@@ -35,12 +35,12 @@
 //! counted per build rather than asserted.
 //!
 //! And the first of the planes, in [`mod@plane`]: every store records what the bytes it wrote were
-//! stored through, which is the judgement C 6.5 says a store makes and the thing the type check of
-//! milestone S5 will later ask about, and every copy carries whatever the bytes it read said over
-//! to the bytes it wrote, which is the other half of the same rule. Those two are every write the
-//! type plane has. The question is not here yet, and the order is deliberate: a check against a
-//! plane that only some of the writes maintain reports on programs that are correct, so the writes
-//! go in first and the check goes in once they are all in.
+//! stored through, which is the judgement C 6.5 says a store makes, and every copy carries whatever
+//! the bytes it read said over to the bytes it wrote, which is the other half of the same rule.
+//! Those two are every write the type plane has, and every read that names a type now asks the
+//! plane whether the bytes agree with it, which is judgement J3. The order was deliberate: a check
+//! against a plane that only some of the writes maintain reports on programs that are correct, so
+//! the writes went in first and the question went in once they were all in.
 //!
 //! The initialization and race checks are not here, because their planes are not written at all and
 //! a check against a plane nobody maintains would either report on every access or on none. Those
@@ -115,6 +115,11 @@ pub struct Counts {
     /// are discharged by different rules: a store into storage nothing watches can be dropped by
     /// looking at the store, and a copy cannot be looked at the same way.
     pub carried: usize,
+    /// Reads that asked the plane whether the bytes agree with the type they are being read as.
+    ///
+    /// Fewer than `checked`, and the two reasons are in `ask`: a store asks nothing, and a read
+    /// the front end did not name a type for has no question to put.
+    pub asked: usize,
 }
 
 impl Counts {
@@ -126,6 +131,7 @@ impl Counts {
         self.skipped += other.skipped;
         self.judged += other.judged;
         self.carried += other.carried;
+        self.asked += other.asked;
     }
 }
 
@@ -180,11 +186,15 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
         match func[inst].opcode {
             Opcode::Load | Opcode::Store => match pointer_of(func, inst) {
                 Some(pointer) => {
-                    check(func, inst, pointer);
+                    let capability = check(func, inst, pointer);
                     counts.checked += 1;
                     counts.live += 1;
-                    if func[inst].opcode == Opcode::Store && judge(func, plane, inst, pointer) {
-                        counts.judged += 1;
+                    if func[inst].opcode == Opcode::Store {
+                        if judge(func, plane, inst, pointer) {
+                            counts.judged += 1;
+                        }
+                    } else if ask(func, plane, inst, pointer, capability) {
+                        counts.asked += 1;
                     }
                 }
                 None => counts.skipped += 1,
@@ -223,9 +233,13 @@ fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
 }
 
 /// Puts `cap_of`, `check_bounds` and `check_live` immediately before one access.
-fn check(func: &mut Func, access: Inst, pointer: Value) {
+///
+/// Gives back the capability the two checks read, so that a third check on the same access can read
+/// the same one rather than taking it again. An access with no payload gets nothing and answers
+/// nothing, which is the shape a caller has to handle anyway.
+fn check(func: &mut Func, access: Inst, pointer: Value) -> Option<Value> {
     let span = func.span(access);
-    let Extra::Mem(info) = func[access].extra else { return };
+    let Extra::Mem(info) = func[access].extra else { return None };
     let mut info = func[info];
     info.size = covered(func, access, info.size);
 
@@ -244,6 +258,8 @@ fn check(func: &mut Func, access: Inst, pointer: Value) {
     let args = func.push_values(&[capability, pointer]);
     let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
     func.insert_before(live, access);
+
+    Some(capability)
 }
 
 /// Puts a `meta_type` immediately after one store, recording what its bytes were stored through.
@@ -284,6 +300,64 @@ fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
     // After the constant it reads rather than after the store, since both go in the same place and
     // the one that goes in second ends up in front.
     func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `check_type` immediately before one read, asking whether the bytes agree with the type
+/// they are about to be read as.
+///
+/// Judgement J3, and the half of the type plane that decides something. The two writes record what
+/// a store and a copy left behind, and this is the question they were recorded for: the effective
+/// type rule of C 6.5 says an object's stored value may only be read through a type compatible with
+/// the one it was stored through, and the plane is where the compiler wrote down which that was.
+///
+/// # Why only a read
+///
+/// A store does not ask, it answers. The plane covers storage the allocator reported and nothing
+/// else, which is exactly the storage C gives no declared type, and the effective type of such an
+/// object is whatever the last store through it set. So a store cannot disagree with the plane: it
+/// is what makes the plane say what it says, and a check in front of one would refuse the reuse of
+/// a buffer that the standard permits.
+///
+/// # Why a read that names no type asks nothing
+///
+/// An access whose payload carries no aliasing node is an access the front end did not say the type
+/// of, which is a copy of an aggregate, an array, or anything else reached by address. That is not
+/// the same as reading bytes nothing has been stored through, and the plane's untyped entry means
+/// the second one. Asking with it would refuse every read of a structure whose members had been
+/// stored through their own types, which is every correct program that has one.
+///
+/// The check goes in front of the read, behind the bounds and lifetime checks that are also in
+/// front of it. A question about what the bytes say is worth asking only once somebody owns them,
+/// and what the runtime answers for an address no region covers is nothing rather than a refusal.
+fn ask(
+    func: &mut Func,
+    plane: &Plane,
+    read: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+) -> bool {
+    let Some(capability) = capability else { return false };
+    let Extra::Mem(at) = func[read].extra else { return false };
+    let mut info = func[at];
+    let Some(node) = info.tbaa else { return false };
+    info.size = covered(func, read, info.size);
+    // A read whose width nothing states reads no bytes anybody can name, the same way a store of
+    // none writes none.
+    if info.size == 0 {
+        return false;
+    }
+    // The payload the check carries is the access's, with the aliasing node replaced by the plane
+    // entry for it, because the plane and the aliasing tree are two vocabularies and the question is
+    // put in the plane's.
+    info.tbaa = Some(plane.entry(Some(node)));
+
+    let span = func.span(read);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckType) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, read);
     true
 }
 
@@ -455,8 +529,8 @@ fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, Flags, MemInfo, MemOrder, MetaNode, PlaneNode, Restrict, Signature, TbaaNode,
-        print_func, verify_func,
+        Builder, Flags, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict, Signature,
+        TbaaNode, print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -511,7 +585,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1, carried: 0 }
+            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1, carried: 0, asked: 0 }
         );
 
         assert_eq!(
@@ -536,13 +610,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_store_records_the_type_it_stored_through() {
-        // The judgement of C 6.5, which is the half of the type plane the compiler makes rather
-        // than asks. The access names a type, so the entry the store records is that type rather
-        // than the distinguished value a store that names nothing records.
-        let mut names = Interner::new();
-        let mut module = Module::new(names.intern("typed.c"), &target());
+    /// A module with one aliasing node under the root, and the plane built over it.
+    ///
+    /// Two nodes rather than one, because the root is the character type and a type of its own has
+    /// to hang under something. What comes back is the module, the plane, and the node for `int`.
+    fn typed(names: &mut Interner, unit: &str) -> (Module, Plane, Meta) {
+        let mut module = Module::new(names.intern(unit), &target());
         let root = names.intern("char");
         let root =
             module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
@@ -550,6 +623,115 @@ mod tests {
         let int =
             module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
         let plane = Plane::build(&mut module);
+        (module, plane, int)
+    }
+
+    /// A function that reads through its parameter as an `int`, naming that type on the access.
+    fn reading(names: &mut Interner, node: Option<Meta>) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("read"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: node,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+        func
+    }
+
+    #[test]
+    fn a_read_asks_the_plane_whether_the_bytes_agree_with_the_type_it_reads_them_as() {
+        // Judgement J3, which is what the two plane writes were recorded for. The question is put
+        // in the plane's vocabulary rather than the aliasing tree's, so what the check carries is
+        // the entry for `int` and not the node for it.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "read.c");
+        let mut func = reading(&mut names, Some(int));
+
+        assert_eq!(insert(&mut func, &plane).asked, 1);
+
+        let printed = print_func(&module, &func, &names);
+        let entry = plane.entry(Some(int));
+        assert_eq!(module[entry], MetaNode::Plane(PlaneNode::Type(int)));
+        // Four bytes, which the payload does not say and the type of the value read does, and the
+        // check is in front of the read rather than after it.
+        let wanted = format!("check_type %1, %0, size 4, align 4, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+        let asked = printed.find(&wanted).expect("the check is there");
+        let read = printed.find("load.i32").expect("and so is the read");
+        assert!(asked < read, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_front_end_named_no_type_for_asks_nothing() {
+        // An aggregate, an array, or anything else reached by address. The plane's untyped entry
+        // means bytes nothing has stored through, which is a different statement from the front
+        // end not having said what the access is through, and asking with it would refuse every
+        // read of a structure whose members were stored through their own types.
+        let mut names = Interner::new();
+        let (module, plane, _) = typed(&mut names, "copy.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane).asked, 0);
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_answers_the_question_rather_than_asking_it() {
+        // The plane covers storage the allocator reported, which is the storage C gives no declared
+        // type, and the effective type of one of those is whatever the last store set. So a store
+        // cannot disagree with the plane, and a check in front of one would refuse the reuse of a
+        // buffer that the standard permits.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "write.c");
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int),
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        let counts = insert(&mut func, &plane);
+        assert_eq!((counts.judged, counts.asked), (1, 0));
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_records_the_type_it_stored_through() {
+        // The judgement of C 6.5, which is the half of the type plane the compiler makes rather
+        // than asks. The access names a type, so the entry the store records is that type rather
+        // than the distinguished value a store that names nothing records.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "typed.c");
 
         let i32_ = Type::int(32);
         let mut func =
@@ -744,7 +926,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "walk.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0, carried: 0 }
+            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0, carried: 0, asked: 0 }
         );
 
         assert_eq!(
@@ -801,7 +983,7 @@ mod tests {
 
         assert_eq!(
             run(&mut module),
-            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2, carried: 0 }
+            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2, carried: 0, asked: 0 }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");

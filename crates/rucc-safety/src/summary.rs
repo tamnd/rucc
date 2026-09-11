@@ -117,6 +117,11 @@ pub struct Summary {
     pub lifetime: Class,
     /// Derivation checks, judgement J2.
     pub derivation: Class,
+    /// Type checks, which is the effective type rule of C 6.5 asked of the type plane.
+    ///
+    /// Fewer than `bounds`, because only a read asks and only a read the front end named a type
+    /// for has a question to put. `crate::ask` is where both of those are argued.
+    pub effective_type: Class,
     /// Accesses that got no check at all, because the pointer they go through is not a value the
     /// insertion pass can take the capability of. A hole rather than a discharge, which is why it
     /// is not folded into either number above.
@@ -162,6 +167,7 @@ impl Summary {
         out.push_str(&format!("    \"bounds\": {},\n", class(self.bounds)));
         out.push_str(&format!("    \"lifetime\": {},\n", class(self.lifetime)));
         out.push_str(&format!("    \"derivation\": {},\n", class(self.derivation)));
+        out.push_str(&format!("    \"type\": {},\n", class(self.effective_type)));
         out.push_str(&format!("    \"unchecked\": {}\n", self.unchecked));
         out.push_str("  },\n");
         out.push_str("  \"trust\": {\n");
@@ -219,6 +225,7 @@ pub fn summarize(
         bounds: Class { emitted: emitted.checked, remaining: 0 },
         lifetime: Class { emitted: emitted.live, remaining: 0 },
         derivation: Class { emitted: emitted.derived, remaining: 0 },
+        effective_type: Class { emitted: emitted.asked, remaining: 0 },
         unchecked: emitted.skipped,
         interposed,
         rows: INTERPOSED.len(),
@@ -250,6 +257,7 @@ pub fn summarize(
                 Opcode::CheckBounds => summary.bounds.remaining += 1,
                 Opcode::CheckLive => summary.lifetime.remaining += 1,
                 Opcode::CheckDeriv => summary.derivation.remaining += 1,
+                Opcode::CheckType => summary.effective_type.remaining += 1,
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
@@ -325,7 +333,7 @@ fn checks_left(func: &rucc_ir::Func) -> usize {
         .filter(|&inst| {
             matches!(
                 func[inst].opcode,
-                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv
+                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv | Opcode::CheckType
             )
         })
         .count()
@@ -489,6 +497,7 @@ mod tests {
             bounds: Class { emitted: 12, remaining: 5 },
             lifetime: Class { emitted: 12, remaining: 11 },
             derivation: Class { emitted: 3, remaining: 3 },
+            effective_type: Class { emitted: 7, remaining: 7 },
             unchecked: 1,
             interposed: 2,
             rows: 27,
@@ -530,6 +539,10 @@ mod tests {
             text.contains(
                 "\"derivation\": { \"emitted\": 3, \"remaining\": 3, \"discharged\": 0 }"
             ),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"type\": { \"emitted\": 7, \"remaining\": 7, \"discharged\": 0 }"),
             "{text}"
         );
     }

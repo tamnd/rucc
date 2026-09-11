@@ -352,6 +352,7 @@ const RUNTIME_NEVER_FREES: &[&str] = &[
     "__rucc_check_bounds",
     "__rucc_check_deriv",
     "__rucc_check_live",
+    "__rucc_check_type",
     "__rucc_extent",
     "__rucc_extent_back",
     "__rucc_meta_type",
