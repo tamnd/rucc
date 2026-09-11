@@ -1758,57 +1758,240 @@ tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_
 name = "__builtin_ceil"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "double(double)"
+library = "ceil"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 notes = "SQLite calls it directly under __GNUC__, which is the path every build that is not MSVC takes."
 
 [[feature]]
 name = "__builtin_ceilf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "float(float)"
+library = "ceilf"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
 name = "__builtin_ceill"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long double(long double)"
+library = "ceill"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
 name = "__builtin_floor"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "double(double)"
+library = "floor"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
 name = "__builtin_floorf"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "float(float)"
+library = "floorf"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
 name = "__builtin_floorl"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "long double(long double)"
+library = "floorl"
 used_by = ["sqlite", "ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
+[[feature]]
+name = "__builtin_trunc"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double)"
+library = "trunc"
+used_by = ["sqlite", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_truncf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float)"
+library = "truncf"
+used_by = ["sqlite", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_truncl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "truncl"
+used_by = ["sqlite", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+[[feature]]
+name = "__builtin_round"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double)"
+library = "round"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+notes = "A half goes away from zero rather than to even, which is the one place C and IEEE 754's default disagree."
+
+[[feature]]
+name = "__builtin_roundf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float)"
+library = "roundf"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_roundl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "roundl"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+[[feature]]
+name = "__builtin_rint"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double)"
+library = "rint"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+notes = "Deliberately not folded. What it answers depends on the rounding mode the program is running under, and gcc 16.2.0 refuses a static initializer written with one for that reason."
+
+[[feature]]
+name = "__builtin_rintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float)"
+library = "rintf"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_rintl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "rintl"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+[[feature]]
+name = "__builtin_nearbyint"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double)"
+library = "nearbyint"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_nearbyintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float)"
+library = "nearbyintf"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_nearbyintl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "nearbyintl"
+used_by = ["glibc", "musl"]
+tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+[[feature]]
+name = "__builtin_fmax"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double, double)"
+library = "fmax"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+notes = "The nan rule is the library's rather than the machine's: fmax of a nan and a number is the number, so this is not the maxsd instruction under another name."
+
+[[feature]]
+name = "__builtin_fmaxf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float, float)"
+library = "fmaxf"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_fmaxl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double, long double)"
+library = "fmaxl"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+[[feature]]
+name = "__builtin_fmin"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double, double)"
+library = "fmin"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_fminf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float, float)"
+library = "fminf"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_fminl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double, long double)"
+library = "fminl"
+used_by = ["gcc-torture", "glibc", "musl"]
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_that_is_called_under_its_own_name", "rucc-base::a_number_taken_to_an_integer_lands_where_the_host_puts_it", "rucc-driver::a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 [[feature]]
 name = "__builtin_nan"
 kind = "builtin"

@@ -4638,6 +4638,86 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
     }
 
+    /// A math library builtin handed a constant is the answer, and is not a call.
+    ///
+    /// This is the reason the family is answered in the front end at all. `double x =
+    /// __builtin_ceil(1.5);` at file scope initializes an object with static storage duration, so
+    /// there is no point in the program at which a call could be made, and a compiler that lowered
+    /// it to one would refuse a program gcc accepts. Every number here is the encoding gcc 16.2.0
+    /// gives on x86-64, read out of the object file one initializer at a time.
+    #[test]
+    fn a_math_library_builtin_of_a_constant_is_the_answer_and_not_a_call() {
+        let text = ir(concat!(
+            "double a = __builtin_ceil(1.5);\n",
+            "double b = __builtin_floor(1.5);\n",
+            "double c = __builtin_trunc(-1.5);\n",
+            // A half goes away from zero and not to even, which is where C and the default
+            // rounding of IEEE 754 part company.
+            "double d = __builtin_round(2.5);\n",
+            // The sign survives a number that rounds away to nothing, so this is a negative zero.
+            "double e = __builtin_ceil(-0.5);\n",
+            "double f = __builtin_fmax(1.0, 2.0);\n",
+            "double g = __builtin_fmin(1.0, 2.0);\n",
+            "float h = __builtin_ceilf(1.25f);\n",
+            // The plain name is the same answer, which is what a program that included `math.h`
+            // and never wrote a prefix reaches.
+            "double ceil(double x);\n",
+            "double i = ceil(2.25);\n",
+        ));
+        assert!(text.contains("global @a : f64 = 0x4000000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x3ff0000000000000,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0xbff0000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x4008000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x8000000000000000,"), "{text}");
+        assert!(text.contains("global @f : f64 = 0x4000000000000000,"), "{text}");
+        assert!(text.contains("global @g : f64 = 0x3ff0000000000000,"), "{text}");
+        assert!(text.contains("global @h : f32 = 0x40000000,"), "{text}");
+        assert!(text.contains("global @i : f64 = 0x4008000000000000,"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// A math library builtin handed anything else is a call to the library function it is.
+    ///
+    /// gcc emits `jmp ceil` for `__builtin_ceil` on x86-64 at the default architecture, measured
+    /// on gcc 16.2.0, and reaches the `roundsd` instruction only under `-msse4.1`. So the call is
+    /// what a program gets from gcc too, and the name on it is the plain one, which is the whole
+    /// point of the prefixed spelling: a program writing it reaches the library's function even
+    /// where a macro or a definition of its own has taken the short name.
+    #[test]
+    fn a_math_library_builtin_of_anything_else_is_a_call_to_the_library() {
+        let text = ir(concat!(
+            "double f(double x) { return __builtin_ceil(x); }\n",
+            "float g(float x) { return __builtin_floorf(x); }\n",
+            "double h(double x, double y) { return __builtin_fmax(x, y); }\n",
+        ));
+        assert!(text.contains("call @ceil("), "{text}");
+        assert!(text.contains("call @floorf("), "{text}");
+        assert!(text.contains("call @fmax("), "{text}");
+
+        // The two the rounding mode decides are calls even when the argument is a constant, since
+        // what they answer is not known until the program runs. gcc refuses a static initializer
+        // written with one for that reason, so there is nothing to fold here either.
+        let text = ir(concat!(
+            "double f(void) { return __builtin_rint(2.5); }\n",
+            "double g(void) { return __builtin_nearbyint(2.5); }\n",
+        ));
+        assert!(text.contains("call @rint("), "{text}");
+        assert!(text.contains("call @nearbyint("), "{text}");
+
+        // A nan operand is the library's rule rather than the machine's, 7.12.12.2 saying the
+        // answer is the other operand, and gcc will not fold that one either.
+        let text = ir("double f(void) { return __builtin_fmin(__builtin_nan(\"\"), 1.0); }\n");
+        assert!(text.contains("call @fmin("), "{text}");
+
+        // `-fno-builtin-ceil` is a program saying it means its own `ceil`, and it leaves the
+        // prefixed spelling alone, which is what writing the prefix is for.
+        let plain = concat!("double ceil(double x);\n", "double f(void) { return ceil(2.25); }\n");
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.no_builtin = vec!["ceil".to_owned()];
+        assert!(run(&opts, plain).text().contains("call @ceil("), "-fno-builtin-ceil");
+    }
+
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
     ///
     /// C23 6.6p8 puts two of them on the list an integer constant expression is built from: one

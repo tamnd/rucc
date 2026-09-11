@@ -62,6 +62,7 @@ mod constant;
 mod count;
 mod expect;
 mod generic;
+mod math;
 mod overflow;
 mod sign;
 mod unreachable;

@@ -43,6 +43,8 @@ use crate::decimal::{Decimal, Fraction};
 
 mod arith;
 
+pub use crate::float::arith::Integral;
+
 /// A floating point format.
 ///
 /// Six of the seven are IEEE 754 binary encodings and the seventh is not, which is why
