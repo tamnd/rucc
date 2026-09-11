@@ -3397,35 +3397,23 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("%8 = or %4, %7"), "and either bit is an overflow: {text}");
     }
 
-    /// A call needing more than the widest type there is is refused by name rather than got wrong.
+    /// A call needing more than the widest type there is compiles, by not asking for such a type.
     ///
     /// One way to reach it: an unsigned `__int128` mixed with a signed type, which needs a hundred
-    /// and twenty nine bits to represent both and so has nowhere left to go. gcc handles that by
-    /// being cleverer in the mixed case rather than by widening. Until that is written, the message
-    /// says what the call needed.
-    ///
-    /// The same mix one width down is not refused any more, because there is a width above it to do
-    /// the arithmetic at, and that case is the second half of this test.
+    /// and twenty nine bits to represent both and so has nowhere left to go. That used to be refused
+    /// by name. It is done now by carrying the sign of each operand alongside its value rather than
+    /// inside it, which is what gcc does, so all three of the family compile for that mix.
     #[test]
-    fn a_call_needing_more_than_the_widest_type_says_so() {
-        let refused = concat!(
-            "int f(unsigned __int128 a, long long b, __int128 *r) {\n",
-            "    return __builtin_add_overflow(a, b, r);\n",
-            "}\n",
-        );
-        let messages = errors(refused);
-        assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(messages[0].contains("E0694"), "{messages:?}");
-        assert!(messages[0].contains("wider than 128 bits"), "{messages:?}");
-
-        let taken = concat!(
-            "int f(unsigned long long a, long long b, long long *r) {\n",
-            "    return __builtin_add_overflow(a, b, r);\n",
-            "}\n",
-        );
-        let mut opts = options();
-        opts.emit = EmitKind::MirFinal;
-        assert!(!run(&opts, taken).failed(), "the width above it is where that one goes now");
+    fn a_call_needing_more_than_the_widest_type_still_compiles() {
+        for name in ["add", "sub", "mul"] {
+            let source = format!(
+                "int f(unsigned __int128 a, long long b, __int128 *r) {{\n    \
+                 return __builtin_{name}_overflow(a, b, r);\n}}\n"
+            );
+            let mut opts = options();
+            opts.emit = EmitKind::MirFinal;
+            assert!(!run(&opts, &source).failed(), "{name} was refused or stopped the back end");
+        }
     }
 
     /// An operand that is not an integer at all is the older message, from the type checking every
