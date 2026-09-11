@@ -22,6 +22,7 @@ mod dso;
 mod fuzz;
 mod implib;
 mod pressure;
+mod real_libc;
 mod runner;
 mod safety;
 mod size;
@@ -53,6 +54,7 @@ tasks:
   disasm            check every instruction we encode against an independent decoder
   stubs             write a sysroot's libraries per ELF target and read them back with readelf
   implib            write an import library per Windows target and hold it against llvm-dlltool
+  real-libc         hold a stub written from a glibc abilist against this machine's libc.so.6
   dso               build a shared library out of what we emit, link a program against it, run it
   unwind            walk a stack through frames we wrote and count what came back
   safety            compile, link and run tests/safety, and hold each program to its verdict
@@ -90,6 +92,7 @@ fn main() -> ExitCode {
         Some("disasm") => disasm::disasm(),
         Some("stubs") => stubs::stubs(),
         Some("implib") => implib::implib(),
+        Some("real-libc") => real_libc::real_libc(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
         Some("safety") => safety::safety(),
