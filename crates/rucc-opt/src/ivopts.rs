@@ -813,15 +813,14 @@ fn address_cost(table: &CostTable, scale: i128, rest: Plain) -> Cost {
     if indexed && !legal_scale(scale) {
         // A scale no addressing mode holds has to be multiplied out, and then the product is a
         // plain register the other modes can still use.
-        let mult = table.mult_of(width(rest)).max(Cycles::ONE);
-        return Cost::cycles(mult) + address_cost(table, 1, rest);
+        return Cost::cycles(scaling(table, width(rest), scale)) + address_cost(table, 1, rest);
     }
     if symbolic && rest.scale != 1 {
         // A base is a register, and this one is a multiple of a register. Multiplying it out
         // leaves an address of the same shape whose invariant part is one of something, which
         // every arm below can then read as a base.
-        let mult = table.mult_of(width(rest)).max(Cycles::ONE);
-        return Cost::cycles(mult) + address_cost(table, scale, Plain { scale: 1, ..rest });
+        return Cost::cycles(scaling(table, width(rest), rest.scale))
+            + address_cost(table, scale, Plain { scale: 1, ..rest });
     }
     let mode = match (indexed, symbolic, displaced) {
         (false, false, false) => AddrMode::Base,
@@ -851,19 +850,35 @@ fn address_cost(table: &CostTable, scale: i128, rest: Plain) -> Cost {
     priced
 }
 
+/// What multiplying something by this factor costs at that width.
+///
+/// A multiply, whatever the factor is, because that is what rucc emits. `x * 64` is `shl $6` on
+/// every machine this targets, and rucc writes `imulq $64, %rdi` for it today: the rule that turns
+/// a multiply by a power of two into a shift wants a replacement that can work the log out of the
+/// number the pattern matched, which the rule language cannot do yet, and the header of
+/// `crates/rucc-opt/rules/strength.rules` says so at length. That is tamnd/rucc#523.
+///
+/// A cost model that prices an instruction the compiler cannot emit is choosing against the code
+/// it is going to produce, and the choice this one makes is whether a loop walks an array with a
+/// pointer or with an index. Pricing the index at a shift it does not get would hand the pointer
+/// four cycles an access it has not earned on x86-64, where a shift is one cycle and a sixty four
+/// bit multiply is five.
+///
+/// One function because there were two and they did not agree. [`address_cost`] charged a multiply
+/// for every scale a mode could not hold, which is what the compiler does. [`value_cost`] asked
+/// whether the factor was a power of two and charged a shift when it was, which is what the
+/// compiler will do. When #523 lands the branch goes here, once, and both callers get it in the
+/// same change as the rule that makes it true.
+fn scaling(table: &CostTable, width: Width, _factor: i128) -> Cycles {
+    table.mult[width.index()].max(Cycles::ONE)
+}
+
 /// What a value of this shape costs when it is wanted in a register rather than in an address.
 fn value_cost(table: &CostTable, ty: Type, scale: i128, rest: Plain) -> Cost {
     let mut cost = Cost::ZERO;
     if scale != 1 {
-        let bits = ty.bits();
-        let mult = match Width::from_bits(bits) {
-            Some(width) if scale <= 0 || !scale.unsigned_abs().is_power_of_two() => {
-                table.mult[width.index()]
-            }
-            Some(_) => table.shift_const,
-            None => return Cost::INFINITE,
-        };
-        cost += Cost::cycles(mult);
+        let Some(width) = Width::from_bits(ty.bits()) else { return Cost::INFINITE };
+        cost += Cost::cycles(scaling(table, width, scale));
     }
     if rest.offset != 0 || (rest.value.is_some() && rest.scale != 0) {
         cost += Cost::cycles(table.add);
@@ -1208,7 +1223,7 @@ mod tests {
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
         GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
         NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, Plain, RETARGETED, REWRITTEN, USE_ADDRESS,
-        USE_COMPARE, USE_GENERIC, address_cost, serve, width,
+        USE_COMPARE, USE_GENERIC, Width, address_cost, serve, value_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1600,6 +1615,26 @@ mod tests {
         let mult = table.mult_of(width(array)).max(Cycles::ONE);
         let want = Cost::cycles(mult) + address_cost(table, 1, array);
         assert_eq!(address_cost(table, 3, array), want);
+    }
+
+    #[test]
+    fn a_power_of_two_scale_costs_the_multiply_the_compiler_writes_for_it() {
+        // Sixty four is a `struct` of sixteen words, which no mode scales by, and working it out
+        // is `shl $6` on the machine and `imulq $64` in what rucc emits. The two halves of this
+        // file used to answer that differently, so what the test says is that an address and a
+        // value are charged the same thing for the same arithmetic, and that the thing is the
+        // multiply. The day tamnd/rucc#523 turns the multiply into a shift, both of these move
+        // together and this test moves with them.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let array = Plain { value: Some(some_value()), read: None, scale: 1, offset: 0 };
+        let mult = Cost::cycles(table.mult_of(Width::W64).max(Cycles::ONE));
+        assert_eq!(address_cost(table, 64, array), mult + address_cost(table, 1, array));
+        assert_eq!(address_cost(table, 64, array), address_cost(table, 24, array));
+
+        let number = Plain { value: None, read: None, scale: 0, offset: 0 };
+        assert_eq!(value_cost(table, Type::int(64), 64, number), mult);
+        assert_eq!(value_cost(table, Type::int(64), 24, number), mult);
     }
 
     #[test]
