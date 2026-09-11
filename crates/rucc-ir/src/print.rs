@@ -993,6 +993,12 @@ mod tests {
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
         check(Opcode::CheckDeriv, None, &[of, p, derived, len]);
         check(Opcode::CheckRace, None, &[of, p]);
+        // The two `restrict` checks, which take the pointer alone and carry the two numbers saying
+        // which pointer of which scope it is. One of each, since read and write are the whole of
+        // what separates them.
+        let named = Restrict { clique: 1, base: 2 };
+        check(Opcode::CheckRestrictRead, Some(MemInfo { restrict: named, ..four }), &[p]);
+        check(Opcode::CheckRestrictWrite, Some(MemInfo { restrict: named, ..four }), &[p]);
 
         let mut plane = |opcode, extra| {
             let args = b.func().push_values(&[p, off]);
@@ -1016,6 +1022,23 @@ mod tests {
             &[],
         );
         b.inst(InstData::new(Opcode::SafeRegionEnd), &[]);
+
+        // The markers around the block those two checks are in. The base on the opening one is how
+        // many pointers the block declares rather than which of them this is, which is the one
+        // place the field counts instead of naming.
+        let scope = MemInfo {
+            size: 112,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict { clique: 1, base: 2 },
+        };
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(scope));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::RestrictEnter) }, &[]);
+        let args = b.func().push_values(&[p]);
+        b.inst(InstData { args, ..InstData::new(Opcode::RestrictLeave) }, &[]);
         b.ret(&[p]);
 
         func.set_facts(
