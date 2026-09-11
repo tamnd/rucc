@@ -46,12 +46,15 @@
 //! hold something, and every copy carries whether the bytes it read held anything over to the bytes
 //! it wrote. The init plane is one bit per byte, so a store records the same thing whatever it
 //! stored, and a copy is the reason padding a member by member fill never touched is still padding
-//! nothing wrote after the structure moves. That is the padding rule of
-//! `spec/safe-memory/09-type-init-and-races.md` section 9.3, and it needs no special case here
-//! because a store through a member is a store of the member's width and a structure written whole
-//! is a copy of the whole width, so the rule falls out of what the front end already lowered. Every
-//! read now asks whether anything ever wrote the bytes it is about to read, which is document 03's
-//! Y6, and the writes went in first for the reason the type plane's did.
+//! nothing wrote after the structure moves. Every read now asks whether anything ever wrote the
+//! bytes it is about to read, which is document 03's Y6, and the writes went in first for the
+//! reason the type plane's did.
+//!
+//! The padding rule of `spec/safe-memory/09-type-init-and-races.md` section 9.3 arrives here as one
+//! number. A store carries how much padding the member it went through owns, and the range it
+//! records is the wider of that and what it wrote, which is all of `-fsafety-init=nopadding`. How
+//! far the padding goes takes a record's layout and this crate reads IR, so the front end is what
+//! decides it and `MemInfo.owns` is how the answer travels.
 //!
 //! The two questions a read asks come apart in one place. A read the front end named no type for
 //! asks the type plane nothing, because the question there is which type the bytes hold, and it
@@ -59,8 +62,8 @@
 //! the bytes rather than about the access. What no `load` in any program asks about is padding: a
 //! read compiled into a `load` reads a member and a member is never padding, so the reads that
 //! cover padding are `memcmp` of two structures, hashing one and handing one to `write`, every one
-//! of which is a call into the movement group of [`mod@wrap`]. That is where
-//! `-fsafety-init=padding` will have something to select and it is why the flag is not here yet.
+//! of which is a call into the movement group of [`mod@wrap`]. Which is why the flag selects what a
+//! store records rather than what a read asks about: the reads that would need it are not `load`s.
 //!
 //! The race check is not here, because the epoch plane is not written at all and a check against a
 //! plane nobody maintains would either report on every access or on none. That is S6. Neither are
@@ -191,10 +194,12 @@ pub fn run(module: &mut Module) -> Counts {
     // point rather than [`insert`]: there is one plane per module and every function records into
     // the same one.
     let plane = Plane::build(module);
+    // The one thing a pointer typed access cannot work out for itself, which is how wide it is.
+    let width = u64::from(module.datalayout.pointer_bits / 8);
     let mut counts = Counts::default();
     for id in module.funcs() {
         if !module[id].is_declaration() {
-            counts.add(insert(&mut module[id], &plane));
+            counts.add(insert(&mut module[id], &plane, width));
         }
     }
     counts
@@ -218,7 +223,7 @@ pub fn run(module: &mut Module) -> Counts {
 /// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
 /// whole design: this pass is a walk anybody can read, and the deletions are rules that are
 /// verified.
-pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
+pub fn insert(func: &mut Func, plane: &Plane, width: u64) -> Counts {
     let mut counts = Counts::default();
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -226,17 +231,17 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
         match func[inst].opcode {
             Opcode::Load | Opcode::Store => match pointer_of(func, inst) {
                 Some(pointer) => {
-                    let capability = check(func, inst, pointer);
+                    let capability = check(func, inst, pointer, width);
                     counts.checked += 1;
                     counts.live += 1;
                     if func[inst].opcode == Opcode::Store {
                         // The init plane's write goes in first so that the type plane's ends up in
                         // front of it, since both are inserted after the store and the one that
                         // goes in second is the one that lands nearer to it.
-                        if wrote(func, inst, pointer) {
+                        if wrote(func, inst, pointer, width) {
                             counts.wrote += 1;
                         }
-                        if judge(func, plane, inst, pointer) {
+                        if judge(func, plane, inst, pointer, width) {
                             counts.judged += 1;
                         }
                     } else {
@@ -244,10 +249,10 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
                         // that lands nearer to it, so this order prints the type question and then
                         // the init question. Either order is correct: neither reads what the other
                         // wrote and the read happens after both.
-                        if ask(func, plane, inst, pointer, capability) {
+                        if ask(func, plane, inst, pointer, capability, width) {
                             counts.asked += 1;
                         }
-                        if filled(func, inst, pointer, capability) {
+                        if filled(func, inst, pointer, capability, width) {
                             counts.filled += 1;
                         }
                     }
@@ -296,11 +301,11 @@ fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
 /// Gives back the capability the two checks read, so that a third check on the same access can read
 /// the same one rather than taking it again. An access with no payload gets nothing and answers
 /// nothing, which is the shape a caller has to handle anyway.
-fn check(func: &mut Func, access: Inst, pointer: Value) -> Option<Value> {
+fn check(func: &mut Func, access: Inst, pointer: Value, width: u64) -> Option<Value> {
     let span = func.span(access);
     let Extra::Mem(info) = func[access].extra else { return None };
     let mut info = func[info];
-    info.size = covered(func, access, info.size);
+    info.size = covered(func, access, info.size, width);
     // Not the padding after it. What a check is about is the bytes the access touches, and the
     // padding is about what a store records rather than about what it reads or writes.
     info.owns = 0;
@@ -338,9 +343,9 @@ fn check(func: &mut Func, access: Inst, pointer: Value) -> Option<Value> {
 /// The length is a value rather than a field of the payload because that is the shape the opcode
 /// has, and it is a `meta_type` over a range because one store writes a run of bytes. Where the
 /// value comes from is [`extent`].
-fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
+fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value, width: u64) -> bool {
     let Extra::Mem(info) = func[store].extra else { return false };
-    let size = covered(func, store, func[info].size);
+    let size = covered(func, store, func[info].size, width);
     // A store whose width nothing states covers no bytes anybody can name, and a plane write over
     // nothing is an instruction with no effect.
     if size == 0 {
@@ -392,12 +397,13 @@ fn ask(
     read: Inst,
     pointer: Value,
     capability: Option<Value>,
+    width: u64,
 ) -> bool {
     let Some(capability) = capability else { return false };
     let Extra::Mem(at) = func[read].extra else { return false };
     let mut info = func[at];
     let Some(node) = info.tbaa else { return false };
-    info.size = covered(func, read, info.size);
+    info.size = covered(func, read, info.size, width);
     // A read whose width nothing states reads no bytes anybody can name, the same way a store of
     // none writes none.
     if info.size == 0 {
@@ -485,12 +491,12 @@ fn carry(func: &mut Func, copy: Inst) -> bool {
 /// cases the type plane has no entry for. What the init plane holds is whether anything was stored
 /// at all, and the answer to that does not depend on what the store thought it was writing, so
 /// every store that covers a byte records it.
-fn wrote(func: &mut Func, store: Inst, pointer: Value) -> bool {
+fn wrote(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
     let Extra::Mem(info) = func[store].extra else { return false };
     // The padding after a member, where the front end was asked to say how far it goes. That is
     // the whole of `-fsafety-init=nopadding` and it is a number rather than a mode here, because
     // what the padding is takes a record's layout and this pass reads IR.
-    let size = covered(func, store, func[info].size).max(u64::from(func[info].owns));
+    let size = covered(func, store, func[info].size, width).max(u64::from(func[info].owns));
     // A store whose width nothing states writes no bytes anybody can name, the same way the type
     // plane's judgement over one records nothing.
     if size == 0 {
@@ -540,11 +546,17 @@ fn wrote(func: &mut Func, store: Inst, pointer: Value) -> bool {
 /// written is refused on the first byte nothing wrote rather than on the byte the address names.
 /// A read of four bytes where two were written is a read of memory that was never written, and
 /// reporting it at the access is the only place a report means anything.
-fn filled(func: &mut Func, read: Inst, pointer: Value, capability: Option<Value>) -> bool {
+fn filled(
+    func: &mut Func,
+    read: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+    width: u64,
+) -> bool {
     let Some(capability) = capability else { return false };
     let Extra::Mem(at) = func[read].extra else { return false };
     let mut info = func[at];
-    info.size = covered(func, read, info.size);
+    info.size = covered(func, read, info.size, width);
     // A read whose width nothing states reads no bytes anybody can name, as in [`ask`].
     if info.size == 0 {
         return false;
@@ -620,7 +632,11 @@ fn extent(func: &mut Func, at: Inst, size: u64) -> (Inst, Value) {
 /// asked how many bytes are being touched and has no type of its own to read. So the width is
 /// worked out here and written into the copy of the payload the check carries, and an access that
 /// did fill the field in keeps what it said.
-fn covered(func: &Func, access: Inst, stated: u64) -> u64 {
+///
+/// `width` is the target's pointer width in bytes, and it is a parameter because a pointer is the
+/// one type in the IR that has no width of its own. Reading a zero off `Type::PTR` and passing it
+/// on is what made every check over a pointer decide over a single byte, which is #953.
+fn covered(func: &Func, access: Inst, stated: u64, width: u64) -> u64 {
     if stated != 0 {
         return stated;
     }
@@ -630,7 +646,12 @@ fn covered(func: &Func, access: Inst, stated: u64) -> u64 {
         Opcode::Store => func[func[access].args].first().map(|&value| func[value].ty),
         _ => None,
     };
-    ty.map_or(0, |ty| u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes()))
+    ty.map_or(0, |ty| {
+        if ty.is_ptr() {
+            return width;
+        }
+        u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes())
+    })
 }
 
 /// Puts `cap_of` and `check_deriv` immediately before one `ptr_add`.
@@ -794,7 +815,7 @@ mod tests {
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
-            insert(&mut func, &plane),
+            insert(&mut func, &plane, 8),
             Counts { checked: 2, live: 2, judged: 1, wrote: 1, filled: 1, ..Counts::default() }
         );
 
@@ -821,6 +842,65 @@ mod tests {
              return %2\n\
              }\n"
         );
+    }
+
+    /// A function that loads a pointer through its parameter.
+    ///
+    /// The payload states no size, which is what the front end emits: a load takes its width from
+    /// the type it produces, and for a pointer that is the one type with no width of its own.
+    fn one_pointer_read(names: &mut Interner) -> Func {
+        let mut func = Func::new(
+            names.intern("deref"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        b.ret(&[loaded]);
+        func
+    }
+
+    #[test]
+    fn an_access_that_reads_a_pointer_is_checked_over_the_targets_pointer_width() {
+        // A pointer is the one type in the IR with no width of its own, so the width has to come
+        // from the target. Answering zero is what left a bounds check over a pointer deciding
+        // about a single byte and left the init question out of it altogether, which was #953.
+        let mut names = Interner::new();
+        let mut func = one_pointer_read(&mut names);
+        let (module, plane) = planed(&mut names, "deref.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8),
+            Counts { checked: 1, live: 1, filled: 1, ..Counts::default() }
+        );
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_bounds %1, %0, size 8, align 8\n"), "{printed}");
+        assert!(printed.contains("check_init %1, %0, size 8, align 8\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_pointer_width_of_four_is_what_a_thirty_two_bit_target_gets() {
+        // The number is the target's and not this crate's, so a build for a target where a pointer
+        // is four bytes asks about four.
+        let mut names = Interner::new();
+        let mut func = one_pointer_read(&mut names);
+        let (module, plane) = planed(&mut names, "deref.c");
+        insert(&mut func, &plane, 4);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_bounds %1, %0, size 4, align 8\n"), "{printed}");
     }
 
     /// A module with one aliasing node under the root, and the plane built over it.
@@ -873,7 +953,7 @@ mod tests {
         let (module, plane, int) = typed(&mut names, "read.c");
         let mut func = reading(&mut names, Some(int));
 
-        assert_eq!(insert(&mut func, &plane).asked, 1);
+        assert_eq!(insert(&mut func, &plane, 8).asked, 1);
 
         let printed = print_func(&module, &func, &names);
         let entry = plane.entry(Some(int));
@@ -901,7 +981,7 @@ mod tests {
         let (module, plane, _) = typed(&mut names, "copy.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane).asked, 0);
+        assert_eq!(insert(&mut func, &plane, 8).asked, 0);
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
     }
@@ -934,7 +1014,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        let counts = insert(&mut func, &plane);
+        let counts = insert(&mut func, &plane, 8);
         assert_eq!((counts.judged, counts.asked), (1, 0));
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
@@ -968,7 +1048,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane).judged, 1);
+        assert_eq!(insert(&mut func, &plane, 8).judged, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four bytes, which the payload does not say and the type of the value stored does.
@@ -1013,7 +1093,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
@@ -1054,7 +1134,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four rather than the one byte the store wrote.
@@ -1076,7 +1156,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "ask.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane).filled, 1);
+        assert_eq!(insert(&mut func, &plane, 8).filled, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_init %1, %0, size 4, align 4\n"), "{printed}");
@@ -1096,7 +1176,7 @@ mod tests {
         let (_module, plane) = planed(&mut names, "untyped.c");
         let mut func = reading(&mut names, None);
 
-        let counts = insert(&mut func, &plane);
+        let counts = insert(&mut func, &plane, 8);
         assert_eq!(counts.asked, 0);
         assert_eq!(counts.filled, 1);
     }
@@ -1129,7 +1209,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane).filled, 0);
+        assert_eq!(insert(&mut func, &plane, 8).filled, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_init"), "{printed}");
@@ -1144,7 +1224,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "read.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane).wrote, 0);
+        assert_eq!(insert(&mut func, &plane, 8).wrote, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("meta_init"), "{printed}");
@@ -1183,7 +1263,10 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_copy(&mut names, Opcode::Memcpy);
         let (module, plane) = planed(&mut names, "move.c");
-        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, moved: 1, ..Counts::default() });
+        assert_eq!(
+            insert(&mut func, &plane, 8),
+            Counts { carried: 1, moved: 1, ..Counts::default() }
+        );
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1212,7 +1295,10 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_copy(&mut names, Opcode::Memmove);
         let (module, plane) = planed(&mut names, "overlap.c");
-        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, moved: 1, ..Counts::default() });
+        assert_eq!(
+            insert(&mut func, &plane, 8),
+            Counts { carried: 1, moved: 1, ..Counts::default() }
+        );
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
@@ -1242,7 +1328,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        insert(&mut func, &plane);
+        insert(&mut func, &plane, 8);
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1283,7 +1369,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "back.c");
-        insert(&mut func, &plane);
+        insert(&mut func, &plane, 8);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
@@ -1310,7 +1396,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        assert_eq!(insert(&mut func, &plane), Counts { derived: 1, ..Counts::default() });
+        assert_eq!(insert(&mut func, &plane, 8), Counts { derived: 1, ..Counts::default() });
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1339,7 +1425,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
-        insert(&mut func, &plane);
+        insert(&mut func, &plane, 8);
 
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -1385,7 +1471,7 @@ mod tests {
 
         let (_module, plane) = planed(&mut names, "nothing.c");
         let before = func.counts();
-        assert_eq!(insert(&mut func, &plane), Counts::default());
+        assert_eq!(insert(&mut func, &plane, 8), Counts::default());
         assert_eq!(func.counts(), before);
     }
 }

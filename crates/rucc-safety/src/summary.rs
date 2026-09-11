@@ -447,7 +447,7 @@ mod tests {
         // The function reads and never stores, so it records nothing and the plane it is
         // instrumented against is one with no types in it.
         let mut elsewhere = Module::new(names.intern("reader.c"), &target());
-        insert(&mut func, &crate::Plane::build(&mut elsewhere));
+        insert(&mut func, &crate::Plane::build(&mut elsewhere), 8);
         func
     }
 
