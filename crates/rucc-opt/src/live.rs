@@ -62,14 +62,24 @@ impl Set {
         }
     }
 
-    fn insert(&mut self, value: Value) {
+    /// Puts it in, and answers whether it was not already there.
+    fn insert(&mut self, value: Value) -> bool {
         let at = value.index();
-        self.words[at / 64] |= 1 << (at % 64);
+        let word = &mut self.words[at / 64];
+        let bit = 1 << (at % 64);
+        let had = *word & bit != 0;
+        *word |= bit;
+        !had
     }
 
-    fn remove(&mut self, value: Value) {
+    /// Takes it out, and answers whether it was there.
+    fn remove(&mut self, value: Value) -> bool {
         let at = value.index();
-        self.words[at / 64] &= !(1 << (at % 64));
+        let word = &mut self.words[at / 64];
+        let bit = 1 << (at % 64);
+        let had = *word & bit != 0;
+        *word &= !bit;
+        had
     }
 
     /// Adds everything in the other, and answers whether that changed anything.
@@ -87,12 +97,36 @@ impl Set {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
 
+    /// Them, in order.
+    ///
+    /// The empty words are skipped and the set bits of the rest are taken one at a time rather than
+    /// by testing all sixty four. A set has a word per sixty four values in the whole function, so
+    /// testing every bit of every word costs the size of the function every time somebody asks what
+    /// is live somewhere, whatever the answer turns out to be, and on a function of a hundred and
+    /// ninety thousand instructions that was most of an optimized compile. tamnd/rucc#1015.
     fn iter(&self) -> impl Iterator<Item = Value> + use<'_> {
-        self.words.iter().enumerate().flat_map(|(at, &word)| {
-            (0..64)
-                .filter(move |bit| word & (1 << bit) != 0)
-                .map(move |bit| Value::new((at * 64 + bit) as u32))
+        self.words.iter().enumerate().filter(|&(_, &word)| word != 0).flat_map(|(at, &word)| {
+            Bits(word).map(move |bit| Value::new((at * 64 + bit as usize) as u32))
         })
+    }
+}
+
+/// The set bits of one word, lowest first.
+///
+/// `trailing_zeros` finds the next one and clearing the lowest set bit moves past it, so the work
+/// is one step per bit that is there rather than one per bit there could be.
+struct Bits(u64);
+
+impl Iterator for Bits {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros();
+        self.0 &= self.0 - 1;
+        Some(bit)
     }
 }
 
@@ -129,7 +163,7 @@ impl Liveness {
                     out.union_with(&live_in[successor.index()]);
                 }
                 let mut set = out.clone();
-                walk(func, block, &mut set, |_, _| {});
+                walk(func, block, &mut set, |_, _, _| {});
                 for &param in &func[block].params {
                     set.remove(param);
                 }
@@ -183,8 +217,33 @@ impl Liveness {
     /// instruction's operands and not its results.
     pub fn through(&self, func: &Func, block: Block, mut at: impl FnMut(Inst, &LiveHere<'_>)) {
         let mut set = self.live_out[block.index()].clone();
-        walk(func, block, &mut set, |inst, set| at(inst, &LiveHere { set }));
+        walk(func, block, &mut set, |inst, set, _| at(inst, &LiveHere { set }));
     }
+
+    /// The same walk, reporting what each instruction changes rather than what is live.
+    ///
+    /// [`Liveness::through`] hands out the whole set at every instruction, and a caller that only
+    /// wants to count what is in it pays the size of the set per instruction. In a function of a
+    /// hundred and ninety thousand instructions the set is thousands of values wide and that is
+    /// quadratic. What actually changes at an instruction is its results and its operands, so a
+    /// caller keeping a running count can be handed those instead and stay linear.
+    /// tamnd/rucc#1015.
+    pub fn changes(&self, func: &Func, block: Block, mut at: impl FnMut(Inst, &Change)) {
+        let mut set = self.live_out[block.index()].clone();
+        walk(func, block, &mut set, |inst, _, change| at(inst, change));
+    }
+}
+
+/// What one instruction does to the live set, seen walking the block backwards.
+///
+/// Both lists hold each value once, because they record the bits that moved rather than the names
+/// the instruction wrote: a value an instruction names twice is one bit and arrives once.
+#[derive(Debug, Default)]
+pub struct Change {
+    /// Values the instruction defines, which are live after it and not before it.
+    pub gone: Vec<Value>,
+    /// Values it names, which are live before it and were not after it.
+    pub arrived: Vec<Value>,
 }
 
 /// What is live at one point inside a block.
@@ -227,23 +286,32 @@ impl LiveHere<'_> {
 /// The order matters and is the reason this is one function rather than two loops at each caller.
 /// The results go out before the operands come in, so an instruction whose operand is also its
 /// result leaves the value live, which is what a use before a redefinition means.
-fn walk(func: &Func, block: Block, set: &mut Set, mut at: impl FnMut(Inst, &Set)) {
+fn walk(func: &Func, block: Block, set: &mut Set, mut at: impl FnMut(Inst, &Set, &Change)) {
+    let mut change = Change::default();
     for this in func.insts_backwards(block) {
+        change.gone.clear();
+        change.arrived.clear();
         let data = &func[this];
         for result in data.results() {
-            set.remove(result);
+            if set.remove(result) {
+                change.gone.push(result);
+            }
         }
         for &arg in &func[data.args] {
-            set.insert(arg);
+            if set.insert(arg) {
+                change.arrived.push(arg);
+            }
         }
         // A branch's arguments are used by the branch, in the block holding it, which is the whole
         // reason block parameters are easier to be right about than phi nodes.
         for call in func.successors(this) {
             for &arg in &func[call.args] {
-                set.insert(arg);
+                if set.insert(arg) {
+                    change.arrived.push(arg);
+                }
             }
         }
-        at(this, set);
+        at(this, set, &change);
     }
 }
 

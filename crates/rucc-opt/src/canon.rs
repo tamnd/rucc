@@ -229,14 +229,12 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
 /// meeting is already there to be edited.
 fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
-        let dom = an.dominators(func).clone();
-        let fronts = an.frontiers(func).clone();
-        let loops = an.loops(func).clone();
-        let Some(job) = leak(func, &dom, &fronts, &loops) else { return true };
+        let (dom, fronts, loops) = an.closure(func);
+        let Some(job) = leak(func, dom, fronts, loops) else { return true };
         if !fuel.take() {
             return false;
         }
-        close(func, &dom, &loops, &job);
+        close(func, dom, loops, &job);
         stats.optimized(CLOSED);
         an.clear();
     }
@@ -307,12 +305,14 @@ pub(crate) fn leaked(
 }
 
 /// Every value one instruction names, its own operands and the arguments it hands to its targets.
-fn named(func: &Func, inst: Inst) -> Vec<Value> {
-    let mut found = func[func[inst].args].to_vec();
-    for at in func.target_list(inst).iter() {
-        found.extend_from_slice(&func[func[at].args]);
-    }
-    found
+///
+/// An iterator rather than a list, because the caller asks this of every instruction outside the
+/// loop once per loop and a list would be one allocation each time. tamnd/rucc#1015.
+fn named(func: &Func, inst: Inst) -> impl Iterator<Item = Value> + '_ {
+    func[func[inst].args]
+        .iter()
+        .copied()
+        .chain(func.successors(inst).flat_map(move |call| func[call.args].iter().copied()))
 }
 
 /// The block the value is defined in.
