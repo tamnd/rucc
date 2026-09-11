@@ -22,8 +22,16 @@
 //! # The clock is Lamport's and that is the whole of the ordering
 //!
 //! Each thread counts its own metadata stores. Acquiring a lock takes the larger of the thread's
-//! own count and whatever the lock was released at, which is the one edge that carries an ordering
-//! between threads and is where document 10's interposed synchronization primitives come in.
+//! own count and whatever the lock was released at, and that is the shape of every edge between
+//! threads there is: whoever hands something over publishes the count they handed it over at, and
+//! whoever takes it moves past that. Document 10's interposed synchronization primitives are where
+//! the edges come from and [`crate::sync`] is the table of them.
+//!
+//! Which makes the completeness of that table a different sort of thing here than anywhere else in
+//! this crate. Every other plane loses a report when a piece of instrumentation is missing. This one
+//! invents one, because two threads a missing edge really did join look exactly like two threads
+//! nothing joined. That is why the edges went in before this file grew a reader and why the atomics,
+//! which are not a call and so cannot be interposed, are a stated gate on turning one on.
 //!
 //! What that buys is one implication and not the other. If one write happened before another then
 //! its clock is smaller, so a clock that is not smaller means the two are not ordered, and that is
@@ -40,18 +48,23 @@
 //! thread has a clock of its own in the slot [`crate::tls`] keeps, and
 //! [`crate::check::stamped`] is the judgement a store through a pointer shaped slot makes.
 //!
-//! What is missing is every reader. Nothing asks [`unordered`] or [`torn`] anything, so no program
-//! is refused on this plane's account, and judgements C1 through C4 are the next box of milestone
-//! S5. The compiler's half is missing with them: no generated code calls `__rucc_meta_epoch` yet,
-//! so the plane a program runs with is empty unless the C library wrappers filled it. That is the
-//! same order the type plane and the init plane went in, and it is the order that keeps a plane's
-//! arithmetic reviewable on its own.
+//! The reader is here now as well. [`Epochs::stranger`] is the walk that finds a stamp nothing this
+//! thread has done orders, and [`crate::check::raced`] is the check that turns one into a report,
+//! which is judgement J9 and is document 03's C2 and C3. What is left of the four classes is C1, the
+//! torn store, which [`torn`] is the arithmetic of and which nothing can call yet: it compares a
+//! pointer word's stamp against the stamp its aux slot was written at, and the aux slot is the part
+//! of milestone S5 that does not exist.
 //!
-//! The one edge between threads is here. [`sync`] is what an interposed lock calls and
-//! [`crate::sync`] is the table of locks that calls it, so a program that gives a mutex up and a
-//! program that takes it next are ordered against each other. What is still missing is the other two
-//! edges, which are a thread being created and a thread being joined, and until those are here a
-//! program that fills a buffer and hands it to a worker looks like two threads that never met.
+//! The edges are all in. [`sync`] is what an interposed primitive calls and [`crate::sync`] is the
+//! table of them, so a lock given up and taken, a thread created, a thread joined, a condition
+//! variable waited on and a semaphore posted each carry an ordering. That matters more here than the
+//! coverage of anything else in the crate does, for the reason the section above this one gives.
+//!
+//! The compiler's half is what is missing. No generated code calls `__rucc_meta_epoch` or
+//! `__rucc_check_race` yet, so the plane a program runs with is empty unless the C library wrappers
+//! filled it, and the ordering that is not a call at all, which is the atomics, has nowhere to be
+//! interposed and so has to come from the compiler too. That is the same order the type plane and
+//! the init plane went in, and it is the order that keeps a plane's arithmetic reviewable on its own.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;
@@ -454,6 +467,38 @@ impl Epochs {
         }
     }
 
+    /// The first stamp in `[at, at + len)` that nothing a thread holding `mine` has done orders, or
+    /// [`NONE`] when every granule of the range is one this thread may look at.
+    ///
+    /// The reading half of section 9.5, and the whole of judgements C2 and C3. It answers a stamp
+    /// rather than a yes or a no because what makes the report worth having is naming the other
+    /// thread, and the stamp is where that name is.
+    ///
+    /// The first rather than the worst. There is no ordering among the strangers a range holds that
+    /// would make one of them the one to report, every one of them is a race on its own, and a walk
+    /// that carried on to compare them would be doing work on the path an access takes to pick
+    /// between two answers that say the same thing.
+    ///
+    /// # Safety
+    ///
+    /// The range is inside the mapping this plane was built for.
+    #[must_use]
+    pub unsafe fn stranger(&self, at: usize, len: usize, mine: Stamp) -> Stamp {
+        if len == 0 {
+            return NONE;
+        }
+        let lo = at - at % GRANULE;
+        for granule in 0..(at - lo + len).div_ceil(GRANULE) {
+            // SAFETY: the caller says the range is mapped, so every granule it covers has a slot,
+            // and the walk stops at the last of them.
+            let found = unsafe { self.read(lo + granule * GRANULE) };
+            if unordered(found, mine) {
+                return found;
+            }
+        }
+        NONE
+    }
+
     /// Forgets everything about `[lo, lo + len)`, which is what an instance beginning there means.
     ///
     /// # Safety
@@ -537,6 +582,11 @@ mod tests {
 
         fn slot(&self, offset: usize) -> usize {
             self.plane.slot(self.base + offset) as usize
+        }
+
+        fn stranger(&self, offset: usize, len: usize, mine: Stamp) -> Stamp {
+            // SAFETY: as above.
+            unsafe { self.plane.stranger(self.base + offset, len, mine) }
         }
     }
 
@@ -706,6 +756,50 @@ mod tests {
         let theirs = std::thread::spawn(tick).join().expect("the thread ran");
         assert_ne!(thread(theirs), thread(first));
         assert_ne!(thread(theirs), 0, "and it is a real number rather than nobody's");
+    }
+
+    #[test]
+    fn a_read_finds_the_thread_whose_writing_nothing_of_its_own_orders() {
+        // The reading half, which is judgement J9 over a range rather than over a word. What comes
+        // back is the stamp and not a yes, because the report is worth having for the name in it.
+        let fake = Fake::new(64);
+        let mine = stamp(1, 10);
+        let theirs = stamp(2, 12);
+
+        assert_eq!(fake.stranger(0, 32, mine), NONE, "nobody has written any of it");
+
+        fake.write(16, theirs);
+        assert_eq!(fake.stranger(0, 32, mine), theirs);
+        assert_eq!(fake.stranger(0, 8, mine), NONE, "the granules below it are still nobody's");
+        assert_eq!(fake.stranger(16, 1, mine), theirs, "one byte of the granule is enough");
+    }
+
+    #[test]
+    fn a_read_says_nothing_about_its_own_writing_or_about_a_thread_it_has_got_past() {
+        // The two ways an answer is ordered, and they are the two the whole detector rests on. A
+        // report in either case would be a report about a program that synchronized correctly.
+        let fake = Fake::new(64);
+        let mine = stamp(1, 10);
+
+        fake.write(0, stamp(1, 4));
+        assert_eq!(fake.stranger(0, 8, mine), NONE, "this thread wrote it");
+
+        fake.write(0, stamp(2, 9));
+        assert_eq!(fake.stranger(0, 8, mine), NONE, "and this one has been got past");
+    }
+
+    #[test]
+    fn a_range_holding_two_strangers_answers_the_first_one() {
+        // There is no ordering among them that would make one the one to report, so the walk stops
+        // at the first rather than carrying on to pick between answers that say the same thing.
+        let fake = Fake::new(64);
+        let mine = stamp(1, 1);
+        fake.write(8, stamp(2, 5));
+        fake.write(16, stamp(3, 5));
+
+        assert_eq!(fake.stranger(0, 24, mine), stamp(2, 5));
+        assert_eq!(fake.stranger(16, 8, mine), stamp(3, 5), "and starting past it finds the other");
+        assert_eq!(fake.stranger(0, 0, mine), NONE, "and a read of nothing reads nobody's word");
     }
 
     #[test]

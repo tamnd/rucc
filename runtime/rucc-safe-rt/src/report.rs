@@ -7,7 +7,9 @@
 //! this writes the three it can: the judgement in document 04's numbering, the address and the width
 //! of the access, and what the lifetime plane says about the range the address is in. A refused
 //! derivation gets two lines more, since it is the one judgement with two addresses and the refused
-//! one on its own is a number rather than a fact.
+//! one on its own is a number rather than a fact. A refused race gets a line naming both threads and
+//! where each of them stood, which is not on section 6.5's list because that list was written for
+//! judgements about one operation and this one is about two.
 //!
 //! The other three are named here rather than left to be noticed missing. The source location comes
 //! from DWARF through the `pc` field of the descriptor, and nothing fills that field in yet, because
@@ -28,10 +30,11 @@ use crate::fail::{Descriptor, Judgement};
 
 /// How much room a report is given.
 ///
-/// Generous for what is written today, which is six short lines. A report that outgrew this would
+/// Generous for what is written today, which is seven short lines. A report that outgrew this would
 /// be silently cut, so [`Text`] says how much it dropped and a test holds the longest report the
-/// renderer can produce against this number.
-pub const ROOM: usize = 512;
+/// renderer can produce against this number. It went from 512 to 640 when the line naming the two
+/// threads of a race was added, which is the arrangement working rather than a surprise.
+pub const ROOM: usize = 640;
 
 /// A report being built.
 #[derive(Debug)]
@@ -254,11 +257,18 @@ pub struct Facts<'a> {
     /// stayed in and how far short of it the derivation fell is the sentence somebody can act on,
     /// and until this line existed getting it took a debugger.
     pub base: Option<usize>,
+    /// For judgement J9, the stamp of the write the access raced with.
+    ///
+    /// A race is the one judgement whose report is about two threads, and the address alone names
+    /// neither of them. What this carries is the other thread's number and the point in its own
+    /// counting that it wrote at, which together with the asking thread's own is the whole of why
+    /// the monitor called the pair concurrent.
+    pub witness: Option<(crate::epoch::Stamp, crate::epoch::Stamp)>,
 }
 
 /// Writes the report for one refused judgement.
 pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
-    let Facts { site, addr, base } = *facts;
+    let Facts { site, addr, base, witness } = *facts;
     out.text("rucc: memory safety violation\n");
 
     out.text("  judgement J").dec(u64::from(row.judgement)).text(", ");
@@ -270,6 +280,15 @@ pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
 
     if let Some(site) = site {
         out.text("  in ").text(site).text(", which the monitor interposes\n");
+    }
+
+    // Before the address rather than after it, because it is the half of a race report that does
+    // not depend on there being an address to print and the other lines all do.
+    if let Some((found, mine)) = witness {
+        out.text("  written by thread ").dec(crate::epoch::thread(found));
+        out.text(" at its step ").dec(crate::epoch::clock(found));
+        out.text(", read by thread ").dec(crate::epoch::thread(mine));
+        out.text(" at its step ").dec(crate::epoch::clock(mine)).text("\n");
     }
 
     // Nothing decides the class yet, so this line is normally absent rather than saying zero.
@@ -385,7 +404,7 @@ mod tests {
 
     /// The report for a descriptor and an address, as a `String` a test can read.
     fn rendered(row: &Descriptor, addr: Option<usize>) -> std::string::String {
-        from(row, &Facts { site: None, addr, base: None })
+        from(row, &Facts { site: None, addr, base: None, witness: None })
     }
 
     /// The report for a descriptor and whatever else the caller has, the same way.
@@ -421,10 +440,10 @@ mod tests {
 
     #[test]
     fn a_judgement_number_nothing_knows_is_said_to_be_one_rather_than_described_as_another() {
-        // The byte comes out of an object file, so it can be anything. Describing a J9 as a J1
+        // The byte comes out of an object file, so it can be anything. Describing a J10 as a J1
         // would send somebody looking for a bug that is not the one they have.
-        let text = rendered(&Descriptor { judgement: 9, ..ACCESS }, None);
-        assert!(text.contains("judgement J9,"), "{text}");
+        let text = rendered(&Descriptor { judgement: 10, ..ACCESS }, None);
+        assert!(text.contains("judgement J10,"), "{text}");
         assert!(text.contains("not a judgement this runtime has heard of"), "{text}");
     }
 
@@ -496,8 +515,14 @@ mod tests {
         // source.
         let ptr = alloc(64);
         let base = ptr as usize;
-        let past = from(&DERIVE, &Facts { site: None, addr: Some(base + 96), base: Some(base) });
-        let under = from(&DERIVE, &Facts { site: None, addr: Some(base - 96), base: Some(base) });
+        let past = from(
+            &DERIVE,
+            &Facts { site: None, addr: Some(base + 96), base: Some(base), witness: None },
+        );
+        let under = from(
+            &DERIVE,
+            &Facts { site: None, addr: Some(base - 96), base: Some(base), witness: None },
+        );
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
 
@@ -517,7 +542,10 @@ mod tests {
         // object that is not there is the one way this line could say something false.
         let mut local = [0_u8; 16];
         let base = local.as_mut_ptr() as usize;
-        let text = from(&DERIVE, &Facts { site: None, addr: Some(base + 64), base: Some(base) });
+        let text = from(
+            &DERIVE,
+            &Facts { site: None, addr: Some(base + 64), base: Some(base), witness: None },
+        );
         assert!(text.contains(&std::format!("  derived from {base:#018x}\n")), "{text}");
         assert!(!text.contains("running"), "{text}");
     }
@@ -536,11 +564,36 @@ mod tests {
             site: Some("memcpy, over its dst argument"),
             addr: Some(base - usize::from(u16::MAX)),
             base: Some(base),
+            witness: Some((
+                crate::epoch::stamp(crate::epoch::THREADS, crate::epoch::CLOCKS),
+                crate::epoch::stamp(crate::epoch::THREADS, crate::epoch::CLOCKS),
+            )),
         };
         let text = from(&row, &facts);
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
         assert!(text.len() < ROOM, "{} bytes of {ROOM}: {text}", text.len());
+    }
+
+    #[test]
+    fn a_race_report_names_both_threads_and_where_each_of_them_stood() {
+        let _turn = turn();
+        // The one judgement whose report is about two threads. The address says which word, and
+        // without this line it says nothing about who else touched it, which is the only part
+        // somebody chasing a race can act on.
+        let row = Descriptor { judgement: 9, class: 0, size: 8, pc: 0 };
+        let facts = Facts {
+            site: None,
+            addr: None,
+            base: None,
+            witness: Some((crate::epoch::stamp(2, 12), crate::epoch::stamp(1, 10))),
+        };
+        assert_eq!(
+            from(&row, &facts),
+            "rucc: memory safety violation\n  judgement J9, a word another thread wrote with \
+             nothing ordering that against this one\n  written by thread 2 at its step 12, read \
+             by thread 1 at its step 10\n"
+        );
     }
 
     #[test]

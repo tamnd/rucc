@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The epoch plane has a reader, which is judgement J9 and is document 03's C2 and C3. A load or a store asks `__rucc_check_race` whether any granule of the range it is about holds a write by another thread that nothing this thread has done orders before it, and a Lamport clock that is not behind is the whole of the evidence: an ordered pair has an increasing clock, so a clock that is not increasing is a pair no synchronization edge joined. One check covers both classes because the comparison is the same from either side, a load finding a stranger being the pointer word race and a store finding one being two threads writing the same slot with nothing between them. The check runs before the store's own `__rucc_meta_epoch` rather than after it, or it would be asking about the write it was called for. A refusal names both threads and where each of them stood, since an address on its own says which word raced and not who else was in it, and that line is the one thing in a report that somebody chasing a race can act on. The judgement is numbered apart from J1 the way J8 is, because it is a relation between two operations rather than a property of one, and document 04 section 4.5 puts it outside the soundness claim for the same reason. C1, the torn store, is the class left over: what it compares is a pointer word's stamp against the stamp the capability beside it was written at, and the aux slot that would hold the second of those does not exist yet. No generated code calls either of the two symbols, which is where the type plane and the init plane each stood at this point, and the atomics are a gate on turning the check on rather than a gap in it, because this is the one plane in the crate where instrumentation nobody wrote costs a false report instead of a missed one. tamnd/rucc#431.
+
 ## 0.10.22
 
 ### Added
