@@ -1,0 +1,100 @@
+; ModuleID = 'tests/golden/restrict.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @copy(ptr, ptr, i64), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = iconst.i32 0
+    %4 = sext.i64 %3
+    jump block1(%4)
+
+block1(%5: i64):
+    %6 = icmp ult %5, %2
+    br_if %6, block2, block3
+
+block2:
+    %7 = iconst.i64 4
+    %8 = mul.nsw %5, %7
+    %9 = ptr_add %0, %8
+    %10 = iconst.i64 4
+    %11 = mul.nsw %5, %10
+    %12 = ptr_add %1, %11
+    %13 = load.i32 %12, align 4, tbaa !1, restrict(1, 2)
+    store %13 -> %9, align 4, tbaa !1, restrict(1, 1)
+    %14 = iconst.i64 1
+    %15 = add %5, %14
+    jump block1(%15)
+
+block3:
+    return
+}
+
+func @swap(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = iconst.i64 4
+    %3 = ptr_add %1, %2
+    %4 = load.i32 %3, align 4, tbaa !1, restrict(2, 2)
+    store %4 -> %0, align 4, tbaa !1, owns 4, restrict(2, 1)
+    %5 = iconst.i64 4
+    %6 = ptr_add %0, %5
+    %7 = iconst.i32 1
+    %8 = sext.i64 %7
+    %9 = iconst.i64 8
+    %10 = mul.nsw %8, %9
+    %11 = ptr_add %1, %10
+    %12 = load.i32 %11, align 4, tbaa !1, restrict(2, 2)
+    store %12 -> %6, align 4, tbaa !1, owns 4, restrict(2, 1)
+    return
+}
+
+func @scale(ptr, ptr, i64), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = iconst.i32 0
+    %4 = sext.i64 %3
+    jump block1(%4)
+
+block1(%5: i64):
+    %6 = icmp ult %5, %2
+    br_if %6, block2, block3
+
+block2:
+    %7 = iconst.i64 4
+    %8 = mul.nsw %5, %7
+    %9 = ptr_add %0, %8
+    %10 = iconst.i64 4
+    %11 = mul.nsw %5, %10
+    %12 = ptr_add %0, %11
+    %13 = load.i32 %12, align 4, tbaa !1, restrict(3, 1)
+    %14 = iconst.i64 4
+    %15 = mul.nsw %5, %14
+    %16 = ptr_add %1, %15
+    %17 = load.i32 %16, align 4, tbaa !1, restrict(3, 2)
+    %18 = mul.nsw %13, %17
+    store %18 -> %9, align 4, tbaa !1, restrict(3, 1)
+    %19 = iconst.i64 1
+    %20 = add %5, %19
+    jump block1(%20)
+
+block3:
+    return
+}
+
+func @indirect(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = load %0, align 8, tbaa !2, restrict(4, 1)
+    %3 = load.i32 %1, align 4, tbaa !1, restrict(4, 2)
+    store %3 -> %2, align 4, tbaa !1
+    return
+}
+
+func @plain(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = load.i32 %1, align 4, tbaa !1
+    store %2 -> %0, align 4, tbaa !1
+    return
+}
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+!2 = tbaa "pointer", parent !0, offset 0

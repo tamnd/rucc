@@ -1,0 +1,151 @@
+decl #3 copy : void(int *, const int *, unsigned long) function external defined
+  params
+    decl #0 to : int *restrict object automatic defined
+    decl #1 from : const int *restrict object automatic defined
+    decl #2 n : unsigned long object automatic defined
+  body
+    block
+      decls
+        decl #4 i : unsigned long object automatic defined
+      for
+        init
+          expr
+            assign = : unsigned long
+              decl #4 i : unsigned long lvalue
+              convert arithmetic : unsigned long
+                const 0 : int
+        cond
+          convert bool : _Bool
+            binary < : int
+              convert lvalue : unsigned long
+                decl #4 i : unsigned long lvalue
+              convert lvalue : unsigned long
+                decl #2 n : unsigned long lvalue
+        step
+          unary post ++ : unsigned long
+            decl #4 i : unsigned long lvalue
+        body
+          block
+            expr
+              assign = : int
+                subscript : int lvalue
+                  convert lvalue : int *
+                    decl #0 to : int *restrict lvalue
+                  convert lvalue : unsigned long
+                    decl #4 i : unsigned long lvalue
+                convert lvalue : int
+                  subscript : const int lvalue
+                    convert lvalue : const int *
+                      decl #1 from : const int *restrict lvalue
+                    convert lvalue : unsigned long
+                      decl #4 i : unsigned long lvalue
+decl #7 swap : void(struct pair *, struct pair *) function external defined
+  params
+    decl #5 p : struct pair *restrict object automatic defined
+    decl #6 q : struct pair *restrict object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          member #0 a : int lvalue
+            unary * : struct pair lvalue
+              convert lvalue : struct pair *
+                decl #5 p : struct pair *restrict lvalue
+          convert lvalue : int
+            member #1 b : int lvalue
+              unary * : struct pair lvalue
+                convert lvalue : struct pair *
+                  decl #6 q : struct pair *restrict lvalue
+      expr
+        assign = : int
+          member #1 b : int lvalue
+            unary * : struct pair lvalue
+              convert lvalue : struct pair *
+                decl #5 p : struct pair *restrict lvalue
+          convert lvalue : int
+            member #0 a : int lvalue
+              unary * : struct pair lvalue
+                binary + : struct pair *
+                  convert lvalue : struct pair *
+                    decl #6 q : struct pair *restrict lvalue
+                  const 1 : int
+decl #11 scale : void(int *, const int *, unsigned long) function external defined
+  params
+    decl #8 a : int *restrict object automatic defined
+    decl #9 b : const int *restrict object automatic defined
+    decl #10 n : unsigned long object automatic defined
+  body
+    block
+      decls
+        decl #12 i : unsigned long object automatic defined
+      for
+        init
+          expr
+            assign = : unsigned long
+              decl #12 i : unsigned long lvalue
+              convert arithmetic : unsigned long
+                const 0 : int
+        cond
+          convert bool : _Bool
+            binary < : int
+              convert lvalue : unsigned long
+                decl #12 i : unsigned long lvalue
+              convert lvalue : unsigned long
+                decl #10 n : unsigned long lvalue
+        step
+          unary post ++ : unsigned long
+            decl #12 i : unsigned long lvalue
+        body
+          block
+            expr
+              assign = : int
+                subscript : int lvalue
+                  convert lvalue : int *
+                    decl #8 a : int *restrict lvalue
+                  convert lvalue : unsigned long
+                    decl #12 i : unsigned long lvalue
+                binary * : int
+                  convert lvalue : int
+                    subscript : int lvalue
+                      convert lvalue : int *
+                        decl #8 a : int *restrict lvalue
+                      convert lvalue : unsigned long
+                        decl #12 i : unsigned long lvalue
+                  convert lvalue : int
+                    subscript : const int lvalue
+                      convert lvalue : const int *
+                        decl #9 b : const int *restrict lvalue
+                      convert lvalue : unsigned long
+                        decl #12 i : unsigned long lvalue
+decl #15 indirect : void(int **, int *) function external defined
+  params
+    decl #13 q : int **restrict object automatic defined
+    decl #14 r : int *restrict object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          unary * : int lvalue
+            convert lvalue : int *
+              unary * : int * lvalue
+                convert lvalue : int **
+                  decl #13 q : int **restrict lvalue
+          convert lvalue : int
+            unary * : int lvalue
+              convert lvalue : int *
+                decl #14 r : int *restrict lvalue
+decl #18 plain : void(int *, const int *) function external defined
+  params
+    decl #16 to : int * object automatic defined
+    decl #17 from : const int * object automatic defined
+  body
+    block
+      expr
+        assign = : int
+          unary * : int lvalue
+            convert lvalue : int *
+              decl #16 to : int * lvalue
+          convert lvalue : int
+            unary * : const int lvalue
+              convert lvalue : const int *
+                decl #17 from : const int * lvalue
