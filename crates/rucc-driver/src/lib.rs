@@ -1529,6 +1529,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // machine whose environment said the right thing, and the link line is the last thing that
     // touches a binary. `spec/cross-compile/13-distribution.md` section 13.2 owns the answer.
     link.cache = Some(cache::dir());
+    // And the ten field spelling of the target, because the release on it decides two things the
+    // three field one cannot say: whether a target that is this architecture is still a cross
+    // compile, and which directory under the cache it is against. After the loop because the last
+    // `--target=` on the command line is the one that counts.
+    link.pinned = pinned;
     // After the loop rather than where `-pthread` was read, so that it lands after the objects
     // that refer to it. A static link takes the definitions it needs from a library when it
     // reaches it and not afterwards, so a library before the objects is a library that answers
@@ -3071,6 +3076,31 @@ mod tests {
             let (native, _) = compile(&[&native, "-c", "a.c"]);
             assert_eq!(native.glibc_minor, None);
         }
+    }
+
+    #[test]
+    fn a_pinned_release_on_this_machines_own_target_reads_the_bundled_tree() {
+        // The end to end half of the answer in `link::cross_for`. A release named for this machine's
+        // own target is a cross compile, so the headers are the bundled tree's and the macro says
+        // what was asked for rather than what this machine has.
+        //
+        // Only on a glibc box, because a release is a glibc release: a mac has no `__GLIBC_MINOR__`
+        // to get wrong and nothing to pin. That makes this a test the Linux runners carry, which is
+        // where the case lives.
+        let Some(host) = Triple::host() else { return };
+        if host.env != rucc_target::Env::Gnu {
+            return;
+        }
+        let pin = format!("--target={}.2.28", host.tuple());
+        let (opts, _) = compile(&[&pin, "-c", "a.c"]);
+        assert_eq!(opts.glibc_minor, Some(28));
+        let root = cache::dir().join("sysroots").join(format!("{}.2.28", host.tuple()));
+        let dirs: Vec<&std::path::Path> =
+            opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
+        assert!(dirs.iter().any(|dir| dir.starts_with(&root)), "{dirs:?}");
+        // And nothing of this machine's, which is the failure this was: a program compiled against
+        // 2.44 declarations and told it was 2.28.
+        assert!(!dirs.iter().any(|dir| *dir == std::path::Path::new("/usr/include")), "{dirs:?}");
     }
 
     /// An architecture that is not this machine's, out of the three the driver has targets for.

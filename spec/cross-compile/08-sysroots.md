@@ -85,6 +85,8 @@ Cross compilation makes header search a target property rather than a machine pr
 1. `-I` in order.
 2. The compiler's own headers (`stddef.h`, `stdarg.h`, `stdint.h`, `float.h`, `limits.h`, `stdbool.h`, `stdalign.h`, `stdnoreturn.h`, `iso646.h`, plus the intrinsic headers). **Always present, on every target including freestanding, and never taken from a sysroot.**
 3. The target's libc headers: from `--sysroot` if given, otherwise from our bundled tree for that tuple, otherwise, and only when the target is the host, from the host's directories as `library.rs` computes them today.
+
+"The target is the host" is the machine and not the spelling, and a target that names a libc release is not the host even when it is this architecture. `--target=x86_64-linux-gnu.2.28` on an x86-64 glibc box reads the bundled tree for 2.28, because the release is the one thing a person writes a pin to say and handing them their own headers instead would give them a binary that does not run where they asked for. What it costs is that a pin equal to this machine's own release also stops using this machine's libc, which is not a loss: the two should be the same text, and if they are not then the machine's copy is patched and the bundled tree is the one the pin asked for.
 4. Nothing else. No `/usr/local/include` when cross compiling, ever; it is a host directory and its presence in a cross build is a bug.
 
 A tree the user named keeps whatever shape its author gave it. A buildroot or Yocto or distribution tree puts the headers under `usr/include` and ours puts them under two directories named after the tuple, so step 3 takes the directories found under the named root rather than assuming one layout and then finding nothing in it.
