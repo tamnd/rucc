@@ -142,11 +142,13 @@ fn middle(runs: &[u64]) -> f64 {
 /// program, or when a run produced no timings.
 pub(crate) fn cost(args: &[String]) -> Result<()> {
     let level = level(args)?;
+    let extra = extra(args);
     let benches = benches()?;
     let runner = Runner::find("this measurement")?;
-    println!("cost: {} programs, {level} both sides, {runner}", benches.len());
+    let named = if extra.is_empty() { String::new() } else { format!(" {}", extra.join(" ")) };
+    println!("cost: {} programs, {level}{named} both sides, {runner}", benches.len());
 
-    let work = build(&benches, level)?;
+    let work = build(&benches, level, &extra)?;
     let times = read(&runner.run(&work, "the benchmarks")?);
 
     let mut rows = Vec::new();
@@ -164,6 +166,18 @@ pub(crate) fn cost(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The `-f` flags the caller wants both sides compiled with, in the order they gave them.
+///
+/// Section 13.5 asks what each elimination source is worth on its own, and the only honest way to
+/// ask that of a benchmark is to turn one off and run the same eight programs again. Both sides get
+/// them, not just the side with the monitor on: a flag that changed the code on one side only would
+/// make the ratio a measurement of the flag rather than of the monitor. The flags a run used are
+/// printed above the table, because a table of ratios with no record of what produced it is the one
+/// thing section 13.4 says a measurement must not be.
+fn extra(args: &[String]) -> Vec<String> {
+    args.iter().filter(|arg| !LEVELS.contains(&arg.as_str())).cloned().collect()
+}
+
 /// The level the caller asked for, or the default when they asked for nothing.
 ///
 /// # Errors
@@ -172,9 +186,13 @@ pub(crate) fn cost(args: &[String]) -> Result<()> {
 fn level(args: &[String]) -> Result<&'static str> {
     let mut found = None;
     for arg in args {
+        if arg.starts_with("-f") {
+            continue;
+        }
         let Some(&known) = LEVELS.iter().find(|&&known| known == arg) else {
             return Err(Error::Io(format!(
-                "cost takes an optimization level and `{arg}` is not one of {}",
+                "cost takes an optimization level and `-f` flags, and `{arg}` is neither one of {} \
+                 nor a flag",
                 LEVELS.join(", ")
             )));
         };
@@ -261,7 +279,7 @@ pub(crate) fn benches() -> Result<Vec<Bench>> {
 }
 
 /// Compiles every program twice and lays out the directory the runner is pointed at.
-fn build(benches: &[Bench], level: &str) -> Result<PathBuf> {
+fn build(benches: &[Bench], level: &str, extra: &[String]) -> Result<PathBuf> {
     let work = root().join("target").join("cost");
     if work.exists() {
         std::fs::remove_dir_all(&work)
@@ -278,7 +296,9 @@ fn build(benches: &[Bench], level: &str) -> Result<PathBuf> {
     for bench in benches {
         for (suffix, tier) in [("off", "-fsafety=off"), ("on", "-fsafety=detect")] {
             let out = Command::new(&rucc)
-                .args(["-S", &format!("--target={TRIPLE}"), tier, level, "-o"])
+                .args(["-S", &format!("--target={TRIPLE}"), tier, level])
+                .args(extra)
+                .arg("-o")
                 .arg(work.join(format!("{}.{suffix}.s", bench.name)))
                 .arg(&bench.path)
                 .current_dir(root())
@@ -433,6 +453,15 @@ mod tests {
         // The same one twice says nothing contradictory, so it is allowed.
         let twice = vec!["-O2".to_owned(), "-O2".to_owned()];
         assert_eq!(level(&twice).expect("the same level twice"), "-O2");
+    }
+
+    #[test]
+    fn a_flag_travels_past_the_level_and_lands_on_both_sides() {
+        let asked = vec!["-O2".to_owned(), "-fno-hoist".to_owned(), "-fno-split".to_owned()];
+        assert_eq!(level(&asked).expect("a level with flags beside it"), "-O2");
+        assert_eq!(extra(&asked), ["-fno-hoist", "-fno-split"]);
+        // And a run that names no flags builds what it always built.
+        assert!(extra(&["-O2".to_owned()]).is_empty());
     }
 
     #[test]

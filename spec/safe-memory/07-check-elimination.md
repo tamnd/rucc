@@ -13,7 +13,7 @@ The numbers to calibrate against, from document 01:
 - **CHOP** uses profile data to build sufficient conditions for redundancy: **about 80% of dynamic bounds-check instructions avoided**, up to 95.8% improvement over SoftBound.
 - **Baggy bounds** lands at ~30% overhead by making the *representation* cheap rather than by eliminating checks, which is the complementary lever and is document 05's job.
 
-Tier E's 1.3x budget assumes PICO-class static elimination and CHOP-class profile-driven elimination **compose**, which nobody has demonstrated. Document 17 question 3 records it as an assumption and document 16 puts the measurement in S4, before anything depends on it.
+Tier E's 1.3x budget assumes PICO-class static elimination and CHOP-class profile-driven elimination **compose**, which nobody has demonstrated. Document 17 question 3 records it as an assumption and document 16 puts the measurement in S4, before anything depends on it. It has now been measured and the assumption is false. The two do not compose on the clock: section 7.4's loop work takes 78 percent of the Tier E overhead off, section 7.3's redundancy walk takes 7 percent off on its own, and the pair take the same 78 percent as the first one alone. They do compose in what they prove, which is the reason it took two numbers to see, and question 3 has both.
 
 ## 7.2 The four sources of a discharge
 
@@ -26,6 +26,8 @@ A check is discharged when a fact implies its conjunct. Facts come from four pla
 **From induction-variable range analysis.** `for (i = 0; i < n; i++) a[i] = 0;` with `a`'s extent known to be at least `n` needs one check, before the loop, not `n` checks in it. This is the PICO result and section 7.4.
 
 **From annotations and summaries.** `__counted_by(n)` on a parameter tells the callee its bound without a dynamic recovery. Interprocedural summaries carry the same information for un-annotated code. Section 7.5.
+
+**What each one is worth, measured.** `-fdischarge-objects`, `-fdischarge-dominance` and `-fdischarge-summaries` run `crate::discharge` with one of these turned on and the rest off, and `-fdischarge-narrow` runs it with all three and no range widening. On the SQLite amalgamation at `-O2 -fsafety=detect` with the loop passes off, out of 102858 checks the frontend's facts take 11.9 percent, dominance takes 16.5 percent, summaries take 2.8 percent and the three together take 26.0 percent against 31.2 percent added up. So they overlap by about a sixth and the list above is a list of four different things, which is what it claims to be. The third one is the surprise. Asked after the other three it takes 0.06 percent more, because it is not a fourth kind of fact at all: it is a way of asking the other three about a subscript instead of about an address the program wrote out, and section 7.4's passes do that widening on the scale that matters. Document 17 question 3 has the rest of it, including the part where none of this shows up on the clock.
 
 ## 7.3 Redundancy over the dominator tree
 
