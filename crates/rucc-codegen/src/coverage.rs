@@ -275,7 +275,7 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
     ),
     (
         "a hundred and twenty eight bits",
-        "no register pair, so nothing at that width has a name",
+        "split into two halves before selection, except a multiply, a shift and a division",
         "tamnd/rucc#351",
     ),
     (

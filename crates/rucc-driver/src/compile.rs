@@ -1865,11 +1865,17 @@ decl #0 x : int object external static defined
     /// no word for is exactly the opcode no rule lowers, so falling back to the opcode and the
     /// type is what makes the message say anything at all in the cases that happen. The span is
     /// the instruction's own, so the message lands on the line rather than on the file.
+    ///
+    /// The multiply is what keeps the program refused. Everything else here is split into halves
+    /// by `rucc_codegen::wide`, and a multiply at that width is not, so a function holding one is
+    /// left with its wide values and reaches the selector the way every function of this width
+    /// used to.
     #[test]
     fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let result = run(&opts, "int f(int a) {\n  __int128 wide = a;\n  return (int) wide;\n}\n");
+        let source = "int f(int a) {\n  __int128 wide = a;\n  return (int) (wide * wide);\n}\n";
+        let result = run(&opts, source);
         assert!(result.failed());
         assert!(
             result.messages[0].contains("no rule lowers a `sext` producing a `i128`"),
@@ -1884,7 +1890,8 @@ decl #0 x : int object external static defined
     fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let result = run(&opts, "int f(int a) { __int128 wide = a; return (int) wide; }\n");
+        let source = "int f(int a) { __int128 wide = a; return (int) (wide * wide); }\n";
+        let result = run(&opts, source);
         assert!(result.failed());
         let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");
         assert!(note.contains("https://github.com/tamnd/rucc/issues"), "{note}");
