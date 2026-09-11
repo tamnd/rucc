@@ -381,8 +381,16 @@ fn bitwise(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
 ///
 /// An equality is the two halves differing in neither place, which is one `or` over two `xor`s
 /// against zero and is shorter than comparing twice and combining. An ordering is the high halves
-/// compared the way the predicate says, or the low halves compared without a sign when the high
-/// halves are equal: the low half of a signed number is unsigned, whatever the number is.
+/// settling it outright, or the low halves settling it when the high halves are equal, and the low
+/// halves are compared without a sign because the low half of a signed number is unsigned whatever
+/// the number is.
+///
+/// The high halves are asked a strict question even when the predicate is not strict. A predicate
+/// that lets the two be equal is true of two equal high halves whatever the low halves say, and
+/// what decides it there is the low halves, so `a >= b` is `a.hi > b.hi` or the high halves being
+/// equal and `a.lo >= b.lo` unsigned. Asking `a.hi >= b.hi` instead makes every value with a high
+/// half of its own greater than or equal to every other, which is the shape of this that a
+/// differential run against GCC caught.
 fn compare(func: &mut Func, halves: &Halves, forward: &mut HashMap<Value, Value>, inst: Inst) {
     let Extra::IntPred(pred) = func[inst].extra else { return };
     let args = func[func[inst].args].to_vec();
@@ -397,7 +405,7 @@ fn compare(func: &mut Func, halves: &Halves, forward: &mut HashMap<Value, Value>
         let zero = ahead_const(func, inst, 0);
         compared(func, inst, pred, both, zero)
     } else {
-        let above = compared(func, inst, pred, a_high, b_high);
+        let above = compared(func, inst, strict(pred), a_high, b_high);
         let below = compared(func, inst, unsigned(pred), a_low, b_low);
         let same = compared(func, inst, IntPred::Eq, a_high, b_high);
         let tail = bit(func, inst, Opcode::And, same, below);
@@ -407,6 +415,17 @@ fn compare(func: &mut Func, halves: &Halves, forward: &mut HashMap<Value, Value>
         forward.insert(result, answer);
     }
     func.remove_inst(inst);
+}
+
+/// The same ordering with the equal case taken out of it, which is what the high halves are asked.
+fn strict(pred: IntPred) -> IntPred {
+    match pred {
+        IntPred::Sle => IntPred::Slt,
+        IntPred::Sge => IntPred::Sgt,
+        IntPred::Ule => IntPred::Ult,
+        IntPred::Uge => IntPred::Ugt,
+        other => other,
+    }
 }
 
 /// The same ordering with no sign in it, which is how the low halves of two signed numbers compare.
@@ -819,6 +838,28 @@ mod tests {
             text.contains("icmp eq"),
             "and the low halves only matter when the high tie: {text}"
         );
+    }
+
+    /// An ordering that allows the two to be equal still asks the high halves a strict question.
+    ///
+    /// Two values whose high halves are equal are ordered by their low halves alone, and a high
+    /// half that is greater than or equal to the other says nothing about that. Asking the high
+    /// halves the predicate as it stands makes every ordering that is not strict answer yes on a
+    /// tie, which is the mistake a run against GCC caught.
+    #[test]
+    fn an_ordering_that_allows_equality_asks_the_high_halves_a_strict_question() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[Type::int(32)]);
+        let mut build = Builder::new(&mut func, entry);
+        let at_least = build.icmp(IntPred::Sge, params[0], params[1]);
+        let answer = build.unary(Opcode::ZExt, at_least, Type::int(32));
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("icmp sgt"), "the high halves settle it outright: {text}");
+        assert!(!text.contains("icmp sge"), "a tie in the high halves settles nothing: {text}");
+        assert!(text.contains("icmp uge"), "the low halves are the ones allowed to tie: {text}");
     }
 
     #[test]
