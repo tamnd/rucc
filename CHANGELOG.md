@@ -16,6 +16,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - ARM64EC is refused rather than guessed at. Its records carry the mangled spelling of every function and export the plain one, so an import library written for it the way the others are written would link and then fail to load, which is exactly the quiet failure section 9.1 is about. Section 6.8 has the target at tier 4, so the cost of saying no is low and the error says what would have to be done instead.
 
+### Changed
+
+- Loop splitting takes a derivation check whose own pointer does not move while the walk it follows does. The guard measures a window at the first iteration's address, and a derivation check names the capability of the pointer that went in, so those two have to be the same object before the window says anything. Until now the only pairs that qualified were a walk starting on the pointer itself and a pair of pointers walking side by side at one step. A pointer that sits a fixed number of bytes from where the walk starts and stays there now qualifies as well: the window is measured from whichever of the two addresses is lower and widened to cover the gap, so the first iteration's window holds the pair and every later one says where the walk has reached. On the SQLite amalgamation that census row goes from 608 checks at 221 sites to 446 at 155, the object carries 148 fewer calls to `__rucc_check_deriv`, and it is 24368 bytes smaller. A pointer that walks away at a step of its own is still refused, because no window a fixed number of bytes wide holds a pair whose distance changes every time round. tamnd/rucc#885.
+
 ## 0.10.19
 
 ### Changed
