@@ -51,11 +51,13 @@
 //! answering a question. It is mapped over every watched region beside the lifetime plane, an
 //! instance forgets its bytes' types when it begins, and [`check`] has judgement J3 and the two
 //! judgements that record it. The compiler's half has started: `rucc_safety::plane` is where a
-//! store records what its bytes were stored through, so `__rucc_meta_type` is called by a program
-//! built with `-fsafety` and the plane holds what it says. What nothing calls yet is J3 itself,
-//! because a copy still carries no type across and a check against a plane that only some of the
-//! writes maintain refuses programs that are correct. The init and epoch planes are not here at
-//! all.
+//! store records what its bytes were stored through and a copy carries whatever the bytes it read
+//! said over to the bytes it wrote, so both `__rucc_meta_type` and `__rucc_meta_type_copy` are
+//! called by a program built with `-fsafety` and the plane holds what they say. That is every write
+//! the type plane has. What nothing calls yet is J3 itself, and the reason is now only that the
+//! union punning of C 6.5.2.3 has no answer here: reading a member other than the one last stored
+//! through is a thing C permits, and a check that does not know it would refuse programs that are
+//! correct. The init and epoch planes are not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates

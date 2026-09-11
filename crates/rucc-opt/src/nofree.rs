@@ -338,10 +338,10 @@ const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 /// a build can see the body. These bodies are in this repository, in `runtime/rucc-safe-rt`, and
 /// what each of them does is read the lifetime plane and then either return a number or report.
 /// Reporting ends the program under `-fsafety=detect` and records under `-fsafety=recover`, and
-/// neither of those hands storage back. The last one writes a plane rather than reading one, which
+/// neither of those hands storage back. The last two write a plane rather than reading one, which
 /// is memory of the runtime's own and not storage the program was ever given.
 ///
-/// These seven and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
+/// These eight and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
 /// `__rucc_alloc_purge` and the frame calls and the rest, and those are exactly the things that do
 /// end a lifetime. Nothing generated calls them, so leaving them out costs nothing, and a name
 /// added here without reading what it does would be a hole in the safety this compiler is for.
@@ -355,6 +355,7 @@ const RUNTIME_NEVER_FREES: &[&str] = &[
     "__rucc_extent",
     "__rucc_extent_back",
     "__rucc_meta_type",
+    "__rucc_meta_type_copy",
 ];
 
 /// Whether either table vouches for that name, under any of the spellings it can arrive in.

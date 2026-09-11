@@ -999,6 +999,10 @@ mod tests {
         plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
         plane(Opcode::MetaEnd, Extra::None);
 
+        // The one plane write with two ranges in it, so it does not go through the helper above.
+        let args = b.func().push_values(&[p, derived, off]);
+        b.inst(InstData { args, ..InstData::new(Opcode::MetaTypeCopy) }, &[]);
+
         let reason = names.intern("hand written assembly, checked by review");
         b.inst(
             InstData { extra: Extra::Reason(reason), ..InstData::new(Opcode::SafeRegionBegin) },

@@ -137,6 +137,7 @@ fn calls(
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             Opcode::MetaType => judgement(func, names, word, numbers, inst),
+            Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -258,6 +259,19 @@ fn judgement(
     let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
     let params = &[Type::PTR, word, small];
     call(func, names, inst, "__rucc_meta_type", params, &[], &[pointer, bytes, ty]);
+}
+
+/// `meta_type_copy` becomes `__rucc_meta_type_copy(destination, source, length)`.
+///
+/// No descriptor and no type number, for the two reasons [`judgement`] gives: a plane write refuses
+/// nothing, and what the copied bytes are is not something the compiler knows. The runtime reads the
+/// entries over the source and writes them over the destination, so the type travels without
+/// anybody here having to name it.
+fn carriage(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [to, from, length] = func[func[inst].args] else { return };
+    let bytes = fitted(func, inst, length, word);
+    let params = &[Type::PTR, Type::PTR, word];
+    call(func, names, inst, "__rucc_meta_type_copy", params, &[], &[to, from, bytes]);
 }
 
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
@@ -456,6 +470,59 @@ mod tests {
         let plane = Plane::build(&mut module);
         let numbers = plane::numbers(&module, names);
         (plane, numbers)
+    }
+
+    /// A module with one function that copies a fixed number of bytes, with the plane write in.
+    fn copied(names: &mut Interner) -> Module {
+        let mut func =
+            Func::new(names.intern("move"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 24,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, from]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memcpy) }, &[]);
+        b.ret(&[]);
+
+        insert(&mut func, &planeless(names).0);
+        let mut module = Module::new(names.intern("move.c"), &target());
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn a_copy_becomes_the_call_that_moves_the_types_across() {
+        // Three operands and no descriptor. A plane write refuses nothing, and what the copied
+        // bytes are is not a thing the compiler knows, so there is no type number either: the
+        // runtime reads the entries over the source and writes them over the destination.
+        let mut names = Interner::new();
+        let mut module = copied(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 0);
+
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @move(ptr, ptr), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr):\n    \
+             memcpy %0, %1, size 24, align 8\n    \
+             %2 = iconst.i64 24\n    \
+             call @__rucc_meta_type_copy(%0, %1, %2) : (ptr, ptr, i64)\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     #[test]
