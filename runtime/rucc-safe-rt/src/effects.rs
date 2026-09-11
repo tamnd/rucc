@@ -69,7 +69,13 @@ use crate::alloc;
 use crate::fail::Judgement;
 use crate::plane::{self, GRANULE};
 
-/// Which of section 10.3's four groups a row belongs to.
+/// Which group of interposed function a row belongs to.
+///
+/// Section 10.3's three that are interposed, and the synchronization primitives, which that section
+/// does not name because it is about memory effects and they have none. Document 09 section 9.5 is
+/// where they are asked for, and they are here rather than in a file of their own because they are
+/// interposed in exactly the same way and for the same reason: the effect a program's call has on
+/// what this monitor knows is written down, and the call goes through to the C library's own.
 ///
 /// The group is what the summary counts by, because "41 movement wrappers and no syscall wrappers"
 /// says something about a build's guarantee that a total of 41 does not.
@@ -83,6 +89,9 @@ pub enum Group {
     /// The syscall surface of section 10.5, where the kernel writes user memory and does not
     /// consult our planes.
     Syscall,
+    /// The synchronization primitives, whose effect is not on a range at all but on the ordering
+    /// between two threads that document 09 section 9.5's clock is made of.
+    Ordering,
 }
 
 impl Group {
@@ -93,6 +102,7 @@ impl Group {
             Self::Movement => "movement",
             Self::Allocation => "allocation",
             Self::Syscall => "syscall",
+            Self::Ordering => "ordering",
         }
     }
 }
@@ -516,7 +526,17 @@ impl Watch {
 /// appends(d, s, n)     the same, stopping at n
 /// scatters(v, k)       an array of k iovecs, and the buffers they name, written
 /// gathers(v, k)        the same, read
+/// acquires(m)          the lock m, taking whatever ordering it was released with
+/// releases(m)          the lock m, publishing the clock it is given up at
 /// ```
+///
+/// The last two are the `Ordering` group and they are the one clause that is not about a range.
+/// They have an arm of their own here because a range judgement happens before the call and an
+/// ordering edge does not: a release has to be published before the lock is really given up, or a
+/// thread that takes the lock next reads a clock from before the work it is being handed, and an
+/// acquire has to be taken after the call returns, and only when the call says the lock was taken.
+/// Every row in that group returns a `c_int` that is zero when it worked, which is what the arm
+/// tests, and a row whose function does not is a row that does not belong in the group.
 ///
 /// A write cannot take a discovered extent of its own, and saying so is a compile error naming the
 /// row: the NUL that would say where a written range ends is the byte the call is about to write.
@@ -529,6 +549,65 @@ impl Watch {
 /// decision than interposing a program's calls. Redirecting the call site is the compiler's half.
 #[macro_export]
 macro_rules! interpose {
+    (
+        group: Ordering;
+        $(
+            $(#[$note:meta])*
+            fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty
+                where $edge:ident($lock:ident)
+            $body:block
+        )+
+    ) => {
+        $(
+            $(#[$note])*
+            ///
+            /// # Safety
+            ///
+            /// The arguments are whatever the program passed, and what this does with them is what
+            /// the C library would have done. The lock is never read through here, only its address
+            /// is used, so a call this monitor was handed rubbish for is rubbish the C library's own
+            /// implementation gets to decide about.
+            pub unsafe fn $name($($arg: $ty),*) -> $ret {
+                $crate::__edge!($edge, $lock, $body)
+            }
+        )+
+
+        /// Every row above, as data.
+        ///
+        /// The effects are empty because these rows have none. What they do is on the clock rather
+        /// than on a range, so `--emit=safety-summary` counts them as a group and has nothing to
+        /// print per argument.
+        pub static TABLE: &[$crate::effects::Row] = &[
+            $(
+                $crate::effects::Row {
+                    name: stringify!($name),
+                    wrapper: concat!("__rucc_wrap_", stringify!($name)),
+                    group: $crate::effects::Group::Ordering,
+                    effects: &[],
+                }
+            ),+
+        ];
+
+        /// The symbols a redirected call site is compiled against.
+        ///
+        /// Separate from the functions above for the reason the other groups' are.
+        #[cfg(not(test))]
+        pub mod exports {
+            use super::*;
+
+            $(
+                #[doc = concat!(
+                    "`", stringify!($name), "`, with its ordering edge taken.\n\n",
+                    "# Safety\n\nThis is `", stringify!($name), "`."
+                )]
+                #[unsafe(export_name = concat!("__rucc_wrap_", stringify!($name)))]
+                pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
+                    // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+                    unsafe { super::$name($($arg),*) }
+                }
+            )+
+        }
+    };
     (
         group: $group:ident;
         $(
@@ -724,6 +803,33 @@ macro_rules! __judge {
             $crate::effects::vectors(site, $arg.cast(), $count, $crate::effects::Kind::Reads)
         };
     };
+}
+
+/// One clause of one `Ordering` row, as the edge it stands for.
+///
+/// Split out of [`crate::interpose`] for the reason [`crate::__judge`] is, which is that a
+/// `macro_rules` arm cannot branch on the value of an `ident` it captured. There are two words and
+/// they differ in when the edge is taken as much as in what it does.
+///
+/// A release publishes before the call, so that the clock is already in the table when the lock is
+/// really given up and the thread that takes it next cannot miss it. An acquire takes the edge
+/// after, and only when the call says it got the lock: a `pthread_mutex_trylock` that returned
+/// `EBUSY` has taken nothing, and syncing to the holder's clock for it would order this thread
+/// behind work it was never handed.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __edge {
+    (acquires, $lock:ident, $body:block) => {{
+        let taken = $body;
+        if taken == 0 {
+            $crate::sync::acquired($lock.cast());
+        }
+        taken
+    }};
+    (releases, $lock:ident, $body:block) => {{
+        $crate::sync::released($lock.cast());
+        $body
+    }};
 }
 
 /// The effects clause of one row, as the data the table holds.

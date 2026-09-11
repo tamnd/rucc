@@ -645,8 +645,11 @@ fn malformed() -> Result<()> {
 
 /// Where the interposition table's rows are written, one file per group, in the order the
 /// compiler's list has to spell them.
-const INTERPOSE_ROWS: &[&str] =
-    &["runtime/rucc-safe-rt/src/wrap.rs", "runtime/rucc-safe-rt/src/syscall.rs"];
+const INTERPOSE_ROWS: &[&str] = &[
+    "runtime/rucc-safe-rt/src/wrap.rs",
+    "runtime/rucc-safe-rt/src/syscall.rs",
+    "runtime/rucc-safe-rt/src/sync.rs",
+];
 
 /// Where the compiler's copy of the same names is written.
 const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
