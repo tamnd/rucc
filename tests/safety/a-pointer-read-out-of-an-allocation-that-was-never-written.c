@@ -1,6 +1,5 @@
 /* row: Y7 */
 /* refuse: J1 */
-/* gap: #431 */
 void *malloc(unsigned long size);
 void free(void *p);
 /* An uninitialized read restricted to a pointer shaped slot, which is the one that matters most
