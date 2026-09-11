@@ -339,6 +339,71 @@ impl FromStr for Visibility {
     }
 }
 
+/// How the debug sections are compressed, which is what `-gz` asks.
+///
+/// Debug information is much larger than the code it describes and almost never read, so an ELF
+/// section holding it may be stored compressed: the section keeps its name, gains the
+/// `SHF_COMPRESSED` flag and starts with a header saying what it decompresses to, and every reader
+/// that understands the flag unpacks it on the way in. A distribution that ships debug symbols for
+/// everything it builds saves more from this than from anything else it passes.
+///
+/// This compiler writes no debug sections at all yet, so every answer here produces the same bytes,
+/// and an object built with `-gz=zstd` is identical to one built without the flag. It is recorded
+/// rather than dropped for the reason section 4.1 gives for the rest of the family: the answer has
+/// to be sitting in the options on the day `rucc-debug` has something to compress, and a build that
+/// asked for it and got silence would have no way of noticing the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Compress {
+    /// `-gz=none`, and what a command line that says nothing gets. gcc's default is the same.
+    #[default]
+    None,
+    /// `-gz` and `-gz=zlib`. The ELF way, with the `SHF_COMPRESSED` flag and an `Elf64_Chdr` in
+    /// front of the data. Bare `-gz` means this one, which is worth knowing because the manual
+    /// describes the flag without saying so.
+    Zlib,
+    /// `-gz=zlib-gnu`. The older way, where the section is renamed from `.debug_info` to
+    /// `.zdebug_info` and carries `ZLIB` and a length instead of a real header. Kept because
+    /// binutils still reads it and some build systems still ask for it by name.
+    ZlibGnu,
+    /// `-gz=zstd`. The same arrangement as `Zlib` with a different algorithm in the header, which
+    /// packs debug information smaller and unpacks it faster.
+    Zstd,
+}
+
+impl Compress {
+    /// The spelling this is asked for by, without the `-gz=` in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Compress::None => "none",
+            Compress::Zlib => "zlib",
+            Compress::ZlibGnu => "zlib-gnu",
+            Compress::Zstd => "zstd",
+        }
+    }
+}
+
+impl fmt::Display for Compress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Compress {
+    type Err = ();
+
+    /// Parses the part after `-gz=`. Bare `-gz` is not this function's business because there is
+    /// nothing after the flag to hand it.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "none" => Compress::None,
+            "zlib" => Compress::Zlib,
+            "zlib-gnu" => Compress::ZlibGnu,
+            "zstd" => Compress::Zstd,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.
 ///
 /// A canary is a word the prologue copies into the frame above everything a local can be written
@@ -1281,6 +1346,11 @@ pub struct Options {
     pub emit: EmitKind,
     /// Whether to emit debug information.
     pub debug_info: bool,
+    /// How the debug sections are compressed, from `-gz`.
+    ///
+    /// Nothing reads this yet because nothing writes a debug section yet. It is the same shape of
+    /// answer `prefix_map.debug` is, and it is waiting for the same crate.
+    pub compress: Compress,
     /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer`.
     ///
     /// Off by default, which is what gcc does at every level above `-O0` and what leaves the
@@ -1603,6 +1673,7 @@ impl Options {
             subobject: Subobject::default(),
             emit: EmitKind::default(),
             debug_info: false,
+            compress: Compress::None,
             frame_pointer: false,
             red_zone: true,
             protector: Protector::default(),

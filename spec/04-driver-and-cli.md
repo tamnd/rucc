@@ -197,9 +197,13 @@ Code generation flags: `-fno-plt`, `-fno-omit-frame-pointer`, `-fomit-frame-poin
 
 ## 4.8 Debug info
 
-`-g`, `-g0` through `-g3`, `-gdwarf-4`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz` for compressed sections. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
+`-g`, `-g0` through `-g3`, `-gdwarf-4`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz` for compressed sections. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
 
 The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` is refused rather than taken while document 11 writes DWARF 5 and nothing else, because a debugger handed version 5 when it was told version 4 is a worse outcome than a build that stopped.
+
+`-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. The answer is recorded on the session and a value outside that list is refused, because a build that asked for `zstd` and quietly got `zlib` would ship a file its reader may not understand and would have no way of finding out. Nothing acts on the answer while document 11 writes no debug sections at all, so an object built with `-gz=zstd` is byte for byte an object built without the flag, and that is what makes taking it a description of what happens rather than a promise. gcc also passes `--compress-debug-sections=` on to the linker, so that debug sections arriving from objects it did not compile are compressed too. This driver does not, and will not until it writes a debug section of its own: the flag is the compiler's answer about its own output, and a link line that gained an option nobody wrote is a change to what is produced.
+
+`-gsplit-dwarf` is refused. It writes the debug information into a `.dwo` file beside the object, and gcc writes that file whether or not it found anything to put in it, so a build system that declares it as an output or a make rule that depends on it gets a file from gcc and nothing from here. Section 4.1 takes a flag that changes nothing and refuses one that changes what is produced, and a file that never appears is the plainest case of the second there is. `-gno-split-dwarf` is taken, because writing it all into the object is what happens.
 
 `-g` at `-O0` must produce debug info good enough that every local variable is inspectable at every point in its scope, because that is the actual reason people use `-O0`. `-g` at `-O2` produces best-effort location lists and is honest in document 16 about what fraction of variables remain inspectable.
 
