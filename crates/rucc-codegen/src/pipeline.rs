@@ -338,22 +338,6 @@ pub fn compile_recording(
     };
     fold::addresses(&mut func, machine.insts, names, &mut pending);
 
-    }
-
-    // After selection, because the address instruction and the one that reads it are both machine
-    // instructions only once selection has written them, and before allocation, because what makes
-    // the pair safe to put together is that a virtual register is written once. The addresses into
-    // the frame and into the caller's argument area go through it like anything else, and the two
-    // lists `finish` reads are rewritten as they do, so an address that ends up inside its reader
-    // is still an address the frame layout knows to write an offset into.
-    let mut pending =
-        fold::Pending {
-        addresses: &mut stack.addresses,
-        arguments: &mut stack.arguments,
-        dynamic: &mut stack.dynamic,
-    };
-    fold::addresses(&mut func, machine.insts, names, &mut pending);
-
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by
     // here. What the machine does about it is this crate's answer, and a target with nowhere to
