@@ -528,15 +528,23 @@ impl Watch {
 /// gathers(v, k)        the same, read
 /// acquires(m)          the lock m, taking whatever ordering it was released with
 /// releases(m)          the lock m, publishing the clock it is given up at
+/// joins(t)             the thread t, taking everything it did before it finished
+/// spawns(f)            a thread running f, which the row gives an ordering to itself
 /// ```
 ///
-/// The last two are the `Ordering` group and they are the one clause that is not about a range.
+/// The last four are the `Ordering` group and they are the one clause that is not about a range.
 /// They have an arm of their own here because a range judgement happens before the call and an
 /// ordering edge does not: a release has to be published before the lock is really given up, or a
 /// thread that takes the lock next reads a clock from before the work it is being handed, and an
 /// acquire has to be taken after the call returns, and only when the call says the lock was taken.
 /// Every row in that group returns a `c_int` that is zero when it worked, which is what the arm
 /// tests, and a row whose function does not is a row that does not belong in the group.
+///
+/// `spawns` is the one word that asks the generator for nothing. Its row takes the edge in its own
+/// body, because a thread cannot be handed a clock once it has already started and there is nowhere
+/// in this grammar to say that one argument is replaced by another function entirely. The word is
+/// there so that the row still says in a line what it is for, and so that it lands in the table
+/// every other ordering row lands in.
 ///
 /// A write cannot take a discovered extent of its own, and saying so is a compile error naming the
 /// row: the NUL that would say where a written range ends is the byte the call is about to write.
@@ -808,14 +816,16 @@ macro_rules! __judge {
 /// One clause of one `Ordering` row, as the edge it stands for.
 ///
 /// Split out of [`crate::interpose`] for the reason [`crate::__judge`] is, which is that a
-/// `macro_rules` arm cannot branch on the value of an `ident` it captured. There are two words and
+/// `macro_rules` arm cannot branch on the value of an `ident` it captured. There are four words and
 /// they differ in when the edge is taken as much as in what it does.
 ///
 /// A release publishes before the call, so that the clock is already in the table when the lock is
 /// really given up and the thread that takes it next cannot miss it. An acquire takes the edge
 /// after, and only when the call says it got the lock: a `pthread_mutex_trylock` that returned
 /// `EBUSY` has taken nothing, and syncing to the holder's clock for it would order this thread
-/// behind work it was never handed.
+/// behind work it was never handed. A join is an acquire against a thread rather than against a
+/// lock and it is tested the same way, since a join that failed was told nothing about whether the
+/// thread has finished. A spawn is the row's own business and this passes it straight through.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __edge {
@@ -830,6 +840,16 @@ macro_rules! __edge {
         $crate::sync::released($lock.cast());
         $body
     }};
+    (joins, $thread:ident, $body:block) => {{
+        let waited = $body;
+        if waited == 0 {
+            $crate::sync::joined($thread.cast());
+        }
+        waited
+    }};
+    (spawns, $start:ident, $body:block) => {
+        $body
+    };
 }
 
 /// The effects clause of one row, as the data the table holds.

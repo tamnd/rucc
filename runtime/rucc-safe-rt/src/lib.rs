@@ -82,14 +82,18 @@
 //! anything and no generated code calls `__rucc_meta_epoch`, so nothing is refused on its account
 //! yet.
 //!
-//! [`sync`] is the edge that makes any of that answerable without reporting on correct programs. A
+//! [`sync`] is the edges that make any of that answerable without reporting on correct programs. A
 //! counter per thread with nothing joining them says every pair of threads is concurrent forever, so
-//! section 9.5's ordering comes from the lock primitives, interposed the way everything else at the
-//! boundary is: a release publishes the clock it was given up at into a table keyed by the lock's
-//! address, and the next thread to take the lock moves its own clock past that. The other two edges
-//! are missing, which are a thread being created and a thread being joined, and those come before
-//! anything reads the plane, because a program that fills a buffer and hands it to a worker has no
-//! lock in it anywhere.
+//! section 9.5's ordering comes from the primitives that really do join them, interposed the way
+//! everything else at the boundary is. All three are in. A lock release publishes the clock it was
+//! given up at into a table keyed by the lock's address and the next thread to take the lock moves
+//! its own clock past that. A thread being created starts inside this crate at a trampoline that
+//! moves the new thread past its creator before the program's own start routine runs, which is the
+//! edge a program that fills a buffer and hands it to a worker depends on and that no lock in such a
+//! program stands in for. A thread finishing publishes what it ended at under the identifier a join
+//! is given, and the join takes it. What is left is the rows nobody has written yet, which are the
+//! condition variables and the semaphores, and the ordering that is not a call at all, which is the
+//! atomics and belongs with the judgements.
 //!
 //! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
 //! block that declares `restrict` pointers promises that no object modified through one of them is
