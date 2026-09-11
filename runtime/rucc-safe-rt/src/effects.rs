@@ -34,16 +34,20 @@
 //!
 //! # What a judgement here can decide, and what it cannot
 //!
-//! The same as [`crate::check`], because it reads the same plane. Bounds and lifetime, per granule,
-//! over the heap this monitor's allocator hands out of. An address that is not the heap's is passed,
-//! which is a local, a global or another allocator's memory, and reporting on one would be a false
-//! positive against a program doing nothing wrong.
+//! The same as [`crate::check`], because it reads the same planes. Bounds and lifetime, per
+//! granule, over the heap this monitor's allocator hands out of. An address that is not the heap's
+//! is passed, which is a local, a global or another allocator's memory, and reporting on one would
+//! be a false positive against a program doing nothing wrong.
 //!
-//! [`Kind`] tells a read from a write and nothing yet acts on the difference, since bounds and
-//! lifetime do not care which direction the bytes were going. It is in the vocabulary from the
-//! start because the init plane of milestone S5 is the thing that cares: a read of a range nobody
-//! wrote is document 03's Y6 and a write of one is not a bug at all. Recording the direction now
-//! means S5 is a change to what the judgement does rather than a rewrite of every row.
+//! Beside the judgement, a wrapper that writes records what it wrote into the init plane. That is
+//! not a check and refuses nothing, and it is here for the reason section 10.1 gives for modelling
+//! a boundary at all: a plane only some of the writes maintain reports on programs that are
+//! correct. A `memset` the monitor did not hear about would leave its destination looking like
+//! storage nobody ever wrote, and the next read of it would be refused.
+//!
+//! [`Kind`] tells a read from a write, and the init plane is the thing that cares about the
+//! difference: a read of a range nobody wrote is document 03's Y6 and a write of one is not a bug
+//! at all. Bounds and lifetime still do not care which direction the bytes were going.
 //!
 //! # The discovered extent
 //!
@@ -326,6 +330,11 @@ pub unsafe fn copied(
 /// it runs off the end before a single byte of the source has been looked at, and that is the
 /// refusal worth reporting rather than one about the source.
 ///
+/// Returns how far from `dst` the call will have written, not counting the terminator, which is
+/// what was already there plus what the source adds. Measured from `dst` rather than from where
+/// the write starts, because that is the number a caller recording the write wants and the string
+/// already there was written by whatever put it there.
+///
 /// # Panics
 ///
 /// As [`range`].
@@ -344,7 +353,9 @@ pub unsafe fn appended(
     // SAFETY: the destination is a string, which is what the call was handed.
     let held = unsafe { scan(dst_site, dst.cast_const()) };
     // SAFETY: as `copied`, from the byte the string already there ends at.
-    unsafe { walk(dst_site, src_site, (dst as usize).wrapping_add(held), src as usize, limit) }
+    let added =
+        unsafe { walk(dst_site, src_site, (dst as usize).wrapping_add(held), src as usize, limit) };
+    held.wrapping_add(added)
 }
 
 /// The walk both of the discovered writes are.
@@ -402,7 +413,7 @@ unsafe fn walk(
 /// `addr` is what the program is about to pass to a scatter or gather syscall. Its elements are
 /// read, which is what the kernel is about to do with them.
 #[must_use]
-pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32) -> usize {
+pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32, kind: Kind) -> usize {
     let Ok(count) = usize::try_from(count) else { return 0 };
     let each = size_of::<Iovec>();
     range(site, addr, count.saturating_mul(each));
@@ -413,6 +424,10 @@ pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32) -> us
         // element inside it asks for.
         let entry = unsafe { addr.cast::<Iovec>().add(at).read() };
         range(site, entry.base.cast_const(), entry.len);
+        if kind == Kind::Writes {
+            // SAFETY: the buffer has just been judged, as in the `writes` clause of a wrapper.
+            unsafe { crate::check::wrote(entry.base.cast_const(), entry.len) };
+        }
         total = total.saturating_add(entry.len);
     }
     total
@@ -488,13 +503,14 @@ impl Watch {
 /// that an interposed function is one whose effects are written down rather than one that was
 /// rewritten.
 ///
-/// The whole vocabulary is five words:
+/// The whole vocabulary is these words:
 ///
 /// ```text
 /// reads(s, n)          n bytes, read
 /// reads(s, nul)        as far as the terminator, read
 /// reads(s, nul, n)     the terminator or n bytes, whichever comes first
 /// writes(d, n)         n bytes, written
+/// moves(d, s, n)       n bytes read from s and written to d, carrying what the source said
 /// copies(d, s)         d written as far as s reaches, both judged as the two walk together
 /// appends(d, s)        the same, starting at d's own terminator
 /// appends(d, s, n)     the same, stopping at n
@@ -636,11 +652,20 @@ macro_rules! __judge {
     };
     (writes, $name:ident, $arg:ident, $len:tt) => {
         $crate::effects::range($crate::__site!($name, $arg), $arg.cast(), $len);
+        // SAFETY: the range has just been judged, so it is inside one live instance or outside
+        // this monitor's heap, and the plane write passes over an address no region covers.
+        unsafe { $crate::check::wrote($arg.cast(), $len) };
+    };
+    (moves, $name:ident, $dst:ident, $src:ident, $len:tt) => {
+        $crate::effects::range($crate::__site!($name, $dst), $dst.cast(), $len);
+        $crate::effects::range($crate::__site!($name, $src), $src.cast(), $len);
+        // SAFETY: both ranges have just been judged, as in the `writes` arm.
+        unsafe { $crate::check::spread($dst.cast(), $src.cast(), $len) };
     };
     (copies, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: both pointers are ones the program passed to a string function, which is what
         // this walks them as, and only the source is read.
-        let _ = unsafe {
+        let written = unsafe {
             $crate::effects::copied(
                 $crate::__site!($name, $dst),
                 $crate::__site!($name, $src),
@@ -649,10 +674,13 @@ macro_rules! __judge {
                 usize::MAX,
             )
         };
+        // The terminator as well, which is the byte the walk judged past the length it returned.
+        // SAFETY: the destination has just been judged for every byte of that, as in `writes`.
+        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
     };
     (appends, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: as the `copies` arm, and the destination is a string as well.
-        let _ = unsafe {
+        let written = unsafe {
             $crate::effects::appended(
                 $crate::__site!($name, $dst),
                 $crate::__site!($name, $src),
@@ -661,10 +689,15 @@ macro_rules! __judge {
                 usize::MAX,
             )
         };
+        // From the destination rather than from where the write starts, because the bytes of the
+        // string already there were written by whatever put it there. Saying so again costs a
+        // wider plane write and says nothing untrue.
+        // SAFETY: as the `copies` arm.
+        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
     };
     (appends, $name:ident, $dst:ident, $src:ident, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
-        let _ = unsafe {
+        let written = unsafe {
             $crate::effects::appended(
                 $crate::__site!($name, $dst),
                 $crate::__site!($name, $src),
@@ -673,17 +706,23 @@ macro_rules! __judge {
                 $limit,
             )
         };
+        // SAFETY: as the unbounded arm.
+        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
     };
     (scatters, $name:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: the pointer is the array the program is about to hand a syscall, and reading its
         // elements is what the kernel is about to do.
-        let _ = unsafe { $crate::effects::vectors(site, $arg.cast(), $count) };
+        let _ = unsafe {
+            $crate::effects::vectors(site, $arg.cast(), $count, $crate::effects::Kind::Writes)
+        };
     };
     (gathers, $name:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: as the `scatters` arm, which is the same array read the same way.
-        let _ = unsafe { $crate::effects::vectors(site, $arg.cast(), $count) };
+        let _ = unsafe {
+            $crate::effects::vectors(site, $arg.cast(), $count, $crate::effects::Kind::Reads)
+        };
     };
 }
 
@@ -778,6 +817,21 @@ macro_rules! __effects {
                 arg: stringify!($src),
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
+            },
+        ] $($rest)*)
+    };
+    (@ [$($done:expr,)*] moves($dst:ident, $src:ident, $len:tt) $($rest:tt)*) => {
+        $crate::__effects!(@ [
+            $($done,)*
+            $crate::effects::Effect {
+                arg: stringify!($dst),
+                kind: $crate::effects::Kind::Writes,
+                extent: $crate::effects::Extent::SizedBy(stringify!($len)),
+            },
+            $crate::effects::Effect {
+                arg: stringify!($src),
+                kind: $crate::effects::Kind::Reads,
+                extent: $crate::effects::Extent::SizedBy(stringify!($len)),
             },
         ] $($rest)*)
     };
@@ -972,16 +1026,18 @@ mod tests {
     #[test]
     fn a_write_whose_length_is_discovered_is_measured_over_the_source() {
         let _turn = turn();
-        // What the judgement returns is the length the call is going to move, which is the number
-        // the row would have been given if C had written one down.
+        // What the judgement returns is how far from the destination the call is going to have
+        // written, which is the number the row would have been given if C had written one down.
         let from = alloc(64);
         let to = alloc(64);
         put(from, b"hello", true);
         // SAFETY: both are live instances and the destination has room for the source.
         assert_eq!(unsafe { copied("dst", "src", to, from, usize::MAX) }, 5);
         put(to, b"one", true);
+        // Three already there and five added, because an append is measured from the destination
+        // and not from the byte the write starts at.
         // SAFETY: as above, from the byte the destination's own string ends at.
-        assert_eq!(unsafe { appended("dst", "src", to, from, usize::MAX) }, 5);
+        assert_eq!(unsafe { appended("dst", "src", to, from, usize::MAX) }, 8);
         // SAFETY: both are live instances.
         unsafe {
             dealloc(from);
@@ -998,6 +1054,7 @@ mod tests {
         let to = alloc(64);
         put(from, b"a source that is quite long", true);
         put(to, b"", true);
+        // Nothing already there, so the answer is the four the walk read.
         // SAFETY: both are live instances and the walk reads four bytes of the source.
         assert_eq!(unsafe { appended("dst", "src", to, from, 4) }, 4);
         // SAFETY: both are live instances.

@@ -26,6 +26,14 @@
 //! compiler side instead, by judging the destination at the call site where the format string is
 //! often a literal anyway, is the option worth costing before either of those lands.
 //!
+//! Every row that writes also records what it wrote into the init plane, which is the other half of
+//! modelling a boundary and not an extra. A `memset` the plane did not hear about leaves its
+//! destination looking like storage nobody ever wrote, and the read after it is a refusal against
+//! correct code. The discovered extents record what the walk turned out to reach, terminator
+//! included, and `memcpy` and `memmove` and `bcopy` carry the source's answers across rather than
+//! declaring the destination written, so padding a program never filled is still padding when it
+//! arrives somewhere else.
+//!
 //! What reaches these is `rucc_safety::wrap`, which points a call the program wrote to `memcpy` at
 //! `__rucc_wrap_memcpy` instead. Without that half the wrappers are code nothing calls.
 //!
@@ -80,8 +88,13 @@ interpose! {
     /// Two ranges of the same length, one read and one written, and one judgement each. This is
     /// the row that says why interposing beats instrumenting: the copy itself is one call into the
     /// C library's own, and the checking is two comparisons rather than two per byte.
+    ///
+    /// One clause rather than two, because the init plane's answer for the destination is the
+    /// source's answer and not a fresh one. A structure filled member by member and then copied
+    /// here still has padding nothing wrote, which is the infoleak of document 09 section 9.3, and
+    /// a `writes` clause would launder it.
     fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void
-        where writes(dst, n), reads(src, n)
+        where moves(dst, src, n)
     {
         // SAFETY: both ranges have been judged, so each is inside one live instance of this
         // monitor's heap or outside its heap entirely, and the caller's contract is what says the
@@ -95,7 +108,7 @@ interpose! {
     /// monitor's: an overlap is defined behaviour here, and each range still has to be inside one
     /// live instance for the call to be one the program is allowed to make.
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void
-        where writes(dst, n), reads(src, n)
+        where moves(dst, src, n)
     {
         // SAFETY: both ranges have been judged, as in `memcpy`.
         unsafe { real::memmove(dst, src, n) }
@@ -144,7 +157,7 @@ interpose! {
     /// of thing a hand written wrapper gets backwards. Here the clause names the arguments, so the
     /// row cannot disagree with the signature above it.
     fn bcopy(src: *const c_void, dst: *mut c_void, n: usize) -> ()
-        where reads(src, n), writes(dst, n)
+        where moves(dst, src, n)
     {
         // SAFETY: both ranges have been judged, as in `memcpy`.
         unsafe { real::bcopy(src, dst, n) }
@@ -335,6 +348,14 @@ mod tests {
         TABLE.iter().find(|row| row.name == name).expect("the row is in the table")
     }
 
+    /// Whether the init plane says every byte of a run of an instance has been written.
+    fn written(ptr: *mut c_void, offset: usize, len: usize) -> bool {
+        let region =
+            crate::alloc::covering(ptr as usize).expect("the address came out of a region of ours");
+        // SAFETY: the run is inside an instance the allocator handed out, so the plane covers it.
+        unsafe { region.init.allows(ptr as usize + offset, len) }
+    }
+
     #[test]
     fn every_row_describes_itself_the_way_it_was_written() {
         // The table and the wrappers come out of the same rows, so this is not checking that they
@@ -375,12 +396,15 @@ mod tests {
         assert_eq!(row("strncpy").effects[0].extent, Extent::SizedBy("n"));
 
         // `bcopy` takes its source first, which is exactly the kind of thing a hand written wrapper
-        // gets backwards, so the row is checked to have read the signature and not the habit.
+        // gets backwards, so the row is checked to have read the signature and not the habit. The
+        // clause names the two in the order `moves` names them and the signature names them the
+        // other way, which is the case the clause was written to make unmistakable.
         let legacy = row("bcopy");
-        assert_eq!(legacy.effects[0].arg, "src");
-        assert_eq!(legacy.effects[0].kind, Kind::Reads);
-        assert_eq!(legacy.effects[1].arg, "dst");
-        assert_eq!(legacy.effects[1].kind, Kind::Writes);
+        assert_eq!(legacy.effects[0].arg, "dst");
+        assert_eq!(legacy.effects[0].kind, Kind::Writes);
+        assert_eq!(legacy.effects[0].extent, Extent::SizedBy("n"));
+        assert_eq!(legacy.effects[1].arg, "src");
+        assert_eq!(legacy.effects[1].kind, Kind::Reads);
     }
 
     #[test]
@@ -779,5 +803,99 @@ mod tests {
         let out = unsafe { strcpy(local.as_mut_ptr().cast(), c"hello".as_ptr()) };
         assert_eq!(out, local.as_mut_ptr().cast());
         assert_eq!(&local[..5], b"hello");
+    }
+
+    #[test]
+    fn a_set_records_the_bytes_it_wrote_into_the_init_plane() {
+        let _turn = turn();
+        // The case the Linux safety suite found first. Without this the plane says nobody wrote
+        // the buffer, and the next read of a `memset` result is refused against correct code,
+        // which is the one direction document 09 section 9.2 says a plane may never thin in.
+        let ptr = alloc(64);
+        assert!(!written(ptr, 0, 64), "a fresh instance has been written by nobody");
+        // SAFETY: a set of exactly the instance is what a correct program writes.
+        assert_eq!(unsafe { memset(ptr, 0, 64) }, ptr);
+        assert!(written(ptr, 0, 64));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_carries_what_its_source_said_instead_of_declaring_its_destination_written() {
+        let _turn = turn();
+        // The `moves` clause, and the reason it is a word of its own rather than a `writes` and a
+        // `reads`. A structure filled member by member and then copied here still has padding
+        // nothing wrote, and a `writes` clause would launder it into a buffer the plane believes
+        // is entirely initialized. That is the infoleak of document 09 section 9.3.
+        let from = alloc(64);
+        let to = alloc(64);
+        // SAFETY: eight bytes of a live instance, set through the wrapper so the plane hears it.
+        unsafe { memset(from, 0, 8) };
+        // SAFETY: both are live instances of sixty four bytes.
+        unsafe { memcpy(to, from, 64) };
+        assert!(written(to, 0, 8), "the eight bytes the source had are the eight it carries");
+        assert!(!written(to, 8, 56), "and the rest arrive as unwritten as they left");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_source_is_not_watched_marks_its_destination_written() {
+        let _turn = turn();
+        // The permissive direction, taken deliberately. A local or a literal has no plane to carry
+        // anything from, and treating that as unwritten would refuse every copy out of a stack
+        // buffer. Losing a check at an edge the monitor cannot see is what section 9.2 asks for.
+        let to = alloc(64);
+        let local = [7_u8; 64];
+        // SAFETY: the destination is a live instance and the source is a live local.
+        unsafe { memcpy(to, local.as_ptr().cast(), 64) };
+        assert!(written(to, 0, 64));
+        // SAFETY: `to` is a live instance.
+        unsafe { dealloc(to) };
+    }
+
+    #[test]
+    fn a_string_copy_records_the_bytes_it_found_and_the_terminator_after_them() {
+        let _turn = turn();
+        // A discovered extent records what the walk turned out to reach, which for `strcpy` is the
+        // string and the byte after it. Recording the string alone would leave the terminator
+        // looking unwritten, and the next `strlen` of the copy would read a byte nobody wrote.
+        let from = alloc(16);
+        let to = alloc(16);
+        put(from, c"hello");
+        // SAFETY: the destination has room for the string and its terminator.
+        assert_eq!(unsafe { strcpy(to.cast(), from.cast()) }, to.cast());
+        assert!(written(to, 0, 6), "five characters and the terminator");
+        assert!(!written(to, 6, 1), "and not the byte after that");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
+    fn an_append_records_from_the_start_of_its_destination_and_not_from_where_it_wrote() {
+        let _turn = turn();
+        // An append writes at the end of what is already there, so how far it reached is measured
+        // from the destination rather than from the first byte it touched. Recording the added
+        // bytes at the front instead would mark the wrong run and leave the real one unwritten.
+        let from = alloc(32);
+        let to = alloc(16);
+        put(from, c"world");
+        // SAFETY: the destination is a live instance with room for what is put in it.
+        unsafe { memset(to, 0, 16) };
+        put(to, c"hello ");
+        // SAFETY: six and five and a terminator is twelve, which is inside sixteen.
+        assert_eq!(unsafe { strcat(to.cast(), from.cast()) }, to.cast());
+        assert!(written(to, 0, 12));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
     }
 }

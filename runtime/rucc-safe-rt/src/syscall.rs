@@ -22,13 +22,20 @@
 //!
 //! # What is judged and what is not, yet
 //!
-//! Bounds and lifetime, which is what the planes hold at S1. Section 10.5 asks for two more things
-//! and both of them need the init plane, which milestone S5 builds: after a read into a buffer the
-//! written range's init plane is set, and before a write out of one the range is checked, because
-//! sending uninitialized bytes to a socket is CWE-200 and is the userspace shape of a kernel
-//! infoleak. Neither is here. The rows are written so that adding them is a change to what a
-//! judgement does rather than a rewrite of the table, which is why [`crate::effects::Kind`] has
-//! recorded the direction since the first row.
+//! Bounds and lifetime, and the init plane's record of what a read into a buffer wrote. Section
+//! 10.5 asks for the record and for one more thing, which is that before a write out of a buffer
+//! the range is checked, because sending uninitialized bytes to a socket is CWE-200 and is the
+//! userspace shape of a kernel infoleak. The check is not here, because nothing asks the init plane
+//! a question yet anywhere in the compiler, and a check on this side alone would report on the one
+//! program whose writes happen to go through a syscall.
+//!
+//! The record is generous in a way worth writing down. A `read(fd, buf, 4096)` that returns ten
+//! records four thousand and ninety six bytes as written, because the judgement is made before the
+//! call and there is no hook after it. That loses checks over the bytes the kernel did not fill
+//! rather than inventing refusals over the ones it did, which is the direction document 09 section
+//! 9.2 says this plane has to thin in. Reading the return value would mean a wrapper body that
+//! does work after the call, which the generator has no word for, and it is worth having when
+//! there is a second reason for one.
 //!
 //! `ioctl` is not here and cannot be until the summary is. Its direction is encoded in the request
 //! number for some drivers and in nothing at all for others, so its buffer has genuinely unknown
