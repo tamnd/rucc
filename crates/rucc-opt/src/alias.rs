@@ -64,12 +64,16 @@
 //!
 //! # What the front end still owes this
 //!
-//! Layers 3 and 5 read fields the front end fills in during lowering, and lowering does not fill
-//! them in yet: every access carries no type node and no `restrict` clique today. The layers are
-//! here, they are tested, and they answer correctly for the accesses that do carry them. Giving
-//! them something to read is the next piece of work, and section 8.2 says what it has to be
-//! careful about, which is that an alias set is derived from a canonical encoding of the type
-//! and never from allocation order, or document 35's LTO silently gains disambiguations.
+//! Layer 3 is fed. `rucc_lower::aliasing` builds the tree and every load and every store an access
+//! through a C type becomes carries the node for that type, keyed on a canonical spelling rather
+//! than on the order the walk met it, which is what section 8.2 asks for so that document 35's LTO
+//! does not silently gain disambiguations when two modules are merged. The tree is one level deep:
+//! `char` is the root and every other scalar hangs under it, so a struct member is not yet
+//! separated from the struct it is in.
+//!
+//! Layer 5 is not. No access carries a `restrict` clique, because nothing in lowering works out
+//! which pointers a qualified parameter's derivations came from. The layer is here, it is tested,
+//! and it answers correctly for the accesses that do carry one, which today is none of them.
 
 use std::collections::HashSet;
 

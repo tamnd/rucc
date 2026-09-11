@@ -41,7 +41,7 @@ block0:
     %4 = iconst.i64 4
     %5 = mul.nsw %3, %4
     %6 = ptr_add %0, %5
-    %7 = load.i32 %6, align 4
+    %7 = load.i32 %6, align 4, tbaa !1
     %8 = iconst.i32 1
     %9 = iconst.i32 2
     %10 = sext.i64 %9
@@ -101,6 +101,9 @@ block0(%0: ptr):
 func @narrowing(ptr, i32), linkage(external) {
 block0(%0: ptr, %1: i32):
     %2 = trunc.i8 %1
-    store %2 -> %0, align 1
+    store %2 -> %0, align 1, tbaa !0
     return
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0

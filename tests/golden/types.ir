@@ -65,7 +65,10 @@ block0(%0: ptr, %1: i32, %2: ptr, %3: ptr):
     %37 = iconst.i64 4
     %38 = mul.nsw %36, %37
     %39 = ptr_add %34, %38
-    %40 = load.i32 %39, align 4
+    %40 = load.i32 %39, align 4, tbaa !1
     %41 = add.nsw %29, %40
     return %41
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0

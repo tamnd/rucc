@@ -16,21 +16,21 @@ block0:
     %4 = mul.nsw %2, %3
     %5 = ptr_add %0, %4
     %6 = call @side() : () -> i32
-    %7 = load.i32 %5, align 4
+    %7 = load.i32 %5, align 4, tbaa !1
     %8 = or %7, %6
-    store %8 -> %5, align 4
+    store %8 -> %5, align 4, tbaa !1
     return
 }
 
 func @compound_on_a_pointer_reads_after_the_right_side(ptr), linkage(external) {
 block0(%0: ptr):
     %1 = call @side() : () -> i32
-    %2 = load %0, align 8
+    %2 = load %0, align 8, tbaa !2
     %3 = sext.i64 %1
     %4 = iconst.i64 4
     %5 = mul.nsw %3, %4
     %6 = ptr_add %2, %5
-    store %6 -> %0, align 8
+    store %6 -> %0, align 8, tbaa !2
     return
 }
 
@@ -42,10 +42,10 @@ block0:
     %3 = iconst.i64 4
     %4 = mul.nsw %2, %3
     %5 = ptr_add %0, %4
-    %6 = load.i32 %5, align 4
+    %6 = load.i32 %5, align 4, tbaa !1
     %7 = iconst.i32 1
     %8 = add %6, %7
-    store %8 -> %5, align 4
+    store %8 -> %5, align 4, tbaa !1
     return %6
 }
 
@@ -57,9 +57,13 @@ block0:
     %3 = iconst.i64 4
     %4 = mul.nsw %2, %3
     %5 = ptr_add %0, %4
-    %6 = load.i32 %5, align 4
+    %6 = load.i32 %5, align 4, tbaa !1
     %7 = iconst.i32 1
     %8 = add %6, %7
-    store %8 -> %5, align 4
+    store %8 -> %5, align 4, tbaa !1
     return %8
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+!2 = tbaa "pointer", parent !0, offset 0

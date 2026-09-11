@@ -105,7 +105,7 @@ block0:
     %0 = alloca, size 8, align 8
     %1 = call @make_both() : () -> i64
     store %1 -> %0, align 8
-    %2 = load.i64 %0, align 8
+    %2 = load.i64 %0, align 8, tbaa !1
     return %2
 }
 
@@ -119,7 +119,7 @@ block0:
     store %4 -> %1, align 4
     %5 = iconst.i64 4
     %6 = ptr_add %1, %5
-    %7 = load.i32 %6, align 4
+    %7 = load.i32 %6, align 4, tbaa !2
     %8, %9 = call @make_mixed() : () -> (f64, i64)
     store %8 -> %0, align 8
     %10 = iconst.i64 8
@@ -127,7 +127,7 @@ block0:
     store %9 -> %11, align 8
     %12 = iconst.i64 8
     %13 = ptr_add %0, %12
-    %14 = load.i32 %13, align 4
+    %14 = load.i32 %13, align 4, tbaa !2
     %15 = add.nsw %7, %14
     return %15
 }
@@ -160,7 +160,7 @@ block0(%0: ptr):
     %3 = iconst.i32 6
     %4 = call_indirect %0(%2, %3) : (i32, i32) -> i64
     store %4 -> %1, align 4
-    %5 = load.i32 %1, align 4
+    %5 = load.i32 %1, align 4, tbaa !2
     return %5
 }
 
@@ -177,3 +177,7 @@ block0(%0: f64, %1: i64):
     %8 = load.i64 %7, align 8
     return %5, %8
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "long", parent !0, offset 0
+!2 = tbaa "int", parent !0, offset 0

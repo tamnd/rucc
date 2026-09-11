@@ -28,34 +28,37 @@ block0(%0: i32):
     %2 = alloca, size 8, align 4
     %3 = alloca, size 8, align 4
     %4 = alloca, size 8, align 4
-    store %0 -> %1, align 4
+    store %0 -> %1, align 4, tbaa !1
     %5 = iconst.i64 4
     %6 = ptr_add %1, %5
     %7 = iconst.i32 1
     %8 = add.nsw %0, %7
-    store %8 -> %6, align 4
-    store %0 -> %2, align 4
+    store %8 -> %6, align 4, tbaa !1
+    store %0 -> %2, align 4, tbaa !1
     %9 = iconst.i64 4
     %10 = ptr_add %2, %9
-    store %0 -> %10, align 4
+    store %0 -> %10, align 4, tbaa !1
     %11 = iconst.i32 1
-    store %11 -> %4, align 4
+    store %11 -> %4, align 4, tbaa !1
     %12 = iconst.i64 4
     %13 = ptr_add %4, %12
     %14 = iconst.i32 2
-    store %14 -> %13, align 4
+    store %14 -> %13, align 4, tbaa !1
     memcpy %3, %4, size 8, align 4
-    %15 = load.i32 %1, align 4
+    %15 = load.i32 %1, align 4, tbaa !1
     %16 = iconst.i32 0
     %17 = sext.i64 %16
     %18 = iconst.i64 4
     %19 = mul.nsw %17, %18
     %20 = ptr_add %2, %19
-    %21 = load.i32 %20, align 4
+    %21 = load.i32 %20, align 4, tbaa !1
     %22 = add.nsw %15, %21
     %23 = iconst.i64 4
     %24 = ptr_add %3, %23
-    %25 = load.i32 %24, align 4
+    %25 = load.i32 %24, align 4, tbaa !1
     %26 = add.nsw %22, %25
     return %26
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0

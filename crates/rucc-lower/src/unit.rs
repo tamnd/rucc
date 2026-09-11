@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AttrSet, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Module, Reloc,
+    Alias, AttrSet, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Meta, Module, Reloc,
     SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
@@ -42,6 +42,7 @@ use rucc_target::TargetInfo;
 use rucc_types::{TypeId, TypeKind, Types, compatible};
 
 use crate::abi::{self, Plan};
+use crate::aliasing;
 use crate::body;
 use crate::reach;
 use crate::repr;
@@ -132,6 +133,16 @@ pub struct Context<'a> {
     /// A fact about the compilation for the same reason the two above it are: what was written is
     /// on the tree and what was asked for is on the command line.
     pub wrapping: Wrapping,
+    /// Whether an access carries the node for the type it goes through, which is
+    /// `-fstrict-aliasing` and is on unless `-fno-strict-aliasing` cleared it.
+    ///
+    /// Clearing it here rather than in the optimizer is what makes the flag one condition in one
+    /// place: an access with no node conflicts with every other access, so a unit built with the
+    /// flag off is a unit whose IR says less rather than a unit the passes are told something
+    /// extra about. That is also what keeps it right across link time optimization, the way
+    /// [`Context::wrapping`] is: a body from a unit that named its types and a body from one that
+    /// did not keep their own answers when they end up in the same module.
+    pub aliasing: bool,
 }
 
 /// What the walk produced.
@@ -149,7 +160,7 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names, visibility, protector, wrapping } = cx;
+    let Context { tast, types, target, names, visibility, protector, wrapping, aliasing } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
@@ -159,6 +170,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         visibility,
         protector,
         wrapping,
+        aliasing,
+        tree: aliasing::Tree::default(),
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -184,6 +197,10 @@ pub(crate) struct Unit<'a> {
     pub(crate) protector: Protector,
     /// What wraps rather than being undefined. See [`Context::wrapping`].
     pub(crate) wrapping: Wrapping,
+    /// Whether an access names the type it goes through. See [`Context::aliasing`].
+    aliasing: bool,
+    /// The type based aliasing tree built so far, which is one per module.
+    tree: aliasing::Tree,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are
@@ -223,6 +240,17 @@ impl std::fmt::Debug for Unit<'_> {
 }
 
 impl Unit<'_> {
+    /// The aliasing node an access through `ty` carries, and [`None`] when it carries none.
+    ///
+    /// [`None`] is also every answer under `-fno-strict-aliasing`, which is the whole of what that
+    /// flag does here. See [`aliasing`](mod@crate::aliasing) for which types have a node.
+    pub(crate) fn alias_node(&mut self, ty: TypeId) -> Option<Meta> {
+        if !self.aliasing {
+            return None;
+        }
+        self.tree.node(&mut self.module, self.names, self.types, ty)
+    }
+
     /// Every declaration the file made, in the order it made them.
     fn run(&mut self) {
         self.find_aliased();

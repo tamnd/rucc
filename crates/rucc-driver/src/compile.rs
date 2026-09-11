@@ -317,6 +317,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 pointer: opts.wrapping.pointer,
                                 trap: opts.wrapping.trap,
                             },
+                            aliasing: opts.strict_aliasing,
                         },
                     );
                     // The walk reports what it cannot build, and what it did build is printed
@@ -2466,23 +2467,14 @@ decl #0 x : int object external static defined
         assert!(with(true).contains("block0"), "a body: {}", with(true));
     }
 
-    /// Nothing lowering writes says which type an access went through, so `-fno-strict-aliasing`
-    /// is a description and not a request.
+    /// Every shape that reads or writes through a C type names that type.
     ///
-    /// The driver takes both spellings of that flag and does nothing about either, and this is why
-    /// it is allowed to. The IR has a place for a type based aliasing node and the alias analysis
-    /// reads one where there is one, and lowering fills it with nothing on every access, so no pass
-    /// has a type to reason from and none of them assumes two objects of different types are
-    /// different objects.
-    ///
-    /// If this test starts failing, the flag has stopped being a description, and taking it and
-    /// dropping it becomes the miscompilation `spec/04-driver-and-cli.md` section 4.1 warns about
-    /// in as many words. Whoever makes lowering emit these nodes has to make the flag turn them off
-    /// in the same change.
+    /// The tree itself is `rucc_lower::aliasing`'s and is tested there. What this is about is that
+    /// the walk reaches it from every shape a program actually writes, since a node on the scalar
+    /// load and nothing on the member load would be a layer that answers for a third of the
+    /// accesses in a program and is not worth having.
     #[test]
-    fn lowering_says_nothing_about_the_type_an_access_went_through() {
-        // Every shape that would carry a node if there were any: a scalar through a pointer, a
-        // member, an element, and the union that is the reason the rule has an exception at all.
+    fn an_access_through_a_type_names_the_type_it_went_through() {
         let source = "\
 struct s { int a; float b; };\n\
 union u { int i; float f; };\n\
@@ -2490,7 +2482,32 @@ int scalar(int *p) { return *p; }\n\
 float member(struct s *p) { p->a = 1; return p->b; }\n\
 int element(int *a, long i) { return a[i]; }\n\
 float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
-        assert!(!ir(source).contains("tbaa"), "{}", ir(source));
+        let text = ir(source);
+        assert!(text.contains(r#"!0 = tbaa "char""#), "the root: {text}");
+        assert!(text.contains(r#"tbaa "int", parent !0"#), "int under it: {text}");
+        assert!(text.contains(r#"tbaa "float", parent !0"#), "float under it: {text}");
+        // One per access, and a function whose accesses all go through one type says so once per
+        // access rather than once per function.
+        let named = text.lines().filter(|line| line.contains(", tbaa !")).count();
+        assert_eq!(named, 6, "six accesses: {text}");
+    }
+
+    /// `-fno-strict-aliasing` is the front end leaving the name off.
+    ///
+    /// Nothing asks the alias analysis anything yet, so no program compiles differently for having
+    /// passed this today. What this test is for is the day one does: the flag has to be the
+    /// absence of the names rather than a condition somewhere downstream, since that is the only
+    /// version of it that a pass added later cannot forget about.
+    #[test]
+    fn turning_strict_aliasing_off_leaves_the_type_off_every_access() {
+        let source = "int punned(float *f, int *i) { *i = 1; *f = 2.0f; return *i; }\n";
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.strict_aliasing = false;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+        let text = result.text().to_owned();
+        assert!(!text.contains("tbaa"), "not even the root: {text}");
     }
 
     /// `return;` from a function that promised a value, which only C89 lets through and which
@@ -4661,7 +4678,7 @@ block0(%0: i32, %1: i32):
 block0:
     %0 = alloca, size 4, align 4
     %1 = iconst.i32 1
-    store %1 -> %0, align 4
+    store %1 -> %0, align 4, tbaa !1
     %2 = call @g(%0) : (ptr) -> i32
     return %2
 ";
@@ -5451,7 +5468,7 @@ block0(%0: ptr):
     memcpy %1, %2, size 16, align 8
     %3 = iconst.i64 8
     %4 = ptr_add %1, %3
-    %5 = load.i64 %4, align 8
+    %5 = load.i64 %4, align 8, tbaa !1
     return %5
 ";
         assert_eq!(body(source), expected);
