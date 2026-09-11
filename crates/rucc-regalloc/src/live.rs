@@ -17,6 +17,13 @@
 //! want and it will want a different structure to hold them in, since a range it can split is a
 //! range with a list of pieces rather than two numbers.
 //!
+//! Which is why the live-in and live-out sets the fixpoint computes are kept rather than thrown
+//! away once the intervals are built. An interval is generous by design and that is fine for
+//! deciding two values cannot share a register, since being generous there loses a register rather
+//! than losing a value. It is not fine wherever the answer decides something instead of describing
+//! it, and `Live::anywhere_in` is the question to ask there: whether a value is live in a given
+//! block, which the sets answer exactly and the interval only approximates.
+//!
 //! Physical registers in the operands are not in the answer. Nothing writes one before allocation
 //! except an instruction that must, and what a call destroys is a separate question that the ABI
 //! lowering asks, so a pass that reads this is reading about the values the allocator places.
@@ -74,6 +81,7 @@ impl Range {
 pub struct Live {
     live_in: Rows,
     live_out: Rows,
+    defined: Rows,
     ranges: Vec<Option<Range>>,
 }
 
@@ -85,7 +93,7 @@ impl Live {
         let (used, defined) = exposed(func, order);
         let (live_in, live_out) = flow(func, order, &used, &defined);
         let ranges = measure(func, order, &live_in, &live_out, vregs);
-        Self { live_in, live_out, ranges }
+        Self { live_in, live_out, defined, ranges }
     }
 
     /// Where a virtual register is live, or `None` for one this function never mentions and for
@@ -107,6 +115,27 @@ impl Live {
     /// and the arguments its terminator carries between them ask for.
     pub fn live_out(&self, block: Block) -> impl Iterator<Item = Reg> + '_ {
         self.live_out.iter(block.index())
+    }
+
+    /// Whether a value is live anywhere in a block.
+    ///
+    /// An interval has no holes in it, so a value live in two blocks is treated as live in every
+    /// block laid out between them, whether or not it reaches them. This answers the question the
+    /// interval cannot: a value is live somewhere in a block when it arrives live, or leaves live,
+    /// or is written there, and in no other block.
+    ///
+    /// Which matters wherever the answer decides something rather than describes it. The order the
+    /// blocks are in here is the one the function came in, and `crate::layout` puts them in a
+    /// different one afterwards, so a block between two others in this order is not between them in
+    /// the code. A call in such a block would otherwise take every register it destroys away from
+    /// every value laid out around it, including values whose loop the call is nowhere near.
+    /// tamnd/rucc#982.
+    #[must_use]
+    pub fn anywhere_in(&self, reg: Reg, block: Block) -> bool {
+        let row = block.index();
+        self.live_in.contains(row, reg)
+            || self.live_out.contains(row, reg)
+            || self.defined.contains(row, reg)
     }
 }
 
@@ -269,6 +298,11 @@ impl Rows {
         }
     }
 
+    fn contains(&self, row: usize, reg: Reg) -> bool {
+        self.column(reg)
+            .is_some_and(|column| self.row(row)[column / 64] & (1 << (column % 64)) != 0)
+    }
+
     fn remove(&mut self, row: usize, reg: Reg) {
         if let Some(column) = self.column(reg) {
             self.row_mut(row)[column / 64] &= !(1 << (column % 64));
@@ -346,6 +380,30 @@ mod tests {
         assert_eq!(regs(live.live_out(middle)), vec![0]);
         assert!(live.range(value).expect("live somewhere").covers(order.start(middle)));
         assert_eq!(live.range(value).expect("live somewhere").end, order.early(read));
+    }
+
+    #[test]
+    fn a_range_covers_a_block_the_value_never_reaches_and_being_live_there_does_not() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let arm = func.create_block();
+        let tail = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(entry, opcode).def(value, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
+        let idle = func.build(arm, opcode).finish();
+        func.build(tail, opcode).uses(value, GPR).finish();
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        // The arm is written between the two blocks the value is live in, so the range covers it
+        // and the value is nowhere near it. Both are true and they answer different questions.
+        assert!(live.range(value).expect("live somewhere").covers(order.early(idle)));
+        assert!(live.anywhere_in(value, entry));
+        assert!(live.anywhere_in(value, tail));
+        assert!(!live.anywhere_in(value, arm));
     }
 
     #[test]
