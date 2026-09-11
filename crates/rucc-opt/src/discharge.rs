@@ -62,7 +62,7 @@
 //! it rather than in a check of its own: that the bytes are inside one instance, and that the
 //! address starts where an access of that alignment may start. Everything above is about the
 //! first. A check that goes takes the second away with it, so nothing goes until something has
-//! answered it, which is [`aligned`] and which reads the object the address came from and the
+//! answered it, which is `aligned` below and which reads the object the address came from and the
 //! steps taken from it. An access that assumes nothing about where it starts has nothing to
 //! answer, and a member of a packed record is exactly that.
 //!
