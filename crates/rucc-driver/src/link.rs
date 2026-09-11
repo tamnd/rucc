@@ -60,11 +60,11 @@
 //! have a line, because PE in that environment is written in the GNU style and the import libraries
 //! for it are ours to produce.
 //!
-//! The headers are the other half of a cross compile and they are not wired here. A cross link
-//! takes its libc from the sysroot while the include path still comes from
-//! [`crate::library`], so a target whose headers are not on this machine compiles against the wrong
-//! ones and then links against the right ones. `rucc_sysroot::search` is what closes that and it is
-//! its own piece of work.
+//! The headers are the other half of a cross compile and [`crate::library::header_dirs`] is where
+//! they are decided. It asks [`cross_sysroot`] the same question this file asks it, which is the
+//! point: a compile that took its libc from the sysroot and its declarations from this machine would
+//! be wrong in the quietest way available, and one function answering for both is what stops that
+//! being possible.
 
 use std::ffi::OsString;
 use std::fs;

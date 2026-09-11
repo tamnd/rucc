@@ -98,8 +98,14 @@ pub struct Options<'a> {
     /// live. Supplied by the caller rather than found here, because finding it means asking the
     /// host where the compiler is installed and that is not this crate's business.
     pub resources: Option<&'a Path>,
-    /// `--sysroot` or `-isysroot`. Replaces step 3's root.
-    pub sysroot: Option<&'a Sysroot>,
+    /// `--sysroot` or `-isysroot`, as the directories under the tree the user named.
+    ///
+    /// Paths rather than a [`Sysroot`], because a tree somebody else assembled has whatever shape
+    /// they gave it. A buildroot or Yocto or distribution tree keeps its headers under
+    /// `usr/include` and not under the two directories [`Sysroot::includes`] names, so the caller
+    /// computes the list and this replaces step 3 with it wholesale. A user who did lay their tree
+    /// out the way we lay one out passes [`Sysroot::includes`] and gets the same thing.
+    pub sysroot: &'a [PathBuf],
     /// The tree we bundle for this target, when there is one.
     pub bundled: Option<&'a Sysroot>,
     /// The host's own include directories, as the driver computes them today.
@@ -143,9 +149,9 @@ pub fn include_paths(
 
     // Step 3. The target's libc headers, from the first of three sources that has them.
     if !options.no_std_inc {
-        if let Some(sysroot) = options.sysroot {
-            for path in sysroot.includes() {
-                paths.push(Entry { path, origin: Origin::Sysroot });
+        if !options.sysroot.is_empty() {
+            for path in options.sysroot {
+                paths.push(Entry { path: path.clone(), origin: Origin::Sysroot });
             }
         } else if let Some(bundled) = options.bundled {
             for path in bundled.includes() {
