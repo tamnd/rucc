@@ -15,8 +15,7 @@
 //! The trap entry point and the descriptor it is handed, the lifetime plane, the allocator over
 //! it, `malloc`, `free`, `calloc` and `realloc`, the three checks generated code calls, and the
 //! reporter that turns a refusal into words. That is milestone S1 in
-//! `spec/safe-memory/16-milestones.md`, which asks for bounds and lifetime and nothing else, so the
-//! type, init and epoch planes are not here.
+//! `spec/safe-memory/16-milestones.md`, which asks for bounds and lifetime and nothing else.
 //!
 //! Milestone S2 is the boundary and it has started. [`effects`] is the vocabulary a row of document
 //! 10 section 10.3's interposition table is written in and the generator that turns a row into a
@@ -44,6 +43,14 @@
 //! answers the classification without the bounds walk, which is the form generated code calls
 //! today: there is nowhere to keep a capability until the aux plane of milestone S5, so a crossing
 //! is counted rather than reconstructed, and the counts are the same either way.
+//!
+//! Milestone S5 is the rest of the planes and it has started at the bottom. [`types`] is document
+//! 09 section 9.1's type plane, which is what a byte was last stored through, in the shape document
+//! 05 section 5.2.3 measured: one slot per eight bytes, and a side entry for a granule whose bytes
+//! disagree. Four of document 03's type classes and one of its spatial classes are that plane
+//! answering a question. Nothing calls into it yet, because the store that makes the judgement and
+//! the access that asks are the compiler's half of the same milestone, and the init and epoch
+//! planes are not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
@@ -84,6 +91,7 @@ pub mod recover;
 pub mod report;
 #[cfg(unix)]
 pub mod syscall;
+pub mod types;
 #[cfg(unix)]
 pub mod wrap;
 
