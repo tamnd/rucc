@@ -1295,7 +1295,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         // machine reads this machine's headers, and a target that is not reads the ones in the
         // sysroot for it rather than the ones next door.
         let cross = link::cross_sysroot(opts.target, &link);
-        for dir in library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref()) {
+        let kernel = link::cross_kernel(opts.target, &link);
+        for dir in
+            library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref(), kernel.as_ref())
+        {
             opts.search.push_system(dir);
         }
     }
@@ -2691,17 +2694,34 @@ mod tests {
     #[test]
     fn a_cross_compile_reads_the_targets_own_headers_rather_than_the_ones_next_door() {
         // The target is not the machine this test runs on wherever it runs, so the answer is the
-        // same on all of them: the two include directories of the sysroot for that target, and
-        // nothing from here. A header read from here is the quiet failure of section 8.5, a program
-        // that builds on the build machine and is wrong everywhere else.
+        // same on all of them: the libc's two include directories for that target, the kernel's
+        // two, and nothing from here. A header read from here is the quiet failure of section 8.5, a
+        // program that builds on the build machine and is wrong everywhere else.
         let (opts, _) = compile(&["--target=riscv64-linux-musl", "-c", "a.c"]);
         let dirs: Vec<&std::path::Path> =
             opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
         let root = cache::dir().join("sysroots").join("riscv64-linux-musl");
-        assert_eq!(dirs.len(), 3, "{dirs:?}");
+        let kernel = cache::dir().join("kernel-headers");
+        assert_eq!(dirs.len(), 5, "{dirs:?}");
         assert_eq!(dirs[0], std::path::Path::new(runtime::DIR));
         assert_eq!(dirs[1], root.join("include").join("riscv64"));
         assert_eq!(dirs[2], root.join("include").join("generic"));
+        // The kernel's, which are beside the sysroots rather than inside one, because every target
+        // that shares an architecture reads the same files.
+        assert_eq!(dirs[3], kernel.join("riscv"));
+        assert_eq!(dirs[4], kernel.join("generic"));
+    }
+
+    #[test]
+    fn a_cross_compile_to_something_that_is_not_linux_reads_no_kernel_headers() {
+        // The other side of the same answer. Windows has its own system headers and no `linux/` at
+        // all, so the list is the libc's two and the question never arises, which is the `None` that
+        // `link::cross_kernel` returns rather than a directory nothing would be found in.
+        let (opts, _) = compile(&["--target=x86_64-pc-windows-gnu", "-c", "a.c"]);
+        let dirs: Vec<&std::path::Path> =
+            opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(dirs.len(), 3, "{dirs:?}");
+        assert!(!dirs.iter().any(|dir| dir.ends_with("kernel-headers")), "{dirs:?}");
     }
 
     #[test]

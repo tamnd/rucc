@@ -11,12 +11,15 @@
 | libc descriptions (glibc abilist blob, musl, mingw defs) | ~1 MB | compressed, all architectures, all versions |
 | glibc header tree (generic + per-arch) | ~8 MB | document 08.3's merge is what makes this possible |
 | musl headers, per arch | ~2 MB total | |
+| Linux uapi headers (shared + per-arch `asm/`) | ~10.5 MB | 9.0 MB shared and 1.3 MB for seven architectures; document 08.3's third tree |
 | mingw-w64 headers + runtime archives | ~15 MB | the largest single bundled item |
 | start files, all targets | ~1 MB | small objects |
 | `librucc_builtins.a`, all tier-1/2 targets | ~10 MB | |
-| **base distribution** | **≤ 60 MB uncompressed, ≤ 25 MB compressed** | |
+| **base distribution** | **≤ 75 MB uncompressed, ≤ 30 MB compressed** | |
 | linker (on demand) | 15 to 40 MB | document 11.2: separate, not in the binary |
 | Darwin SDK, MSVC SDK | **not distributed** | §13.4 |
+
+**Where the total came from, and why it moved.** The kernel header row was missing from the first version of this table, and adding it showed that the rows already summed to 62 MB against a stated base of 60, so the total is restated here rather than nudged. The rows now come to 72.7 MB and the base is 75, with the slack being the difference between a measurement and a budget. The two kernel figures are measured and not estimated: Zig 0.16's `any-linux-any` is 990 headers and 9.0 MB, 1.9 MB gzipped, and the seven per-architecture directories our table needs come to 1.3 MB, 187 KB gzipped. The row is in the base rather than in §13.2's cache because no Linux target compiles a program that calls `ioctl` without it, and a payload every Linux row needs before anything works is not on demand in any useful sense.
 
 The base is a target, published per release, and a regression against it is a release-blocking item in the same way a benchmark regression is. If the compiler alone exceeds 25 MB the size argument against LLVM has been lost on our own terms and document 16 should record it.
 
