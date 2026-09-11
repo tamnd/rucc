@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The glibc header directory in a sysroot says the byte order where the byte order changes the headers, which is powerpc and nothing else. The name used to be the architecture family with neither the word size nor the order in it, so `powerpc64le-linux-gnu` and a big endian powerpc row would have read the same `powerpc` directory. They cannot: glibc 2.44 installs 474 headers for each order of powerpc and one of them differs, `bits/long-double.h`, because little endian powerpc can redirect `long double` to the float128 ABI and big endian powerpc cannot, so one install defines `__LDOUBLE_REDIRECTS_TO_FLOAT128_ABI` as `(__LDBL_MANT_DIG__ == 113)` and the other defines it as `0`. There is a `powerpc` directory and a `powerpcle` directory now. Everything else stays coarse, because the same experiment on aarch64 installs 474 headers for each order and `diff -r` over the two is empty, so one directory serves both, and the width is still in no name at all, powerpc included, because 32-bit against 64-bit powerpc with the order held fixed is 474 headers each and an empty diff too. The reason is not `bits/endianness.h`, which is what it looked like before anyone installed the headers twice: glibc branches on `__BIG_ENDIAN__` inside that file, the way it branches on `__x86_64__` inside `bits/wordsize.h`, and musl 1.2.5 does the same in `bits/alltypes.h` and `bits/signal.h`, which is why the musl names carry no order either. tamnd/rucc#940.
+
 ## 0.10.21
 
 ### Added
