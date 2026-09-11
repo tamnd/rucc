@@ -1671,9 +1671,14 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
                 // this build understands. A file this build cannot read is a file whose lines it
                 // cannot vouch for, and printing it anyway would pass the problem to whoever parses
                 // the output next.
+                // The last newline comes off because whatever prints an answer adds one, the way it
+                // does for every other query here. Keeping it would put a blank line at the end of
+                // the one answer that is a file somebody diffs against the file it came from.
                 Ok(text) => Manifest::parse(&text)
                     .map_err(|why| err(format!("{}: {why}", path.display())))?
-                    .render(),
+                    .render()
+                    .trim_end_matches('\n')
+                    .to_string(),
                 // A tree with no manifest in it is a tree somebody laid out themselves and pointed
                 // `--sysroot` at, and nothing here knows where any of it came from. The answer is
                 // nothing, which a reader can tell apart from a manifest with no inputs in it
@@ -4220,8 +4225,9 @@ mod tests {
     fn the_provenance_of_a_sysroot_is_the_manifest_it_carries() {
         // Section 13.5 wants seven things per input and wants them machine readable, and the manifest
         // is the record that already has them, so the flag prints that rather than a second format.
-        let manifest = "rucc sysroot manifest 2\n\
+        let manifest = "rucc sysroot manifest 3\n\
                         target\tx86_64-linux-musl\n\
+                        kernel\t6.12\n\
                         include/generic/stdio.h\tmusl-1.2.5\t\
                         https://musl.libc.org/releases/musl-1.2.5.tar.gz\t\
                         0000000000000000000000000000000000000000000000000000000000000000\tmit\t\
@@ -4232,7 +4238,13 @@ mod tests {
                         generated\n";
         let tree = TempTree::new("provenance", &[("manifest", manifest)]);
         let sysroot = format!("--sysroot={}", tree.0.display());
-        assert_eq!(printed(&[&sysroot, "-print-sysroot-provenance"]), manifest);
+        // The kernel line of tamnd/rucc#934 is in the answer without anything here naming it, because
+        // the flag parses the record and renders it again rather than picking fields out of it. That
+        // is the reason it prints a manifest and not a format of its own.
+        //
+        // The answer is the file without its last newline, because whatever prints it adds one. The
+        // file is what somebody diffs the output against, so the two have to be the same bytes.
+        assert_eq!(printed(&[&sysroot, "-print-sysroot-provenance"]) + "\n", manifest);
 
         // A tree with no manifest in it is a tree somebody assembled themselves, and nothing here
         // knows where any of it came from. Saying nothing is the only honest answer, and a reader can
@@ -4249,7 +4261,7 @@ mod tests {
         assert_eq!(printed(&[&format!("--target={host}"), "-print-sysroot-provenance"]), "");
 
         // And the other spelling, which section 13.5 is the document that writes.
-        assert_eq!(printed(&[&sysroot, "--print-sysroot-provenance"]), manifest);
+        assert_eq!(printed(&[&sysroot, "--print-sysroot-provenance"]) + "\n", manifest);
     }
 
     #[test]
@@ -4259,7 +4271,7 @@ mod tests {
         // parsing it.
         let tree = TempTree::new(
             "provenance-bad",
-            &[("manifest", "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\nlib/libc.a\n")],
+            &[("manifest", "rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\nlib/libc.a\n")],
         );
         let message =
             refused(&[&format!("--sysroot={}", tree.0.display()), "-print-sysroot-provenance"]);

@@ -195,7 +195,7 @@ fn parse_os(s: &str) -> Option<(Os, Option<Version>, Option<Env>)> {
     }
 
     let (base, version_text) = split_version(&lower);
-    let version = if version_text.is_empty() { None } else { parse_version(version_text) };
+    let version = if version_text.is_empty() { None } else { Version::parse(version_text) };
     if !version_text.is_empty() && version.is_none() {
         return None;
     }
@@ -257,7 +257,7 @@ fn parse_env(s: &str) -> Result<ParsedEnv, Error> {
     let version = if version_text.is_empty() {
         None
     } else {
-        match parse_version(version_text) {
+        match Version::parse(version_text) {
             Some(v) => Some(v),
             None => {
                 return Err(Error::BadVersion {
@@ -292,22 +292,4 @@ fn split_version(s: &str) -> (&str, &str) {
             (name, rest.strip_prefix('.').unwrap_or(rest))
         }
     }
-}
-
-/// Read one, two or three dot separated numbers. Anything else is not a version.
-fn parse_version(s: &str) -> Option<Version> {
-    let mut parts = s.split('.');
-    let major: u32 = parts.next()?.parse().ok()?;
-    let minor = match parts.next() {
-        None => return Some(Version::major(major)),
-        Some(text) => text.parse::<u32>().ok()?,
-    };
-    let patch = match parts.next() {
-        None => return Some(Version::new(major, minor)),
-        Some(text) => text.parse::<u32>().ok()?,
-    };
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(Version::full(major, minor, patch))
 }

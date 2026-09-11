@@ -24,18 +24,21 @@
 //!
 //! # The format
 //!
-//! Tab separated lines, sorted by path, with a two line header. Not JSON, because the thing this is
-//! optimized for is a person reading a diff between two of them, and not TOML, because it has no
-//! nesting and a parser for it is thirty lines. Sorted because the order files come out of a
-//! directory walk is a property of the filesystem, and a manifest whose line order depended on that
-//! would report a difference between two identical sysroots.
+//! Tab separated lines, sorted by path, under a header that is two lines and sometimes three: the
+//! format version, the target, and the Linux release the kernel headers came out of when the sysroot
+//! has kernel headers in it. Not JSON, because the thing this is optimized for is a person reading a
+//! diff between two of them, and not TOML, because it has no nesting and a parser for it is thirty
+//! lines. Sorted because the order files come out of a directory walk is a property of the
+//! filesystem, and a manifest whose line order depended on that would report a difference between
+//! two identical sysroots.
 //!
 //! ```
 //! use rucc_sysroot::{Input, Licence, Manifest, Provenance};
-//! use rucc_tuple::TargetTuple;
+//! use rucc_tuple::{TargetTuple, Version};
 //!
 //! let target: TargetTuple = "aarch64-linux-musl".parse().unwrap();
 //! let mut manifest = Manifest::new(target);
+//! manifest.set_kernel(Version::new(6, 12));
 //! manifest.push(Input {
 //!     path: "include/generic/stdio.h".into(),
 //!     source: "musl-1.2.5".into(),
@@ -53,7 +56,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use rucc_tuple::TargetTuple;
+use rucc_tuple::{TargetTuple, Version};
 
 /// The licence an input arrives under.
 ///
@@ -229,6 +232,7 @@ pub struct Input {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     target: TargetTuple,
+    kernel: Option<Version>,
     inputs: Vec<Input>,
 }
 
@@ -241,6 +245,8 @@ pub enum ManifestError {
     UnknownVersion(String),
     /// The second line did not name a target, or named one that does not parse.
     BadTarget(String),
+    /// The `kernel` line was there and what followed it is not a Linux release.
+    BadKernel(String),
     /// A line did not have the six fields an input has.
     BadInput {
         /// Which line, counting from one.
@@ -277,6 +283,9 @@ impl fmt::Display for ManifestError {
                 write!(f, "manifest format version {v}, which this build does not read")
             }
             ManifestError::BadTarget(t) => write!(f, "`{t}` is not a target this understands"),
+            ManifestError::BadKernel(k) => {
+                write!(f, "`{k}` is not a Linux release, which is what a kernel line carries")
+            }
             ManifestError::BadInput { line, fields } => {
                 write!(f, "line {line} has {fields} fields where an input has six")
             }
@@ -304,19 +313,54 @@ impl std::error::Error for ManifestError {}
 /// provenance means and there is no honest answer to that: an input nobody wrote a provenance for is
 /// an input whose provenance nobody knows. Nothing has written a version 1 file to a place that
 /// outlives a build, so the only cost of the bump is this sentence.
-const HEADER: &str = "rucc sysroot manifest 2";
+///
+/// Version 3 adds the optional `kernel` line. The number went up even though the line is optional,
+/// because the whole point of a format version is that a reader can say it does not read a file, and
+/// a version 2 reader handed a file with a `kernel` line in it would report the line as an input
+/// with two fields rather than as a format it does not know.
+const HEADER: &str = "rucc sysroot manifest 3";
 
 impl Manifest {
     /// An empty manifest for this target.
     #[must_use]
     pub const fn new(target: TargetTuple) -> Self {
-        Manifest { target, inputs: Vec::new() }
+        Manifest { target, kernel: None, inputs: Vec::new() }
     }
 
     /// The target this sysroot is for.
     #[must_use]
     pub const fn target(&self) -> TargetTuple {
         self.target
+    }
+
+    /// The Linux release the kernel headers in this sysroot came out of, when one was recorded.
+    ///
+    /// Absent has one meaning and it is not "nobody knows": it is that this sysroot has no kernel
+    /// headers in it. Every target that is not Linux is in that case, and so is a Linux sysroot
+    /// produced before a kernel tree was installed beside it, which is a state the producer allows
+    /// because the two trees are two commands. That is the one thing an optional line can mean here
+    /// and it is why this one is optional where the provenance field is not: a file with no kernel
+    /// headers in it has no kernel version, and an input always came from somewhere.
+    ///
+    /// What it is for is the question somebody asks after a cross build read a header nobody
+    /// expected. `-print-sysroot` answers where and the manifest answers what, and a sysroot whose
+    /// record names the release its `linux/` headers came out of makes a stale pairing visible
+    /// instead of leaving it to be guessed at. Nothing here checks the version against the headers
+    /// themselves, which is tamnd/rucc#925's argument applied to the kernel tree rather than to
+    /// glibc.
+    #[must_use]
+    pub const fn kernel(&self) -> Option<Version> {
+        self.kernel
+    }
+
+    /// Record which Linux release the kernel headers came out of.
+    ///
+    /// Infallible, and in particular it does not refuse a target that has no kernel headers. The
+    /// property this type owes its callers is that [`Manifest::parse`] reads back what
+    /// [`Manifest::render`] wrote, so the reader accepts every manifest a producer can build and a
+    /// `kernel` line on a Windows sysroot is a bug in the producer rather than a corrupt file.
+    pub const fn set_kernel(&mut self, version: Version) {
+        self.kernel = Some(version);
     }
 
     /// Every input, in the order they were added.
@@ -369,6 +413,11 @@ impl Manifest {
         text.push_str("target\t");
         text.push_str(&self.target.to_canonical_string());
         text.push('\n');
+        if let Some(kernel) = self.kernel {
+            text.push_str("kernel\t");
+            text.push_str(&kernel.to_string());
+            text.push('\n');
+        }
         for input in &sorted {
             text.push_str(&input.path);
             text.push('\t');
@@ -394,7 +443,7 @@ impl Manifest {
     /// a cache entry somebody has to decide about, and "invalid manifest" is not enough to decide
     /// with.
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
-        let mut lines = text.lines().enumerate();
+        let mut lines = text.lines().enumerate().peekable();
 
         let (_, first) = lines.next().ok_or(ManifestError::NotAManifest)?;
         if first != HEADER {
@@ -412,6 +461,17 @@ impl Manifest {
             .map_err(|_| ManifestError::BadTarget(spelling.to_string()))?;
 
         let mut manifest = Manifest::new(target);
+
+        // The kernel line is read only here, immediately after the target, rather than wherever it
+        // turns up. The render order is what makes two manifests comparable with `diff`, and a
+        // reader that took the line anywhere would accept files that do not compare.
+        if let Some(spelling) = lines.peek().and_then(|(_, line)| line.strip_prefix("kernel\t")) {
+            let version = Version::parse(spelling)
+                .ok_or_else(|| ManifestError::BadKernel(spelling.into()))?;
+            manifest.set_kernel(version);
+            lines.next();
+        }
+
         for (index, line) in lines {
             if line.is_empty() {
                 continue;

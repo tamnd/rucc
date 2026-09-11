@@ -74,6 +74,8 @@ Everything else we ship, glibc headers (LGPL), musl (MIT), mingw-w64 (permissive
 
 This exists for three reasons and each is sufficient on its own: it is what document 02 claim 5 requires; it is what an organization with a software bill of materials obligation needs; and it is what makes a report of "rucc produced a bad binary for target T" reproducible, because the *inputs* are named rather than implied.
 
+The record has a header as well as a line per input, and what is in the header is what is true of the sysroot rather than of any one file: the format version, the target, and on Linux the kernel release the `linux/` and `asm/` headers came out of. The kernel release is there because it is the one input a per file line cannot carry honestly. One kernel tree serves every Linux target, so it lives in the cache beside the sysroots rather than inside each of them, and it is installed by its own command, which means a sysroot can be produced next to one release and compiled against another without anything going wrong loudly. `rucc_sysroot::Manifest::kernel` is the field and the `kernel` line is the spelling. Nothing checks the version in the header against the headers on disk, and that is the same gap section 13.2 leaves open about the libc version in a cache directory's name.
+
 The same information, for all targets, ships as a manifest in the distribution so it can be audited without running the compiler.
 
 ## 13.6 Reproducibility of the distribution itself
