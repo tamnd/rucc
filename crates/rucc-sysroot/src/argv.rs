@@ -61,6 +61,28 @@ pub enum Item {
     Library(String),
 }
 
+/// Where our own runtime is, which is the one thing on the line the sysroot does not settle.
+///
+/// `librucc_builtins.a` is ours rather than the platform's, so unlike every other path here it is
+/// not a fact about the target. A sysroot we shipped has it under `lib` beside the libc, which is
+/// the default and the case this enum exists to keep simple. A build tree has it wherever the build
+/// put it, and a machine that has never built it for this target does not have it at all.
+///
+/// The third case is not an error. A program that needs none of the wide arithmetic links without
+/// it, which is most programs, and one that needs it gets the linker's own message naming the
+/// routine. Refusing every cross link because an archive that may not be reached is missing would
+/// make the common case wait for the uncommon one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Builtins<'a> {
+    /// Under the sysroot's `lib`, where a distribution we produced puts it.
+    #[default]
+    InSysroot,
+    /// At a path of its own, which is what a build tree looks like and what `-B` names.
+    At(&'a Path),
+    /// Nowhere on this machine, so the line is written without it.
+    Nowhere,
+}
+
 /// What the driver knows that the line needs, beyond the target and the sysroot.
 ///
 /// A struct because most of it is empty in the common case, and because a function with nine
@@ -91,6 +113,12 @@ pub struct Invocation<'a> {
     /// passing it with a `-l` of their own is asking for, and the link says so by name if they are
     /// not.
     pub no_builtins_lib: bool,
+    /// Where our own runtime is, when it is not where a sysroot we shipped would have it.
+    ///
+    /// The one field here that is an answer about the machine rather than about the compilation, and
+    /// it is here because the alternative is this file looking for the file itself. Which it cannot
+    /// do and stay a function of its arguments.
+    pub builtins: Builtins<'a>,
     /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
     pub export_dynamic: bool,
     /// `-s`, which drops the symbol table.
@@ -380,15 +408,23 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     args
 }
 
-/// The libraries, with ours left off if that is what was asked for.
+/// The libraries, with ours left off if that is what was asked for and moved if it is elsewhere.
 ///
 /// By the one name in [`BUILTINS`] rather than by position, because the position is
 /// [`LinkLine`]'s business and a caller that knew it would be a second place to fix the day the
-/// order changes.
+/// order changes. Which is also why a runtime somewhere else is a substitution rather than a removal
+/// and an append: after the libc is where it has to be, wherever the file is.
 fn libraries(line: &LinkLine, options: &Invocation<'_>) -> Vec<PathBuf> {
     let mut libraries = line.libraries.clone();
-    if options.no_builtins_lib {
-        libraries.retain(|path| path.file_name().is_none_or(|name| name != BUILTINS));
+    let ours = |path: &PathBuf| path.file_name().is_some_and(|name| name == BUILTINS);
+    if options.no_builtins_lib || options.builtins == Builtins::Nowhere {
+        libraries.retain(|path| !ours(path));
+    } else if let Builtins::At(found) = options.builtins {
+        for path in &mut libraries {
+            if ours(path) {
+                *path = found.to_path_buf();
+            }
+        }
     }
     libraries
 }
@@ -568,7 +604,7 @@ mod tests {
 
     use rucc_tuple::TargetTuple;
 
-    use super::{Invocation, Item, Unsupported, argv, emulation, pe_machine};
+    use super::{Builtins, Invocation, Item, Unsupported, argv, emulation, pe_machine};
     use crate::layout::Sysroot;
     use crate::link::LinkMode;
 
@@ -781,6 +817,54 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
         // And the libc it was asked to keep is still there, because that is the other flag.
         assert!(args.iter().any(|arg| arg.ends_with("libc.a")), "{args:?}");
+    }
+
+    /// Our runtime somewhere other than the sysroot, which is what a build tree is.
+    ///
+    /// The position is the point of the test rather than the path. A runtime that moved and ended up
+    /// before the libc is a runtime that contributes nothing to the names musl itself calls, so the
+    /// substitution has to happen where the old path was and not at the end of the line.
+    #[test]
+    fn a_runtime_found_elsewhere_is_linked_from_there_and_still_after_the_libc() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let built = Path::new("/build/x86_64-linux-musl/release/librucc_builtins.a");
+        let invocation = Invocation {
+            inputs: &one,
+            output: Some(Path::new("main")),
+            mode: LinkMode::Static,
+            builtins: Builtins::At(built),
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-linux-musl";
+        let args = argv(target(spelling), &sysroot(spelling), &invocation).expect("a line");
+        let at = |name: &str| {
+            args.iter().position(|arg| arg.ends_with(name)).unwrap_or_else(|| panic!("{name}"))
+        };
+        assert_eq!(args[at("librucc_builtins.a")], built.display().to_string());
+        assert!(at("libc.a") < at("librucc_builtins.a"), "{args:?}");
+        // And exactly one of it, because a substitution that appended would link it twice.
+        assert_eq!(args.iter().filter(|arg| arg.ends_with("librucc_builtins.a")).count(), 1);
+    }
+
+    #[test]
+    fn a_runtime_that_was_never_built_for_the_target_leaves_the_line_without_it() {
+        // The state of every machine that has not built the runtime for this target, which is most
+        // of them today. The rest of the line is what it would have been, because a program that
+        // calls none of those routines links and runs, and one that calls one of them gets the
+        // linker's message about the name rather than ours about the file.
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let invocation = Invocation {
+            inputs: &one,
+            output: Some(Path::new("main")),
+            mode: LinkMode::Static,
+            builtins: Builtins::Nowhere,
+            ..Invocation::default()
+        };
+        let spelling = "riscv64-linux-musl";
+        let args = argv(target(spelling), &sysroot(spelling), &invocation).expect("a line");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("libc.a")), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("crt1.o")), "{args:?}");
     }
 
     #[test]
