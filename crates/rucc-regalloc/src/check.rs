@@ -166,7 +166,7 @@ pub fn check(func: &Func, order: &Order, live: &Live, assignment: &Assignment) -
         values.push(Value { reg, class, range, place });
     }
     overlaps(&values, &reuses, live, &mut problems);
-    instructions(func, order, assignment, &values, &reuses, &mut problems);
+    instructions(func, order, live, assignment, &values, &reuses, &mut problems);
     problems
 }
 
@@ -265,6 +265,7 @@ fn coalesced(first: Value, second: Value, reuses: &[Option<Reuse>], live: &Live)
 fn instructions(
     func: &Func,
     order: &Order,
+    live: &Live,
     assignment: &Assignment,
     values: &[Value],
     reuses: &[Option<Reuse>],
@@ -298,7 +299,12 @@ fn instructions(
                     if mine || value.class != operand.class {
                         continue;
                     }
-                    if value.place == Place::Reg(at) && value.range.covers(point) {
+                    // The range has no holes in it, so it covers blocks the value never
+                    // reaches. What decides this is whether the value is live in the block the
+                    // instruction is in, which is a question about the function rather than
+                    // about the order it happens to be written in. tamnd/rucc#982.
+                    let live_here = live.anywhere_in(value.reg, block);
+                    if value.place == Place::Reg(at) && value.range.covers(point) && live_here {
                         problems.push(Problem::InTheWay { reg: value.reg, at, inst });
                     }
                 }
