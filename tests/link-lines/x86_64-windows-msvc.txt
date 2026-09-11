@@ -5,16 +5,16 @@ loader    none
 sysroot   <cache>/sysroots/x86_64-windows-msvc
 
 [static]
-  refused: there is no cross link line for x86_64-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
 
 [static-pie]
-  refused: there is no cross link line for x86_64-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
 
 [dynamic]
-  refused: there is no cross link line for x86_64-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
 
 [dynamic-no-pie]
-  refused: there is no cross link line for x86_64-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
 
 [shared]
-  refused: there is no cross link line for x86_64-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have

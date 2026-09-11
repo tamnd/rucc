@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rucc_tuple::{Abi, Arch, DataModel, Endian, Env, Os, TargetTuple};
+use rucc_tuple::{Abi, Arch, DataModel, Endian, Env, ObjectFormat, Os, TargetTuple};
 
 use crate::layout::Sysroot;
 
@@ -78,9 +78,9 @@ impl LinkMode {
 
 /// What a produced sysroot holds for a target's C library.
 ///
-/// Three cases, from `spec/cross-compile/08-sysroots.md` section 8.2's table, and the line differs
+/// Four cases, from `spec/cross-compile/08-sysroots.md` section 8.2's table, and the line differs
 /// between them in what goes on it rather than in how it is spelled. The table has seven rows and two
-/// of those are legal walls rather than technical ones, so what is left is these three.
+/// of those are legal walls rather than technical ones, so what is left is these four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Libc {
     /// Nothing, which is the freestanding row: the nine compiler headers and no link inputs at all.
@@ -95,17 +95,36 @@ pub enum Libc {
     /// for the same reason, which is that their libc is a shared object on the target machine and a
     /// list of names is enough to link against one.
     Stub,
+    /// A set of import libraries, which is what the same idea is called in COFF.
+    ///
+    /// Windows is the row this is, and it is a separate case from [`Libc::Stub`] rather than a
+    /// spelling of it, for two reasons that both show up on the line. The container is different: a
+    /// Windows program links against an archive of tiny objects per DLL rather than against one
+    /// shared object, which is `spec/cross-compile/09-libc-stubs.md` section 9.4 and what
+    /// `rucc_stub::coff` writes. And the C library is not one file: the msvcrt import library,
+    /// mingw-w64's own `libmingwex.a` and `libmoldname.a`, and the Win32 libraries a CRT calls into
+    /// are all on the line, where a glibc line has one `libc.so` on it.
+    ///
+    /// A static link against this is not refused, which is the other difference. On Windows the C
+    /// library is a DLL on every machine and always has been, so `-static` there is a statement
+    /// about our libraries and mingw-w64's rather than about the CRT, and a program linked that way
+    /// runs. That is why the refusal in [`crate::argv::argv`] is about [`Libc::Stub`] by name.
+    Import,
 }
 
-/// Which of the three cases this target is.
+/// Which of the four cases this target is.
 ///
 /// Asked in two places, which is why it is a function rather than a `match` in each: [`LinkLine`]
 /// uses it to pick the files and [`crate::argv::argv`] uses it to refuse a static link against a
 /// stub. Two copies of this rule would be two rules.
+///
+/// The format is asked before the environment, because what holds a libc's names is a property of
+/// the object format and `Env::Gnu` means mingw-w64 on a Windows target and glibc on a Linux one.
 #[must_use]
 pub fn libc(target: TargetTuple) -> Libc {
     match (target.os(), target.env()) {
         (Os::None, _) => Libc::None,
+        _ if target.object_format() == ObjectFormat::Coff => Libc::Import,
         (_, Env::Musl) => Libc::Archive,
         _ => Libc::Stub,
     }
@@ -148,6 +167,7 @@ impl LinkLine {
             Libc::None => LinkLine::freestanding(sysroot),
             Libc::Archive => LinkLine::musl(sysroot, mode),
             Libc::Stub => LinkLine::glibc(sysroot, mode),
+            Libc::Import => LinkLine::mingw(sysroot, mode),
         }
     }
 
@@ -237,6 +257,60 @@ impl LinkLine {
             start: start_files(&lib, mode),
             libraries: vec![lib.join("libc.so"), lib.join(BUILTINS)],
             end: vec![lib.join("crtn.o")],
+        }
+    }
+
+    /// The line for a mingw-w64 link against this sysroot.
+    ///
+    /// One start file and no end file, which is the first thing that is different from every ELF
+    /// line above. `crt2.o` runs before `main` and calls it, `dllcrt2.o` is its counterpart for a
+    /// DLL, and there is no `crti.o` and no `crtn.o` because PE has no `.init` and `.fini` sections
+    /// for a pair of files to open and close. What those two bracket on ELF is done on Windows by a
+    /// table of pointers in the `.CRT$XC` sections, which the linker sorts by section name, so the
+    /// ordering problem the three groups exist for does not arise here.
+    ///
+    /// `crtbegin.o` and `crtend.o` are deliberately absent. They are GCC's files rather than
+    /// mingw-w64's, they bracket GCC's own list of constructors, and a toolchain that is not GCC
+    /// writes that list the way the platform writes it instead. Ours is not written yet: a mingw
+    /// link runs `main` and does not run a file scope constructor, which is a known gap that belongs
+    /// with the sysroot build rather than with the line, and the gap is in the codegen for the
+    /// format rather than here.
+    ///
+    /// The libraries are a set rather than one file, because the C library on Windows is several
+    /// DLLs and the CRT calls into the system ones. `libmingw32.a` holds the start code `crt2.o`
+    /// calls, `libmoldname.a` is the layer that gives the old unprefixed spellings of the names
+    /// Microsoft deprecated, `libmingwex.a` is everything C requires that msvcrt does not have, and
+    /// `libmsvcrt.a` is the import library for the CRT itself. Then the four Win32 libraries that
+    /// mingw-w64's own code calls into, which are on the line for the same reason they are on gcc's:
+    /// a program that uses none of them directly still reaches `kernel32` through `malloc`.
+    ///
+    /// The order is the one a single pass linker needs, which is GNU ld's PE port: a library after
+    /// everything that calls into it. `librucc_builtins.a` is last for the reason it is last on the
+    /// musl line, which is that the things before it call it and it calls none of them. lld's COFF
+    /// linker resolves archives to a fixed point and does not care about any of this, and writing
+    /// the line for the stricter of the two is what makes one line serve both.
+    #[must_use]
+    pub fn mingw(sysroot: &Sysroot, mode: LinkMode) -> Self {
+        let lib = sysroot.lib();
+        let start = match mode {
+            LinkMode::Shared => "dllcrt2.o",
+            _ => "crt2.o",
+        };
+        let libraries = [
+            "libmingw32.a",
+            "libmoldname.a",
+            "libmingwex.a",
+            "libmsvcrt.a",
+            "libadvapi32.a",
+            "libshell32.a",
+            "libuser32.a",
+            "libkernel32.a",
+            BUILTINS,
+        ];
+        LinkLine {
+            start: vec![lib.join(start)],
+            libraries: libraries.iter().map(|name| lib.join(name)).collect(),
+            end: Vec::new(),
         }
     }
 

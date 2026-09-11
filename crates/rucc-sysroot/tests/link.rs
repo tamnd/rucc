@@ -130,14 +130,19 @@ fn the_libc_the_target_names_picks_the_line() {
 }
 
 #[test]
-fn the_three_cases_of_section_8_2_are_three_different_lines() {
-    // What the sysroot holds rather than what the target is called: nothing, a real archive, or a
-    // stub shared object. Every other difference between these targets leaves the line alone.
+fn the_cases_of_section_8_2_are_that_many_different_lines() {
+    // What the sysroot holds rather than what the target is called: nothing, a real archive, a stub
+    // shared object, or a set of import libraries. Every other difference between these targets
+    // leaves the line alone.
     assert_eq!(libc(target("x86_64-linux-musl")), Libc::Archive);
     assert_eq!(libc(target("x86_64-linux-gnu")), Libc::Stub);
     assert_eq!(libc(target("x86_64-freebsd")), Libc::Stub);
     assert_eq!(libc(target("aarch64-linux-android")), Libc::Stub);
     assert_eq!(libc(target("armv7m-none-eabi")), Libc::None);
+    assert_eq!(libc(target("x86_64-windows-gnu")), Libc::Import);
+    // The format decides rather than the environment, because `gnu` means mingw-w64 here and glibc
+    // one line above.
+    assert_eq!(libc(target("aarch64-windows-msvc")), Libc::Import);
 
     // And a freestanding line is our runtime and nothing else, with no start files at either end,
     // because the files that would be there come from a libc this target does not have.
@@ -145,6 +150,30 @@ fn the_three_cases_of_section_8_2_are_three_different_lines() {
     assert!(bare.start.is_empty());
     assert!(bare.end.is_empty());
     assert_eq!(names(&bare.libraries), ["librucc_builtins.a"]);
+}
+
+#[test]
+fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
+    // The import library case, which is the same idea as a stub in a different container and a
+    // different number of files. There is no `crti.o` and no `crtn.o` either, because PE has no
+    // `.init` and `.fini` sections for a pair of files to open and close.
+    let line = LinkLine::for_target(&sysroot("x86_64-windows-gnu"), LinkMode::Dynamic);
+    assert_eq!(names(&line.start), ["crt2.o"]);
+    assert!(line.end.is_empty());
+    assert_eq!(
+        names(&line.libraries),
+        [
+            "libmingw32.a",
+            "libmoldname.a",
+            "libmingwex.a",
+            "libmsvcrt.a",
+            "libadvapi32.a",
+            "libshell32.a",
+            "libuser32.a",
+            "libkernel32.a",
+            "librucc_builtins.a",
+        ]
+    );
 }
 
 #[test]

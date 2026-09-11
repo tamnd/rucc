@@ -53,9 +53,12 @@
 //!
 //! # What is not here yet
 //!
-//! Darwin and Windows. `ld64` wants a different line, a platform version load command and a
-//! different set of default libraries, and `link.exe` wants another one again. Each arrives with
-//! the target that needs it, and a cross link to either is refused by name rather than approximated.
+//! Darwin, and Windows in Microsoft's ABI. `ld64` wants a platform version load command and a
+//! different set of default libraries, and `lld-link` wants a `/`-style command line and an import
+//! library set out of an SDK nobody may redistribute. Each arrives with the target that needs it,
+//! and a cross link to either is refused by name rather than approximated. A mingw-w64 target does
+//! have a line, because PE in that environment is written in the GNU style and the import libraries
+//! for it are ours to produce.
 //!
 //! The headers are the other half of a cross compile and they are not wired here. A cross link
 //! takes its libc from the sysroot while the include path still comes from
@@ -291,12 +294,16 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
 /// and `-fuse-ld=` is still there for somebody whose is not.
 ///
 /// A cross binutils under its prefixed name is last, because a machine that has
-/// `aarch64-linux-gnu-ld` installed has it on purpose. Only for Linux: the prefixed name is a
-/// distribution convention for the Linux targets and nothing names the others that way.
+/// `aarch64-linux-gnu-ld` installed has it on purpose. The prefix is a distribution convention and
+/// there are two of them: a Linux target is filed under its multiarch name and a mingw-w64 one under
+/// `<arch>-w64-mingw32`, which is what every distribution's mingw packages install. `ld.lld` is the
+/// same binary for both, because its MinGW mode is a mode of the one linker rather than a second one.
 fn cross_order(target: Triple) -> Vec<String> {
     let mut names = vec!["ld.lld".to_owned(), "lld".to_owned()];
-    if target.os == Os::Linux {
-        names.push(format!("{}-ld", multiarch(target)));
+    match (target.os, target.env) {
+        (Os::Linux, _) => names.push(format!("{}-ld", multiarch(target))),
+        (Os::Windows, Env::Gnu) => names.push(format!("{}-w64-mingw32-ld", target.arch.as_str())),
+        _ => {}
     }
     names
 }
@@ -368,9 +375,9 @@ fn cross_line(
         // left to the linker, because what the linker would say is that `main` is undefined.
         return Err(Error::Cross {
             why: format!(
-                "-pg needs gcrt1.o, the startup file that starts and stops the counting, and a \
-                 generated sysroot for {target} does not have one. Profile on the host, or pass \
-                 --sysroot=<dir> naming a tree that has it"
+                "-pg needs gcrt1.o, or gcrt2.o on Windows, the startup file that starts and stops \
+                 the counting, and a generated sysroot for {target} does not have one. Profile on \
+                 the host, or pass --sysroot=<dir> naming a tree that has it"
             ),
         });
     }
@@ -1293,6 +1300,22 @@ mod tests {
             let Error::Cross { why } = &error else { panic!("{error:?}") };
             assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
         }
+    }
+
+    #[test]
+    fn a_mingw_target_links_and_looks_for_a_linker_that_can_write_a_pe_image() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let args = cross_line(target, &cached(), &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line for mingw-w64");
+        let at = |flag: &str| args.iter().position(|arg| arg == flag).expect(flag);
+        assert_eq!(args[at("-m") + 1], "i386pep");
+        assert_eq!(args[at("--subsystem") + 1], "console");
+        assert!(args.iter().any(|arg| arg.ends_with("libmsvcrt.a")), "{args:?}");
+        // And the prefixed name a distribution files its mingw binutils under, which is not the
+        // multiarch one.
+        let names = cross_order(target);
+        assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
+        assert!(names.contains(&"x86_64-w64-mingw32-ld".to_owned()), "{names:?}");
     }
 
     #[test]

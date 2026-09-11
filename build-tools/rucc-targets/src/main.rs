@@ -26,7 +26,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use rucc_abi::{AbiDescription, DataLayout, FloatType, Rule, abis};
-use rucc_sysroot::argv::emulation;
+use rucc_sysroot::argv::{emulation, pe_machine};
 use rucc_sysroot::link::loader;
 use rucc_sysroot::{LinkLine, LinkMode, Sysroot, layout::can_be_bundled};
 use rucc_tuple::{TARGETS, TargetTuple, lookup, planned_working_count};
@@ -320,7 +320,8 @@ fn sysroot(target: TargetTuple) {
 
     println!();
     println!("loader         {}", loader(target).unwrap_or("none on the link line"));
-    println!("emulation      {}", emulation(target).unwrap_or("none, the format has no names"));
+    let machine = emulation(target).or_else(|| pe_machine(target));
+    println!("emulation      {}", machine.unwrap_or("none, the format has no names"));
 }
 
 /// One floating point type, as the two separate facts it is.

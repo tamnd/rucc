@@ -1,20 +1,126 @@
 target    i686-windows-gnu
 format    coff
-emulation none
+emulation i386pe
 loader    none
 sysroot   <cache>/sysroots/i686-windows-gnu
 
 [static]
-  refused: there is no cross link line for i686-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  i386pe
+  --sysroot=<cache>/sysroots/i686-windows-gnu
+  --subsystem
+  console
+  -static
+  --dynamicbase
+  --nxcompat
+  --no-insert-timestamp
+  <cache>/sysroots/i686-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/i686-windows-gnu/lib
+  main.o
+  <cache>/sysroots/i686-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/i686-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
 
 [static-pie]
-  refused: there is no cross link line for i686-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  i386pe
+  --sysroot=<cache>/sysroots/i686-windows-gnu
+  --subsystem
+  console
+  -static
+  --dynamicbase
+  --nxcompat
+  --no-insert-timestamp
+  <cache>/sysroots/i686-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/i686-windows-gnu/lib
+  main.o
+  <cache>/sysroots/i686-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/i686-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
 
 [dynamic]
-  refused: there is no cross link line for i686-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  i386pe
+  --sysroot=<cache>/sysroots/i686-windows-gnu
+  --subsystem
+  console
+  --dynamicbase
+  --nxcompat
+  --no-insert-timestamp
+  <cache>/sysroots/i686-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/i686-windows-gnu/lib
+  main.o
+  <cache>/sysroots/i686-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/i686-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
 
 [dynamic-no-pie]
-  refused: there is no cross link line for i686-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  i386pe
+  --sysroot=<cache>/sysroots/i686-windows-gnu
+  --subsystem
+  console
+  --dynamicbase
+  --nxcompat
+  --no-insert-timestamp
+  <cache>/sysroots/i686-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/i686-windows-gnu/lib
+  main.o
+  <cache>/sysroots/i686-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/i686-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
 
 [shared]
-  refused: there is no cross link line for i686-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  i386pe
+  --sysroot=<cache>/sysroots/i686-windows-gnu
+  -shared
+  --dynamicbase
+  --nxcompat
+  --no-insert-timestamp
+  <cache>/sysroots/i686-windows-gnu/lib/dllcrt2.o
+  -L<cache>/sysroots/i686-windows-gnu/lib
+  main.o
+  <cache>/sysroots/i686-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/i686-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/i686-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
