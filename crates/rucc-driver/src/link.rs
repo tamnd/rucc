@@ -74,6 +74,7 @@ use std::process::Command;
 use rucc_sysroot::layout::{Kernel, Sysroot};
 use rucc_sysroot::{LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Triple};
+use rucc_tuple::TargetTuple;
 
 /// What the command line said about linking.
 ///
@@ -118,6 +119,15 @@ pub struct LinkOptions {
     /// `-fno-builtins-lib`, which leaves our own runtime off the line so that the machine's
     /// libgcc answers for everything instead.
     pub no_builtins_lib: bool,
+    /// The whole ten field target when `--target=` spelled one, which is where a pinned libc
+    /// release is.
+    ///
+    /// [`None`] is a command line that named no target at all, and then there is nothing pinned and
+    /// this machine is the target. A `Triple` has room for an architecture, an OS and an
+    /// environment and nowhere to put a release, so the release arrives here instead of there, and
+    /// [`cross_sysroot`] reads it for both of the things it decides: whether this is a cross link
+    /// and which directory under the cache it is against.
+    pub pinned: Option<TargetTuple>,
     /// `-pg`, which changes the link as well as the code.
     ///
     /// The counts a profiled program keeps have to be started before `main` runs and written out
@@ -323,6 +333,17 @@ fn cross_order(target: Triple) -> Vec<String> {
 ///
 /// An unknown host counts as different from every target. A machine this compiler cannot name is a
 /// machine whose `/usr/lib` it should not be guessing at.
+///
+/// # A pinned release is a cross compile
+///
+/// The first of those three conditions is about the machine and not about the triple, and a target
+/// that names a libc release is not this machine even when it is this architecture. Somebody on a
+/// 2.44 box writing `--target=x86_64-linux-gnu.2.28` is asking for a binary that runs on a 2.28
+/// machine, and handing them their own headers and their own libc gives them a binary that does not.
+/// So the condition is the triple being the host *and* no release named, and what it costs is that a
+/// pin equal to this machine's own release also stops using this machine's libc. That is not a loss:
+/// the two should be the same text, and if they are not then this machine's copy is patched and the
+/// bundled tree is the one the pin asked for. tamnd/rucc#956.
 #[must_use]
 pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
     cross_for(target, opts, Triple::host())
@@ -330,11 +351,26 @@ pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
 
 /// The same answer with the host as a parameter, so that both branches are testable on one machine.
 fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Sysroot> {
-    if opts.sysroot.is_some() || host == Some(target) {
+    if opts.sysroot.is_some() {
+        return None;
+    }
+    let tuple = target_tuple(target, opts);
+    if host == Some(target) && tuple.env_version().is_none() {
         return None;
     }
     let cache = opts.cache.as_deref()?;
-    Some(Sysroot::in_cache(cache, target.tuple()))
+    Some(Sysroot::in_cache(cache, tuple))
+}
+
+/// The target as the model that has room for a release, which is what names the cache directory.
+///
+/// The pinned spelling when there is one, because `x86_64-linux-gnu` and `x86_64-linux-gnu.2.28` are
+/// two sysroots and not one: the release is in the tuple for the reason
+/// `spec/cross-compile/03-target-model.md` section 3.2 admits a field at all, which is that it
+/// changes what is compiled. A command line that named no target, or one whose spelling the ten
+/// field parser did not take, falls back to what the three field one did.
+fn target_tuple(target: Triple, opts: &LinkOptions) -> TargetTuple {
+    opts.pinned.unwrap_or_else(|| target.tuple())
 }
 
 /// The kernel headers that go with [`cross_sysroot`], for the targets that have any.
@@ -1361,6 +1397,29 @@ mod tests {
         assert!(cross_for(other, &named, Some(host)).is_none());
         // A host this compiler cannot name is a host whose directories it should not be guessing at.
         assert!(cross_for(other, &cached(), None).is_some());
+    }
+
+    #[test]
+    fn a_pinned_release_on_this_machines_own_target_is_a_cross_compile() {
+        // The case that used to be dropped on the floor. `--target=x86_64-linux-gnu.2.28` on an
+        // x86-64 glibc machine read that machine's headers and linked that machine's libc, and the
+        // release reached nothing, so what came out was a binary for whatever release the build
+        // machine happened to have. A pin is the one thing a person writes to say otherwise.
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let pinned = LinkOptions {
+            pinned: Some(
+                "x86_64-linux-gnu.2.28".parse::<TargetTuple>().expect("a spelling with a release"),
+            ),
+            ..cached()
+        };
+        let at = cross_for(host, &pinned, Some(host)).expect("a pin is a cross compile");
+        // And against the release's own directory, because the release is in the cache key: a tree
+        // produced for 2.28 and a tree produced for 2.44 are two trees and the path has to say which.
+        assert!(at.root().ends_with("x86_64-linux-gnu.2.28"), "{:?}", at.root());
+        // The release is the whole of the difference. The same command line without it is this
+        // machine, which is what every native compile has always been.
+        let bare = LinkOptions { pinned: None, ..cached() };
+        assert!(cross_for(host, &bare, Some(host)).is_none());
     }
 
     #[test]
