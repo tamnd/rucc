@@ -136,6 +136,7 @@ fn calls(
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
+            Opcode::CheckType => typed(func, names, word, numbers, table, inst),
             Opcode::MetaType => judgement(func, names, word, numbers, inst),
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
@@ -232,6 +233,43 @@ fn deriv(
     let desc = record(func, names, table, inst, row);
     let params = &[Type::PTR, Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
+}
+
+/// `check_type` becomes `__rucc_check_type(pointer, size, type, descriptor)`.
+///
+/// The one check with a type number on it, and the number is the same one [`judgement`] passes for
+/// the same reason: what the store wrote and what the read asks about have to be written in one
+/// vocabulary or they cannot be compared.
+///
+/// The descriptor says J1 rather than a judgement of its own. The type plane is one of the planes
+/// document 04 section 4.4's first judgement names, so a read the plane refused is an access the
+/// planes did not permit, which is the sentence the reporter already prints.
+fn typed(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    numbers: &HashMap<Meta, u32>,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+) {
+    let [_capability, pointer] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+    let Some(node) = func[mem].tbaa else { return };
+    let Some(&number) = numbers.get(&node) else { return };
+
+    let row = Descriptor {
+        judgement: ACCESS,
+        class: 0,
+        // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
+        size: u16::try_from(size).unwrap_or(u16::MAX),
+    };
+    let desc = record(func, names, table, inst, row);
+    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let small = Type::int(32);
+    let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
+    let params = &[Type::PTR, word, small, Type::PTR];
+    call(func, names, inst, "__rucc_check_type", params, &[], &[pointer, bytes, ty, desc]);
 }
 
 /// `meta_type` becomes `__rucc_meta_type(pointer, size, type)`.
@@ -421,7 +459,9 @@ fn emit(module: &mut Module, names: &mut Interner, index: usize, row: Descriptor
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, MemInfo, MemOrder, Restrict, print_func, verify_func};
+    use rucc_ir::{
+        Builder, MemInfo, MemOrder, MetaNode, Restrict, TbaaNode, print_func, verify_func,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -497,6 +537,108 @@ mod tests {
         let mut module = Module::new(names.intern("move.c"), &target());
         module.add_func(func);
         module
+    }
+
+    /// A module with one function that reads through its parameter as an `int`, checks in.
+    ///
+    /// The aliasing node is built by hand rather than by the front end, since this crate cannot
+    /// depend on the one that builds the tree. What matters is the shape: a root and one type under
+    /// it, which is what `rucc_lower::aliasing` produces for a translation unit that reads an `int`.
+    fn asking_the_plane(names: &mut Interner) -> Module {
+        let mut module = Module::new(names.intern("read.c"), &target());
+        let root = names.intern("char");
+        let root =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+        let int = names.intern("int");
+        let int =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
+        let plane = Plane::build(&mut module);
+
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("read"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int),
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+
+        insert(&mut func, &plane);
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn a_read_of_the_plane_becomes_the_call_that_carries_the_type_asked_about() {
+        // Three rows rather than two, because the type check is a judgement and a judgement that
+        // refuses has to say what it refused. The type travels as the same number a store of the
+        // same type would have recorded, which is the only way the two can be compared.
+        let mut names = Interner::new();
+        let mut module = asking_the_plane(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 3);
+
+        // The printer writes an `i32` immediate as a signed number and the identifier is a hash
+        // that uses the whole width, so what appears is the same bits read the other way round.
+        let number = i32::from_ne_bytes(plane::identifier("int").to_ne_bytes());
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            format!(
+                "func @read(ptr) -> i32, linkage(external) {{\n\
+                 block0(%0: ptr):\n    \
+                 %1 = global_addr @__rucc_safety_desc_0\n    \
+                 %2 = iconst.i64 4\n    \
+                 call @__rucc_check_bounds(%0, %2, %1) : (ptr, i64, ptr)\n    \
+                 %3 = global_addr @__rucc_safety_desc_1\n    \
+                 call @__rucc_check_live(%0, %3) : (ptr, ptr)\n    \
+                 %4 = global_addr @__rucc_safety_desc_2\n    \
+                 %5 = iconst.i64 4\n    \
+                 %6 = iconst.i32 {number}\n    \
+                 call @__rucc_check_type(%0, %5, %6, %4) : (ptr, i64, i32, ptr)\n    \
+                 %7 = load.i32 %0, size 4, align 4, tbaa !1\n    \
+                 return %7\n\
+                 }}\n"
+            )
+        );
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn the_judgement_a_type_check_names_is_the_one_about_the_planes() {
+        // J1 rather than a judgement of its own. Document 04 section 4.4's first judgement is an
+        // access the capability, the planes or the alignment did not permit, and the type plane is
+        // one of the planes, so that is the sentence the reporter should print.
+        let mut names = Interner::new();
+        let mut module = asking_the_plane(&mut names);
+        lower(&mut module, &mut names);
+
+        let rows: Vec<u8> = module
+            .globals()
+            .map(|id| {
+                let init = module[id].init.expect("a descriptor is a definition");
+                match module[init][0] {
+                    Datum::Scalar { value, .. } => {
+                        u8::try_from(module[value].bits()).expect("a judgement is one byte")
+                    }
+                    _ => panic!("a descriptor starts with its judgement"),
+                }
+            })
+            .collect();
+        assert_eq!(rows, [ACCESS, ACCESS, ACCESS]);
     }
 
     #[test]

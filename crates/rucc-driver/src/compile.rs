@@ -2770,6 +2770,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("check_live"), "{text}");
         // The subscript is address arithmetic, so J2 applies to it as well as J1.
         assert!(text.contains("check_deriv"), "{text}");
+        // And the read names a type, so it asks the type plane about the bytes as well.
+        assert!(text.contains("check_type"), "{text}");
     }
 
     #[test]
@@ -2941,24 +2943,25 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("\tcall\t__rucc_check_bounds\n"), "{text}");
         assert!(text.contains("\tcall\t__rucc_check_live\n"), "{text}");
         assert!(text.contains("\tcall\t__rucc_check_deriv\n"), "{text}");
+        assert!(text.contains("\tcall\t__rucc_check_type\n"), "{text}");
     }
 
     #[test]
     fn every_check_that_reached_the_assembler_has_a_row_describing_it() {
-        // Three checks and three descriptors, each in the section the runtime's reporter reads.
+        // Four checks and four descriptors, each in the section the runtime's reporter reads.
         // The width is `rucc_safety::lower::WIDTH` and the row is `rucc_safe_rt::fail::Descriptor`,
         // and the two agreeing is what makes the address a check is handed mean anything.
         let text = safe_asm(rucc_session::Safety::Detect, READS_THROUGH_A_POINTER);
         let section = format!("\t.section\t{},", rucc_safety::SECTION);
-        assert_eq!(text.matches(&section).count(), 3, "{text}");
-        for index in 0..3 {
+        assert_eq!(text.matches(&section).count(), 4, "{text}");
+        for index in 0..4 {
             let name = format!("__rucc_safety_desc_{index}");
             // Defined once and referenced once, because a descriptor nothing points at describes
             // nothing and a reference with no definition does not link.
             assert!(text.contains(&format!("{name}:\n")), "{text}");
             assert!(text.contains(&format!("{name}(%rip)")), "{text}");
         }
-        assert!(!text.contains("__rucc_safety_desc_3"), "{text}");
+        assert!(!text.contains("__rucc_safety_desc_4"), "{text}");
     }
 
     /// `__builtin_constant_p` is answered in the front end and never reaches the IR.

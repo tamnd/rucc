@@ -155,7 +155,7 @@ fn number(module: &Module, names: &Interner, node: PlaneNode) -> u32 {
 ///
 /// Biased past what the runtime has spent on the values that are not types, so that the type whose
 /// spelling happens to hash to zero is not read back as a byte nobody has stored through.
-fn identifier(name: &str) -> u32 {
+pub(crate) fn identifier(name: &str) -> u32 {
     FIRST_INTERNED + fnv(name) % (u32::MAX - FIRST_INTERNED)
 }
 
