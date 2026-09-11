@@ -172,6 +172,7 @@ options:
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
+  -f[no-]safety-subobject   a write has to stay inside the member it names
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
@@ -894,6 +895,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.padding = mode.parse().map_err(|()| {
                     err(format!("`{mode}` is not a padding mode, which is padding or nopadding"))
                 })?;
+            }
+            // Row S4, from section 9.4 of document 09. A bare flag with no value, because the
+            // strict form of that section needs a member id the front end does not name yet and
+            // accepting the spelling for it would be accepting a promise this build cannot keep.
+            // Before `-fno-` is looked at below, for the reason the tier is.
+            "-fsafety-subobject" => opts.subobject = rucc_session::Subobject::Members,
+            "-fno-safety-subobject" => opts.subobject = rucc_session::Subobject::Off,
+            _ if arg.starts_with("-fsafety-subobject=") => {
+                let form = &arg["-fsafety-subobject=".len()..];
+                return Err(err(format!(
+                    "`{form}` is not a form of -fsafety-subobject. The flag takes no value, and                      the strict form of section 9.4 is tamnd/rucc#967"
+                )));
             }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
             // after every `-f` the rest of the compiler answers to, so a pass can never take a
@@ -2251,6 +2264,25 @@ mod tests {
     }
 
     #[test]
+    fn whether_a_write_has_to_stay_inside_its_member_is_read_off_the_command_line() {
+        // Off by default, because a store to allocated storage sets its effective type and C 6.5
+        // lets a program reuse a buffer as something else. Row S4 is a build opting out of that.
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.subobject, rucc_session::Subobject::Off);
+
+        let (opts, _) = compile(&["-fsafety=detect", "-fsafety-subobject", "a.c"]);
+        assert_eq!(opts.subobject, rucc_session::Subobject::Members);
+
+        let (opts, _) = compile(&["-fsafety-subobject", "-fno-safety-subobject", "a.c"]);
+        assert_eq!(opts.subobject, rucc_session::Subobject::Off);
+
+        // It takes no value. The form that would take one is the strict reading of section 9.4,
+        // which is not written yet, so say so rather than accept a spelling that does nothing.
+        let e = parse_args(&args(&["-fsafety-subobject=strict", "a.c"])).unwrap_err();
+        assert!(e.message.contains("tamnd/rucc#967"), "{}", e.message);
+    }
+
+    #[test]
     fn print_pipeline_answers_with_the_passes_the_level_asked_for() {
         let a = parse_args(&args(&["--print-pipeline", "-O2"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
@@ -3512,6 +3544,10 @@ mod tests {
         // which is two lines rather than one because the first of them is a choice this compiler
         // records and the rest are claims about what it does anyway, and putting a real setting on
         // the same line as three flags that change nothing would be misleading about both.
-        assert!(USAGE.lines().count() < 59, "usage text has grown past one screen");
+        // the same line as three flags that change nothing would be misleading about both. The one
+        // it went up by last is the flag that says a write has to stay inside the member it names,
+        // which is a setting rather than a claim and so cannot share the line above it, that being
+        // the one that picks a tier.
+        assert!(USAGE.lines().count() < 60, "usage text has grown past one screen");
     }
 }

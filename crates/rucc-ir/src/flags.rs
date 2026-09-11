@@ -135,6 +135,23 @@ impl Flags {
     /// A fact rather than a licence, in the way [`Flags::NOFREE`] is.
     pub const HEAP: Self = Self(1 << 14);
 
+    /// The address the check this is on is about starts where the access assumes it does.
+    ///
+    /// The alignment conjunct of judgement J1 rides on `check_bounds`, which
+    /// `spec/safe-memory/06-instrumentation.md` section 6.3 settled, so a check that goes takes the
+    /// test of it away with it and `crate::discharge` will not take one out until something has
+    /// answered it. Mostly it answers itself, off the `alloca` or the allocation the address was
+    /// computed from and the steps taken from there. This is the case it cannot: how aligned a
+    /// global is lives on the module and a pass is given one function, which is the reason
+    /// [`Flags::STATIC`] exists and the same reason repeated.
+    ///
+    /// It says the address and not the object. A global aligned to sixteen read four bytes in at a
+    /// width of four is one of these and the same global read one byte in is not, so what was
+    /// worked out before the pipeline started is the offset as well as the object.
+    ///
+    /// A fact rather than a licence, in the way [`Flags::STATIC`] is.
+    pub const ALIGNED: Self = Self(1 << 15);
+
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
         Self::NNAN.0
@@ -226,9 +243,10 @@ impl Flags {
             Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
             // On the three checks `rucc-safety` emits and on nothing else. What they say is about
             // the bytes a check names, so an instruction that names no bytes has no room for them.
-            Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv => {
-                Self::STATIC.union(Self::HANDED)
-            }
+            Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC.union(Self::HANDED),
+            // `ALIGNED` on the bounds check alone, because the alignment conjunct rides on that
+            // one and the other two say nothing about where an access starts.
+            Opcode::CheckBounds => Self::STATIC.union(Self::HANDED).union(Self::ALIGNED),
             Opcode::Alloca | Opcode::PtrAdd => Self::NOALIAS,
             _ => Self::NONE,
         }
@@ -297,6 +315,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::STATIC, "static"),
     (Flags::HANDED, "handed"),
     (Flags::HEAP, "heap"),
+    (Flags::ALIGNED, "aligned"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

@@ -21,6 +21,10 @@ workspace = true
 rucc-ir = { workspace = true }
 # The name table, because turning a check into a call means interning the name it calls.
 rucc-base = { workspace = true }
+# For `Subobject` and nothing else, the way `rucc-opt` takes this crate for the optimization level.
+# Whether a store asks the type plane anything is a decision the command line makes and this pass
+# is told, per the note on `run`.
+rucc-session = { workspace = true }
 
 # Only needed to build a module to run the pass over.
 [dev-dependencies]

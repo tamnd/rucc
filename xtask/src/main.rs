@@ -19,6 +19,7 @@ mod cost;
 mod differential;
 mod disasm;
 mod dso;
+mod fuzz;
 mod implib;
 mod pressure;
 mod runner;
@@ -54,6 +55,7 @@ tasks:
   unwind            walk a stack through frames we wrote and count what came back
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
+  fuzz              generate C programs with one memory error each and hold both builds to it
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
   pressure          compile bench/safety both ways at -O2, and with any -f flags given, and
@@ -90,6 +92,7 @@ fn main() -> ExitCode {
         Some("unwind") => unwind::unwind(),
         Some("safety") => safety::safety(),
         Some("accounting") => safety::accounting(),
+        Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("cost") => cost::cost(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("pressure") => pressure::pressure(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("aux") => aux_plane::aux(),
@@ -1261,6 +1264,15 @@ fn ci() -> Result<()> {
     match runner::Runner::find("the differential accounting") {
         Ok(_) => safety::accounting()?,
         Err(why) => skipped.push(("accounting", why.to_string())),
+    }
+    // Programs nobody wrote, which is the only check here whose input is different every time it
+    // is asked for. A fixed seed, so the command is the same command twice in a row and a failure
+    // on main is a failure anybody can reproduce. The number that finds things is whatever somebody
+    // leaves running with `--count`, and what this default is for is a regression obvious enough to
+    // show up in two dozen programs.
+    match runner::Runner::find("the elimination fuzzer") {
+        Ok(_) => fuzz::fuzz(&[])?,
+        Err(why) => skipped.push(("fuzz", why.to_string())),
     }
     println!("{}", accounted(&skipped));
     Ok(())

@@ -100,6 +100,7 @@ pub use summary::{Frames, Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
+pub use rucc_session::Subobject;
 
 /// How many checks a run of [`insert`] put in.
 ///
@@ -137,10 +138,12 @@ pub struct Counts {
     /// are discharged by different rules: a store into storage nothing watches can be dropped by
     /// looking at the store, and a copy cannot be looked at the same way.
     pub carried: usize,
-    /// Reads that asked the plane whether the bytes agree with the type they are being read as.
+    /// Accesses that asked the plane whether the bytes agree with the type they name.
     ///
-    /// Fewer than `checked`, and the two reasons are in `ask`: a store asks nothing, and a read
-    /// the front end did not name a type for has no question to put.
+    /// Fewer than `checked`, and the reason is in `ask`: an access the front end did not name a
+    /// type for has no question to put. Without `-fsafety-subobject` it is fewer again, because
+    /// only a read asks, and the reason a store asks only when somebody asked for it is on
+    /// [`rucc_session::Subobject`].
     pub asked: usize,
     /// Stores that recorded that the bytes they wrote hold what they wrote.
     ///
@@ -188,7 +191,7 @@ impl Counts {
 /// Whether this runs at all is `-fsafety=`, and the driver decides it. This crate does not read
 /// the flag, because a pass that decides for itself whether it runs is a pass whose effect cannot
 /// be read off the pipeline.
-pub fn run(module: &mut Module) -> Counts {
+pub fn run(module: &mut Module, subobject: Subobject) -> Counts {
     // Before the walk, because the entries live in the module and a function is borrowed out of
     // the module while its stores are being instrumented. It is also the reason this is the entry
     // point rather than [`insert`]: there is one plane per module and every function records into
@@ -199,7 +202,7 @@ pub fn run(module: &mut Module) -> Counts {
     let mut counts = Counts::default();
     for id in module.funcs() {
         if !module[id].is_declaration() {
-            counts.add(insert(&mut module[id], &plane, width));
+            counts.add(insert(&mut module[id], &plane, width, subobject));
         }
     }
     counts
@@ -223,7 +226,7 @@ pub fn run(module: &mut Module) -> Counts {
 /// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
 /// whole design: this pass is a walk anybody can read, and the deletions are rules that are
 /// verified.
-pub fn insert(func: &mut Func, plane: &Plane, width: u64) -> Counts {
+pub fn insert(func: &mut Func, plane: &Plane, width: u64, subobject: Subobject) -> Counts {
     let mut counts = Counts::default();
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -235,6 +238,13 @@ pub fn insert(func: &mut Func, plane: &Plane, width: u64) -> Counts {
                     counts.checked += 1;
                     counts.live += 1;
                     if func[inst].opcode == Opcode::Store {
+                        // In front of the store, and only when the build asked for it. Every other
+                        // question at a store is a recording made afterwards, and this is the one
+                        // that can refuse, so it has to be asked while the bytes still say what
+                        // they said before.
+                        if subobject.asks() && ask(func, plane, inst, pointer, capability, width) {
+                            counts.asked += 1;
+                        }
                         // The init plane's write goes in first so that the type plane's ends up in
                         // front of it, since both are inserted after the store and the one that
                         // goes in second is the one that lands nearer to it.
@@ -815,7 +825,7 @@ mod tests {
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
-            insert(&mut func, &plane, 8),
+            insert(&mut func, &plane, 8, Subobject::Off),
             Counts { checked: 2, live: 2, judged: 1, wrote: 1, filled: 1, ..Counts::default() }
         );
 
@@ -881,7 +891,7 @@ mod tests {
         let mut func = one_pointer_read(&mut names);
         let (module, plane) = planed(&mut names, "deref.c");
         assert_eq!(
-            insert(&mut func, &plane, 8),
+            insert(&mut func, &plane, 8, Subobject::Off),
             Counts { checked: 1, live: 1, filled: 1, ..Counts::default() }
         );
 
@@ -897,7 +907,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_pointer_read(&mut names);
         let (module, plane) = planed(&mut names, "deref.c");
-        insert(&mut func, &plane, 4);
+        insert(&mut func, &plane, 4, Subobject::Off);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_bounds %1, %0, size 4, align 8\n"), "{printed}");
@@ -953,7 +963,7 @@ mod tests {
         let (module, plane, int) = typed(&mut names, "read.c");
         let mut func = reading(&mut names, Some(int));
 
-        assert_eq!(insert(&mut func, &plane, 8).asked, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).asked, 1);
 
         let printed = print_func(&module, &func, &names);
         let entry = plane.entry(Some(int));
@@ -981,7 +991,73 @@ mod tests {
         let (module, plane, _) = typed(&mut names, "copy.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8).asked, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).asked, 0);
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    /// A function that writes through its parameter as an `int`, naming that type on the access.
+    fn writing(names: &mut Interner, node: Option<Meta>) -> Func {
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: node,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_store_asks_the_plane_too_once_the_build_has_said_the_member_matters() {
+        // Row S4, which is a write that leaves one member and lands in the next. Read literally a
+        // store like that is a program retyping storage it owns, which C 6.5 permits, so the
+        // question is only put when somebody asked for it to be put.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "member.c");
+        let mut func = writing(&mut names, Some(int));
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Members);
+        assert_eq!((counts.asked, counts.judged), (1, 1));
+
+        let printed = print_func(&module, &func, &names);
+        let entry = plane.entry(Some(int));
+        let wanted = format!("check_type %2, %0, size 4, align 4, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+        // In front of the store, because the bytes say what they said before it runs, and the
+        // recording this pass makes afterwards is what would make the answer yes.
+        let asked = printed.find(&wanted).expect("the check is there");
+        let wrote = printed.find("store %1").expect("and so is the store");
+        let recorded = printed.find("meta_type").expect("and so is the recording");
+        assert!(asked < wrote && wrote < recorded, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_the_front_end_named_no_type_for_asks_nothing_whatever_the_build_asked() {
+        // The same reason a read of one does not. An access with no aliasing node is one the front
+        // end did not say the type of, which is not the same as bytes nothing has been stored
+        // through, and the plane has no way to tell the question apart from the answer.
+        let mut names = Interner::new();
+        let (module, plane, _) = typed(&mut names, "aggregate.c");
+        let mut func = writing(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Members).asked, 0);
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
     }
@@ -990,8 +1066,8 @@ mod tests {
     fn a_store_answers_the_question_rather_than_asking_it() {
         // The plane covers storage the allocator reported, which is the storage C gives no declared
         // type, and the effective type of one of those is whatever the last store set. So a store
-        // cannot disagree with the plane, and a check in front of one would refuse the reuse of a
-        // buffer that the standard permits.
+        // cannot disagree with the plane unless the build asked it to, and a check in front of one
+        // by default would refuse the reuse of a buffer that the standard permits.
         let mut names = Interner::new();
         let (module, plane, int) = typed(&mut names, "write.c");
         let i32_ = Type::int(32);
@@ -1014,7 +1090,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        let counts = insert(&mut func, &plane, 8);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off);
         assert_eq!((counts.judged, counts.asked), (1, 0));
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_type"), "{printed}");
@@ -1048,7 +1124,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8).judged, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).judged, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four bytes, which the payload does not say and the type of the value stored does.
@@ -1093,7 +1169,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
@@ -1134,7 +1210,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8).wrote, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 1);
 
         let printed = print_func(&module, &func, &names);
         // Four rather than the one byte the store wrote.
@@ -1156,7 +1232,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "ask.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8).filled, 1);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).filled, 1);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_init %1, %0, size 4, align 4\n"), "{printed}");
@@ -1176,7 +1252,7 @@ mod tests {
         let (_module, plane) = planed(&mut names, "untyped.c");
         let mut func = reading(&mut names, None);
 
-        let counts = insert(&mut func, &plane, 8);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off);
         assert_eq!(counts.asked, 0);
         assert_eq!(counts.filled, 1);
     }
@@ -1209,7 +1285,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        assert_eq!(insert(&mut func, &plane, 8).filled, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).filled, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("check_init"), "{printed}");
@@ -1224,7 +1300,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "read.c");
         let mut func = reading(&mut names, None);
 
-        assert_eq!(insert(&mut func, &plane, 8).wrote, 0);
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off).wrote, 0);
 
         let printed = print_func(&module, &func, &names);
         assert!(!printed.contains("meta_init"), "{printed}");
@@ -1264,7 +1340,7 @@ mod tests {
         let mut func = one_copy(&mut names, Opcode::Memcpy);
         let (module, plane) = planed(&mut names, "move.c");
         assert_eq!(
-            insert(&mut func, &plane, 8),
+            insert(&mut func, &plane, 8, Subobject::Off),
             Counts { carried: 1, moved: 1, ..Counts::default() }
         );
 
@@ -1296,7 +1372,7 @@ mod tests {
         let mut func = one_copy(&mut names, Opcode::Memmove);
         let (module, plane) = planed(&mut names, "overlap.c");
         assert_eq!(
-            insert(&mut func, &plane, 8),
+            insert(&mut func, &plane, 8, Subobject::Off),
             Counts { carried: 1, moved: 1, ..Counts::default() }
         );
 
@@ -1328,7 +1404,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        insert(&mut func, &plane, 8);
+        insert(&mut func, &plane, 8, Subobject::Off);
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1369,7 +1445,7 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "back.c");
-        insert(&mut func, &plane, 8);
+        insert(&mut func, &plane, 8, Subobject::Off);
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
@@ -1396,7 +1472,10 @@ mod tests {
         b.ret(&[moved]);
 
         let (module, plane) = planed(&mut names, "walk.c");
-        assert_eq!(insert(&mut func, &plane, 8), Counts { derived: 1, ..Counts::default() });
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off),
+            Counts { derived: 1, ..Counts::default() }
+        );
 
         assert_eq!(
             print_func(&module, &func, &names),
@@ -1425,7 +1504,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
         let (module, plane) = planed(&mut names, "both.c");
-        insert(&mut func, &plane, 8);
+        insert(&mut func, &plane, 8, Subobject::Off);
 
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -1451,7 +1530,7 @@ mod tests {
         module.add_func(declared);
 
         assert_eq!(
-            run(&mut module),
+            run(&mut module, Subobject::Off),
             Counts { checked: 4, live: 4, judged: 2, wrote: 2, filled: 2, ..Counts::default() }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -1471,7 +1550,7 @@ mod tests {
 
         let (_module, plane) = planed(&mut names, "nothing.c");
         let before = func.counts();
-        assert_eq!(insert(&mut func, &plane, 8), Counts::default());
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off), Counts::default());
         assert_eq!(func.counts(), before);
     }
 }

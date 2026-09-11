@@ -53,7 +53,7 @@ use crate::{Error, Result, root, staticlib};
 /// Milestone S1 is `detect` and nothing else. `enforce` and `kernel` get their own runs when the
 /// milestones that define them arrive, and each will want its own column in the expectations
 /// rather than a second pass over these.
-const TIER: &str = "-fsafety=detect";
+pub(crate) const TIER: &str = "-fsafety=detect";
 
 /// The optimization level the suite is run at.
 ///
@@ -61,12 +61,12 @@ const TIER: &str = "-fsafety=detect";
 /// them. `accounting` is where they are run at `-O2`, and it is a different question: there the
 /// interesting failure is a check that was eliminated when it should not have been, and the
 /// expectations that answer it are these same files read a second time.
-const LEVEL: &str = "-O0";
+pub(crate) const LEVEL: &str = "-O0";
 
 /// The optimization level the differential accounting runs at.
 ///
 /// The one people ship at, and the one where every pass that could take a check out has run.
-const OPTIMIZED: &str = "-O2";
+pub(crate) const OPTIMIZED: &str = "-O2";
 
 /// What turns the elimination off without turning anything else off.
 ///
@@ -78,10 +78,10 @@ const OPTIMIZED: &str = "-O2";
 /// Every pass that takes a check out belongs here. A pass left off the list is a pass whose
 /// removals are in both builds, and a comparison of two builds that both did the thing has nothing
 /// to say about whether the thing was right.
-const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
+pub(crate) const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
 
 /// The line every report starts with, which is what says one happened at all.
-const BANNER: &str = "rucc: memory safety violation";
+pub(crate) const BANNER: &str = "rucc: memory safety violation";
 
 /// What a case says should happen to it.
 #[derive(Debug)]
@@ -110,6 +110,12 @@ struct Case {
     /// test to make CI green, applied to a test that has not started passing rather than one that
     /// has stopped.
     gap: Option<String>,
+    /// Flags this one case is compiled with on top of the tier and the level.
+    ///
+    /// For a check the command line turns on, which is every check that would refuse a program C
+    /// permits. A suite that only ever compiled one way could not hold both halves of a flag like
+    /// that to anything, and a second suite run for every flag would cost a build each.
+    flags: Vec<String>,
     /// Libraries in `tests/safety/lib` this case is linked against, uninstrumented.
     ///
     /// Document 10 section 10.7's mixed link, which is the configuration that matters most in
@@ -136,11 +142,11 @@ struct Case {
 
 /// What one program actually did.
 #[derive(Debug)]
-struct Ran {
+pub(crate) struct Ran {
     /// Everything it wrote, on both streams.
-    output: String,
+    pub(crate) output: String,
     /// What it exited with, or nothing when it did not get as far as being linked.
-    status: Option<i32>,
+    pub(crate) status: Option<i32>,
 }
 
 /// Runs every program in `tests/safety` and holds each to the verdict written in it.
@@ -341,6 +347,7 @@ impl Case {
         let mut judgement = None;
         let mut says = Vec::new();
         let mut allow = false;
+        let mut flags = Vec::new();
         let mut links = Vec::new();
         let mut summary = Vec::new();
         let mut gap = None;
@@ -359,6 +366,17 @@ impl Case {
                     })?);
                 }
                 "says" => says.push(value.to_owned()),
+                "flags" => {
+                    for flag in value.split_whitespace() {
+                        if !flag.starts_with('-') {
+                            return Err(Error::Io(format!(
+                                "{name}: `{flag}` is not a flag, and this directive is not a way \
+                                 to hand the compiler another file"
+                            )));
+                        }
+                        flags.push(flag.to_owned());
+                    }
+                }
                 "links" => links.push(value.to_owned()),
                 "summary" => summary.push(value.to_owned()),
                 "allow" => allow = true,
@@ -396,7 +414,17 @@ impl Case {
                 "{name}: `blocked` already says nothing happens, so the `gap` adds nothing"
             )));
         }
-        Ok(Self { name, path: path.to_path_buf(), row, verdict, links, summary, gap, blocked })
+        Ok(Self {
+            name,
+            path: path.to_path_buf(),
+            row,
+            verdict,
+            flags,
+            links,
+            summary,
+            gap,
+            blocked,
+        })
     }
 
     /// Whether what the program did is what the case said it would.
@@ -562,6 +590,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
         let mut compile = Command::new(&rucc);
         compile.args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level]);
         compile.args(plan.without);
+        compile.args(&case.flags);
         let out = compile
             .arg("-o")
             .arg(work.join(format!("{}.s", case.name)))
@@ -646,7 +675,9 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
     }
     let path = work.join(format!("{}.safety.json", case.name));
     let out = Command::new(rucc)
-        .args(["--emit=safety-summary", &format!("--target={TRIPLE}"), TIER, LEVEL, "-o"])
+        .args(["--emit=safety-summary", &format!("--target={TRIPLE}"), TIER, LEVEL])
+        .args(&case.flags)
+        .arg("-o")
         .arg(&path)
         .arg(&case.path)
         .current_dir(root())
@@ -688,7 +719,7 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
 /// instrumented. That is deliberate and is the point of document 10 section 10.7: the library a
 /// case links against has to be one this project did not build, or the mixed link is not being
 /// tested. A case says which of them it wants in a `.links` file beside its assembly.
-const SCRIPT: &str = "\
+pub(crate) const SCRIPT: &str = "\
 #!/bin/sh
 exec 2>/dev/null
 out=/tmp/safety
@@ -722,7 +753,7 @@ done
 ";
 
 /// Splits what the script printed back into one entry per case.
-fn read(text: &str) -> BTreeMap<String, Ran> {
+pub(crate) fn read(text: &str) -> BTreeMap<String, Ran> {
     let mut runs = BTreeMap::new();
     let mut name = String::new();
     let mut output = String::new();
@@ -835,6 +866,25 @@ mod tests {
         assert!(quiet.judge(&Ran { output: String::new(), status: Some(0) }).is_ok());
         assert!(quiet.judge(&Ran { output: BANNER.to_owned(), status: Some(134) }).is_err());
         assert!(quiet.judge(&Ran { output: String::new(), status: Some(139) }).is_err());
+    }
+
+    #[test]
+    fn a_case_can_ask_for_the_flags_it_is_compiled_with_and_cannot_ask_for_a_file() {
+        let asked = case(
+            "a-flagged-case",
+            "/* row: S4 */\n/* flags: -fsafety-subobject */\n/* refuse: J1 */\n",
+        );
+        assert_eq!(asked.flags, ["-fsafety-subobject"]);
+        assert!(case("a-plain-case", "/* row: S4 */\n/* allow */\n").flags.is_empty());
+
+        // The directive hands words to the compiler, so a word that is not a flag is another input
+        // file, and a case that could add one of those could compile something nobody reviewed.
+        let dir = std::env::temp_dir().join("rucc-safety-flags");
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join("a-sneaky-case.c");
+        std::fs::write(&path, "/* row: S4 */\n/* flags: other.c */\n/* allow */\n").expect("write");
+        let said = Case::read(&path).expect_err("not a flag").to_string();
+        assert!(said.contains("is not a flag"), "{said}");
     }
 
     #[test]

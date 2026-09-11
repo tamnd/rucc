@@ -65,11 +65,24 @@ use crate::fail::Descriptor;
 use crate::plane::{self, Version};
 use crate::types::{self, TypeId};
 
-/// Judgement J1, the bounds half: an access of `size` bytes at `addr` stays in one instance.
+/// Judgement J1, the bounds half: an access of `size` bytes at `addr` stays in one instance, and
+/// starts where an access of that alignment is allowed to start.
 ///
 /// The first byte and the last byte have to be owned by the same version. An access that starts
 /// inside an instance and ends past it lands in the next block's header, in the neighbour, or in
 /// storage nobody owns, and all three read as a different version.
+///
+/// The alignment is here rather than in a check of its own because document 06 section 6.3 writes
+/// it on `check_bounds`, and because a separate call would double the cost of the commonest check
+/// in the program to test three bits. `align` is what the access is allowed to assume, so zero and
+/// one both mean it assumes nothing and the test is skipped.
+///
+/// It is answered before anything reads a plane, and for an address no region covers as well as for
+/// one the heap owns. Where the storage came from does not enter into it: `addr mod align = 0` is
+/// document 04 section 4.4's conjunct and a local read through a pointer that lost three of its low
+/// bits is the same S7 bug as a heap one. This is the only thing in this module that decides
+/// anything about an address outside the region, and it is decidable there precisely because it
+/// needs nothing that was recorded.
 ///
 /// Whether there is an instance at all is not decided here. That is [`live`], and the two are kept
 /// apart because the optimizer discharges them at very different rates: the bounds of an access at
@@ -86,8 +99,24 @@ use crate::types::{self, TypeId};
 ///
 /// `descriptor` is the address of a descriptor the same build wrote into `.rucc_safety_desc`, or
 /// null. It is only read when the check refuses.
-pub unsafe fn bounds(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
+pub unsafe fn bounds(
+    addr: *const c_void,
+    size: usize,
+    align: usize,
+    descriptor: *const Descriptor,
+) {
     let addr = addr as usize;
+    // A mask rather than a remainder, because the divisor is a register here and a division per
+    // access is not a thing to pay for a test of three bits. It is the right test because an
+    // alignment is a power of two, which `rucc_ir::verify` refuses a check for not being.
+    if align > 1 && addr & (align - 1) != 0 {
+        // SAFETY: as below. The address is the one the access was about.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+        // One report per access. Under the abort posture there is no second one to consider, and
+        // under the postures that carry on a report that the same access is also out of bounds
+        // would say the same J1 about the same line twice and count twice in the tally.
+        return;
+    }
     let Some(region) = alloc::covering(addr) else { return };
     // An access of no bytes reads nothing, so the last byte is the first one and the check is
     // trivially satisfied rather than reaching an address one before the pointer.
@@ -525,16 +554,16 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The eleven names generated code is compiled against.
+/// The twelve names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
 /// not cross an `extern "C"` boundary, so a test that calls one of these to watch it refuse would
 /// abort the harness rather than see a refusal. The tests call the plain functions.
 ///
-/// The three checks take the descriptor last, so that the argument registers the address and the
-/// size arrive in are the ones they would already be in. Neither extent query has a descriptor,
-/// because they decide nothing and so have nothing to report.
+/// The checks take the descriptor last, so that the argument registers the address and the size
+/// arrive in are the ones they would already be in. Neither extent query has a descriptor, because
+/// they decide nothing and so have nothing to report.
 pub mod exports {
     use core::ffi::c_void;
 
@@ -548,10 +577,11 @@ pub mod exports {
     pub unsafe extern "C" fn __rucc_check_bounds(
         addr: *const c_void,
         size: usize,
+        align: usize,
         descriptor: *const Descriptor,
     ) {
         // SAFETY: this wrapper's contract is the one it calls, passed straight on.
-        unsafe { super::bounds(addr, size, descriptor) };
+        unsafe { super::bounds(addr, size, align, descriptor) };
     }
 
     /// # Safety
@@ -700,7 +730,16 @@ mod tests {
     /// once rather than at every call site keeps the tests about which accesses are refused.
     fn bounds(addr: *const c_void, size: usize) {
         // SAFETY: the address of a `static`, which is what a descriptor is at run time too.
-        unsafe { super::bounds(addr, size, &raw const ROW) }
+        unsafe { super::bounds(addr, size, 1, &raw const ROW) }
+    }
+
+    /// The bounds check over an access that is allowed to assume an alignment.
+    ///
+    /// Kept apart from [`bounds`] so that every test above that is about where an access lands
+    /// says nothing about alignment, which is what passing one means.
+    fn aligned(addr: *const c_void, size: usize, align: usize) {
+        // SAFETY: as above.
+        unsafe { super::bounds(addr, size, align, &raw const ROW) }
     }
 
     /// The liveness check, the same way.
@@ -1066,6 +1105,51 @@ mod tests {
         }
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn an_access_that_starts_where_its_alignment_does_not_allow_is_refused() {
+        let _turn = turn();
+        // Row S7. The allocator hands out sixteen byte aligned storage, so an int read one byte
+        // into it is misaligned and one read four bytes in is not. Nothing about this is out of
+        // bounds and the instance is live, which is why it takes its own conjunct to catch.
+        let ptr = alloc(64);
+        assert!(!refused(|| aligned(at(ptr, 4), 4, 4)));
+        assert!(refused(|| aligned(at(ptr, 1), 4, 4)));
+        assert!(refused(|| aligned(at(ptr, 2), 4, 4)));
+        // The same address under a wider access, which is the wire format case: four bytes in is
+        // a fine place for an int and not for a long.
+        assert!(refused(|| aligned(at(ptr, 4), 8, 8)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn an_access_that_assumes_nothing_about_where_it_starts_is_allowed_anywhere() {
+        let _turn = turn();
+        // A char access, and every access the front end could not work an alignment out for. One
+        // and zero both mean the same thing here, which is that there is nothing to test.
+        let ptr = alloc(64);
+        for offset in [0, 1, 2, 3, 7] {
+            assert!(!refused(|| aligned(at(ptr, offset), 1, 1)), "offset {offset}");
+            assert!(!refused(|| aligned(at(ptr, offset), 4, 0)), "offset {offset}");
+        }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_misaligned_access_to_storage_no_region_covers_is_refused() {
+        let _turn = turn();
+        // The one thing this module decides about an address the heap does not own. Where the
+        // storage came from does not change whether the address is a multiple of four, and a
+        // local read through a pointer that lost its low bits is the same bug as a heap one.
+        // A `u64` array rather than a byte one, because a byte array is allowed to start anywhere
+        // and the test would then be about where the frame happened to land.
+        let stack = [0u64; 2];
+        let addr = stack.as_ptr().cast::<c_void>();
+        assert!(!refused(|| aligned(addr.wrapping_byte_add(8), 4, 4)));
+        assert!(refused(|| aligned(addr.wrapping_byte_add(9), 4, 4)));
     }
 
     #[test]

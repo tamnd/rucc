@@ -225,6 +225,61 @@ impl FromStr for Padding {
     }
 }
 
+/// Whether an access has to stay inside the member it names, from `-fsafety-subobject`.
+///
+/// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.4, which is row S4 of document
+/// 03 and is the class Fil-C, CHERI by default and ARM MTE all miss. Their metadata is per
+/// allocation and a member is not an allocation, so an overflow from one member of a structure
+/// into the next is invisible to all three. The type plane is byte granular, so it is not
+/// invisible here.
+///
+/// A flag rather than a default because of what a store means. C 6.5 says a store to allocated
+/// storage sets that storage's effective type, so a write that leaves one member and lands in the
+/// next is, read literally, a program retyping bytes it owns. Every buffer that gets reused for a
+/// second kind of value does the same thing on purpose. So the question a store asks is only asked
+/// when somebody has said they want it asked, and what they get in return is the write half of
+/// S4 that nothing else catches.
+///
+/// The read half is not behind this and never was: a read that disagrees with the plane is
+/// judgement J1 at every tier, because reading bytes back through a type they were not stored
+/// through is undefined however the pointer got there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Subobject {
+    /// No `-fsafety-subobject`. A store records what it wrote and is asked nothing.
+    #[default]
+    Off,
+    /// `-fsafety-subobject`. A store asks the plane whether the bytes it is about to write agree
+    /// with the type it writes them through, which catches an overflow out of a member into a
+    /// member of a different type.
+    ///
+    /// Two adjacent members of the same type are indistinguishable to this, which section 9.4
+    /// states plainly: `struct { int a; int b; }` overflowing from `a` into `b` writes `int` over
+    /// `int` and there is nothing for the plane to disagree with. That is what
+    /// `-fsafety-subobject=strict` is for and it is not here yet.
+    Members,
+}
+
+impl Subobject {
+    /// The spelling this is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Subobject::Off => "off",
+            Subobject::Members => "members",
+        }
+    }
+
+    /// Whether a store asks the type plane anything.
+    pub const fn asks(self) -> bool {
+        matches!(self, Subobject::Members)
+    }
+}
+
+impl fmt::Display for Subobject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How far a name reaches outside a shared library when nothing in the source said.
 ///
 /// `-fvisibility=`, which is written on every cmake project that cares about its exports and is
@@ -1121,6 +1176,11 @@ pub struct Options {
     /// library code, which is that it does not, so a record filled a member at a time is not
     /// reported when something later reads it whole.
     pub padding: Padding,
+    /// Whether an access has to stay inside the member it names, from `-fsafety-subobject`.
+    ///
+    /// Means nothing unless `safety` asked for a tier. Off by default, which section 9.4 argues
+    /// for: this is the row most likely to fire on code that is doing what its author meant.
+    pub subobject: Subobject,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -1438,6 +1498,7 @@ impl Options {
             opt_level: OptLevel::default(),
             safety: Safety::default(),
             padding: Padding::default(),
+            subobject: Subobject::default(),
             emit: EmitKind::default(),
             debug_info: false,
             frame_pointer: false,
