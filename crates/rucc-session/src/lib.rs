@@ -26,6 +26,7 @@ pub mod runtime;
 
 pub use crate::fs::{Dir, FileSystem, Found, IncludeForm, MemoryFileSystem, SearchPath, path_key};
 
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -408,6 +409,101 @@ impl Wrapping {
     /// Neither, which is the default and what a command line that says nothing about any of this
     /// gets.
     pub const NONE: Self = Self { signed: false, pointer: false, trap: false };
+}
+
+/// A list of `old=new` rewrites to apply to a path before it is written into the output, which is
+/// what the `-f*-prefix-map=` family asks for.
+///
+/// The point of them is a build whose output does not depend on where it was built. A path is the
+/// last thing in an object that a second machine cannot reproduce: two people who check out the
+/// same commit and run the same compiler get the same instructions and different `__FILE__`
+/// strings, and a distribution that wants to prove its binaries came from its sources has to make
+/// that difference go away. So the build says what its root is called, and every path that would
+/// name the real one names that instead.
+///
+/// The rule is a plain string prefix and nothing more, which is worth saying because it looks like
+/// it ought to be about directories. gcc compares the characters, so `s=B` turns `sub/h.h` into
+/// `Bub/h.h`, and an empty `old` matches everything and puts `new` in front of it. The path
+/// compared against is the one the search found, so a header reached through a relative `-I` is
+/// mapped as a relative path and the same header reached through an absolute one is mapped as an
+/// absolute path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefixMap {
+    /// The rewrites, in the order the command line gave them.
+    entries: Vec<(String, String)>,
+}
+
+impl PrefixMap {
+    /// No rewrites, which is what a command line that says nothing about this gets.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether nothing was asked for, which is the case worth not spending anything on.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Adds a rewrite, which is what one flag on the command line is.
+    pub fn push(&mut self, old: impl Into<String>, new: impl Into<String>) {
+        self.entries.push((old.into(), new.into()));
+    }
+
+    /// The two halves of one flag's argument, split at the last `=` rather than the first.
+    ///
+    /// That is where gcc splits it, and it is the answer that makes a path containing an `=`
+    /// mappable: `-ffile-prefix-map=/home/a=b=/src` maps the directory `/home/a=b`. The cost is
+    /// that a replacement cannot contain one, which is the rarer thing to want. `None` when there
+    /// is no `=` at all, which gcc refuses rather than reading as a mapping to nothing.
+    #[must_use]
+    pub fn split(arg: &str) -> Option<(&str, &str)> {
+        arg.rsplit_once('=')
+    }
+
+    /// `path` with the last rewrite that matches it applied, or `path` where none does.
+    ///
+    /// The last rather than the first, because that is gcc's answer and because it is the one a
+    /// build relies on: a mapping set for the whole project and a narrower one set for one
+    /// directory is a command line where the second is meant to win.
+    #[must_use]
+    pub fn apply<'a>(&self, path: &'a str) -> Cow<'a, str> {
+        for (old, new) in self.entries.iter().rev() {
+            if let Some(rest) = path.strip_prefix(old.as_str()) {
+                return Cow::Owned(format!("{new}{rest}"));
+            }
+        }
+        Cow::Borrowed(path)
+    }
+}
+
+/// The three answers to the question the `-f*-prefix-map=` family asks, which is one question
+/// asked about three kinds of output.
+///
+/// They are separate because gcc's flags are separate and a build uses that: a distribution maps
+/// its debug paths to something a debugger can find the sources under and leaves `__FILE__` alone,
+/// or maps `__FILE__` so that an assertion message does not name a build directory and leaves the
+/// debug info pointing at the real tree. `-ffile-prefix-map=` is the shorthand for all three and is
+/// what a build that simply wants to be reproducible writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefixMaps {
+    /// What `__FILE__` and `__BASE_FILE__` are rewritten by, from `-fmacro-prefix-map=`.
+    ///
+    /// The only one of the three this compiler acts on today, because it is the only one whose
+    /// output exists: `__FILE__` is a string literal in the binary and an assertion message a user
+    /// reads.
+    pub macros: PrefixMap,
+    /// What a path in the debug info is rewritten by, from `-fdebug-prefix-map=`.
+    ///
+    /// Nothing reads this yet, because no debug info is generated yet. It is kept rather than
+    /// dropped so that the crate that generates it has the answer waiting rather than a flag to
+    /// go and add, and `crates/rucc-debug` says so where the work will start.
+    pub debug: PrefixMap,
+    /// What a path in the profile data is rewritten by, from `-fprofile-prefix-map=`.
+    ///
+    /// Nothing reads this yet either, and for the same reason: there is no profile data.
+    pub profile: PrefixMap,
 }
 
 /// How far a multiply and an addition may be fused into one rounding, from `-ffp-contract=`.
@@ -1281,6 +1377,12 @@ pub struct Options {
     /// because it is the only one this compiler could act on: the rest of that group withdraw
     /// licences that nothing here takes in the first place.
     pub fp_contract: Contract,
+    /// What a path is rewritten by before it is written into the output, from the
+    /// `-f*-prefix-map=` family.
+    ///
+    /// See [`PrefixMaps`]. This is what makes a build reproducible from a different directory, and
+    /// it is three lists rather than one because gcc has three flags and a build uses them apart.
+    pub prefix_map: PrefixMaps,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1514,6 +1616,7 @@ impl Options {
             short_enums: false,
             strict_aliasing: true,
             fp_contract: Contract::Off,
+            prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,
@@ -1681,6 +1784,50 @@ mod tests {
         assert!("".parse::<GnucVersion>().is_err());
         assert!("15.".parse::<GnucVersion>().is_err(), "a trailing dot is a typo, not a zero");
         assert!("1.2.3.4".parse::<GnucVersion>().is_err());
+    }
+
+    #[test]
+    fn a_prefix_map_rewrites_the_front_of_a_path_and_nothing_else() {
+        let map = |pairs: &[(&str, &str)]| {
+            let mut map = PrefixMap::new();
+            for &(old, new) in pairs {
+                map.push(old, new);
+            }
+            map
+        };
+        assert!(PrefixMap::new().is_empty());
+        assert_eq!(PrefixMap::new().apply("sub/h.h"), "sub/h.h");
+
+        let one = map(&[("sub", "SUB")]);
+        assert_eq!(one.apply("sub/h.h"), "SUB/h.h");
+        assert_eq!(one.apply("a.c"), "a.c", "a path the mapping does not start");
+        assert_eq!(one.apply("x/sub/h.h"), "x/sub/h.h", "the middle of a path is not the front");
+
+        // Characters rather than directories, which is what gcc compares and is worth a test of
+        // its own because it is the part that looks like it ought to be otherwise.
+        assert_eq!(map(&[("s", "B")]).apply("sub/h.h"), "Bub/h.h");
+        assert_eq!(map(&[("sub/", "SUB/")]).apply("sub/h.h"), "SUB/h.h");
+        assert_eq!(map(&[("sub", "")]).apply("sub/h.h"), "/h.h", "mapping to nothing");
+        assert_eq!(map(&[("", "PRE")]).apply("a.c"), "PREa.c", "an empty old is in front of all");
+
+        // The last one that matches wins, whether or not the two ask about the same prefix, which
+        // is what a project wide mapping plus a narrower one for a directory relies on.
+        assert_eq!(map(&[("sub", "ONE"), ("sub", "TWO")]).apply("sub/h.h"), "TWO/h.h");
+        assert_eq!(map(&[("sub", "A"), ("s", "B")]).apply("sub/h.h"), "Bub/h.h");
+        assert_eq!(map(&[("s", "B"), ("sub", "A")]).apply("sub/h.h"), "A/h.h");
+        assert_eq!(map(&[("nope", "X"), ("sub", "A")]).apply("sub/h.h"), "A/h.h");
+    }
+
+    #[test]
+    fn the_argument_is_split_at_the_last_equals_sign() {
+        assert_eq!(PrefixMap::split("old=new"), Some(("old", "new")));
+        assert_eq!(PrefixMap::split("=new"), Some(("", "new")), "an empty old is allowed");
+        assert_eq!(PrefixMap::split("old="), Some(("old", "")), "and so is an empty new");
+        // The last rather than the first, so a directory whose name has an `=` in it can be
+        // mapped and a replacement whose name has one cannot. That is gcc's choice of which of
+        // the two to make possible, and it is the right way round.
+        assert_eq!(PrefixMap::split("/home/a=b=/src"), Some(("/home/a=b", "/src")));
+        assert_eq!(PrefixMap::split("nope"), None);
     }
 
     #[test]

@@ -46,8 +46,8 @@ use rucc_codegen::coverage::{self, Fired};
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Control, Dumps, EmitKind, Hook, Options, Pic, Preinclude, Protector, SaveTemps, Session, Std,
-    Wrapping, runtime,
+    Control, Dumps, EmitKind, Hook, Options, Pic, PrefixMap, Preinclude, Protector, SaveTemps,
+    Session, Std, Wrapping, runtime,
 };
 use rucc_target::Triple;
 
@@ -122,6 +122,22 @@ fn err(message: impl Into<String>) -> CliError {
     CliError { message: message.into() }
 }
 
+/// The two halves of one prefix mapping flag's argument, where `flag` includes its trailing `=`.
+///
+/// The split is at the last `=` in what follows the flag, not the first, which is gcc's rule and
+/// the only one that lets a directory whose name contains an `=` be the old half. It also means
+/// `-fmacro-prefix-map=a=b=c` rewrites `a=b` to `c` rather than `a` to `b=c`, which looks like a
+/// trap until you notice the alternative traps the far more common case.
+fn rewrite<'a>(arg: &'a str, flag: &str) -> Result<(&'a str, &'a str), CliError> {
+    let rest = &arg[flag.len()..];
+    PrefixMap::split(rest).ok_or_else(|| {
+        let flag = flag.trim_end_matches('=');
+        err(format!(
+            "`{rest}` is not a rewrite for `{flag}`, which is an old prefix, an `=` and a new one"
+        ))
+    })
+}
+
 /// A question the command line asked instead of asking for a compilation.
 ///
 /// These are answered after the loop rather than where they are read, because every one of them
@@ -194,6 +210,8 @@ options:
   -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
   -ffp-contract=<how>    fuse a multiply and an addition: fast, on or off
   -fexcess-precision=<how>, -f[no-]rounding-math, -f[no-]trapping-math   what it does anyway
+  -ffile-prefix-map=<old>=<new>   rewrite that front of every path we put in the output
+  -fmacro-prefix-map= -fdebug-prefix-map= -fprofile-prefix-map=   the same, one output each
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -839,6 +857,32 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         "`{how}` is not an excess precision, which is 16, fast or standard"
                     )));
                 }
+            }
+            // Which front of a path is rewritten before it reaches the output, which is how a
+            // build gets the same bytes out of two different directories. The four spellings are
+            // one flag each into three lists, and `-ffile-prefix-map=` is the three of them at
+            // once. Only the macro list does anything today, because `__FILE__` is the only place
+            // a path reaches the output: there is no DWARF and no profile data yet, so the other
+            // two are recorded for the work that will read them. The argument splits at the last
+            // `=` rather than the first, which is gcc's rule and is what lets a directory with an
+            // `=` in its name be the old half.
+            _ if arg.starts_with("-fmacro-prefix-map=") => {
+                let (old, new) = rewrite(arg, "-fmacro-prefix-map=")?;
+                opts.prefix_map.macros.push(old, new);
+            }
+            _ if arg.starts_with("-fdebug-prefix-map=") => {
+                let (old, new) = rewrite(arg, "-fdebug-prefix-map=")?;
+                opts.prefix_map.debug.push(old, new);
+            }
+            _ if arg.starts_with("-fprofile-prefix-map=") => {
+                let (old, new) = rewrite(arg, "-fprofile-prefix-map=")?;
+                opts.prefix_map.profile.push(old, new);
+            }
+            _ if arg.starts_with("-ffile-prefix-map=") => {
+                let (old, new) = rewrite(arg, "-ffile-prefix-map=")?;
+                opts.prefix_map.macros.push(old, new);
+                opts.prefix_map.debug.push(old, new);
+                opts.prefix_map.profile.push(old, new);
             }
             // What every name gets when nothing in the source said, which the attribute in the
             // source overrides rather than the other way round. Before the optimizer's `-f`
@@ -2766,6 +2810,50 @@ mod tests {
         assert!(failed.to_string().contains("is not an excess precision"), "{failed}");
     }
 
+    /// The four prefix mapping flags, which are what a distribution passes to get the same bytes
+    /// out of `/build/pkg-1.2` and out of `/home/someone/pkg-1.2`. Three lists rather than one
+    /// because gcc has three, and `-ffile-prefix-map=` is the three of them at once.
+    #[test]
+    fn a_prefix_mapping_flag_goes_on_the_list_its_spelling_names() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.prefix_map.macros.is_empty(), "nothing is rewritten unless it is asked for");
+        assert!(opts.prefix_map.debug.is_empty(), "nor here");
+        assert!(opts.prefix_map.profile.is_empty(), "nor here");
+
+        let (opts, _) = compile(&["-c", "-fmacro-prefix-map=/build=.", "a.c"]);
+        assert_eq!(opts.prefix_map.macros.apply("/build/a.c"), "./a.c", "the one it names");
+        assert!(opts.prefix_map.debug.is_empty(), "and not the two it does not");
+
+        let (opts, _) = compile(&["-c", "-fdebug-prefix-map=/build=.", "a.c"]);
+        assert_eq!(opts.prefix_map.debug.apply("/build/a.c"), "./a.c", "the one it names");
+        assert!(opts.prefix_map.macros.is_empty(), "and not the two it does not");
+
+        let (opts, _) = compile(&["-c", "-fprofile-prefix-map=/build=.", "a.c"]);
+        assert_eq!(opts.prefix_map.profile.apply("/build/a.c"), "./a.c", "the one it names");
+        assert!(opts.prefix_map.macros.is_empty(), "and not the two it does not");
+
+        let (opts, _) = compile(&["-c", "-ffile-prefix-map=/build=.", "a.c"]);
+        for list in [&opts.prefix_map.macros, &opts.prefix_map.debug, &opts.prefix_map.profile] {
+            assert_eq!(list.apply("/build/a.c"), "./a.c", "all three at once");
+        }
+
+        // Every mention is kept and the last one that matches wins, unlike the flags above whose
+        // last mention replaces the earlier ones. A build writes one of these per source root and
+        // expects all of them to be in force, which is the whole point of a list.
+        let (opts, _) =
+            compile(&["-c", "-ffile-prefix-map=/a=one", "-ffile-prefix-map=/b=two", "a.c"]);
+        assert_eq!(opts.prefix_map.macros.apply("/a/x.c"), "one/x.c", "the earlier one still acts");
+        assert_eq!(opts.prefix_map.macros.apply("/b/x.c"), "two/x.c", "and so does the later one");
+
+        // An argument with no `=` is refused rather than ignored, because a build whose paths were
+        // meant to be rewritten and were not is one that ships the build directory's name and says
+        // nothing about it. gcc refuses the same thing.
+        for bad in ["-fmacro-prefix-map=nope", "-ffile-prefix-map=", "-fdebug-prefix-map=/build"] {
+            let failed = parse_args(&args(&[bad, "a.c"])).expect_err("refused");
+            assert!(failed.to_string().contains("is not a rewrite for"), "{bad}: {failed}");
+        }
+    }
+
     /// `-ffunction-sections` and `-fdata-sections`, which are what make `--gc-sections` able to
     /// drop anything: a linker can leave out a section nothing reaches and cannot leave out half of
     /// one. A kernel and an embedded image are both linked that way.
@@ -3543,11 +3631,13 @@ mod tests {
         // reading this list will see them. The one it went up by last is the floating point group,
         // which is two lines rather than one because the first of them is a choice this compiler
         // records and the rest are claims about what it does anyway, and putting a real setting on
-        // the same line as three flags that change nothing would be misleading about both.
         // the same line as three flags that change nothing would be misleading about both. The one
         // it went up by last is the flag that says a write has to stay inside the member it names,
         // which is a setting rather than a claim and so cannot share the line above it, that being
-        // the one that picks a tier.
-        assert!(USAGE.lines().count() < 60, "usage text has grown past one screen");
+        // the one that picks a tier. The two it went up by last are the prefix mapping family,
+        // which is four flags whose whole job is to keep a build's output the same from two
+        // different directories, and which a person chasing a reproducible build comes here
+        // looking for by name.
+        assert!(USAGE.lines().count() < 62, "usage text has grown past one screen");
     }
 }
