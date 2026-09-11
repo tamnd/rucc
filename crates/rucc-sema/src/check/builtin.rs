@@ -45,12 +45,13 @@
 use rucc_base::Symbol;
 use rucc_diag::Span;
 use rucc_gnu::{Kind, Status};
-use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, int_width};
+use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, TypeKind, int_width};
 
 use crate::check::Checker;
 use crate::decl::{
     Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, StorageDuration,
 };
+use crate::expr::{ExprId, ExprKind};
 use crate::scope::Binding;
 
 mod abs;
@@ -259,6 +260,55 @@ impl Checker<'_> {
         let kinds = [IntKind::UChar, IntKind::UShort, IntKind::UInt, IntKind::ULong];
         let kind = kinds.into_iter().find(|&kind| int_width(kind, self.cx.target) == bits);
         self.types.int(kind.unwrap_or(IntKind::ULongLong))
+    }
+
+    /// Whether what is being called is a declaration of the library function a plain name is,
+    /// rather than something else the program gave the name to.
+    ///
+    /// The families whose plain names the compiler is allowed to know all have to ask this, and
+    /// they all have to ask it the same way, so it is asked once here and the caller says which
+    /// type it expects. `check/builtin/abs.rs` asks it about `abs` and `check/builtin/sign.rs`
+    /// asks it about `fabs`.
+    ///
+    /// Three questions. It has to be a function and not a pointer some object holds, because a
+    /// call through a pointer reaches whatever the pointer holds and no declaration decides that.
+    /// It has to have external linkage, because a `static` one is the program's own function and
+    /// the name outside the file is somebody else's problem. And its type has to be the one the
+    /// library gives the name, spelled with a prototype, because a program that declared `long
+    /// long llabs()` has not said what it takes and one that declared `int llabs(int)` has said
+    /// something else.
+    pub(in crate::check) fn callee_is_the_library_one(
+        &self,
+        callee: ExprId,
+        ret: TypeId,
+        params: &[TypeId],
+    ) -> bool {
+        let mut node = callee;
+        // The callee arrives having decayed from a function to a pointer to one, which is a
+        // conversion the language performed rather than anything the program wrote.
+        while let ExprKind::Convert { operand, .. } = self.tast[node].kind {
+            node = operand;
+        }
+        let ExprKind::Decl(decl) = self.tast[node].kind else {
+            return false;
+        };
+        let decl = &self.tast[decl];
+        if decl.kind != DeclKind::Function || decl.linkage != Linkage::External {
+            return false;
+        }
+        let TypeKind::Function(id) = self.types.kind(self.types.canonical(decl.ty)) else {
+            return false;
+        };
+        let signature = self.types.signature(id);
+        signature.prototyped
+            && !signature.variadic
+            && self.types.canonical(signature.ret) == ret
+            && signature.params.len() == params.len()
+            && signature
+                .params
+                .iter()
+                .zip(params)
+                .all(|(&got, &want)| self.types.canonical(got) == want)
     }
 }
 

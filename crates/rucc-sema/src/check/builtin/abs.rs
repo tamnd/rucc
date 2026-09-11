@@ -35,10 +35,9 @@
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
-use rucc_types::{IntKind, TypeKind};
+use rucc_types::IntKind;
 
 use crate::check::Checker;
-use crate::decl::{DeclKind, Linkage};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 
 /// One name of the family, and the type the library gives it.
@@ -87,51 +86,15 @@ impl Checker<'_> {
             .iter()
             .find(|row| row.name == spelled || row.builtin == spelled)
             .filter(|_| self.cx.means_the_library(spelled))?;
-        if !self.callee_is_the_library_one(callee, row) {
+        let ty = self.types.int(row.at);
+        if !self.callee_is_the_library_one(callee, ty, &[ty]) {
             return None;
         }
         let &operand = args.first()?;
         if self.is_poisoned(operand) {
             return Some(self.poison(span));
         }
-        let ty = self.types.int(row.at);
         Some(self.tast.expr(Expr::new(ExprKind::Abs { operand }, ty, Category::Rvalue), span))
-    }
-
-    /// Whether what is being called is a declaration of the library function this name is, rather
-    /// than something else the program gave the name to.
-    ///
-    /// Three questions. It has to be a function and not a pointer some object holds, because a
-    /// call through a pointer reaches whatever the pointer holds and no declaration decides that.
-    /// It has to have external linkage, because a `static` one is the program's own function and
-    /// the name outside the file is somebody else's problem. And its type has to be the one the
-    /// library gives the name, spelled with a prototype, because a program that declared `long
-    /// long llabs()` has not said what it takes and one that declared `int llabs(int)` has said
-    /// something else.
-    fn callee_is_the_library_one(&self, callee: ExprId, row: Row) -> bool {
-        let mut node = callee;
-        // The callee arrives having decayed from a function to a pointer to one, which is a
-        // conversion the language performed rather than anything the program wrote.
-        while let ExprKind::Convert { operand, .. } = self.tast[node].kind {
-            node = operand;
-        }
-        let ExprKind::Decl(decl) = self.tast[node].kind else {
-            return false;
-        };
-        let decl = &self.tast[decl];
-        if decl.kind != DeclKind::Function || decl.linkage != Linkage::External {
-            return false;
-        }
-        let TypeKind::Function(id) = self.types.kind(self.types.canonical(decl.ty)) else {
-            return false;
-        };
-        let signature = self.types.signature(id);
-        let wanted = self.types.int(row.at);
-        signature.prototyped
-            && !signature.variadic
-            && self.types.canonical(signature.ret) == wanted
-            && signature.params.len() == 1
-            && self.types.canonical(signature.params[0]) == wanted
     }
 }
 
