@@ -285,6 +285,13 @@ pub fn compile_recording(
     // Before the width legalisation and everything after it, because what an ordered access
     // becomes here is a plain one and every pass below is written about a plain one by name.
     expand::orderings(source, machine.conv.word);
+    // Above the splitting rather than below it, because an overflow check is the one instruction
+    // whose result is two things and the splitting has no answer for that, while the arithmetic it
+    // becomes here is adds, multiplies and comparisons the splitting knows already. Nothing is lost
+    // by running it this early: the widths it is written for are the widths the machine has, and
+    // the legalisation below never touches one of these anyway, so a check at a width neither pass
+    // is written for is refused by name either way round.
+    expand::overflows(source);
     // Ahead of the width legalisation and not part of it, because the two go in opposite
     // directions: an integer of forty bits becomes one of sixty four down there, and one of a
     // hundred and twenty eight becomes two of sixty four here. Doing this first means a function
@@ -296,7 +303,6 @@ pub fn compile_recording(
     widths::integers(source);
     expand::bytes(source);
     expand::counts(source);
-    expand::overflows(source);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     expand::rounds(source, machine.conv.stack_align);
