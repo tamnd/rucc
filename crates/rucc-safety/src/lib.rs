@@ -49,9 +49,18 @@
 //! nothing wrote after the structure moves. That is the padding rule of
 //! `spec/safe-memory/09-type-init-and-races.md` section 9.3, and it needs no special case here
 //! because a store through a member is a store of the member's width and a structure written whole
-//! is a copy of the whole width, so the rule falls out of what the front end already lowered. The
-//! question a read asks is not in yet, for the reason the type plane's was held back until its
-//! writes were all in.
+//! is a copy of the whole width, so the rule falls out of what the front end already lowered. Every
+//! read now asks whether anything ever wrote the bytes it is about to read, which is document 03's
+//! Y6, and the writes went in first for the reason the type plane's did.
+//!
+//! The two questions a read asks come apart in one place. A read the front end named no type for
+//! asks the type plane nothing, because the question there is which type the bytes hold, and it
+//! asks the init plane the same thing every other read does, because the question there is about
+//! the bytes rather than about the access. What no `load` in any program asks about is padding: a
+//! read compiled into a `load` reads a member and a member is never padding, so the reads that
+//! cover padding are `memcmp` of two structures, hashing one and handing one to `write`, every one
+//! of which is a call into the movement group of [`mod@wrap`]. That is where
+//! `-fsafety-init=padding` will have something to select and it is why the flag is not here yet.
 //!
 //! The race check is not here, because the epoch plane is not written at all and a check against a
 //! plane nobody maintains would either report on every access or on none. That is S6. Neither are
@@ -136,6 +145,12 @@ pub struct Counts {
     /// records into the init plane whatever it was storing through, because what the init plane
     /// holds is whether anything was stored at all.
     pub wrote: usize,
+    /// Reads that asked the plane whether anything ever wrote the bytes they are about to read.
+    ///
+    /// The same set as the reads in `checked`, and unlike `asked` it does not thin: the question is
+    /// whether the bytes hold anything at all, which is a question about every read whatever type
+    /// the front end did or did not name for it.
+    pub filled: usize,
     /// Copies that carried whether the bytes they read held anything over to the bytes they wrote.
     ///
     /// The same set as `carried`, and counted beside it for the reason `wrote` is counted beside
@@ -155,6 +170,7 @@ impl Counts {
         self.carried += other.carried;
         self.asked += other.asked;
         self.wrote += other.wrote;
+        self.filled += other.filled;
         self.moved += other.moved;
     }
 }
@@ -223,8 +239,17 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
                         if judge(func, plane, inst, pointer) {
                             counts.judged += 1;
                         }
-                    } else if ask(func, plane, inst, pointer, capability) {
-                        counts.asked += 1;
+                    } else {
+                        // Both go in front of the read, and the one that goes in second is the one
+                        // that lands nearer to it, so this order prints the type question and then
+                        // the init question. Either order is correct: neither reads what the other
+                        // wrote and the read happens after both.
+                        if ask(func, plane, inst, pointer, capability) {
+                            counts.asked += 1;
+                        }
+                        if filled(func, inst, pointer, capability) {
+                            counts.filled += 1;
+                        }
                     }
                 }
                 None => counts.skipped += 1,
@@ -483,6 +508,60 @@ fn wrote(func: &mut Func, store: Inst, pointer: Value) -> bool {
     true
 }
 
+/// Puts a `check_init` in front of one read, asking whether anything ever wrote the bytes it is
+/// about to read.
+///
+/// Document 03's Y6, and the class MSan exists for. The two writes are in, a store recording that
+/// the bytes it wrote hold something and a copy carrying whether the bytes it read held anything,
+/// so the plane now says something true about every byte a program wrote and this is the question
+/// those writes were recorded for.
+///
+/// # Why every read and not only the ones that named a type
+///
+/// [`ask`] passes over a read the front end named no type for, because a question about which type
+/// bytes hold has nothing to ask when the access names none. This one has no such case: the plane
+/// holds one bit per byte and the bit says whether anything was ever stored there, which is a fact
+/// about the bytes and not about the access, so a read of an aggregate by address asks it just as a
+/// read of an `int` does.
+///
+/// # Padding
+///
+/// It does not come up here and that is worth writing down, because section 9.3 is where the
+/// padding rule lives and this is the check the rule is about. A read compiled into a `load` reads
+/// a member, and a member is never padding, so no `load` in any program covers a byte a
+/// member-by-member fill left alone. The reads that do cover padding are `memcmp` of two
+/// structures, hashing one, and handing one to `write`, and every one of those is a call into the
+/// movement group of `crate::wrap` rather than a `load`. That is where `-fsafety-init=padding` will
+/// have something to select, and it is why the flag is not here.
+///
+/// # Why a whole width and not a byte
+///
+/// The payload's size, the same one [`ask`] uses, so a read that straddles the end of what was
+/// written is refused on the first byte nothing wrote rather than on the byte the address names.
+/// A read of four bytes where two were written is a read of memory that was never written, and
+/// reporting it at the access is the only place a report means anything.
+fn filled(func: &mut Func, read: Inst, pointer: Value, capability: Option<Value>) -> bool {
+    let Some(capability) = capability else { return false };
+    let Extra::Mem(at) = func[read].extra else { return false };
+    let mut info = func[at];
+    info.size = covered(func, read, info.size);
+    // A read whose width nothing states reads no bytes anybody can name, as in [`ask`].
+    if info.size == 0 {
+        return false;
+    }
+    // The plane holds no types, so whatever the access named is not a thing this question is in
+    // terms of, and carrying it would suggest the check compares against it.
+    info.tbaa = None;
+
+    let span = func.span(read);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckInit) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, read);
+    true
+}
+
 /// Puts a `meta_init_copy` immediately after one copy, carrying whether its source held anything
 /// over to its destination.
 ///
@@ -716,7 +795,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 2, live: 2, judged: 1, wrote: 1, ..Counts::default() }
+            Counts { checked: 2, live: 2, judged: 1, wrote: 1, filled: 1, ..Counts::default() }
         );
 
         assert_eq!(
@@ -729,6 +808,7 @@ mod tests {
              %1 = cap_of %0\n    \
              check_bounds %1, %0, size 4, align 4\n    \
              check_live %1, %0\n    \
+             check_init %1, %0, size 4, align 4\n    \
              %2 = load.i32 %0, size 4, align 4\n    \
              %3 = cap_of %0\n    \
              check_bounds %3, %0, size 4, align 4\n    \
@@ -989,6 +1069,73 @@ mod tests {
     }
 
     #[test]
+    fn a_read_asks_whether_anything_ever_wrote_the_bytes_it_is_about_to_read() {
+        // Document 03's Y6. The question carries the access's width and no type, because the plane
+        // holds one bit per byte and the bit says whether anything was stored there at all.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "ask.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane).filled, 1);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_init %1, %0, size 4, align 4\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_front_end_named_no_type_for_still_asks_the_init_plane() {
+        // The one place the two questions a read asks come apart. A read with no type on it has
+        // nothing to ask the type plane, because the question there is which type the bytes hold,
+        // and it has the same thing to ask the init plane as any other read, because the question
+        // there is about the bytes rather than about the access.
+        let mut names = Interner::new();
+        let (_module, plane) = planed(&mut names, "untyped.c");
+        let mut func = reading(&mut names, None);
+
+        let counts = insert(&mut func, &plane);
+        assert_eq!(counts.asked, 0);
+        assert_eq!(counts.filled, 1);
+    }
+
+    #[test]
+    fn a_store_asks_the_init_plane_nothing() {
+        // A store writes the bytes it is about to write, so whether anything wrote them before is
+        // not a question about it. Asking would refuse the first write to every fresh instance,
+        // which is every program.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "store.c");
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane).filled, 0);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_init"), "{printed}");
+    }
+
+    #[test]
     fn a_read_tells_the_init_plane_nothing() {
         // A read is a question and not a judgement. Whether the bytes it read hold anything is
         // what the plane already says, and a read that wrote the plane would make every read of
@@ -1219,7 +1366,7 @@ mod tests {
 
         assert_eq!(
             run(&mut module),
-            Counts { checked: 4, live: 4, judged: 2, wrote: 2, ..Counts::default() }
+            Counts { checked: 4, live: 4, judged: 2, wrote: 2, filled: 2, ..Counts::default() }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");

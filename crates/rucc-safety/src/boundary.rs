@@ -27,6 +27,15 @@
 //! the one a reviewer should read first, because it is how much of a program the boundary is not
 //! covering.
 //!
+//! # What a pointer leaving does to the init plane
+//!
+//! There is a third thing at the boundary and it is not a crossing to be counted. A pointer handed
+//! to a function this build did not instrument is storage that function may have written, and none
+//! of those writes are reported, so the init plane of `spec/safe-memory/09-type-init-and-races.md`
+//! would go on saying nobody had touched it. That is a refusal of a correct program, which is the
+//! one thing section 10.1 will not trade for anything, so every pointer argument of a call that
+//! leaves gets a call to `__rucc_meta_init_handed` after it and the plane stops claiming to know.
+//!
 //! # Why the capability is thrown away
 //!
 //! Because there is nowhere to put it. A capability is four words and the aux plane that lets a
@@ -68,6 +77,9 @@ use rucc_ir::{
 /// The runtime symbol a crossing is spelled as.
 pub const WITNESS: &str = "__rucc_cap_witness";
 
+/// The runtime symbol a pointer handed out of the build is spelled as.
+pub const HANDED: &str = "__rucc_meta_init_handed";
+
 /// How many places in a module a pointer crosses the boundary.
 ///
 /// Two numbers rather than one, because they are different holes. A pointer arriving is a function
@@ -97,6 +109,7 @@ impl Sites {
 /// wrote.
 pub fn witness(module: &mut Module, names: &mut Interner) -> Sites {
     let callee = names.intern(WITNESS);
+    let handed = names.intern(HANDED);
     let outside = reachable(module);
     let defined: Vec<Symbol> = module
         .funcs()
@@ -114,6 +127,7 @@ pub fn witness(module: &mut Module, names: &mut Interner) -> Sites {
             sites.entered += entering(&mut module[id], callee);
         }
         sites.returned += returning(&mut module[id], names, callee, &defined);
+        handing(&mut module[id], names, handed, &defined);
     }
     sites
 }
@@ -210,6 +224,49 @@ fn returning(func: &mut Func, names: &Interner, callee: Symbol, defined: &[Symbo
         count += 1;
     }
     count
+}
+
+/// Tells the init plane about every pointer this function hands to code outside the build.
+///
+/// The same question [`returning`] asks, from the other end of the call. A pointer that leaves is a
+/// pointer whoever received it may have written through, and none of those writes are reported back
+/// here, so an instance a library filled entirely would look to the plane like storage nobody ever
+/// touched and the next read of it would be refused. `crate::check::handed` in the runtime is the
+/// other half of this, and it says what the answer costs.
+///
+/// After the call rather than before it, because before it the callee has not written anything and
+/// the whole point is what it did while nothing here was looking. A call through a pointer is left
+/// alone for the reason its result is, and a tail call because there is nowhere after it to put
+/// anything.
+///
+/// Not counted in [`Sites`]. A crossing there is a place a capability could not be carried, and
+/// this is a place a plane could not be maintained, so adding these to that number would be adding
+/// up two different things.
+fn handing(func: &mut Func, names: &Interner, callee: Symbol, defined: &[Symbol]) {
+    let insts: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+
+    for inst in insts {
+        if func[inst].opcode != Opcode::Call {
+            continue;
+        }
+        let Extra::Call(at) = func[inst].extra else { continue };
+        match func[at].callee {
+            Some(name) if crosses(name, names, defined) => {}
+            _ => continue,
+        }
+        let args: Vec<Value> = func[func[inst].args]
+            .iter()
+            .copied()
+            .filter(|&value| func[value].ty.is_ptr())
+            .collect();
+        let mut after = inst;
+        for arg in args {
+            let call = crossing(func, callee, arg, inst);
+            func.insert_after(call, after);
+            after = call;
+        }
+    }
 }
 
 /// One call to the runtime, carrying the pointer that crossed.
@@ -365,6 +422,79 @@ mod tests {
         module.add_func(func);
 
         assert_eq!(witness(&mut module, &mut names), Sites::default());
+    }
+
+    /// A function that hands a pointer of its own and a length to `name`.
+    fn handing_to(names: &mut Interner, name: &str) -> Func {
+        let mut func = Func::new(names.intern("run"), Signature::new().with_params(&[Type::PTR]));
+        func.linkage = Linkage::Internal;
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let signature =
+            func.add_signature(Signature::new().with_params(&[Type::PTR, Type::int(64)]));
+        let varargs = func.push_abis(&[]);
+        let callee = names.intern(name);
+        let info = func.add_call(CallInfo { callee: Some(callee), signature, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let len = b.iconst(Type::int(64), 64);
+        let args = b.func().push_values(&[p, len]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_pointer_handed_to_a_library_is_storage_the_init_plane_stops_claiming_to_know_about() {
+        // The library may have filled every byte of it and nothing said so, and a plane that goes
+        // on calling that storage unwritten refuses the read that comes next.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("one.c"), &target());
+        module.add_func(handing_to(&mut names, "notes_fill"));
+
+        assert_eq!(witness(&mut module, &mut names), Sites::default());
+        let id = module.funcs().next().expect("the function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @run(ptr), linkage(internal) {\n\
+             block0(%0: ptr):\n    \
+             %1 = iconst.i64 64\n    \
+             call @notes_fill(%0, %1) : (ptr, i64)\n    \
+             call @__rucc_meta_init_handed(%0) : (ptr)\n    \
+             return\n\
+             }\n"
+        );
+        if let Err(errors) = verify(&module, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_pointer_handed_to_a_function_this_build_compiled_is_left_alone() {
+        // It is instrumented, so whatever it writes it records, and saying otherwise here would
+        // throw away every uninitialized read inside a program made of its own functions.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("one.c"), &target());
+        module.add_func(taking(&mut names, "notes_fill", Linkage::Internal));
+        module.add_func(handing_to(&mut names, "notes_fill"));
+
+        assert_eq!(witness(&mut module, &mut names), Sites::default());
+        let id = module.funcs().nth(1).expect("the caller");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(!printed.contains("__rucc_meta_init_handed"), "{printed}");
+    }
+
+    #[test]
+    fn a_wrapper_this_build_put_there_is_not_a_pointer_leaving() {
+        // `memcpy` under `-fsafety` is a call to a wrapper that judges both of its ranges, so the
+        // plane heard about it and forgetting what it just recorded would undo the wrapper.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("one.c"), &target());
+        module.add_func(handing_to(&mut names, "__rucc_wrap_memcpy"));
+
+        assert_eq!(witness(&mut module, &mut names), Sites::default());
+        let id = module.funcs().next().expect("the function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(!printed.contains("__rucc_meta_init_handed"), "{printed}");
     }
 
     #[test]

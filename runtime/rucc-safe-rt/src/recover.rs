@@ -209,6 +209,24 @@ pub fn argument(carried: Cap, addr: *const c_void) -> Cap {
     if carried.is_bottom() { recover(addr) } else { carried }
 }
 
+/// The instance `addr` landed in, as a base and an extent, when the planes know of one.
+///
+/// [`recover`]'s bounds without the capability around them and without the tally, for a caller that
+/// wants to say something about a whole instance rather than about the pointer into it.
+/// [`crate::check::handed`] is the one there is, and what it says is that storage handed to code
+/// this build did not compile may have been written by it.
+///
+/// Nothing, rather than the region's own bounds, when the address is in an arena whose allocator
+/// said nothing or on storage nobody owns. Those are the two cases where a run is not an instance,
+/// and answering with one would be the assumption section 10.1 forbids.
+#[must_use]
+pub fn extent(region: &Region, addr: usize) -> Option<(usize, usize)> {
+    // SAFETY: the caller established that the region covers this address, which is what reading a
+    // version asks for.
+    let version = unsafe { region.plane.version(addr) };
+    plane::owned(version).then(|| run(region, addr, version))
+}
+
 /// The run of granules around `addr` that `version` owns, as a base and an extent.
 ///
 /// Walked in both directions and stopped at the region's edges, which bounds it at the size of the

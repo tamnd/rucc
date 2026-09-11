@@ -18,7 +18,12 @@ void *memcpy(void *to, const void *from, unsigned long count) {
 int main(void) {
     char *from = malloc(16);
     char *to = malloc(16);
-    from[0] = 7;
+    int i;
+    /* The whole of the source is written, because the copy below reads the whole of it and the row
+       this file is here for is the definition, not an uninitialized read. */
+    for (i = 0; i < 16; i++) {
+        from[i] = 7;
+    }
     memcpy(to, from, 16);
     if (to[0] != 7) {
         return 1;
