@@ -30,6 +30,11 @@
 //! and the loader reads out of the result, which is why a file that says nothing about it turns
 //! the check off for the whole program rather than only for itself.
 //!
+//! [`defines`] says which names a linker can find in what [`write`] wrote, which is what the symbol
+//! index of an archive is built from. It is here rather than worked out by whoever writes the
+//! archive because the index has to agree with the member, and the writer is the only thing that
+//! knows what it put in one.
+//!
 //! What it is given is [`Text`], [`Data`] and the aliases between them, which are here rather than
 //! beside the assembler that fills them in because they are what an object file is made of and
 //! because a writer cannot depend on the thing that produces its input without the layer graph
@@ -46,7 +51,7 @@
 mod elf;
 mod section;
 
-pub use crate::elf::{Error, write};
+pub use crate::elf::{Error, defines, write};
 pub use crate::section::{
     Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Output, Patch, Place, Property, Reference,
     Reloc, Sections, Text, Unwind, Visibility,

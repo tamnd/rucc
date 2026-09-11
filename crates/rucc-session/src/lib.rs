@@ -1266,6 +1266,18 @@ pub enum EmitKind {
     Executable,
     /// An object file, `-c`.
     Object,
+    /// A static library holding the objects of every input, `--emit=archive`.
+    ///
+    /// Not a GCC mode, because GCC has `ar` beside it and we have said we ship a toolchain rather
+    /// than half of one. What needs it first is `cargo xtask builtins`, which has to turn a
+    /// directory of C files into the `librucc_builtins.a` a cross link looks for, for a target
+    /// whose machine may have no `ar` that knows the format.
+    ///
+    /// It is a mode of the compiler rather than a second program because of the symbol index. A
+    /// static link resolves through it, so writing one means knowing what each member defines, and
+    /// the compiler has just finished compiling them. An `ar` would have to read the objects back
+    /// to find out the same thing.
+    Archive,
     /// Assembly text, `-S`.
     Asm,
     /// Preprocessed source, `-E`.
@@ -1299,6 +1311,7 @@ impl EmitKind {
         match self {
             EmitKind::Executable => "exe",
             EmitKind::Object => "obj",
+            EmitKind::Archive => "archive",
             EmitKind::Asm => "asm",
             EmitKind::Preprocessed => "preprocessed",
             EmitKind::Tast => "tast",
@@ -1317,6 +1330,7 @@ impl FromStr for EmitKind {
         Ok(match s {
             "exe" => EmitKind::Executable,
             "obj" => EmitKind::Object,
+            "archive" => EmitKind::Archive,
             "asm" => EmitKind::Asm,
             "preprocessed" => EmitKind::Preprocessed,
             "tast" => EmitKind::Tast,

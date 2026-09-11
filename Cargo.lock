@@ -164,6 +164,7 @@ name = "rucc-driver"
 version = "0.10.24"
 dependencies = [
  "memmap2",
+ "rucc-archive",
  "rucc-asm",
  "rucc-base",
  "rucc-codegen",
