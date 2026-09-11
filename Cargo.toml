@@ -27,6 +27,7 @@ readme = "README.md"
 # mixed-version build.
 [workspace.dependencies]
 rucc-abi = { version = "=0.10.23", path = "crates/rucc-abi" }
+rucc-archive = { version = "=0.10.23", path = "crates/rucc-archive" }
 rucc-asm = { version = "=0.10.23", path = "crates/rucc-asm" }
 rucc-ast = { version = "=0.10.23", path = "crates/rucc-ast" }
 rucc-base = { version = "=0.10.23", path = "crates/rucc-base" }

@@ -76,7 +76,7 @@ Reach. The Rust path needs a Rust target for every row of `spec/cross-compile/04
 
 Size. The staticlib rustc produces carries Rust's own `compiler_builtins` along with it. `cargo xtask builtins --target x86_64-unknown-linux-gnu` writes 4.5 MB today, for a crate whose whole content is `memcpy`, `memmove`, `memset` and `memcmp`, and tamnd/rucc#912 measured 4.6 MB for `x86_64-unknown-linux-musl`. One target's archive is therefore about half of the 10 MB that `spec/cross-compile/13-distribution.md` section 13.1 budgets for every tier-1 and tier-2 archive together, before any of the routines that section asks for are written.
 
-The Rust crate stays where it is and keeps its tests, as the reference implementation the C is differentially tested against, which is the reference the paragraph above asks for and never named. What the decision costs is the routines written in C and an archive writer for the objects rucc emits, which is tamnd/rucc#991, and `rucc-stub` already writes a COFF import library with a symbol index in it, so the machinery for the second is next door.
+The Rust crate stays where it is and keeps its tests, as the reference implementation the C is differentially tested against, which is the reference the paragraph above asks for and never named. What the decision costs is the routines written in C and an archive writer for the objects rucc emits, which is tamnd/rucc#991. The second of those is done: `rucc-archive` writes the container and the symbol index for both the System V flavour and Microsoft's, deterministically in the sense §13.6 asks for, and `rucc-stub` writes its import libraries through it rather than through a copy of its own.
 
 `-fno-builtins-lib` suppresses linking it, for people who want libgcc.
 

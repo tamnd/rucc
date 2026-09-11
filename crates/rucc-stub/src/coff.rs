@@ -193,7 +193,7 @@ pub fn write(module: &Module, target: TargetTuple) -> Result<Vec<u8>, Error> {
         }
     }
 
-    Ok(archive(&dll, &members))
+    archive(&dll, members)
 }
 
 /// One archive member: the bytes, and the names the linker index has to point at it.
@@ -634,151 +634,21 @@ fn strings(names: &[&str]) -> Vec<u8> {
 
 /// The `ar` archive, with the two symbol indexes a Windows linker reads.
 ///
-/// The first is the one `ar` has always had, with its counts and offsets big-endian whatever the
-/// machine is, and its names in member order. The second is Microsoft's, little-endian, with the
-/// names sorted so a linker can bisect them and an index per name saying which member to pull. Both
-/// are present in every import library either tool produces and a linker may read either, so writing
-/// one and not the other is a file that works until it meets the other linker.
-fn archive(dll: &str, members: &[Member]) -> Vec<u8> {
-    // Every member is named after the DLL, which is what `llvm-dlltool` does. It means a long DLL
-    // name needs the long names member, since 16 bytes is what a header has for a name.
-    let long = dll.len() + 1 > 16;
-    let name = if long { "/0".to_owned() } else { format!("{dll}/") };
-
-    let mut flat: Vec<(&str, usize)> = Vec::new();
-    for (at, member) in members.iter().enumerate() {
-        for define in &member.defines {
-            flat.push((define, at));
-        }
-    }
-
-    let mut first = Vec::new();
-    u32be(&mut first, flat.len() as u32);
-    for _ in &flat {
-        u32be(&mut first, 0);
-    }
-    for (define, _) in &flat {
-        first.extend_from_slice(define.as_bytes());
-        first.push(0);
-    }
-    pad(&mut first, 0);
-
-    let mut sorted: Vec<&(&str, usize)> = flat.iter().collect();
-    sorted.sort_by(|one, two| one.0.as_bytes().cmp(two.0.as_bytes()));
-    let mut second = Vec::new();
-    u32le(&mut second, members.len() as u32);
-    for _ in members {
-        u32le(&mut second, 0);
-    }
-    u32le(&mut second, flat.len() as u32);
-    for (_, at) in &sorted {
-        // One based, and it is an index into the member list rather than an offset.
-        u16le(&mut second, *at as u16 + 1);
-    }
-    for (define, _) in &sorted {
-        second.extend_from_slice(define.as_bytes());
-        second.push(0);
-    }
-    pad(&mut second, 0);
-
-    let names = if long {
-        let mut names = Vec::from(dll.as_bytes());
-        names.push(0);
-        pad(&mut names, b'\n');
-        Some(names)
-    } else {
-        None
-    };
-
-    // Now that every length is known the offsets can be worked out, which is why the two indexes
-    // were built with zeroes in them rather than in one pass.
-    let mut at = 8 + 60 + even(first.len()) + 60 + even(second.len());
-    if let Some(names) = &names {
-        at += 60 + even(names.len());
-    }
-    let mut offsets = Vec::new();
-    for member in members {
-        offsets.push(at as u32);
-        at += 60 + even(member.body.len());
-    }
-
-    for (index, (_, member)) in flat.iter().enumerate() {
-        let to = 4 + 4 * index;
-        first[to..to + 4].copy_from_slice(&offsets[*member].to_be_bytes());
-    }
-    for (index, offset) in offsets.iter().enumerate() {
-        let to = 4 + 4 * index;
-        second[to..to + 4].copy_from_slice(&offset.to_le_bytes());
-    }
-
-    let mut out = Vec::from(&b"!<arch>\n"[..]);
-    member(&mut out, "/", Mode::Zero, &first);
-    member(&mut out, "/", Mode::Zero, &second);
-    if let Some(names) = &names {
-        member(&mut out, "//", Mode::Blank, names);
-    }
-    for body in members {
-        member(&mut out, &name, Mode::Object, &body.body);
-    }
-    out
-}
-
-/// One byte on the end of a linker member, where one is needed to make its length even.
-///
-/// The length it declares is the padded one rather than the archive's own padding to an even
-/// boundary, which is a distinction with no effect on any reader and is what `llvm-dlltool` writes.
-/// The object members are not padded this way and take the archive's `\n` instead.
-///
-/// The byte is a caller's choice because the two kinds of linker member do not agree on it. The two
-/// indexes pad with a zero, which reads as one more empty string, and the long names member pads
-/// with a newline, which is what a reader of that member skips over anyway. Neither choice means
-/// anything to a reader, so the only reason to tell them apart is byte equality with the tool we are
-/// compared against.
-fn pad(member: &mut Vec<u8>, with: u8) {
-    if member.len() % 2 == 1 {
-        member.push(with);
-    }
-}
-
-/// What goes in the four numeric fields of a member header.
-///
-/// Three shapes rather than a number, because the reference writes three: zeroes on the linker
-/// members, blanks on the long names member, and a mode on the objects.
-enum Mode {
-    /// A zero in every field, which the two linker members carry.
-    Zero,
-    /// Nothing at all, which is what the long names member carries.
-    Blank,
-    /// Zero for the time and the owner, and 644 for the mode, which every object carries.
-    Object,
-}
-
-/// One member header and its body, padded to an even length.
-///
-/// Every numeric field is zero, and that is the determinism requirement rather than laziness: a real
-/// timestamp or a real uid would put the machine that built the library into the library. The mode is
-/// the one exception, because both tools write 0 on the linker members and 644 on the objects and the
-/// output is compared against one of them.
-fn member(out: &mut Vec<u8>, name: &str, mode: Mode, body: &[u8]) {
-    let (time, owner, mode) = match mode {
-        Mode::Zero => ("0", "0", "0"),
-        Mode::Blank => ("", "", ""),
-        Mode::Object => ("0", "0", "644"),
-    };
-    let header =
-        format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", name, time, owner, owner, mode, body.len());
-    out.extend_from_slice(header.as_bytes());
-    out.extend_from_slice(body);
-    if body.len() % 2 == 1 {
-        // `\n` rather than a zero, which is what `ar` has always written and what keeps a text
-        // member readable when somebody looks at the file with a pager.
-        out.push(b'\n');
-    }
-}
-
-/// A length rounded up to the even boundary a member starts on.
-fn even(length: usize) -> usize {
-    length + length % 2
+/// The container and both indexes are `rucc-archive`'s, which is the crate that writes them for
+/// every target rather than only for this one. What is left here is the one thing about an import
+/// library that is not true of archives in general: every member is named after the DLL, which is
+/// what `llvm-dlltool` does and which means a long DLL name is stored once and pointed at by all of
+/// them rather than copied per member.
+fn archive(dll: &str, members: Vec<Member>) -> Result<Vec<u8>, Error> {
+    let members: Vec<rucc_archive::Member> = members
+        .into_iter()
+        .map(|one| rucc_archive::Member {
+            name: dll.to_owned(),
+            body: one.body,
+            defines: one.defines,
+        })
+        .collect();
+    rucc_archive::write(rucc_archive::Flavour::Coff, &members).map_err(Error::Archive)
 }
 
 fn u16le(out: &mut Vec<u8>, value: u16) {
@@ -787,10 +657,6 @@ fn u16le(out: &mut Vec<u8>, value: u16) {
 
 fn u32le(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn u32be(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_be_bytes());
 }
 
 /// Why an import library could not be written.
@@ -817,6 +683,9 @@ pub enum Error {
         /// The name.
         name: String,
     },
+    /// The archive itself could not be written, which for an import library means there are more
+    /// exports in it than a COFF symbol index can number.
+    Archive(rucc_archive::Error),
     /// An export is by ordinal only and has no ordinal.
     ///
     /// [`crate::def::read`] refuses this too, so reaching it means a description was assembled in
@@ -848,6 +717,7 @@ impl fmt::Display for Error {
             Error::NameHasNul { name } => {
                 write!(f, "`{name}` contains a zero byte, which a name in an import library cannot")
             }
+            Error::Archive(error) => write!(f, "the import library could not be written: {error}"),
             Error::NoName { name } => write!(
                 f,
                 "`{name}` is imported by ordinal and has no ordinal, so nothing can reach it"
@@ -1271,6 +1141,7 @@ renamed == realname
             Error::NoLibrary,
             Error::NameHasNul { name: "f".to_owned() },
             Error::NoName { name: "f".to_owned() },
+            Error::Archive(rucc_archive::Error::TooManyMembers { members: 70000 }),
         ];
         for error in messages {
             let said = error.to_string();

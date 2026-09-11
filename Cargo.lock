@@ -97,6 +97,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rucc-archive"
+version = "0.10.23"
+
+[[package]]
 name = "rucc-asm"
 version = "0.10.23"
 dependencies = [
@@ -333,6 +337,7 @@ dependencies = [
 name = "rucc-stub"
 version = "0.10.23"
 dependencies = [
+ "rucc-archive",
  "rucc-tuple",
 ]
 

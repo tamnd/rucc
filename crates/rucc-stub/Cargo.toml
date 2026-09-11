@@ -16,9 +16,12 @@ readme.workspace = true
 workspace = true
 
 # Layer rank 1, beside `rucc-abi` and `rucc-sysroot`, which is where
-# `spec/cross-compile/09-libc-stubs.md` section 9.8 puts it. It depends on the tuple and on
-# nothing else, and in particular not on `rucc-object` at rank 9: a stub has no code, no
-# relocations and no sections to lay out around code, so the writer it wants is a much smaller
-# program than a general object writer and sharing one would point the layer graph backwards.
+# `spec/cross-compile/09-libc-stubs.md` section 9.8 puts it. It depends on rank 0 and on nothing
+# else, and in particular not on `rucc-object` at rank 9: a stub has no code, no relocations and no
+# sections to lay out around code, so the writer it wants is a much smaller program than a general
+# object writer and sharing one would point the layer graph backwards.
 [dependencies]
+# The `ar` container and its symbol indexes, at rank 0, so that the import libraries here and the
+# builtins archive the driver writes come out of one writer rather than two.
+rucc-archive.workspace = true
 rucc-tuple.workspace = true
