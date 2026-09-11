@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.21
+
 ### Added
 
 - A `-fsanitize=` that is still asking for a check when the command line ends is refused by name, instead of coming back as an unknown option. This is the one flag family in the specification refused for a reason that is not about the bytes: a flag is taken when ignoring it costs speed and refused when ignoring it changes what is produced, and a sanitizer is neither, because it is a promise that the program is watched while it runs. A build that asked for one and was quietly handed a program with no checks in it gets a test suite that passes for the wrong reason, so the refusal names the sanitizer that was asked for and names `-fsafety=detect`, which is the checking this compiler does have. Which names are names is gcc 16's list plus `alias`, `restrict` and `memory`, which are checks section 7.7 of document 07 promises and gcc has no spelling for, and a name outside the list gets a different message from a name inside it, because a typo and an unimplemented feature are different problems. The answer waits for the end of the command line, so a build whose shared flags ask for a check and whose rule for one file takes it back compiles that file here rather than stopping. The flags that describe what a check does rather than asking for one are taken and dropped, `-fsanitize-recover=`, `-fsanitize-trap=` and `-fsanitize-sections=` among them, and `-fsanitize-coverage=` is refused, because a fuzzer whose coverage callbacks were never generated runs blind for the length of the campaign without anything saying so. tamnd/rucc#489.
