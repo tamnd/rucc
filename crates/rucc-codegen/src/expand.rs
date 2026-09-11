@@ -851,7 +851,19 @@ fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut HashM
 /// This is the expensive one. Six multiplies and a dozen other instructions at sixty four bits,
 /// against one `mul` on a machine whose multiply writes the high half into a second register. That
 /// is most of what #309 is worth and it is what makes the multiply the one to give a rule to first.
-fn high_half(func: &mut Func, inst: Inst, a: Value, b: Value, signed: bool, ty: Type) -> Value {
+///
+/// [`crate::wide`] calls it as well, for the carry out of the low halves of a multiply at a hundred
+/// and twenty eight bits, which is the same question asked at the width below. That pass runs
+/// before this one, so what it writes here is already at a width the machine has and nothing in
+/// this module needs to look at it again.
+pub(crate) fn high_half(
+    func: &mut Func,
+    inst: Inst,
+    a: Value,
+    b: Value,
+    signed: bool,
+    ty: Type,
+) -> Value {
     let width = ty.bits();
     let half = width / 2;
     let shift = ahead_const(func, inst, Imm::int(i128::from(half), ty), ty);

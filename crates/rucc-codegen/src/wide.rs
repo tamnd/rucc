@@ -39,12 +39,10 @@
 //!
 //! # What it does not do yet
 //!
-//! Multiplying, shifting and dividing. A multiply at this width is three multiplies and a run of
-//! adds over the halves, a shift is two shifts and a choice over whether the count reached past the
-//! low half, and a divide is a call into the compiler runtime rather than arithmetic at all. The
-//! first two are the rest of `tamnd/rucc#351` and the third waits on the runtime. A function that
-//! reaches one of them is left alone here and refused by the selector, which is the same answer it
-//! got before this pass existed.
+//! Dividing, which at this width is a call into the compiler runtime rather than arithmetic at all
+//! and waits on the runtime having the four entry points to call. A function that divides one of
+//! these is left alone here and refused by the selector, which is the same answer it got before
+//! this pass existed.
 
 use std::collections::HashMap;
 
@@ -53,6 +51,8 @@ use rucc_ir::{
     MemInfo, Opcode, Param, Signature, Type, Value,
 };
 use rucc_target::{CallRegs, Places, Where};
+
+use crate::expand;
 
 /// The width this pass is about, which is the one width a C program writes that no register holds.
 const WIDE: u32 = 128;
@@ -121,11 +121,10 @@ type Halves = HashMap<Value, (Value, Value)>;
 /// function is left alone, so this list is the pass's own statement of what it has thought about.
 /// Adding to it is adding an arm to [`rewrite`] as well.
 ///
-/// The multiply, the shifts and the divisions are deliberately not here, and the module
-/// documentation says what each of them waits on. A conversion between one of these and a floating
-/// point value is missing for a different reason: the conversion the machine has stops at sixty
-/// four bits, so what is needed there is arithmetic rather than a split, and it belongs beside the
-/// other conversions in [`crate::expand`].
+/// The divisions are deliberately not here, and the module documentation says what they wait on. A
+/// conversion between one of these and a floating point value is missing for a different reason:
+/// the conversion the machine has stops at sixty four bits, so what is needed there is arithmetic
+/// rather than a split, and it belongs beside the other conversions in [`crate::expand`].
 fn understood(opcode: Opcode) -> bool {
     matches!(
         opcode,
@@ -134,6 +133,10 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Store
             | Opcode::Add
             | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Shl
+            | Opcode::LShr
+            | Opcode::AShr
             | Opcode::And
             | Opcode::Or
             | Opcode::Xor
@@ -278,6 +281,10 @@ fn rewrite(func: &mut Func, halves: &mut Halves, forward: &mut HashMap<Value, Va
         Opcode::Load if produces => load(func, halves, inst),
         Opcode::Store if takes => store(func, halves, inst),
         Opcode::Add | Opcode::Sub if produces => carried(func, halves, inst, data.opcode),
+        Opcode::Mul if produces => multiply(func, halves, inst),
+        Opcode::Shl | Opcode::LShr | Opcode::AShr if produces => {
+            shifted(func, halves, inst, data.opcode);
+        }
         Opcode::And | Opcode::Or | Opcode::Xor if produces => {
             bitwise(func, halves, inst, data.opcode);
         }
@@ -361,6 +368,103 @@ fn carried(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
     let carry = ahead(func, inst, Opcode::ZExt, &[carried]);
     let high = ahead(func, inst, opcode, &[a_high, b_high]);
     let high = ahead(func, inst, opcode, &[high, carry]);
+    replace(func, halves, inst, low, high);
+}
+
+/// A multiply, which is long multiplication in base two to the sixty fourth with everything that
+/// lands above the width thrown away.
+///
+/// The low half of the answer is the low halves multiplied together. The high half is what that
+/// multiply carried out of its own top, plus the two cross products, each of which starts at bit
+/// sixty four. The fourth partial product is the two high halves against each other and it starts
+/// at bit one hundred and twenty eight, so the whole of it is above the width and it is never
+/// worked out, which is why a wide multiply is three multiplies and not four.
+///
+/// Nothing here asks whether the operands are signed, because the low hundred and twenty eight bits
+/// of a product are the same bits either way. The sign only matters to the bits that are being
+/// thrown away.
+///
+/// The carry out of the low halves is the high half of a sixty four bit product, which this machine
+/// has an instruction for and this compiler has no way to ask for. [`crate::expand`] already writes
+/// that out as long multiplication one level further down, for the overflow builtins, so this calls
+/// it rather than keeping a second copy of the same arithmetic. It is the expensive part of a wide
+/// multiply by a long way, and `tamnd/rucc#309` is the rule that would make it one instruction for
+/// both callers at once.
+fn multiply(func: &mut Func, halves: &mut Halves, inst: Inst) {
+    let args = func[func[inst].args].to_vec();
+    let [a, b] = args[..] else { return };
+    let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
+        return;
+    };
+    let low = ahead(func, inst, Opcode::Mul, &[a_low, b_low]);
+    let carried = expand::high_half(func, inst, a_low, b_low, false, half());
+    let cross = ahead(func, inst, Opcode::Mul, &[a_low, b_high]);
+    let other = ahead(func, inst, Opcode::Mul, &[a_high, b_low]);
+    let high = ahead(func, inst, Opcode::Add, &[carried, cross]);
+    let high = ahead(func, inst, Opcode::Add, &[high, other]);
+    replace(func, halves, inst, low, high);
+}
+
+/// A shift, as each half shifted by the count with the bits that crossed between them put back, and
+/// a second answer for a count that reached a whole half.
+///
+/// A count below sixty four moves each half by the count, and the bits that left one half are the
+/// ones that arrive in the other. A count of sixty four or more empties one half completely, and
+/// what lands in the other is the first half moved by the count less sixty four. Taking the sixty
+/// four bit off a count in range is the same as subtracting sixty four from it, so both cases shift
+/// by the same number of places and differ only in which value ends up where, which means one shift
+/// each and a choice rather than two of everything. The choice is a `select` and not a branch, for
+/// the reason [`choose`] gives.
+///
+/// The bits that cross move the other way by sixty four less the count. That is a shift of sixty
+/// four places when the count is zero, which is not a distance this width has. Moving one place and
+/// then sixty three less the count is the same distance for every count from one to sixty three,
+/// and for a count of zero it shifts a value whose top bit is already gone all the way down to
+/// nothing, which is the right answer: a half that did not move carries nothing into the other one.
+///
+/// A count of a hundred and twenty eight or more is undefined in C and nothing here goes out of its
+/// way about it, the same as at every other width.
+fn shifted(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
+    let args = func[func[inst].args].to_vec();
+    let [a, b] = args[..] else { return };
+    let (Some(&(a_low, a_high)), Some(&(count, _))) = (halves.get(&a), halves.get(&b)) else {
+        return;
+    };
+    let top = ahead_const(func, inst, i128::from(HALF - 1));
+    let places = ahead(func, inst, Opcode::And, &[count, top]);
+    let back = ahead(func, inst, Opcode::Sub, &[top, places]);
+    let one = ahead_const(func, inst, 1);
+    let zero = ahead_const(func, inst, 0);
+    let bit = ahead_const(func, inst, i128::from(HALF));
+    let reach = ahead(func, inst, Opcode::And, &[count, bit]);
+    let whole = compared(func, inst, IntPred::Ne, reach, zero);
+
+    let (low, high) = if opcode == Opcode::Shl {
+        let moved = ahead(func, inst, Opcode::Shl, &[a_low, places]);
+        let edge = ahead(func, inst, Opcode::LShr, &[a_low, one]);
+        let across = ahead(func, inst, Opcode::LShr, &[edge, back]);
+        let above = ahead(func, inst, Opcode::Shl, &[a_high, places]);
+        let joined = ahead(func, inst, Opcode::Or, &[above, across]);
+        let low = ahead(func, inst, Opcode::Select, &[whole, zero, moved]);
+        let high = ahead(func, inst, Opcode::Select, &[whole, moved, joined]);
+        (low, high)
+    } else {
+        let moved = ahead(func, inst, opcode, &[a_high, places]);
+        let edge = ahead(func, inst, Opcode::Shl, &[a_high, one]);
+        let across = ahead(func, inst, Opcode::Shl, &[edge, back]);
+        let below = ahead(func, inst, Opcode::LShr, &[a_low, places]);
+        let joined = ahead(func, inst, Opcode::Or, &[below, across]);
+        // What is left behind when the whole low half is gone: zeroes for a logical shift, and for
+        // an arithmetic one the sign bit spread over the half it came from.
+        let spent = if opcode == Opcode::AShr {
+            ahead(func, inst, Opcode::AShr, &[a_high, top])
+        } else {
+            zero
+        };
+        let low = ahead(func, inst, Opcode::Select, &[whole, moved, joined]);
+        let high = ahead(func, inst, Opcode::Select, &[whole, spent, moved]);
+        (low, high)
+    };
     replace(func, halves, inst, low, high);
 }
 
@@ -897,17 +1001,97 @@ mod tests {
         assert_eq!(text.matches("block1(").count(), 3, "and both edges pass two: {text}");
     }
 
+    /// A multiply is the low halves, the two cross products, and nothing for the fourth corner.
+    ///
+    /// Three at the top, and four more inside the carry out of the low halves, which is a product
+    /// at half the width again worked out the same way. What the count is really saying is that the
+    /// two high halves are never multiplied together, because the whole of that partial product
+    /// lands above the width.
     #[test]
-    fn a_multiply_leaves_the_function_exactly_as_it_was() {
+    fn a_multiply_is_three_multiplies_and_the_carry_out_of_the_low_ones() {
         let mut names = Interner::new();
         let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
         let mut build = Builder::new(&mut func, entry);
         let product = build.binary(Opcode::Mul, params[0], params[1], Flags::NONE);
         build.ret(&[product]);
-        let before = printed(&func, &mut names);
 
-        assert!(!halves(&mut func, &SYSV), "a multiply at this width is not understood yet");
-        assert_eq!(printed(&func, &mut names), before, "so nothing moved");
+        assert!(halves(&mut func, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+        assert_eq!(text.matches(" = mul ").count(), 7, "three and the carry's four: {text}");
+    }
+
+    /// A shift left moves each half and chooses between the count having crossed a half and not.
+    ///
+    /// Two shifts left, one per half, and the low one does for both cases: a count that reached a
+    /// whole half puts exactly that value in the high half and nothing in the low one, so the only
+    /// thing the far case needs is the shift the near case already did. Two right shifts carry the
+    /// crossing bits, two selects pick a half each, and there is no branch anywhere.
+    #[test]
+    fn a_shift_left_chooses_between_a_count_that_crossed_a_half_and_one_that_did_not() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let moved = build.binary(Opcode::Shl, params[0], params[1], Flags::NONE);
+        build.ret(&[moved]);
+
+        assert!(halves(&mut func, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+        assert_eq!(
+            text.matches(" = shl ").count(),
+            2,
+            "one per half, and the far case reuses one: {text}"
+        );
+        assert_eq!(text.matches(" = select.i64 ").count(), 2, "one choice per half: {text}");
+        assert_eq!(text.matches(" = lshr ").count(), 2, "the crossing bits, in two steps: {text}");
+    }
+
+    /// The bits that cross move one place and then the rest, so a count of zero carries nothing.
+    ///
+    /// Sixty four less a count of zero is sixty four, which is not a distance a sixty four bit shift
+    /// has. One place first and sixty three less the count after is the same distance everywhere the
+    /// question is asked, and for a count of zero it moves a value whose top bit has already gone
+    /// all the way out, which leaves the zero a half that did not move should carry.
+    #[test]
+    fn the_bits_that_cross_move_one_place_and_then_the_rest_of_the_way() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let moved = build.binary(Opcode::LShr, params[0], params[1], Flags::NONE);
+        build.ret(&[moved]);
+
+        assert!(halves(&mut func, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i64 63"), "sixty three is the distance left: {text}");
+        assert!(text.contains("iconst.i64 1"), "after the one place that comes first: {text}");
+        assert!(text.contains(" = sub "), "the rest of the way is worked out: {text}");
+        assert!(
+            !text.contains("iconst.i64 127"),
+            "and the count is not masked to the width: {text}"
+        );
+    }
+
+    /// An arithmetic shift right leaves the sign bit behind where a logical one leaves zeroes.
+    ///
+    /// What the two differ in is only the half the count moved out of entirely. A logical shift puts
+    /// zeroes there, which is a constant already in hand, and an arithmetic one puts the sign bit
+    /// spread across the half it came from, which is one more shift.
+    #[test]
+    fn an_arithmetic_shift_right_leaves_the_sign_bit_where_a_logical_one_leaves_zeroes() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let moved = build.binary(Opcode::AShr, params[0], params[1], Flags::NONE);
+        build.ret(&[moved]);
+
+        assert!(halves(&mut func, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+        // The high half by the count, and the high half by sixty three for the half left empty.
+        assert_eq!(text.matches(" = ashr ").count(), 2, "the count and the sign: {text}");
+        assert_eq!(text.matches(" = lshr ").count(), 1, "the low half is not signed: {text}");
+        assert_eq!(text.matches(" = select.i64 ").count(), 2, "one choice per half: {text}");
     }
 
     #[test]

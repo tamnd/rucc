@@ -274,7 +274,7 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
     ),
     (
         "a hundred and twenty eight bits",
-        "split into two halves before selection, except a multiply, a shift and a division",
+        "split into two halves before selection, except a division",
         "tamnd/rucc#351",
     ),
     (
