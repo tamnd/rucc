@@ -400,18 +400,33 @@ impl Checker<'_> {
     ///
     /// The count is the array's own size expression rather than a copy, since C evaluates it
     /// once where the array was declared and every `sizeof` after that reads what was stored.
+    ///
+    /// A dimension can be a constant on the way down to the variable one. `int a[5][n]` is five
+    /// of something whose size is worked out, so the walk keeps going and the five joins the
+    /// product as a number. The walk stops at the first type that has a size the target knows,
+    /// which is the element type at the bottom and every dimension under the variable one.
     fn size_expr(&mut self, ty: TypeId, span: Span) -> Option<ExprId> {
-        let TypeKind::Array { elem, len: ArrayLen::Variable(vla) } =
-            self.types.kind(self.types.canonical(ty))
-        else {
+        let size = self.size_type();
+        if !self.is_variable_length(ty) {
             let measured = layout(&self.types, ty, self.cx.target).ok()?;
-            let size = self.size_type();
             return Some(self.constant(Const::Int(i128::from(measured.size)), size, span));
+        }
+        // Only an array answers the test above, so the pattern holds and the `else` is here
+        // because the compiler cannot know that.
+        let TypeKind::Array { elem, len } = self.types.kind(self.types.canonical(ty)) else {
+            return None;
         };
         let elem = self.size_expr(elem, span)?;
-        let count = self.tast.vla_size(vla);
-        let size = self.size_type();
-        let count = self.conv().to_type(count, size);
+        let count = match len {
+            ArrayLen::Variable(vla) => {
+                let count = self.tast.vla_size(vla);
+                self.conv().to_type(count, size)
+            }
+            ArrayLen::Fixed(count) => self.constant(Const::Int(i128::from(count)), size, span),
+            // A dimension with no size at all, which is an incomplete array or a `[*]` in a
+            // prototype. Neither has a size to answer with, and both are refused above this.
+            ArrayLen::Unknown | ArrayLen::Star => return None,
+        };
         let node = ExprKind::Binary { op: ast::BinaryOp::Mul, lhs: count, rhs: elem };
         Some(self.tast.expr(Expr::new(node, size, Category::Rvalue), span))
     }
@@ -1438,6 +1453,36 @@ mod tests {
         // An array's alignment is its element's, which is an answer even where its size is not.
         assert_eq!(folded(&c, aligned), 4);
         assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn sizeof_a_variable_length_array_counts_the_dimensions_outside_the_variable_one() {
+        let mut f = Fixture::new();
+        let n = f.name("n");
+        let count = f.expr(ast::Expr::Name(n));
+        let specs = f.keywords(&[BuiltinSet::INT]);
+        let outer = fixed(&mut f, 5);
+        let inner =
+            Derived::Array { size: ArraySize::Expr(count), quals: Quals::NONE, has_static: false };
+        let ty = f.type_name(specs, &[outer, inner]);
+        let size = measure_of(&mut f, ty, Measure::Size);
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let int = c.types.int(IntKind::Int);
+        c.declare_object(n, int, Span::DUMMY);
+        let measured = c.check_expr(size);
+
+        assert_eq!(messages(&c), Vec::<String>::new());
+        // Five of `int[n]`, so the five is a factor of its own. Leaving it out is what used to
+        // answer zero, since the outer array went to the layout code and that has no size for an
+        // array whose element has none.
+        assert_eq!(
+            dump(&c, measured),
+            "binary * : unsigned long\n  const 5 : unsigned long\n  binary * : unsigned \
+             long\n    convert arithmetic : unsigned long\n      convert lvalue : int\n        \
+             decl #0 n : int lvalue\n    const 4 : unsigned long\n"
+        );
     }
 
     #[test]
