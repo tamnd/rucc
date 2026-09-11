@@ -605,6 +605,53 @@ pub struct Lto {
     pub compression: Option<u8>,
 }
 
+/// What the profile reading half of the `-fprofile` family asked for.
+///
+/// A profile is a count per edge, gathered by running a build of the program that was instrumented
+/// to count, and read back on a second compilation so that the optimizer knows which way each
+/// branch actually went. It is worth more than any single optimization, because almost everything
+/// the optimizer decides is a guess about a frequency that the counts simply state.
+///
+/// Nothing here reads one yet, so this is recorded rather than acted on, and the family splits in
+/// two rather than being taken or refused as a whole. The half recorded here is the half that only
+/// costs speed when it is ignored: a build that asks to read a profile and is not read one gets the
+/// program it would have got anyway, which is what section 4.1 means by a hint about speed. The
+/// other half writes files, and that half is refused by the driver rather than landing here, on the
+/// same reading `-gsplit-dwarf` gets: a program instrumented by `-fprofile-generate` writes a
+/// `.gcda` when it runs and `-ftest-coverage` writes a `.gcno` beside the object, and ignoring
+/// either means a build waits for a file that never arrives and then quietly optimizes against no
+/// counts at all.
+///
+/// gcc's own measurement is the argument for the split. `-fprofile-use` on a file with no counts
+/// beside it produces an object byte for byte identical to the one no flag produces, and warns; the
+/// same file under `-fprofile-generate` grows from 71 bytes of code to 375 with 296 bytes of
+/// counters beside it. So one half of the family is already a no-op in gcc when there is nothing to
+/// read, and the other half is never one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Profile {
+    /// Whether the last of `-fprofile-use` and `-fno-profile-use` on the command line was the
+    /// first of the two.
+    pub requested: bool,
+    /// Where to read the counts from, from `-fprofile-use=<path>`, where `None` means beside the
+    /// object the way gcc looks when nobody says. A directory or a file, which is gcc's rule and
+    /// is not something this can tell apart without looking at the filesystem.
+    pub path: Option<String>,
+    /// Where the whole family's files live, from `-fprofile-dir=`. Separate from `path` because
+    /// gcc keeps them separate: this one moves the counts for the generating half as well.
+    pub dir: Option<String>,
+    /// Whether the path recorded in those files is made absolute, from `-fprofile-abs-path`. It is
+    /// what a build with several object directories under one source tree needs so that two files
+    /// of the same name do not land on one set of counts.
+    pub absolute: bool,
+    /// Whether counts that do not add up are repaired rather than refused, from
+    /// `-fprofile-correction`. A program that forked or was killed while it ran leaves counts that
+    /// no single execution could have produced, and this says to make the best of them.
+    pub correction: bool,
+    /// Whether the parts of the program the training run never reached are optimized as if they
+    /// were cold rather than as if nothing were known about them, from `-fprofile-partial-training`.
+    pub partial_training: bool,
+}
+
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.
 ///
 /// A canary is a word the prologue copies into the frame above everything a local can be written
@@ -1559,6 +1606,12 @@ pub struct Options {
     pub compress: Compress,
     /// What the `-flto` family asked for, which nothing does yet.
     pub lto: Lto,
+    /// What the profile reading half of the `-fprofile` family asked for, which nothing reads yet.
+    ///
+    /// Named for the data rather than for the flag, because `profile` next door is already the
+    /// answer to whether `-pg` asked for a call to a profiler on the way into every function, and
+    /// the two are different questions about the same word.
+    pub profile_data: Profile,
     /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer`.
     ///
     /// Off by default, which is what gcc does at every level above `-O0` and what leaves the
@@ -1897,6 +1950,7 @@ impl Options {
             debug_info: false,
             compress: Compress::None,
             lto: Lto::default(),
+            profile_data: Profile::default(),
             frame_pointer: false,
             red_zone: true,
             protector: Protector::default(),
