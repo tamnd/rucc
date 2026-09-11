@@ -12,11 +12,12 @@
 //! copy of what they say. A copy of a table is a table that drifts, which is the failure
 //! `spec/cross-compile/04-target-matrix.md` section 4.7 is written against.
 //!
-//! The argument parsing is by hand. There are nine subcommands and a handful of flags, so a
+//! The argument parsing is by hand. There are ten subcommands and a handful of flags, so a
 //! dependency here would be a dependency in the workspace for a `match` on a string.
 
 mod corpus;
 mod docs;
+mod lines;
 mod rng;
 mod signatures;
 
@@ -25,7 +26,9 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use rucc_abi::{AbiDescription, DataLayout, FloatType, Rule, abis};
-use rucc_sysroot::{LinkLine, LinkMode, Sysroot, layout::can_be_bundled, link::musl_loader};
+use rucc_sysroot::argv::emulation;
+use rucc_sysroot::link::loader;
+use rucc_sysroot::{LinkLine, LinkMode, Sysroot, layout::can_be_bundled};
 use rucc_tuple::{TARGETS, TargetTuple, lookup, planned_working_count};
 
 const USAGE: &str = "\
@@ -45,6 +48,9 @@ commands:
   abi-corpus --check   check that tests/abi-corpus matches the grammar
   abi-signatures --write  write tests/abi-signatures, which is one program
   abi-signatures --check  check that tests/abi-signatures matches the grammar
+  link-lines <tup>  the linker command line for one target, in every mode
+  link-lines --write   write tests/link-lines for every target
+  link-lines --check   check that tests/link-lines matches what would be written
   help
 ";
 
@@ -96,6 +102,16 @@ fn main() -> ExitCode {
         },
         ["abi-signatures", "--write"] => signatures::run(&root(), signatures::Mode::Write),
         ["abi-signatures", "--check"] => signatures::run(&root(), signatures::Mode::Check),
+        ["link-lines", "--write"] => lines::run(&root(), lines::Mode::Write),
+        ["link-lines", "--check"] => lines::run(&root(), lines::Mode::Check),
+        ["link-lines", tuple] => match TargetTuple::from_str(tuple) {
+            Ok(target) => lines::one(target),
+            Err(error) => {
+                eprintln!("error: {error}");
+                eprintln!("  in target tuple `{tuple}`");
+                ExitCode::FAILURE
+            }
+        },
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
         ["sysroot", tuple] => run(tuple, sysroot),
@@ -281,19 +297,17 @@ fn sysroot(target: TargetTuple) {
     );
     println!();
 
-    if target.env() != rucc_tuple::Env::Musl {
-        println!("The link line below is musl's, and this target is not a musl target. What it");
-        println!("shows is the ordering rather than the file names, and the file names for this");
-        println!("target come from whichever libc it uses.");
-        println!();
-    }
-
+    // The file names rather than the whole command line, because the ordering is what this
+    // subcommand is for and the flags that go with it are long enough to push the names off the
+    // edge of a terminal. `link-lines <tuple>` prints the command itself.
     for (mode, name) in [
         (LinkMode::Static, "static"),
         (LinkMode::StaticPie, "static-pie"),
         (LinkMode::Dynamic, "dynamic"),
+        (LinkMode::DynamicNoPie, "dynamic-no-pie"),
+        (LinkMode::Shared, "shared"),
     ] {
-        let line = LinkLine::musl(&sysroot, mode);
+        let line = LinkLine::for_target(&sysroot, mode);
         let names: Vec<String> = line
             .with_objects(&[PathBuf::from("main.o")])
             .iter()
@@ -301,18 +315,12 @@ fn sysroot(target: TargetTuple) {
                 path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
             })
             .collect();
-        println!("{name:<14} {}", names.join(" "));
-        println!("               {}", line.flags.join(" "));
+        println!("{name:<15}{}", names.join(" "));
     }
 
-    // Only for a musl target, because this is the path that goes in the program header and the
-    // one glibc installs is a different file with a different name. Printing musl's under a
-    // heading that says loader would be the almost-right answer `spec/cross-compile/06-abis.md`
-    // opens by warning about.
-    if target.env() == rucc_tuple::Env::Musl {
-        println!();
-        println!("loader         {}", musl_loader(target));
-    }
+    println!();
+    println!("loader         {}", loader(target).unwrap_or("none on the link line"));
+    println!("emulation      {}", emulation(target).unwrap_or("none, the format has no names"));
 }
 
 /// One floating point type, as the two separate facts it is.

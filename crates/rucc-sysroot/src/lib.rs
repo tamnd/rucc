@@ -23,8 +23,15 @@
 //! the tuple, which is what makes the tuple a cache key.
 //!
 //! [`include_paths`] is section 8.5 as an ordered list, with each entry saying which of the four
-//! steps put it there. [`LinkLine`] is the start files, the libraries and the end files for a musl
-//! link, in the order a linker needs them.
+//! steps put it there. [`LinkLine`] is the start files, the libraries and the end files, in the
+//! order a linker needs them, for either libc.
+//!
+//! [`argv`] is `spec/cross-compile/11-linking.md` section 11.3: the whole linker command line as a
+//! function of the target, the sysroot and what the user asked for. It is the same division as the
+//! one above, one level up. [`LinkLine`] is what has to be linked, which is a fact about the target,
+//! and [`argv`] is how that is spelled for a linker, which is a fact about the linker. Section 11.3
+//! asks for a golden file per target and `tests/link-lines` is it, one file per target, regenerated
+//! by `cargo xtask link-lines` and checked in CI.
 //!
 //! [`Manifest`] is what a produced sysroot carries: every input with where it came from, its hash
 //! and its licence. Two sysroots for the same target built on two hosts have the same manifest, and
@@ -39,7 +46,7 @@
 //! worth downloading.
 //!
 //! ```
-//! use rucc_sysroot::{Sysroot, LinkLine, LinkMode};
+//! use rucc_sysroot::{Sysroot, LinkLine, LinkMode, argv};
 //! use rucc_tuple::TargetTuple;
 //! use std::path::Path;
 //!
@@ -56,7 +63,12 @@
 //! let line = LinkLine::musl(&sysroot, LinkMode::Static);
 //! assert_eq!(line.start.last().unwrap().file_name().unwrap(), "crti.o");
 //! assert_eq!(line.end.first().unwrap().file_name().unwrap(), "crtn.o");
-//! assert!(line.flags.iter().any(|flag| flag == "-static"));
+//!
+//! // And the whole linker command line, which names nothing on this machine.
+//! let options = argv::Invocation { mode: LinkMode::Static, ..Default::default() };
+//! let line = argv::argv(target, &sysroot, &options).unwrap();
+//! assert!(line.contains(&"-static".to_owned()));
+//! assert!(line.contains(&"-m".to_owned()) && line.contains(&"aarch64linux".to_owned()));
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/rucc-sysroot/0.10.19")]
@@ -64,13 +76,15 @@
 // question they have to answer by reading the body.
 #![deny(missing_docs)]
 
+pub mod argv;
 pub mod layout;
 pub mod link;
 pub mod manifest;
 pub mod search;
 
+pub use argv::{Invocation, Item, Unsupported};
 pub use layout::Sysroot;
-pub use link::{LinkLine, LinkMode};
+pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError};
 pub use search::{Entry, Options, Origin, include_paths};
 

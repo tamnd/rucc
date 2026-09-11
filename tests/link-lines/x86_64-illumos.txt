@@ -1,0 +1,82 @@
+target    x86_64-illumos
+format    elf
+emulation elf_x86_64
+loader    none
+sysroot   <cache>/sysroots/x86_64-illumos
+
+[static]
+  refused: x86_64-illumos cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: x86_64-illumos cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-illumos
+  -pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-illumos/lib/Scrt1.o
+  <cache>/sysroots/x86_64-illumos/lib/crti.o
+  -L<cache>/sysroots/x86_64-illumos/lib
+  main.o
+  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/sysroots/x86_64-illumos/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-illumos/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-illumos
+  -no-pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-illumos/lib/crt1.o
+  <cache>/sysroots/x86_64-illumos/lib/crti.o
+  -L<cache>/sysroots/x86_64-illumos/lib
+  main.o
+  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/sysroots/x86_64-illumos/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-illumos/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-illumos
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-illumos/lib/crti.o
+  -L<cache>/sysroots/x86_64-illumos/lib
+  main.o
+  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/sysroots/x86_64-illumos/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-illumos/lib/crtn.o

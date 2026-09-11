@@ -1,0 +1,20 @@
+target    arm64ec-windows-msvc
+format    coff
+emulation none
+loader    none
+sysroot   <cache>/sysroots/arm64ec-windows-msvc
+
+[static]
+  refused: there is no cross link line for arm64ec-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+
+[static-pie]
+  refused: there is no cross link line for arm64ec-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+
+[dynamic]
+  refused: there is no cross link line for arm64ec-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+
+[dynamic-no-pie]
+  refused: there is no cross link line for arm64ec-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+
+[shared]
+  refused: there is no cross link line for arm64ec-windows-msvc yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one

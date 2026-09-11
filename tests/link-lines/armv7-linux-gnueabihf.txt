@@ -1,0 +1,86 @@
+target    armv7-linux-gnueabihf
+format    elf
+emulation armelf_linux_eabi
+loader    /lib/ld-linux-armhf.so.3
+sysroot   <cache>/sysroots/armv7-linux-gnueabihf
+
+[static]
+  refused: armv7-linux-gnueabihf cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: armv7-linux-gnueabihf cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-linux-gnueabihf
+  -pie
+  -dynamic-linker
+  /lib/ld-linux-armhf.so.3
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/Scrt1.o
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
+  -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  main.o
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-linux-gnueabihf
+  -no-pie
+  -dynamic-linker
+  /lib/ld-linux-armhf.so.3
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crt1.o
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
+  -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  main.o
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-linux-gnueabihf
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
+  -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  main.o
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o

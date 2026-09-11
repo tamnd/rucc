@@ -1,0 +1,20 @@
+target    wasm32-wasip1
+format    wasm
+emulation none
+loader    none
+sysroot   <cache>/sysroots/wasm32-wasip1
+
+[static]
+  refused: there is no cross link line for wasm32-wasip1 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+
+[static-pie]
+  refused: there is no cross link line for wasm32-wasip1 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+
+[dynamic]
+  refused: there is no cross link line for wasm32-wasip1 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+
+[dynamic-no-pie]
+  refused: there is no cross link line for wasm32-wasip1 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+
+[shared]
+  refused: there is no cross link line for wasm32-wasip1 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one

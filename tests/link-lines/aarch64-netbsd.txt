@@ -1,0 +1,82 @@
+target    aarch64-netbsd
+format    elf
+emulation aarch64linux
+loader    none
+sysroot   <cache>/sysroots/aarch64-netbsd
+
+[static]
+  refused: aarch64-netbsd cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: aarch64-netbsd cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-netbsd
+  -pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-netbsd/lib/Scrt1.o
+  <cache>/sysroots/aarch64-netbsd/lib/crti.o
+  -L<cache>/sysroots/aarch64-netbsd/lib
+  main.o
+  <cache>/sysroots/aarch64-netbsd/lib/libc.so
+  <cache>/sysroots/aarch64-netbsd/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-netbsd/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-netbsd
+  -no-pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-netbsd/lib/crt1.o
+  <cache>/sysroots/aarch64-netbsd/lib/crti.o
+  -L<cache>/sysroots/aarch64-netbsd/lib
+  main.o
+  <cache>/sysroots/aarch64-netbsd/lib/libc.so
+  <cache>/sysroots/aarch64-netbsd/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-netbsd/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-netbsd
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-netbsd/lib/crti.o
+  -L<cache>/sysroots/aarch64-netbsd/lib
+  main.o
+  <cache>/sysroots/aarch64-netbsd/lib/libc.so
+  <cache>/sysroots/aarch64-netbsd/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-netbsd/lib/crtn.o
