@@ -34,7 +34,7 @@ Zig solved this and the solution is the one to adopt. Two techniques, both from 
 
 **Per-architecture only where it must be.** Most of glibc's headers are architecture-independent. The `bits/` directory and a handful of others are not. Splitting into `generic` plus `<arch>` cuts the multiplication from a product to a sum.
 
-Applying both: the glibc header payload is roughly *one* generic tree plus eight small per-architecture trees, not forty-eight trees. Document 13 puts the number on it.
+Applying both: the glibc header payload is *one* shared tree plus a small tree per architecture family, not a tree per architecture per version. `bin/glibc-headers` in `tamnd/rucc-cross` produces it and the measurement is in document 13: 411 shared files and 77 that differ between families in 453 copies, seven families for the nine glibc ABIs in the target table, 5.3 MB against the 31 MB that nine separate installs of the same release weigh.
 
 **The per-architecture directory is named by the libc and not by us.** Zig 0.16 ships twelve glibc directories and seventeen musl ones for the same machines, because glibc installs one `bits/` tree per architecture family and musl installs one per architecture and ABI. glibc's `x86` directory serves i386, x86-64 and x32 together, and the files in it do the splitting themselves: 22 of its 31 `bits/` headers branch on `__x86_64__`, `__ILP32__` or `__WORDSIZE`, starting with `bits/wordsize.h`. musl has separate `i386`, `x86_64` and `x32` directories and no branching. So the name of that directory is a question for the libc rather than a scheme of ours, which makes it a function of the architecture and the environment both, and `Sysroot::header_arch` in `rucc-sysroot` takes both.
 
