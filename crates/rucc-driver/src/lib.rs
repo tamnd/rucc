@@ -193,6 +193,7 @@ options:
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
+  -f[no-]sanitize=<what>   the negative is taken, the positive is refused by name
   -f[no-]safety-subobject   a write has to stay inside the member it names
   -f[no-]safety-restrict    two restrict pointers of one block may not meet
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
@@ -256,6 +257,55 @@ fn joined_or_next(
     Ok(next.clone())
 }
 
+/// Every name that may follow `-fsanitize=`, which is gcc 16's list and three of this compiler's
+/// own.
+///
+/// The three are on it because `spec/07-types-and-semantics.md` section 7.7 already promises them:
+/// each undefined behaviour this compiler exploits is listed there with the check that detects it,
+/// and `alias`, `restrict` and `memory` are checks gcc has no spelling for. gcc refuses `memory`
+/// outright, since the sanitizer of that name is clang's. A name being here means it is a name
+/// rather than a typo, and nothing more than that: every one of them is refused after the loop,
+/// because none of them is implemented.
+///
+/// `all` is deliberately absent. gcc takes it only in the negative, so it is handled where each of
+/// those two spellings is read rather than by being on this list.
+const SANITIZERS: [&str; 34] = [
+    "address",
+    "kernel-address",
+    "hwaddress",
+    "kernel-hwaddress",
+    "pointer-compare",
+    "pointer-subtract",
+    "thread",
+    "leak",
+    "undefined",
+    "shift",
+    "shift-base",
+    "shift-exponent",
+    "integer-divide-by-zero",
+    "unreachable",
+    "vla-bound",
+    "null",
+    "return",
+    "signed-integer-overflow",
+    "bounds",
+    "bounds-strict",
+    "alignment",
+    "object-size",
+    "float-divide-by-zero",
+    "float-cast-overflow",
+    "nonnull-attribute",
+    "returns-nonnull-attribute",
+    "bool",
+    "enum",
+    "vptr",
+    "pointer-overflow",
+    "builtin",
+    "alias",
+    "restrict",
+    "memory",
+];
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -282,6 +332,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
     let mut threads = false;
+    // Which sanitizers are still asked for by the end of the command line. Accumulated across the
+    // loop rather than answered where it was read, because `-fno-sanitize=` turns one off and a
+    // build that asks for a check and then takes it back has asked for nothing. What happens to a
+    // set that is not empty is decided after the loop.
+    let mut sanitizers: Vec<&str> = Vec::new();
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
@@ -1141,7 +1196,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-fsafety-subobject=") => {
                 let form = &arg["-fsafety-subobject=".len()..];
                 return Err(err(format!(
-                    "`{form}` is not a form of -fsafety-subobject. The flag takes no value, and                      the strict form of section 9.4 is tamnd/rucc#967"
+                    "`{form}` is not a form of -fsafety-subobject. The flag takes no value, and \
+                     the strict form of section 9.4 is tamnd/rucc#967"
                 )));
             }
             // Row Y8, from section 9.6 of document 09. A bare flag with no value, for the reason
@@ -1154,6 +1210,89 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let form = &arg["-fsafety-restrict=".len()..];
                 return Err(err(format!(
                     "`{form}` is not a form of -fsafety-restrict. The flag takes no value."
+                )));
+            }
+            // The sanitizers of document 12, which are checks at run time rather than a way of
+            // generating the same program. Each name is held to gcc 16's list, and what is still
+            // asked for by the end of the line is answered after the loop, so that a command line
+            // which turns one on and then off again is a command line that asked for nothing.
+            //
+            // Before the optimizer's `-f` family below, for the reason the tier above it is.
+            _ if arg.starts_with("-fsanitize=") => {
+                for one in arg["-fsanitize=".len()..].split(',') {
+                    if one == "all" {
+                        // gcc takes `all` only in the negative, because turning every check on at
+                        // once includes checks that contradict each other.
+                        return Err(err(
+                            "`-fsanitize=all` is not a gcc option, only `-fno-sanitize=all` is",
+                        ));
+                    }
+                    if !SANITIZERS.contains(&one) {
+                        return Err(err(format!(
+                            "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
+                        )));
+                    }
+                    if !sanitizers.contains(&one) {
+                        sanitizers.push(one);
+                    }
+                }
+            }
+            _ if arg.starts_with("-fno-sanitize=") => {
+                for one in arg["-fno-sanitize=".len()..].split(',') {
+                    if one == "all" {
+                        sanitizers.clear();
+                        continue;
+                    }
+                    if !SANITIZERS.contains(&one) {
+                        return Err(err(format!(
+                            "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
+                        )));
+                    }
+                    sanitizers.retain(|asked| *asked != one);
+                }
+            }
+            // What a check does when it fires, and where the records about the checked objects go.
+            // Each of them is an answer about the sanitizers refused after the loop, so there is
+            // nothing left for them to change here. The names are still held to the list, because
+            // a misspelling in a build's flags is worth finding when the compiler reads it.
+            _ if arg.starts_with("-fsanitize-recover=")
+                || arg.starts_with("-fno-sanitize-recover=")
+                || arg.starts_with("-fsanitize-trap=")
+                || arg.starts_with("-fno-sanitize-trap=") =>
+            {
+                // The guard above matched on a spelling that has an `=` in it, so the tail is
+                // whatever follows the first one.
+                let how = arg.split_once('=').map_or("", |(_, rest)| rest);
+                for one in how.split(',') {
+                    if one != "all" && !SANITIZERS.contains(&one) {
+                        return Err(err(format!(
+                            "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
+                        )));
+                    }
+                }
+            }
+            "-fsanitize-undefined-trap-on-error"
+            | "-fsanitize-address-use-after-scope"
+            | "-fno-sanitize-address-use-after-scope" => {}
+            _ if arg.starts_with("-fsanitize-sections=") => {}
+            // Counting which edges a run reached, which is how a fuzzer knows an input was worth
+            // keeping. Refused rather than dropped, because a fuzzer whose calls into
+            // `__sanitizer_cov_*` were never generated runs blind and reports coverage of nothing,
+            // and there is no point in the campaign where that announces itself.
+            _ if arg.starts_with("-fsanitize-coverage=") => {
+                let how = &arg["-fsanitize-coverage=".len()..];
+                for one in how.split(',') {
+                    if !matches!(one, "trace-pc" | "trace-cmp") {
+                        return Err(err(format!(
+                            "`{one}` is not a coverage instrumentation, which is trace-pc or \
+                             trace-cmp"
+                        )));
+                    }
+                }
+                return Err(err(format!(
+                    "{arg}: this compiler generates no coverage callbacks, and a fuzzer built \
+                     with it would run without any feedback at all, see \
+                     spec/04-driver-and-cli.md section 4.7"
                 )));
             }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
@@ -1367,6 +1506,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `SearchPath` appends within a group and the position is what the order is.
     // The same directory the headers were looked for under, because a sysroot is a statement
     // about a whole installation and not about half of one.
+    // After the loop, because `-fno-sanitize=` can take back what an earlier flag asked for and a
+    // command line that turns a check on and off again has asked for nothing. What is left is
+    // refused rather than dropped, and it is the one place in this parser where the reason is not
+    // that the output would differ. A sanitizer is a promise that the program is watched while it
+    // runs, so a build that asks for one and is quietly given a program with no checks in it does
+    // not get a slower program or a bigger file, it gets a test suite that passes for the wrong
+    // reason. `-fsafety=` is the checking this compiler does have, and the message says so, because
+    // somebody reaching for `-fsanitize=address` wants the nearest thing rather than a list of
+    // options.
+    if let Some(first) = sanitizers.first() {
+        return Err(err(format!(
+            "-fsanitize={first}: this compiler has no sanitizer instrumentation, and a build that \
+             asked for one and got none would run its tests unchecked, see \
+             spec/04-driver-and-cli.md section 4.7. `-fsafety=detect` is the memory checking this \
+             compiler does have"
+        )));
+    }
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -3899,6 +4055,73 @@ mod tests {
         assert!(refused(&["-fprofile-reproducible=any", "-c", "a.c"]).contains("reproducibility"));
     }
 
+    /// The sanitizers, which are refused by name and are the one family refused for a reason that
+    /// is not about the bytes.
+    ///
+    /// A sanitizer is a promise that the program is watched while it runs, so a build that asked
+    /// for one and was quietly given a program with no checks in it gets a test suite that passes
+    /// for the wrong reason rather than a slower program.
+    #[test]
+    fn a_sanitizer_that_is_still_asked_for_at_the_end_of_the_line_is_refused_by_name() {
+        for asked in ["address", "undefined", "thread", "kernel-address", "leak", "memory"] {
+            let failed = refused(&[&format!("-fsanitize={asked}"), "-c", "a.c"]);
+            assert!(failed.contains(asked), "the refusal names what was asked for: {failed}");
+            assert!(failed.contains("-fsafety=detect"), "and the nearest thing: {failed}");
+        }
+
+        // A list is every name in it, and the first one still standing is the one named.
+        let failed = refused(&["-fsanitize=address,undefined", "-c", "a.c"]);
+        assert!(failed.contains("address"), "{failed}");
+
+        // A name that is not one, which is worth its own message: somebody who wrote `-fsanitize`
+        // with a typo in it has a different problem from somebody who wrote a real one.
+        for bad in ["-fsanitize=bogus", "-fsanitize=address,bogus", "-fno-sanitize=bogus"] {
+            let failed = refused(&[bad, "-c", "a.c"]);
+            assert!(failed.contains("is not a sanitizer"), "{bad}: {failed}");
+        }
+
+        // gcc takes `all` only in the negative, and so does this.
+        assert!(refused(&["-fsanitize=all", "-c", "a.c"]).contains("only `-fno-sanitize=all`"));
+
+        // Asking and then taking it back is asking for nothing, which is why the answer waits for
+        // the end of the line. A build whose shared flags turn a check on and whose rule for one
+        // file turns it off again compiles that file here.
+        for pair in [
+            ["-fsanitize=address", "-fno-sanitize=address"],
+            ["-fsanitize=address,undefined", "-fno-sanitize=all"],
+            ["-fsanitize=undefined", "-fno-sanitize=undefined"],
+        ] {
+            let (opts, _) = compile(&[pair[0], pair[1], "-c", "a.c"]);
+            assert_eq!(opts.safety, rucc_session::Safety::Off, "{pair:?} asked for nothing");
+        }
+        // And the other order still asks, because the last word is the one that counts.
+        assert!(!refused(&["-fno-sanitize=address", "-fsanitize=address", "-c", "a.c"]).is_empty());
+
+        // What a check does when it fires is an answer about checks that are refused, so there is
+        // nothing left for it to change and it is taken.
+        for taken in [
+            "-fsanitize-recover=undefined",
+            "-fno-sanitize-recover=all",
+            "-fsanitize-trap=undefined",
+            "-fno-sanitize-trap=all",
+            "-fsanitize-undefined-trap-on-error",
+            "-fsanitize-address-use-after-scope",
+            "-fno-sanitize-address-use-after-scope",
+            "-fsanitize-sections=.data",
+        ] {
+            let (opts, _) = compile(&[taken, "-c", "a.c"]);
+            assert_eq!(opts.safety, rucc_session::Safety::Off, "{taken} asks for no checking");
+        }
+        assert!(refused(&["-fsanitize-recover=bogus", "-c", "a.c"]).contains("is not a sanitizer"));
+
+        // Coverage instrumentation is refused rather than dropped, because a fuzzer with no
+        // feedback runs blind and never says so.
+        let failed = refused(&["-fsanitize-coverage=trace-pc", "-c", "a.c"]);
+        assert!(failed.contains("feedback"), "{failed}");
+        let failed = refused(&["-fsanitize-coverage=trace-pc-guard", "-c", "a.c"]);
+        assert!(failed.contains("trace-pc or trace-cmp"), "gcc takes two of them: {failed}");
+    }
+
     #[test]
     fn the_levels_gcc_spells_differently_are_the_levels_they_mean() {
         assert_eq!(compile(&["-O", "-c", "a.c"]).0.opt_level, OptLevel::O1);
@@ -4309,7 +4532,9 @@ mod tests {
         // about a path and which is long enough on its own that it could not have shared a line with
         // anything. The one it went up by last is the profile family, which splits down the middle
         // where no other family here does, so the line has to name the half that is taken and the
-        // half that is refused or it would be read as taking both.
-        assert!(USAGE.lines().count() < 68, "usage text has grown past one screen");
+        // half that is refused or it would be read as taking both. The one it went up by last is
+        // the sanitizers, which are what somebody reaching for a checked build writes first and
+        // which belong beside the tier that is the nearest thing here to what they asked for.
+        assert!(USAGE.lines().count() < 69, "usage text has grown past one screen");
     }
 }
