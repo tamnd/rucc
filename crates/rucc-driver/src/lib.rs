@@ -269,6 +269,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut jobs = Jobs::default();
     let mut nostdinc = false;
     let mut sysroot: Option<PathBuf> = None;
+    // The whole ten field target, kept beside the three field one because `--target=` can pin a
+    // libc version and `Triple` has nowhere to put it. It decides `__GLIBC_MINOR__` and nothing
+    // else today, and `None` is a command line that named no target, which is this machine.
+    let mut pinned: Option<rucc_tuple::TargetTuple> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
@@ -837,6 +841,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
                 opts.target = t.parse().map_err(|e| err(format!("{e}")))?;
+                // The same string again, as the model that has room for a libc version. A spelling
+                // the three field parser took and this one does not is not an error, because the
+                // one that decides what is compiled has already accepted it and the only thing
+                // lost is a version nobody asked for.
+                pinned = t.parse().ok();
             }
             _ if arg.starts_with("--emit=") => {
                 let k = &arg["--emit=".len()..];
@@ -1296,6 +1305,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         // sysroot for it rather than the ones next door.
         let cross = link::cross_sysroot(opts.target, &link);
         let kernel = link::cross_kernel(opts.target, &link);
+        // And the version of those headers, which only the bundled tree has an answer for. A host
+        // glibc and a tree the user named both define `__GLIBC_MINOR__` in their own `features.h`,
+        // and a second definition with a different value is a warning on every file, so the
+        // condition is the same one that chose the directories.
+        if cross.is_some() {
+            let target = pinned.unwrap_or_else(|| opts.target.tuple());
+            opts.glibc_minor = rucc_sysroot::bundled_glibc_minor(target).map_err(|skew| {
+                err(format!(
+                    "{skew}; pin a release the tree has, or name a tree that has that one \
+                     with --sysroot"
+                ))
+            })?;
+        }
         for dir in
             library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref(), kernel.as_ref())
         {
@@ -2722,6 +2744,37 @@ mod tests {
             opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
         assert_eq!(dirs.len(), 3, "{dirs:?}");
         assert!(!dirs.iter().any(|dir| dir.ends_with("kernel-headers")), "{dirs:?}");
+    }
+
+    #[test]
+    fn the_glibc_version_macro_goes_with_the_bundled_tree_and_with_nothing_else() {
+        // One tree serves every glibc release, so the release is what the target supplies, and the
+        // condition is the same one that chose the directories. A host glibc and a tree somebody
+        // named both define `__GLIBC_MINOR__` in their own `features.h`, and two definitions with
+        // different values is a warning on every compilation of every file.
+        let (bundled, _) = compile(&["--target=x86_64-linux-gnu", "-c", "a.c"]);
+        assert_eq!(bundled.glibc_minor, Some(44));
+        let (pinned, _) = compile(&["--target=x86_64-linux-gnu.2.28", "-c", "a.c"]);
+        assert_eq!(pinned.glibc_minor, Some(28));
+
+        let (named, _) =
+            compile(&["--target=x86_64-linux-gnu", "--sysroot=/nowhere-at-all", "-c", "a.c"]);
+        assert_eq!(named.glibc_minor, None);
+        let (none, _) = compile(&["--target=x86_64-linux-gnu", "-nostdinc", "-c", "a.c"]);
+        assert_eq!(none.glibc_minor, None);
+        let (musl, _) = compile(&["--target=x86_64-linux-musl", "-c", "a.c"]);
+        assert_eq!(musl.glibc_minor, None);
+    }
+
+    #[test]
+    fn a_glibc_newer_than_the_bundled_tree_is_refused_by_name() {
+        // Both versions in the message, because the two things a person can do about it are pin a
+        // release the tree has and name a sysroot that has the one they asked for, and neither is a
+        // choice they can make without knowing which release the tree is.
+        let message = refused(&["--target=x86_64-linux-gnu.2.99", "-c", "a.c"]);
+        assert!(message.contains("asked for glibc 2.99"), "{message}");
+        assert!(message.contains("bundled headers are glibc 2.44"), "{message}");
+        assert!(message.contains("--sysroot"), "{message}");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rucc_sysroot::{Kernel, Sysroot, layout::can_be_bundled};
+use rucc_sysroot::{BUNDLED_GLIBC, Kernel, Sysroot, bundled_glibc_minor, layout::can_be_bundled};
 use rucc_tuple::{TARGETS, TargetEntry, TargetTuple};
 
 /// The target with this spelling.
@@ -199,4 +199,46 @@ fn the_kernels_asm_is_searched_before_its_shared_tree() {
     assert_eq!(includes[1], kernel.generic_include());
     assert!(includes[0].ends_with("kernel-headers/arm64"));
     assert!(includes[1].ends_with("kernel-headers/generic"));
+}
+
+#[test]
+fn the_version_macro_is_the_one_the_target_asked_for_and_the_trees_own_otherwise() {
+    // Section 8.3's version half. One tree serves every release because the differences are inside
+    // the files, so the release is what the target supplies, and a target that pinned nothing is
+    // compiled against the release the tree was produced from.
+    let asked = target("x86_64-linux-gnu.2.28");
+    assert_eq!(bundled_glibc_minor(asked), Ok(Some(28)));
+    let plain = target("x86_64-linux-gnu");
+    assert_eq!(bundled_glibc_minor(plain), Ok(Some(BUNDLED_GLIBC.minor_part().unwrap())));
+    // A major version with no minor is somebody naming the libc rather than pinning it, so it is
+    // the tree's own version and not an error.
+    assert_eq!(bundled_glibc_minor(target("x86_64-linux-gnu.2")), bundled_glibc_minor(plain));
+}
+
+#[test]
+fn nothing_but_glibc_gets_a_glibc_version_macro() {
+    // There is no `__GLIBC_MINOR__` on musl or mingw, and a program that probes for one has to hear
+    // no. Defining it would have every `__GLIBC_PREREQ` in a portable program answer yes on a libc
+    // that has neither the symbol versioning nor the declarations the probe is about.
+    for tuple in ["x86_64-linux-musl", "x86_64-pc-windows-gnu", "aarch64-macos", "armv7m-none-eabi"]
+    {
+        assert_eq!(bundled_glibc_minor(target(tuple)), Ok(None), "{tuple}");
+    }
+}
+
+#[test]
+fn a_release_newer_than_the_tree_is_refused_rather_than_approximated() {
+    // The one direction that cannot be faked. Asking for an older release turns declarations off,
+    // which is what the macro is for, and asking for a newer one would turn on declarations the
+    // text does not have, so every probe would pass and the program would fail later and further
+    // away, at best on a missing declaration and at worst on a missing symbol at link time.
+    let skew =
+        bundled_glibc_minor(target("x86_64-linux-gnu.2.99")).expect_err("newer than the tree");
+    assert_eq!(skew.tree, BUNDLED_GLIBC);
+    assert_eq!(skew.asked.to_string(), "2.99");
+    assert!(skew.to_string().contains("2.99") && skew.to_string().contains("2.44"));
+    // A different major is the same answer for the same reason, in both directions, because glibc 3
+    // does not exist and glibc 1 is not what this tree is.
+    assert!(bundled_glibc_minor(target("x86_64-linux-gnu.3.0")).is_err());
+    assert!(bundled_glibc_minor(target("x86_64-linux-gnu.1.9")).is_err());
 }

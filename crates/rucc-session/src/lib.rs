@@ -1779,6 +1779,19 @@ pub struct Options {
     /// A build that means its own `memcpy` and the library's everything else writes this rather
     /// than the whole flag, which is what the kernel does for a handful of names.
     pub no_builtin: Vec<String>,
+    /// The glibc release the headers on the search path are, as the minor number alone.
+    ///
+    /// `Some` means two things together: this is a glibc target, and step 3 of
+    /// `spec/cross-compile/08-sysroots.md` section 8.5 resolved to the tree we bundle. Then the
+    /// compiler defines `__GLIBC_MINOR__`, because one tree serves every version and the version is
+    /// the part of it the target supplies. `__GLIBC__` is not ours to define either way, since it is
+    /// in the tree and a real `features.h` defines it too.
+    ///
+    /// `None` is every other case, and the cases matter more than the value. A host glibc's
+    /// `features.h` defines the macro itself, and a tree the user named has a `features.h` of its
+    /// own, so defining it as well would be two definitions with different values, which is a
+    /// warning on every compilation of every file. A musl or mingw target has no such macro at all.
+    pub glibc_minor: Option<u32>,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines because `-U` wins.
@@ -1917,6 +1930,7 @@ impl Options {
             hosted: true,
             builtins: true,
             no_builtin: Vec::new(),
+            glibc_minor: None,
             defines: Vec::new(),
             undefines: Vec::new(),
             search: SearchPath::new(),
