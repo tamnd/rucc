@@ -3410,10 +3410,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 "int f(unsigned __int128 a, long long b, __int128 *r) {{\n    \
                  return __builtin_{name}_overflow(a, b, r);\n}}\n"
             );
-            assert!(errors(&source).is_empty(), "{name} was refused");
             let mut opts = options();
             opts.emit = EmitKind::MirFinal;
-            assert!(!run(&opts, &source).failed(), "{name} reached the back end and stopped");
+            assert!(!run(&opts, &source).failed(), "{name} was refused or stopped the back end");
         }
     }
 
