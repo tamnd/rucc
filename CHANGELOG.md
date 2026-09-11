@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.20
+
 ### Added
 
 - `cargo xtask real-libc` holds a generated glibc stub against the real `libc.so.6` on the machine, which is the third of `spec/cross-compile/09-libc-stubs.md` section 9.8's correctness properties and the one it calls the single highest value test in the document. The other two ask whether the file says what the description said, and both were already here: the round trip in `crates/rucc-stub/tests/roundtrip.rs` reads the bytes back, and `cargo xtask stubs` hands them to two readers nobody here wrote. This one asks whether the description is true, which no amount of reading our own output can answer. The rule is 9.8's: the real library's symbols must be a superset of ours, at the same version nodes, with the same sizes where there is storage for a copy relocation to move. Not equality, because a real glibc exports `GLIBC_PRIVATE` names for its own libraries to call and glibc's own description leaves those out. tamnd/rucc#732.
