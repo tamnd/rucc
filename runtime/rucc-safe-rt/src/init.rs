@@ -42,9 +42,13 @@
 //! what makes a byte unwritten is an instance beginning there. `crate::check` has the question a
 //! read asks and the two judgements that record what it asks about.
 //!
-//! What is missing is the caller. No generated code reaches those three yet, because which range a
-//! store names is section 9.3's padding rule and that is the compiler's half of the same
-//! milestone.
+//! Two callers reach the judgements. The compiler emits one beside every store and every copy, and
+//! the C library wrappers in [`crate::wrap`] record what they wrote, which they have to: a plane
+//! only some of the writes maintain reports on programs that are correct.
+//!
+//! What is missing is the reader. No generated code asks this plane a question yet, so nothing is
+//! refused on its account. That is the next box of milestone S5, and it waits on section 9.3's
+//! padding mode, because a struct copied a byte at a time is a program the default has to allow.
 
 /// How many bytes of program memory one byte of this plane covers.
 ///

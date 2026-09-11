@@ -65,10 +65,12 @@
 //! the reason this one could be shipped. It is mapped over every watched region beside the other
 //! two, an instance forgets its bytes when it begins, `calloc` says it wrote what it zeroed and
 //! `realloc` carries the answers of the bytes it moved, and [`check`] has the question a read asks
-//! along with the two judgements that record what it asks about. What is missing is the caller: no
-//! generated code reaches `__rucc_check_init`, `__rucc_meta_init` or `__rucc_meta_init_copy` yet,
-//! because which range a store names is section 9.3's padding rule and that is the compiler's half
-//! of the same milestone. The epoch plane is not here at all.
+//! along with the two judgements that record what it asks about. The compiler emits those two
+//! judgements beside every store and every copy, and the C library wrappers record what they wrote
+//! as well, because a plane only some of the writes maintain reports on programs that are correct.
+//! What is missing is the reader: no generated code reaches `__rucc_check_init` yet, so nothing is
+//! refused on this plane's account, and that waits on section 9.3's padding mode. The epoch plane
+//! is not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
