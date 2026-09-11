@@ -26,11 +26,11 @@
 //!
 //! Tab separated lines, sorted by path, under a header that is two lines and sometimes three: the
 //! format version, the target, and the Linux release the kernel headers came out of when the sysroot
-//! has kernel headers in it. Not JSON, because the thing this is
-//! optimized for is a person reading a diff between two of them, and not TOML, because it has no
-//! nesting and a parser for it is thirty lines. Sorted because the order files come out of a
-//! directory walk is a property of the filesystem, and a manifest whose line order depended on that
-//! would report a difference between two identical sysroots.
+//! has kernel headers in it. Not JSON, because the thing this is optimized for is a person reading a
+//! diff between two of them, and not TOML, because it has no nesting and a parser for it is thirty
+//! lines. Sorted because the order files come out of a directory walk is a property of the
+//! filesystem, and a manifest whose line order depended on that would report a difference between
+//! two identical sysroots.
 //!
 //! ```
 //! use rucc_sysroot::{Input, Licence, Manifest, Provenance};
@@ -466,8 +466,8 @@ impl Manifest {
         // turns up. The render order is what makes two manifests comparable with `diff`, and a
         // reader that took the line anywhere would accept files that do not compare.
         if let Some(spelling) = lines.peek().and_then(|(_, line)| line.strip_prefix("kernel\t")) {
-            let version =
-                Version::parse(spelling).ok_or_else(|| ManifestError::BadKernel(spelling.into()))?;
+            let version = Version::parse(spelling)
+                .ok_or_else(|| ManifestError::BadKernel(spelling.into()))?;
             manifest.set_kernel(version);
             lines.next();
         }

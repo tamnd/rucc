@@ -293,4 +293,3 @@ fn split_version(s: &str) -> (&str, &str) {
         }
     }
 }
-
