@@ -31,6 +31,13 @@
 ;; the first range cannot refuse the second, because a bounds check asks whether the bytes it is
 ;; about lie inside one storage instance and a subset of those bytes lies inside the same instance.
 ;;
+;; The last rule in the file is about the other conjunct of the same check and so reads differently.
+;; A bounds check asks where the bytes are and also asks whether the access starts where it says it
+;; does, and the second of those is row S7 rather than row S1. The obligation there is that an
+;; address the walk found a divisor of divides by what the access needs, and the split is the same
+;; one: finding the divisor is the walk's and is not proved, and getting from it to the access's own
+;; number is arithmetic and is.
+;;
 ;; # Why the guard carries bounds that look unnecessary
 ;;
 ;; A guard is read twice. The compiler reads it in `i128`, where adding two byte counts does not
@@ -207,6 +214,32 @@
                         (bvugt delta far)
                         (and (bvule (bvsub at delta) at)
                              (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
+                    1
+                    0)
+               (result))))
+
+;; The alignment conjunct of a bounds check, for an address the walk found a divisor of.
+;;
+;; `at` is the address, `known` is what the walk over where the pointer came from worked out the
+;; address is a multiple of, and `claim` is what the access needs. The guard is the test the pass
+;; makes, which is that the claim is no larger than what is known, and the claim proved is that the
+;; address is a multiple of the claim. Those two are not the same statement and that is the whole
+;; reason this is a rule: being larger is being divisible by only for powers of two, and every
+;; number that reaches here is one for a reason the head above writes out.
+;;
+;; The bounds on the numbers are the file comment's, and an alignment past four gigabytes is not a
+;; thing a C program asks for. Zero is refused rather than bounded, because it is what the walk
+;; answers with when it could read nothing and there is no address it says anything about.
+(rule (discharge (aligned.i64 (value.i64 at) (iconst.i64 known) (iconst.i64 claim)))
+      (if (and (>= claim 1) (<= claim 4294967296)
+               (>= known claim) (<= known 4294967296)))
+      (iconst.i64 1)
+      (spec (= (ite (or (= known 0)
+                        (= claim 0)
+                        (not (= (bvand known (bvsub known 1)) 0))
+                        (not (= (bvand claim (bvsub claim 1)) 0))
+                        (not (= (bvand at (bvsub known 1)) 0))
+                        (= (bvand at (bvsub claim 1)) 0))
                     1
                     0)
                (result))))

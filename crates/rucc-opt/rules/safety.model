@@ -6,9 +6,10 @@
 ;; address a fixed distance apart. The second is the question the hoist pass asks about a check
 ;; inside a loop whose address the walk has worked out is somewhere in a known range. The third is
 ;; the same question the discharge pass asks when the walk got past a step it could not read and
-;; what it has is a range of distances rather than one. The last two are the question the split pass
+;; what it has is a range of distances rather than one. The next two are the question the split pass
 ;; asks about a loop whose extent is a value the program works out rather than a number, once for a
-;; walk that goes up and once for a walk that goes down.
+;; walk that goes up and once for a walk that goes down. The last is the alignment half of a bounds
+;; check, which is a different question about the same address and is asked of the same pass.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -148,5 +149,40 @@
            (bvugt delta far)
            (and (bvule (bvsub at delta) at)
                 (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
+       1
+       0))
+
+;; Whether an address known to be a multiple of one number is a multiple of a smaller one.
+;;
+;; The alignment half of a bounds check, which is row S7 and the one conjunct in the check that is
+;; not about where the bytes are. `at` is the address the access uses, `known` is what the walk over
+;; the pointer's origin worked out the address is a multiple of, and `claim` is what the access
+;; itself needs. Both numbers are byte counts and both are powers of two.
+;;
+;; What makes this worth a head rather than a comparison somebody writes in the pass is that the
+;; comparison is not the claim. The pass tests `known >= claim`, and being larger is not being
+;; divisible by: eight is larger than six and an address that is a multiple of eight is not a
+;; multiple of six. The two coincide only because both numbers are powers of two, and a person
+;; writing `>=` there is one step away from being right for a reason nobody wrote down.
+;;
+;; The first four disjuncts are hypotheses and not claims, in the manner of the two heads above.
+;; They say the two numbers are powers of two and neither is zero, and they are cases this answers
+;; yes to vacuously rather than cases where such an access would be aligned. What carries them is
+;; where the numbers come from: a claim is the alignment on an access, which the front end takes off
+;; a type, and `known` is the smallest of an `alloca`'s alignment, what an allocator promises, and
+;; the largest power of two dividing each step taken from there. Every one of those is a power of
+;; two, and a zero is what the pass answers with when it could read nothing, which fails the guard
+;; rather than reaching here.
+;;
+;; The fifth is the fact the walk established, and the last is the claim. Both are written as a mask
+;; and not as a remainder, because that is the arithmetic a machine does to answer the question and
+;; because a remainder by a value nothing knows is a term no solver settles quickly.
+(semantics (aligned.i64 at known claim)
+  (ite (or (= known 0)
+           (= claim 0)
+           (not (= (bvand known (bvsub known 1)) 0))
+           (not (= (bvand claim (bvsub claim 1)) 0))
+           (not (= (bvand at (bvsub known 1)) 0))
+           (= (bvand at (bvsub claim 1)) 0))
        1
        0))
