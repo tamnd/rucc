@@ -1385,6 +1385,94 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.strip_prefix("-f").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-f".len()..].to_owned(), true));
             }
+            // The flags that name a pass of gcc's own. They arrive from the torture suite, where a
+            // program reduced from a miscompilation usually names the pass that miscompiled it on
+            // its `dg-options` line, and they arrive from hand written build files for the same
+            // reason. Section 4.1 sorts a flag by what the output would be without it, and by that
+            // rule these are one pile: a flag that turns one of gcc's passes on or off is asking
+            // for a compiler that does not exist here, and the program it is attached to is a
+            // correctness test that passes either way. Turning on a pass we do not have costs
+            // speed, turning off a pass we do not have costs nothing, and neither changes what the
+            // program computes.
+            //
+            // rucc's own pass names are matched above this, so `-fno-dce` turns off the dce this
+            // compiler has rather than landing here, and the day one of these names becomes a pass
+            // here it stops being taken and dropped without anybody editing this list.
+            //
+            // Two of them are prefixes rather than names, which is the one place this file takes a
+            // family instead of a flag. gcc files its gimple passes under `-ftree-` and its
+            // interprocedural passes under `-fipa-`, both namespaces are pass selection and
+            // nothing else, and there is no member of either that changes the meaning of a program
+            // that was already correct. The rest are written out one at a time, because they live
+            // in the flat `-f` namespace where the neighbours do change meanings.
+            _ if arg.starts_with("-ftree-") || arg.starts_with("-fno-tree-") => {}
+            _ if arg.starts_with("-fipa-") || arg.starts_with("-fno-ipa-") => {}
+            "-fexpensive-optimizations" | "-fno-expensive-optimizations" => {}
+            "-fmodulo-sched" | "-fno-modulo-sched" => {}
+            "-fvect-cost-model" | "-fno-vect-cost-model" => {}
+            _ if arg.starts_with("-fvect-cost-model=") || arg.starts_with("-fsimd-cost-model=") => {
+            }
+            "-fearly-inlining" | "-fno-early-inlining" => {}
+            "-finline"
+            | "-fno-inline"
+            | "-finline-functions"
+            | "-fno-inline-functions"
+            | "-finline-small-functions"
+            | "-fno-inline-small-functions"
+            | "-finline-functions-called-once"
+            | "-fno-inline-functions-called-once" => {}
+            "-foptimize-strlen" | "-fno-optimize-strlen" => {}
+            "-fira-share-spill-slots" | "-fno-ira-share-spill-slots" => {}
+            // The charset flags are not in that pile, because an encoding is a statement about
+            // what the bytes of the source mean rather than about how fast the output is. The
+            // preprocessor reads UTF-8 and has no converter, so the one name that describes what
+            // already happens is taken and every other name is refused. Spelled without regard to
+            // case and with both of the spellings iconv answers to, since a build writes whichever
+            // one its author typed.
+            _ if arg.starts_with("-finput-charset=") => {
+                let name = &arg["-finput-charset=".len()..];
+                if !name.eq_ignore_ascii_case("utf-8") && !name.eq_ignore_ascii_case("utf8") {
+                    return Err(err(format!(
+                        "-finput-charset={name}: the preprocessor reads UTF-8 and has no \
+                         converter, so a file in another encoding would be read as though it were \
+                         UTF-8 rather than converted",
+                    )));
+                }
+            }
+            // The three that come in on the same `dg-options` lines and are the other half of
+            // section 4.1's rule, because each of them changes what the program does and not how
+            // fast it does it. The negative form of each is what this compiler does anyway, so it
+            // is taken and dropped, which is the shape `-fnested-functions` has above.
+            "-ffast-math" => {
+                return Err(err(
+                    "-ffast-math is a licence to answer a floating point arithmetic differently \
+                     from the way the source wrote it, and it is not one flag: it defines \
+                     __FAST_MATH__, which a library header reads, and gcc links a startup file \
+                     that puts the hardware in flush to zero mode for the whole process. Taking it \
+                     and dropping it would change what other objects in the same program answer. \
+                     -ffp-contract= and -fexcess-precision= are the parts of it this compiler has",
+                ));
+            }
+            "-fno-fast-math" => {}
+            "-fnon-call-exceptions" => {
+                return Err(err(
+                    "-fnon-call-exceptions is a promise that an instruction which is not a call \
+                     can raise an exception the unwinder finds a handler for, and nothing here \
+                     produces a landing pad for a trapping instruction. A program built without it \
+                     would unwind past the handler it wrote",
+                ));
+            }
+            "-fno-non-call-exceptions" => {}
+            "-finstrument-functions" => {
+                return Err(err(
+                    "-finstrument-functions calls __cyg_profile_func_enter on entry to every \
+                     function and __cyg_profile_func_exit on the way out, and nothing here emits \
+                     either call. A program that asks for them usually counts them, so taking the \
+                     flag and dropping it would turn a program that fails loudly into one that \
+                     fails quietly",
+                ));
+            }
+            "-fno-instrument-functions" => {}
             // The unstable options, spelled the way rustc spells them and carrying the same
             // promise, which is none: one of these may change or go away in any release. They are
             // measurements and debugging aids rather than things a build asks for, which is why
@@ -2672,6 +2760,92 @@ mod tests {
         ] {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+        }
+    }
+
+    /// The flags a torture program writes on its own `dg-options` line, which is where most of
+    /// these come from: a program reduced from a miscompilation names the pass that miscompiled
+    /// it. Eighteen programs in the suite stopped on the driver before anything read them, and
+    /// tamnd/rucc#1019 is the list.
+    #[test]
+    fn the_flags_that_name_a_pass_of_gccs_own_are_taken_and_dropped() {
+        for flag in [
+            "-fno-tree-ccp",
+            "-fno-tree-dominator-opts",
+            "-fno-tree-vrp",
+            "-fno-tree-bit-ccp",
+            "-fno-tree-coalesce-vars",
+            "-ftree-vectorize",
+            "-ftree-loop-distribution",
+            "-fno-ipa-cp",
+            "-fipa-pta",
+            "-fmodulo-sched",
+            "-fno-vect-cost-model",
+            "-fvect-cost-model=unlimited",
+            "-fsimd-cost-model=cheap",
+            "-fexpensive-optimizations",
+            "-fno-early-inlining",
+            "-fno-inline",
+            "-finline-functions",
+            "-foptimize-strlen",
+            "-fno-ira-share-spill-slots",
+        ] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+            assert!(opts.passes.is_empty(), "{flag} named a pass of gcc's and not one of ours");
+        }
+    }
+
+    /// The two namespaces are taken whole, so a name neither this test nor gcc 16 has heard of
+    /// goes the same way as the ones above rather than stopping a build on the day gcc adds it.
+    #[test]
+    fn a_pass_name_in_either_family_is_taken_whether_or_not_it_is_one_gcc_has() {
+        for flag in ["-ftree-no-such-pass", "-fno-ipa-no-such-pass"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+        }
+    }
+
+    /// A pass this compiler has keeps its flag, since the arms that read the registry are above
+    /// the family arms. `dce` is the one both compilers have a name for, and `execute/pr97421-2.c`
+    /// is the program that writes it.
+    #[test]
+    fn a_pass_name_this_compiler_has_is_still_read_as_a_pass() {
+        let (opts, _) = compile(&["-c", "-fno-dce", "a.c"]);
+        assert_eq!(opts.passes, vec![("dce".to_owned(), false)]);
+    }
+
+    /// The encoding of the source is not a question about speed, so the one name that describes
+    /// what the preprocessor does is taken and every other name is refused.
+    #[test]
+    fn the_input_charset_is_taken_when_it_names_the_one_that_is_read() {
+        for flag in ["-finput-charset=utf-8", "-finput-charset=UTF-8", "-finput-charset=utf8"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+        }
+
+        let e = parse_args(&args(&["-c", "-finput-charset=latin1", "a.c"])).unwrap_err();
+        assert!(e.message.contains("latin1"), "{}", e.message);
+        assert!(e.message.contains("UTF-8"), "what is read is worth saying: {}", e.message);
+    }
+
+    /// The other half of the same rule. Each of these changes what the program does rather than
+    /// how fast it does it, so each is refused with the reason, and the negative of each is what
+    /// happens anyway and is taken.
+    #[test]
+    fn the_three_that_change_the_answer_are_refused_and_their_negatives_are_taken() {
+        for (flag, word) in [
+            ("-ffast-math", "__FAST_MATH__"),
+            ("-fnon-call-exceptions", "landing pad"),
+            ("-finstrument-functions", "__cyg_profile_func_enter"),
+        ] {
+            let e = parse_args(&args(&["-c", flag, "a.c"])).unwrap_err();
+            assert!(e.message.contains(word), "{flag}: {}", e.message);
+            assert!(!e.message.contains("unknown option"), "{flag} deserves a reason");
+
+            let off = format!("-fno-{}", flag.trim_start_matches("-f"));
+            let (opts, _) = compile(&["-c", &off, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{off}");
         }
     }
 
