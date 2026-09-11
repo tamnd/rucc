@@ -49,6 +49,7 @@ use rucc_session::{
     Compress, Control, Dumps, EmitKind, Hook, Options, Pic, PrefixMap, Preinclude, Protector,
     SaveTemps, Session, Std, Wrapping, runtime,
 };
+use rucc_sysroot::{Manifest, Sysroot};
 use rucc_target::Triple;
 
 use crate::link::LinkOptions;
@@ -154,6 +155,8 @@ enum Query {
     SearchDirs,
     /// `-print-sysroot`, the root the headers and the libraries are read under.
     Sysroot,
+    /// `-print-sysroot-provenance`, what is in that root and where each of it came from.
+    SysrootProvenance,
     /// `-print-file-name=<name>`, the full path of a library file.
     FileName(String),
     /// `-print-prog-name=<name>`, the full path of a program.
@@ -221,6 +224,7 @@ options:
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
   -print-sysroot         the root the headers and the libraries are read under
+  -print-sysroot-provenance   every input under it, where it came from and its licence
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
@@ -413,6 +417,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-print-multiarch" => query = Some(Query::Multiarch),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
             "-print-sysroot" => query = Some(Query::Sysroot),
+            // Both spellings, because this one is ours rather than GCC's and our own documents
+            // write it both ways: section 13.5 of `spec/cross-compile/13-distribution.md` gives it
+            // two dashes like the other flags we invented, and document 12's table gives it one
+            // like the `-print-` family it sits in. A person who reads either and types what it
+            // says is right, so neither is refused.
+            "-print-sysroot-provenance" | "--print-sysroot-provenance" => {
+                query = Some(Query::SysrootProvenance);
+            }
             "-print-libgcc-file-name" => query = Some(Query::Libgcc),
             _ if arg.starts_with("-print-file-name=") => {
                 query = Some(Query::FileName(arg["-print-file-name=".len()..].to_owned()));
@@ -1283,7 +1295,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         inputs.push(Input::library("pthread"));
     }
     if let Some(query) = query {
-        return Ok(Action::Print(answer(&query, &opts, &link)));
+        return Ok(Action::Print(answer(&query, &opts, &link)?));
     }
     // `-M` and `-MM` produce the rule and nothing else, so the run stops after phase 4 whatever
     // else the command line asked for. Read here rather than where the flag was, because a `-c`
@@ -1359,12 +1371,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
 /// GCC prints the name back unchanged when it cannot find the file a `-print` flag asked about,
 /// which is what makes the answer safe to paste into a link line whether or not the file is
 /// there, and this does the same.
-fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> String {
+fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, CliError> {
     let found = |name: &str| {
         link::find_in_search(link, opts.target, name)
             .map_or_else(|| name.to_owned(), |path| path.display().to_string())
     };
-    match query {
+    Ok(match query {
         Query::Machine => opts.target.to_string(),
         Query::Version => VERSION.to_owned(),
         Query::Multiarch => link::multiarch(opts.target),
@@ -1393,12 +1405,36 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> String {
         // look at when a cross build read a header nobody expected. A native compile has no
         // sysroot and the answer is the empty line, which is what GCC prints when it was
         // configured without one. `--sysroot` wins over ours because it wins everywhere else.
-        Query::Sysroot => link
-            .sysroot
-            .clone()
-            .or_else(|| link::cross_sysroot(opts.target, link).map(|at| at.root().to_path_buf()))
-            .map(|root| root.display().to_string())
-            .unwrap_or_default(),
+        Query::Sysroot => {
+            sysroot_root(opts, link).map(|root| root.display().to_string()).unwrap_or_default()
+        }
+        // Section 13.5 of `spec/cross-compile/13-distribution.md`: for every input that is not this
+        // compiler's own code, what it is, where it was got, its hash, its licence and whether it
+        // was bundled, generated or fetched. What is printed is the manifest the sysroot already
+        // carries rather than a second format saying the same things, because the three uses 13.5
+        // gives for this are a licence notice, a reproducibility check and a security audit, and all
+        // three are somebody else parsing it. One format is one parser to write.
+        Query::SysrootProvenance => {
+            let Some(root) = sysroot_root(opts, link) else {
+                return Ok(String::new());
+            };
+            let path = Sysroot::at(root, opts.target.tuple()).manifest_path();
+            match std::fs::read_to_string(&path) {
+                // Read and rendered rather than copied out, so that what comes back is the format
+                // this build understands. A file this build cannot read is a file whose lines it
+                // cannot vouch for, and printing it anyway would pass the problem to whoever parses
+                // the output next.
+                Ok(text) => Manifest::parse(&text)
+                    .map_err(|why| err(format!("{}: {why}", path.display())))?
+                    .render(),
+                // A tree with no manifest in it is a tree somebody laid out themselves and pointed
+                // `--sysroot` at, and nothing here knows where any of it came from. The answer is
+                // nothing, which a reader can tell apart from a manifest with no inputs in it
+                // because that one still has its header line.
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(why) => return Err(err(format!("{}: {why}", path.display()))),
+            }
+        }
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -1413,7 +1449,19 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> String {
             .map(|dir| dir.join(name))
             .find(|path| path.is_file())
             .map_or_else(|| name.clone(), |path| path.display().to_string()),
-    }
+    })
+}
+
+/// The root both of the sysroot answers are about.
+///
+/// One function rather than a copy in each, because the second flag exists to say what is inside the
+/// tree the first one names, and two answers that disagreed about which tree that is would be a
+/// difference nobody would think to look for. `--sysroot` wins over ours because it wins everywhere
+/// else.
+fn sysroot_root(opts: &Options, link: &LinkOptions) -> Option<PathBuf> {
+    link.sysroot
+        .clone()
+        .or_else(|| link::cross_sysroot(opts.target, link).map(|at| at.root().to_path_buf()))
 }
 
 /// Renders the passes this level will run, in order, with what each one does.
@@ -3741,6 +3789,57 @@ mod tests {
     }
 
     #[test]
+    fn the_provenance_of_a_sysroot_is_the_manifest_it_carries() {
+        // Section 13.5 wants seven things per input and wants them machine readable, and the manifest
+        // is the record that already has them, so the flag prints that rather than a second format.
+        let manifest = "rucc sysroot manifest 2\n\
+                        target\tx86_64-linux-musl\n\
+                        include/generic/stdio.h\tmusl-1.2.5\t\
+                        https://musl.libc.org/releases/musl-1.2.5.tar.gz\t\
+                        0000000000000000000000000000000000000000000000000000000000000000\tmit\t\
+                        bundled\n\
+                        lib/libc.so\tmusl-1.2.5\t\
+                        https://musl.libc.org/releases/musl-1.2.5.tar.gz\t\
+                        1111111111111111111111111111111111111111111111111111111111111111\tmit\t\
+                        generated\n";
+        let tree = TempTree::new("provenance", &[("manifest", manifest)]);
+        let sysroot = format!("--sysroot={}", tree.0.display());
+        assert_eq!(printed(&[&sysroot, "-print-sysroot-provenance"]), manifest);
+
+        // A tree with no manifest in it is a tree somebody assembled themselves, and nothing here
+        // knows where any of it came from. Saying nothing is the only honest answer, and a reader can
+        // tell it from a manifest with no inputs because that one still has its two header lines.
+        let bare = TempTree::new("provenance-bare", &[]);
+        assert_eq!(
+            printed(&[&format!("--sysroot={}", bare.0.display()), "-print-sysroot-provenance"]),
+            ""
+        );
+
+        // And a compile for this machine has no sysroot at all, which is the same empty answer
+        // `-print-sysroot` gives for it.
+        let host = Triple::host().expect("a host this compiler knows");
+        assert_eq!(printed(&[&format!("--target={host}"), "-print-sysroot-provenance"]), "");
+
+        // And the other spelling, which section 13.5 is the document that writes.
+        assert_eq!(printed(&[&sysroot, "--print-sysroot-provenance"]), manifest);
+    }
+
+    #[test]
+    fn a_manifest_this_build_cannot_read_is_refused_rather_than_printed() {
+        // Passing a file we could not parse to whoever asked would make their parser the one that
+        // finds the problem, and the three uses section 13.5 gives for this are all somebody else
+        // parsing it.
+        let tree = TempTree::new(
+            "provenance-bad",
+            &[("manifest", "rucc sysroot manifest 2\ntarget\tx86_64-linux-musl\nlib/libc.a\n")],
+        );
+        let message =
+            refused(&[&format!("--sysroot={}", tree.0.display()), "-print-sysroot-provenance"]);
+        assert!(message.contains("manifest"), "{message}");
+        assert!(message.contains("1 fields where an input has six"), "{message}");
+    }
+
+    #[test]
     fn the_two_dependency_flags_that_stop_after_the_rule_stop_after_the_rule() {
         let (opts, _) = compile(&["-M", "a.c"]);
         assert!(opts.deps.emit && opts.deps.instead_of_compiling);
@@ -4030,7 +4129,10 @@ mod tests {
         // asking a question no other line here answers. The one it went up by last is the sysroot,
         // which is the question somebody asks when a cross build read a file nobody expected, and
         // which has no room on the line above it because the answers there are a path each and this
-        // one is the root all of them are under.
-        assert!(USAGE.lines().count() < 66, "usage text has grown past one screen");
+        // one is the root all of them are under. The one it went up by last is what is inside that
+        // root and where each of it came from, which is a question about a whole tree rather than
+        // about a path and which is long enough on its own that it could not have shared a line with
+        // anything.
+        assert!(USAGE.lines().count() < 67, "usage text has grown past one screen");
     }
 }

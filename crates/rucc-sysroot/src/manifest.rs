@@ -1,19 +1,26 @@
 //! What a produced sysroot carries: every input, where it came from, its hash and its licence.
 //!
-//! Design: `spec/cross-compile/08-sysroots.md` section 8.6 for the licence half and
+//! Design: `spec/cross-compile/08-sysroots.md` section 8.6 for the licence half,
+//! `spec/cross-compile/13-distribution.md` section 13.5 for the provenance half, and
 //! `spec/cross-compile/02-the-goal.md` claim 5 for the rest.
 //!
-//! # Two jobs, one file
+//! # Three jobs, one file
 //!
 //! Claim 5 asks for byte identical output from two hosts for the same target. Checking that over a
 //! sysroot means comparing several thousand files, and the first thing anybody does when the
 //! comparison fails is ask which file and where it came from. A manifest answers both, and comparing
 //! two manifests is a diff of a few hundred lines rather than of a directory tree.
 //!
-//! The other job is the licence wall. Section 8.6 says the macOS SDK and the Windows SDK cannot be
+//! The second job is the licence wall. Section 8.6 says the macOS SDK and the Windows SDK cannot be
 //! redistributed, and the way that rule gets enforced rather than remembered is that every input
 //! carries its licence and [`Manifest::redistributable`] is a function anything that publishes an
 //! artifact can call. A rule in a document is a rule somebody breaks in eighteen months.
+//!
+//! The third is provenance. Section 13.5 asks the compiler to emit, for every input that is not its
+//! own code, the name, the upstream project, the version, the source URL, the content hash, the
+//! licence and whether the input was bundled, generated or fetched. That is this file's line with
+//! two fields added, so `-print-sysroot-provenance` prints a manifest rather than a second format
+//! saying the same things in a different order.
 //!
 //! # The format
 //!
@@ -24,7 +31,7 @@
 //! would report a difference between two identical sysroots.
 //!
 //! ```
-//! use rucc_sysroot::{Input, Licence, Manifest};
+//! use rucc_sysroot::{Input, Licence, Manifest, Provenance};
 //! use rucc_tuple::TargetTuple;
 //!
 //! let target: TargetTuple = "aarch64-linux-musl".parse().unwrap();
@@ -32,8 +39,10 @@
 //! manifest.push(Input {
 //!     path: "include/generic/stdio.h".into(),
 //!     source: "musl-1.2.5".into(),
+//!     url: "https://musl.libc.org/releases/musl-1.2.5.tar.gz".into(),
 //!     sha256: "0".repeat(64),
 //!     licence: Licence::Mit,
+//!     provenance: Provenance::Bundled,
 //! });
 //!
 //! let text = manifest.render();
@@ -131,6 +140,65 @@ impl FromStr for Licence {
     }
 }
 
+/// How an input got to where it is.
+///
+/// Section 13.5 asks for this field and does not say what the three answers mean, which makes the
+/// meaning a decision rather than a transcription. The question each answer has to settle is what a
+/// person reproducing a file has to have: an upstream release is enough for one of them, our own
+/// generator and its version is needed for the second, and the third did not exist on any machine
+/// until somebody's network fetched it.
+///
+/// The test to apply is whether the bytes can be found in the upstream release. A header we unpack
+/// and ship unchanged can be, so it is [`Provenance::Bundled`]. A stub shared object, a merged header
+/// tree or a linker script cannot be, because this compiler wrote it, so it is
+/// [`Provenance::Generated`] even though what it was derived from is upstream's. Anything that arrived
+/// over the network after the release was built is [`Provenance::Fetched`], whoever wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Provenance {
+    /// Shipped inside the distribution, byte for byte as upstream released it. Reproducing it needs
+    /// the release named in [`Input::source`] and nothing of ours.
+    Bundled,
+    /// Written by this compiler from something upstream describes, which is the stubs of
+    /// `spec/cross-compile/09-libc-stubs.md` and the merged header trees of section 8.3.
+    /// Reproducing it needs our generator at the version that wrote it as well as the release.
+    Generated,
+    /// Downloaded onto this machine, which for the two licence walls of section 13.4 is the only way
+    /// the input can legally arrive at all. The record says so because a sysroot holding one is not
+    /// the same artifact as a sysroot that shipped complete.
+    Fetched,
+}
+
+impl Provenance {
+    /// The spelling in a manifest file.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Provenance::Bundled => "bundled",
+            Provenance::Generated => "generated",
+            Provenance::Fetched => "fetched",
+        }
+    }
+}
+
+impl fmt::Display for Provenance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Provenance {
+    type Err = ManifestError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bundled" => Ok(Provenance::Bundled),
+            "generated" => Ok(Provenance::Generated),
+            "fetched" => Ok(Provenance::Fetched),
+            other => Err(ManifestError::UnknownProvenance(other.to_string())),
+        }
+    }
+}
+
 /// One file in a sysroot, and everything that has to be true of it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Input {
@@ -140,10 +208,21 @@ pub struct Input {
     /// What it came out of, named so that the same manifest can be produced again. A release name
     /// and version rather than a URL, because a URL moves and a release does not.
     pub source: String,
+    /// Where that release was fetched from, which is the field section 13.5 asks for by name.
+    ///
+    /// The URL of the release rather than of the file, because what anybody checking this does is
+    /// download the release and look inside it, and because a per file URL would be a claim about
+    /// somebody else's directory layout. It is here in spite of a URL moving and a release not,
+    /// which is the reason [`Input::source`] exists and is not replaced by this: the two fields
+    /// answer what it is and where it was got, and only the first of those is still true in ten
+    /// years.
+    pub url: String,
     /// The hash of the file, lowercase hex.
     pub sha256: String,
     /// What it may be done with.
     pub licence: Licence,
+    /// Whether it was bundled, generated or fetched.
+    pub provenance: Provenance,
 }
 
 /// The record of one produced sysroot.
@@ -162,7 +241,7 @@ pub enum ManifestError {
     UnknownVersion(String),
     /// The second line did not name a target, or named one that does not parse.
     BadTarget(String),
-    /// A line did not have the four fields an input has.
+    /// A line did not have the six fields an input has.
     BadInput {
         /// Which line, counting from one.
         line: usize,
@@ -178,6 +257,16 @@ pub enum ManifestError {
     },
     /// A licence spelling nothing here knows.
     UnknownLicence(String),
+    /// A provenance spelling nothing here knows.
+    UnknownProvenance(String),
+    /// An empty field where a source, a URL or a path belongs. A record with a hole in it is worse
+    /// than no record, because it reads as an answer.
+    EmptyField {
+        /// Which line, counting from one.
+        line: usize,
+        /// Which field was empty, spelled the way this module names it.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -189,12 +278,18 @@ impl fmt::Display for ManifestError {
             }
             ManifestError::BadTarget(t) => write!(f, "`{t}` is not a target this understands"),
             ManifestError::BadInput { line, fields } => {
-                write!(f, "line {line} has {fields} fields where an input has four")
+                write!(f, "line {line} has {fields} fields where an input has six")
             }
             ManifestError::BadHash { line, found } => {
                 write!(f, "line {line} has `{found}` where a sha256 belongs")
             }
             ManifestError::UnknownLicence(l) => write!(f, "`{l}` is not a licence this knows"),
+            ManifestError::UnknownProvenance(o) => {
+                write!(f, "`{o}` is not bundled, generated or fetched")
+            }
+            ManifestError::EmptyField { line, field } => {
+                write!(f, "line {line} has nothing where its {field} belongs")
+            }
         }
     }
 }
@@ -202,7 +297,14 @@ impl fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 /// The first line of every manifest, which is also how one is recognized.
-const HEADER: &str = "rucc sysroot manifest 1";
+///
+/// Version 2 is version 1 with the source URL and the provenance on every line, which is what
+/// section 13.5 asks a record of an input to carry. The number went up rather than the two fields
+/// being optional, because a reader that accepted both would have to decide what a missing
+/// provenance means and there is no honest answer to that: an input nobody wrote a provenance for is
+/// an input whose provenance nobody knows. Nothing has written a version 1 file to a place that
+/// outlives a build, so the only cost of the bump is this sentence.
+const HEADER: &str = "rucc sysroot manifest 2";
 
 impl Manifest {
     /// An empty manifest for this target.
@@ -272,9 +374,13 @@ impl Manifest {
             text.push('\t');
             text.push_str(&input.source);
             text.push('\t');
+            text.push_str(&input.url);
+            text.push('\t');
             text.push_str(&input.sha256);
             text.push('\t');
             text.push_str(input.licence.as_str());
+            text.push('\t');
+            text.push_str(input.provenance.as_str());
             text.push('\n');
         }
         text
@@ -312,17 +418,24 @@ impl Manifest {
             }
             let number = index + 1;
             let fields: Vec<&str> = line.split('\t').collect();
-            let [path, source, sha256, licence] = fields.as_slice() else {
+            let [path, source, url, sha256, licence, provenance] = fields.as_slice() else {
                 return Err(ManifestError::BadInput { line: number, fields: fields.len() });
             };
             if !is_sha256(sha256) {
                 return Err(ManifestError::BadHash { line: number, found: (*sha256).to_string() });
             }
+            for (value, field) in [(path, "path"), (source, "source"), (url, "url")] {
+                if value.is_empty() {
+                    return Err(ManifestError::EmptyField { line: number, field });
+                }
+            }
             manifest.push(Input {
                 path: (*path).to_string(),
                 source: (*source).to_string(),
+                url: (*url).to_string(),
                 sha256: (*sha256).to_string(),
                 licence: licence.parse()?,
+                provenance: provenance.parse()?,
             });
         }
         Ok(manifest)
