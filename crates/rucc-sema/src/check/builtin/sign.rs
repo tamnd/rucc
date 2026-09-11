@@ -77,18 +77,8 @@ struct Row {
 /// The names are also rows of `features.toml`, and the test at the bottom of this file is what
 /// keeps the two from drifting.
 const FAMILY: &[Row] = &[
-    Row {
-        name: "__builtin_fabs",
-        library: Some("fabs"),
-        op: Sign::Clear,
-        at: FloatKind::Double,
-    },
-    Row {
-        name: "__builtin_fabsf",
-        library: Some("fabsf"),
-        op: Sign::Clear,
-        at: FloatKind::Float,
-    },
+    Row { name: "__builtin_fabs", library: Some("fabs"), op: Sign::Clear, at: FloatKind::Double },
+    Row { name: "__builtin_fabsf", library: Some("fabsf"), op: Sign::Clear, at: FloatKind::Float },
     Row { name: "__builtin_fabsl", library: None, op: Sign::Clear, at: FloatKind::LongDouble },
     Row {
         name: "__builtin_copysign",

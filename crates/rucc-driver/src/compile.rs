@@ -4532,17 +4532,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// build stopped. That is issue 630.
     #[test]
     fn the_plain_math_names_are_the_same_mask_and_not_a_call() {
-        let text = body(concat!(
-            "double fabs(double x);\n",
-            "double f(double x) { return fabs(x); }\n",
-        ));
+        let text =
+            body(concat!("double fabs(double x);\n", "double f(double x) { return fabs(x); }\n",));
         assert!(text.contains("iconst.i64 9223372036854775807"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
-        let text = body(concat!(
-            "float fabsf(float x);\n",
-            "float f(float x) { return fabsf(x); }\n",
-        ));
+        let text =
+            body(concat!("float fabsf(float x);\n", "float f(float x) { return fabsf(x); }\n",));
         assert!(text.contains("bitcast.i32 %0"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
