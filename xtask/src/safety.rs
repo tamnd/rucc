@@ -53,7 +53,7 @@ use crate::{Error, Result, root, staticlib};
 /// Milestone S1 is `detect` and nothing else. `enforce` and `kernel` get their own runs when the
 /// milestones that define them arrive, and each will want its own column in the expectations
 /// rather than a second pass over these.
-const TIER: &str = "-fsafety=detect";
+pub(crate) const TIER: &str = "-fsafety=detect";
 
 /// The optimization level the suite is run at.
 ///
@@ -61,12 +61,12 @@ const TIER: &str = "-fsafety=detect";
 /// them. `accounting` is where they are run at `-O2`, and it is a different question: there the
 /// interesting failure is a check that was eliminated when it should not have been, and the
 /// expectations that answer it are these same files read a second time.
-const LEVEL: &str = "-O0";
+pub(crate) const LEVEL: &str = "-O0";
 
 /// The optimization level the differential accounting runs at.
 ///
 /// The one people ship at, and the one where every pass that could take a check out has run.
-const OPTIMIZED: &str = "-O2";
+pub(crate) const OPTIMIZED: &str = "-O2";
 
 /// What turns the elimination off without turning anything else off.
 ///
@@ -78,10 +78,10 @@ const OPTIMIZED: &str = "-O2";
 /// Every pass that takes a check out belongs here. A pass left off the list is a pass whose
 /// removals are in both builds, and a comparison of two builds that both did the thing has nothing
 /// to say about whether the thing was right.
-const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
+pub(crate) const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
 
 /// The line every report starts with, which is what says one happened at all.
-const BANNER: &str = "rucc: memory safety violation";
+pub(crate) const BANNER: &str = "rucc: memory safety violation";
 
 /// What a case says should happen to it.
 #[derive(Debug)]
@@ -136,11 +136,11 @@ struct Case {
 
 /// What one program actually did.
 #[derive(Debug)]
-struct Ran {
+pub(crate) struct Ran {
     /// Everything it wrote, on both streams.
-    output: String,
+    pub(crate) output: String,
     /// What it exited with, or nothing when it did not get as far as being linked.
-    status: Option<i32>,
+    pub(crate) status: Option<i32>,
 }
 
 /// Runs every program in `tests/safety` and holds each to the verdict written in it.
@@ -688,7 +688,7 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
 /// instrumented. That is deliberate and is the point of document 10 section 10.7: the library a
 /// case links against has to be one this project did not build, or the mixed link is not being
 /// tested. A case says which of them it wants in a `.links` file beside its assembly.
-const SCRIPT: &str = "\
+pub(crate) const SCRIPT: &str = "\
 #!/bin/sh
 exec 2>/dev/null
 out=/tmp/safety
@@ -722,7 +722,7 @@ done
 ";
 
 /// Splits what the script printed back into one entry per case.
-fn read(text: &str) -> BTreeMap<String, Ran> {
+pub(crate) fn read(text: &str) -> BTreeMap<String, Ran> {
     let mut runs = BTreeMap::new();
     let mut name = String::new();
     let mut output = String::new();
