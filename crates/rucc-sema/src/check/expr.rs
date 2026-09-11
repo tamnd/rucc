@@ -632,6 +632,13 @@ impl Checker<'_> {
         if let Some(value) = self.abs_builtin_value(callee, function, &args, span) {
             return value;
         }
+        // The sign bit pair under the plain names the math library gives them, which are the
+        // spellings `math.h` declares and so the ones programs actually write. In
+        // `check/builtin/sign.rs`, with why leaving these as calls is a link error and not only a
+        // missed expansion.
+        if let Some(value) = self.sign_library_value(callee, function, &args, span) {
+            return value;
+        }
         // The byte swaps, which are arithmetic and not a call to anything. In
         // `check/builtin/bswap.rs`, with why the name alone decides them.
         if let Some(value) = self.bswap_builtin_value(function, &args, span) {

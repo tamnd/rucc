@@ -4522,6 +4522,91 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("bitcast.i64 %1"), "{text}");
     }
 
+    /// The plain math library names are the same mask, which is what makes a program link.
+    ///
+    /// `math.h` declares `fabs` and never spells `__builtin_fabs`, so the plain name is the one
+    /// every program that includes the header reaches. Recognising only the prefixed spelling
+    /// leaves a call to the math library behind, and the math library is not on the link line
+    /// unless the program asked for `-lm`. parson is the project that shows it: its makefile has
+    /// no `-lm`, it does not need one under gcc, and `undefined reference to 'fabs'` is where the
+    /// build stopped. That is issue 630.
+    #[test]
+    fn the_plain_math_names_are_the_same_mask_and_not_a_call() {
+        let text =
+            body(concat!("double fabs(double x);\n", "double f(double x) { return fabs(x); }\n",));
+        assert!(text.contains("iconst.i64 9223372036854775807"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text =
+            body(concat!("float fabsf(float x);\n", "float f(float x) { return fabsf(x); }\n",));
+        assert!(text.contains("bitcast.i32 %0"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text = body(concat!(
+            "double copysign(double x, double y);\n",
+            "double f(double x, double y) { return copysign(x, y); }\n",
+        ));
+        assert!(text.contains("iconst.i64 -9223372036854775808"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text = body(concat!(
+            "float copysignf(float x, float y);\n",
+            "float f(float x, float y) { return copysignf(x, y); }\n",
+        ));
+        assert!(!text.contains("call"), "{text}");
+
+        // The `long double` pair is left alone on purpose. The prefixed spelling of both stops in
+        // the back end with `no rule lowers a bitcast producing an i80`, so expanding the plain
+        // name would trade a link error for a worse one. They go in with issue 540.
+        let text = ir(concat!(
+            "long double fabsl(long double x);\n",
+            "long double f(long double x) { return fabsl(x); }\n",
+        ));
+        assert!(text.contains("call @fabsl"), "{text}");
+    }
+
+    /// A plain math name the program took is the program's own function.
+    ///
+    /// The same four ways as the absolute value family next door, asked again here because these
+    /// two go through a different path: the plain names of this family are taken after the call
+    /// has been checked against the declaration, and the declaration is the whole reason the
+    /// question can be answered at all. Measured against gcc 16.2.0, which calls the program's
+    /// function in every one of them.
+    #[test]
+    fn a_plain_math_name_the_program_took_is_the_programs_own_function() {
+        let taken = concat!(
+            "static double fabs(double b) { return 7; }\n",
+            "double f(double x) { return fabs(x); }\n",
+        );
+        assert!(ir(taken).contains("call @fabs"), "a static definition is the program's own");
+
+        let retyped = concat!("int fabs(int b);\n", "int f(int x) { return fabs(x); }\n");
+        assert!(ir(retyped).contains("call @fabs"), "another type is another function");
+
+        let plain = concat!("double fabs(double b);\n", "double f(double x) { return fabs(x); }\n");
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        assert!(!run(&opts, plain).text().contains("call @fabs"), "the library's by default");
+
+        opts.builtins = false;
+        assert!(run(&opts, plain).text().contains("call @fabs"), "-fno-builtin");
+
+        opts.builtins = true;
+        opts.no_builtin = vec!["fabs".to_owned()];
+        assert!(run(&opts, plain).text().contains("call @fabs"), "-fno-builtin-fabs");
+        let one = concat!(
+            "double copysign(double a, double b);\n",
+            "double f(double x) { return copysign(x, 1.0); }\n",
+        );
+        assert!(!run(&opts, one).text().contains("call @copysign"), "one name and not the family");
+
+        // The prefixed spelling is untouched by any of it, which is what the prefix is for.
+        opts.no_builtin = Vec::new();
+        opts.builtins = false;
+        let prefixed = "double f(double x) { return __builtin_fabs(x); }\n";
+        assert!(!run(&opts, prefixed).text().contains("call @fabs"), "the prefix is not a library");
+    }
+
     /// The sign builtins answer a zero and a nan the way the bits say.
     ///
     /// This is why they are described over the bits rather than written with comparisons and
