@@ -21,7 +21,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
-use rucc_session::{Found, IncludeForm, Preinclude};
+use rucc_session::{Found, IncludeForm, PrefixMap, Preinclude};
 use rucc_target::TargetInfo;
 
 use crate::cond;
@@ -143,6 +143,16 @@ impl Preprocessor {
     /// A preprocessor with an empty macro table.
     pub fn new() -> Preprocessor {
         Preprocessor::default()
+    }
+
+    /// The same, with `__FILE__` and `__BASE_FILE__` rewritten by `map`.
+    ///
+    /// Handed in at construction rather than set afterwards because it is fixed for the whole
+    /// translation unit: the command line cannot change its mind halfway through a file, and a
+    /// `__FILE__` that answered differently at the top of a header than at the bottom would be a
+    /// worse bug than not having the flag.
+    pub fn with_prefix_map(map: PrefixMap) -> Preprocessor {
+        Preprocessor { expander: Expander::with_prefix_map(map), ..Preprocessor::default() }
     }
 
     /// The macros defined so far.
@@ -1923,6 +1933,13 @@ mod tests {
     ///
     /// The main file is always `/main.c`, so a quoted include with no search path set up
     /// finds a header the test put at `/name.h`.
+    /// Any spelling of a path as forward slashes, doubled backslashes included, since a name this
+    /// compiler built by joining a directory to a header holds the host's own separator and
+    /// `__FILE__` escapes a backslash.
+    fn slashes(text: &str) -> String {
+        text.replace("\\\\", "/").replace('\\', "/")
+    }
+
     struct Run {
         interner: Interner,
         sources: SourceMap,
@@ -1940,6 +1957,15 @@ mod tests {
                 search: SearchPath::new(),
                 pp: Preprocessor::new(),
             }
+        }
+
+        /// The same, with the `-fmacro-prefix-map=` rewrites `map` names, oldest first.
+        fn mapping(map: &[(&str, &str)]) -> Run {
+            let mut list = PrefixMap::new();
+            for (old, new) in map {
+                list.push(*old, *new);
+            }
+            Run { pp: Preprocessor::with_prefix_map(list), ..Run::new() }
         }
 
         /// Puts a header where an include can find it.
@@ -3187,6 +3213,54 @@ mod tests {
         run.file("/deep.h", "__FILE__ __BASE_FILE__\n");
         assert_eq!(run.go("#include \"deep.h\"\n"), "\"/deep.h\" \"/main.c\"");
         assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_prefix_map_rewrites_the_file_and_the_base_file_and_not_the_file_name() {
+        let mut run = Run::mapping(&[("/build", ".")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/build/deep.h", "__FILE__ __BASE_FILE__ __FILE_NAME__\n");
+        // The header is rewritten and so is the file at the bottom of the stack, because both of
+        // those are paths and a path is what the flag exists to hide. The last component is not,
+        // because a mapping rewrites the front of a path and that is what is left after the front
+        // has been taken off: a name with no directories in it is already what the flag is for.
+        // gcc draws the line in exactly this place.
+        let text = run.go_named("/build/main.c", "#include \"deep.h\"\n");
+        // The separators are whatever the host joined the directory and the header with, and this
+        // test is not about which of the two characters that is.
+        assert_eq!(slashes(&text), "\"./deep.h\" \"./main.c\" \"deep.h\"");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_last_rewrite_that_matches_is_the_one_that_acts() {
+        // Two roots mapped at once, which is what a distribution passes, and one of them inside
+        // the other, which is what makes the order matter. The later flag wins where both match.
+        let mut run = Run::mapping(&[("/build", "src"), ("/build/gen", "generated")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/gen/made.c", "__FILE__\n"), "\"generated/made.c\"");
+
+        let mut run = Run::mapping(&[("/build", "src"), ("/build/gen", "generated")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/hand.c", "__FILE__\n"), "\"src/hand.c\"");
+
+        // And a name the flags say nothing about comes out as it went in, rather than as an empty
+        // string or as the first rewrite applied to nothing.
+        let mut run = Run::mapping(&[("/build", "src")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/elsewhere/main.c", "__FILE__\n"), "\"/elsewhere/main.c\"");
+    }
+
+    #[test]
+    fn a_rewrite_matches_the_characters_and_not_the_directories() {
+        // gcc compares the front of the string, not a sequence of path components, so a rewrite
+        // that stops halfway through a directory name really does cut it in half. Surprising the
+        // first time and relied on the second, because it is what lets `-ffile-prefix-map=/b=/a`
+        // fix up a whole family of sibling roots at once, and a compiler that quietly rounded the
+        // rewrite up to the nearest separator would be answering a different question.
+        let mut run = Run::mapping(&[("/bui", "X")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/main.c", "__FILE__\n"), "\"Xld/main.c\"");
     }
 
     #[test]

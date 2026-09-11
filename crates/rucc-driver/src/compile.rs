@@ -179,7 +179,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Phases 1 to 4. The expanded stream is turned into pp-tokens straight away, because the
     // include context borrows the source map that rendering a diagnostic reads and the borrow
     // has to end before anything is rendered.
-    let mut pp = rucc_pp::Preprocessor::new();
+    let mut pp = rucc_pp::Preprocessor::with_prefix_map(opts.prefix_map.macros.clone());
     let predef = rucc_pp::Predef::for_options(opts);
     let expanded: Vec<PpToken> = {
         let mut tokens = Vec::new();
