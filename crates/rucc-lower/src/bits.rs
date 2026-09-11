@@ -20,6 +20,22 @@
 //! address. That is the little-endian order, and it is why a big-endian target is reported
 //! rather than lowered.
 
+/// What is left of an alignment `offset` bytes further on.
+///
+/// The alignment of an address inside an object is what the offset leaves of the object's: a four
+/// byte aligned record has a byte at offset six that is aligned to two, and one at offset zero that
+/// is as aligned as the record is. Never less than one, because every address is aligned to one
+/// byte and an alignment of zero is not a thing an access can be asked about.
+pub(crate) fn shifted(base: u32, offset: u64) -> u32 {
+    let align = if offset == 0 {
+        base
+    } else {
+        // Capped at a shift the type can take, which is far above any alignment.
+        base.min(1 << offset.trailing_zeros().min(16))
+    };
+    align.max(1)
+}
+
 /// A run of bits at an address, which is what a bit-field is once its record is laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Run {
@@ -37,13 +53,7 @@ impl Run {
     /// The alignment of the run's own address is what the offset leaves of the base's: a
     /// four byte aligned record has a byte at offset six that is aligned to two.
     pub(crate) fn at(base: u32, offset: u64, start: u32, width: u32) -> Run {
-        let align = if offset == 0 {
-            base
-        } else {
-            // Capped at a shift the type can take, which is far above any alignment.
-            base.min(1 << offset.trailing_zeros().min(16))
-        };
-        Run { start, width, align: align.max(1) }
+        Run { start, width, align: shifted(base, offset) }
     }
 
     /// How many bytes the run has a bit in.

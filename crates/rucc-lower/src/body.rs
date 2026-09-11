@@ -44,7 +44,7 @@ use rucc_types::{
 };
 
 use crate::abi::{self, Plan, Travel};
-use crate::bits::{Piece, Run};
+use crate::bits::{Piece, Run, shifted};
 use crate::repr;
 use crate::ssa::{Ssa, Var};
 use crate::unit::{Protector, Unit};
@@ -90,6 +90,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         landings: HashMap::new(),
         jumps: Vec::new(),
         grows: false,
+        aligned: HashMap::new(),
     };
     body.ssa.seal(body.func, entry);
 
@@ -448,6 +449,25 @@ struct Body<'a, 'u> {
     /// Whether anything the function declares is an array whose length is not a constant, which
     /// is what makes the stack move under it.
     grows: bool,
+    /// What an address is known to be aligned to, for the addresses something worked it out for.
+    ///
+    /// An access ordinarily assumes the alignment of the type it goes through, because that is
+    /// what C 6.2.8 gives an object of that type. Packing takes that away: a member of a record
+    /// written `packed` or under a `#pragma pack` sits wherever the layout put it, and an `int`
+    /// there is aligned to one byte and not to four. So the addresses whose alignment the layout
+    /// settled are recorded on the way down, and [`Body::info_of`] takes the smaller of that and
+    /// the type's.
+    ///
+    /// Only the addresses that are less aligned than their type are worth anything, but all of
+    /// them go in, because an entry that agrees with the type costs one lookup and leaving it out
+    /// would mean deciding what the type's answer is twice.
+    ///
+    /// An address that is not in here is one nothing worked out, and the type's alignment is what
+    /// an access through it assumes. That is the assumption `spec/safe-memory/04-safety-model.md`
+    /// judgement J1 tests at run time rather than one this pass has to prove: a pointer that was
+    /// cast from a narrower type and lost its low bits is row S7 of document 03, and the check is
+    /// what finds it.
+    aligned: HashMap<Value, u32>,
 }
 
 /// One open scope, and the stack pointer as it was before anything in it grew the stack.
@@ -1086,7 +1106,14 @@ impl<'u> Body<'_, 'u> {
         } else {
             self.access(place.ty)
         };
-        MemInfo { owns: place.owns, ..info }
+        let info = MemInfo { owns: place.owns, ..info };
+        // The smaller of what the type would give the access and what the layout left the address
+        // with, for an address the layout settled. They differ only where something was packed.
+        let Where::Addr(addr) = place.at else { return info };
+        match self.alignment(addr) {
+            Some(known) => MemInfo { align: info.align.min(known), ..info },
+            None => info,
+        }
     }
 
     /// The flags an access to that type carries.
@@ -2683,12 +2710,19 @@ impl<'u> Body<'_, 'u> {
         };
         let byte = member.offset;
         let owns = self.owned(id, record, kind, byte, place.owns);
+        // What the record's own address is aligned to, which is the alignment of its type unless
+        // the record is itself inside something that knows better. Written down before the member
+        // is stepped to, because that is what [`Self::offset`] carries forward: a `packed` record
+        // is aligned to one byte, so an `int` member of one is too, and an access through it may
+        // not assume the four bytes C would otherwise give it.
+        let base =
+            self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
+        self.aligns(addr, base);
         if let Some(width) = member.bits {
             // The address is of the byte the first of its bits is in, and the run says which
             // bit of that byte it starts at. A member of a record aligned to eight bytes at
             // byte offset four is aligned to four, which is what the run needs to know to say
             // how the loads under it are aligned.
-            let base = repr::align_of(self.types(), self.target(), record);
             let addr = self.offset(addr, byte, span);
             let run = Run::at(base, byte, member.bit, width);
             return Place { punned, owns, ..Place::new(Where::Bits(addr, run), ty) };
@@ -2776,11 +2810,34 @@ impl<'u> Body<'_, 'u> {
         if bytes == 0 {
             return addr;
         }
-        let address = self.address;
-        let mut build = self.build(span);
-        let amount = build.iconst(address, bytes as i128);
-        let args = build.func().push_values(&[addr, amount]);
-        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        let moved = {
+            let address = self.address;
+            let mut build = self.build(span);
+            let amount = build.iconst(address, bytes as i128);
+            let args = build.func().push_values(&[addr, amount]);
+            build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        };
+        // The alignment the offset leaves of whatever the address had, for the addresses anything
+        // knows an alignment for. This is what carries a packed record's one byte alignment out to
+        // the members of it and to anything inside those.
+        if let Some(align) = self.alignment(addr) {
+            self.aligns(moved, shifted(align, bytes));
+        }
+        moved
+    }
+
+    /// What an address is known to be aligned to, where the layout settled it.
+    fn alignment(&self, addr: Value) -> Option<u32> {
+        self.aligned.get(&addr).copied()
+    }
+
+    /// Writes down what an address is aligned to, keeping the smaller of two answers.
+    ///
+    /// Two answers about one address is a thing a walk that meets the same value twice can
+    /// produce, and the smaller one is the one an access can rely on.
+    fn aligns(&mut self, addr: Value, align: u32) {
+        let known = self.aligned.entry(addr).or_insert(align);
+        *known = (*known).min(align);
     }
 
     /// An address a number of elements further on, or back when `back` is set.
@@ -2793,10 +2850,23 @@ impl<'u> Body<'_, 'u> {
         back: bool,
         span: Span,
     ) -> Value {
-        let amount = self.scaled(steps, signed, size, back, span);
-        let mut build = self.build(span);
-        let args = build.func().push_values(&[addr, amount]);
-        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        let moved = {
+            let amount = self.scaled(steps, signed, size, back, span);
+            let mut build = self.build(span);
+            let args = build.func().push_values(&[addr, amount]);
+            build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        };
+        // A step of a whole number of elements leaves whatever the element width and the address
+        // have in common, which is what [`shifted`] works out. How many elements it is does not
+        // enter into it, and a width the program computed leaves nothing at all.
+        if let Some(align) = self.alignment(addr) {
+            let left = match size {
+                Stride::Bytes(bytes) => shifted(align, bytes),
+                Stride::Value(_) => 1,
+            };
+            self.aligns(moved, left);
+        }
+        moved
     }
 
     /// A number of elements as the number of bytes it is, in the width an address has.
