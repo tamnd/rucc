@@ -308,6 +308,28 @@ pub enum Opcode {
     /// both facts about the moment the program reaches this, so the runtime reads them and nothing
     /// here could name them.
     MetaEpoch,
+    /// Everything this thread has done so far is published at the atomic object named here.
+    ///
+    /// One half of a synchronization edge in the sense of section 9.5, and the half that goes in
+    /// front of the atomic that carries it. The operand is the object's address, because that is
+    /// the key whoever takes the other end will look the clock up under, and there is no payload:
+    /// which thread is publishing and how far it has counted are facts about the moment the program
+    /// reaches this, the same way they are for [`Opcode::MetaEpoch`].
+    ///
+    /// This exists because an atomic is not a call. Every other edge the monitor knows about is a
+    /// `pthread` function and is interposed, and a C11 release store is a machine instruction with
+    /// nothing to interpose, so the compiler is the only thing that can say the edge was there.
+    MetaRelease,
+    /// Everything published at the atomic object named here is now ordered before this thread.
+    ///
+    /// The other half of [`Opcode::MetaRelease`], and it goes after the atomic rather than in front
+    /// of it, because the ordering it takes is the ordering the atomic just read.
+    ///
+    /// A missing edge is the one kind of missing instrumentation in the whole safety pass that
+    /// costs a false report rather than a missed one: two threads that really were ordered by an
+    /// edge nobody recorded look concurrent, and a race is reported against a program doing nothing
+    /// wrong. That is why the edges go in before the race check is ever on by default.
+    MetaAcquire,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
     MetaTransfer,
     /// A declared exemption starts here, with the reason it was declared.
@@ -512,6 +534,8 @@ impl Opcode {
             Self::MetaInit => "meta_init",
             Self::MetaInitCopy => "meta_init_copy",
             Self::MetaEpoch => "meta_epoch",
+            Self::MetaRelease => "meta_release",
+            Self::MetaAcquire => "meta_acquire",
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
             Self::SafeRegionEnd => "safe_region_end",
@@ -803,6 +827,8 @@ impl Opcode {
             | Self::MetaInit
             | Self::MetaInitCopy
             | Self::MetaEpoch
+            | Self::MetaRelease
+            | Self::MetaAcquire
             | Self::MetaTransfer
             | Self::SafeRegionBegin
             | Self::SafeRegionEnd
@@ -1040,6 +1066,8 @@ static ALL: &[Opcode] = &[
     Opcode::MetaInit,
     Opcode::MetaInitCopy,
     Opcode::MetaEpoch,
+    Opcode::MetaRelease,
+    Opcode::MetaAcquire,
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
     Opcode::SafeRegionEnd,

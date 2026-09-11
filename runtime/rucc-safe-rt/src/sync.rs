@@ -74,9 +74,16 @@
 //! that met at it rather than zero to all of them, so it does not fit the group's rule that zero is
 //! how a row spells success. It is not on macOS either.
 //!
-//! The atomics are not here either. A C11 `atomic_store` with release ordering is an edge and it is
-//! not a call, so there is nothing to interpose: it is the compiler's half, and it belongs with the
-//! judgements rather than here.
+//! The atomics are not interposed, because there is nothing to interpose: a C11 `atomic_store` with
+//! release ordering is an edge and it is a machine instruction rather than a call. The compiler
+//! emits the edge instead, and what it emits lands in [`edges`] below and goes into the same two
+//! tables under the same keys, so an ordering established through an atomic and one established
+//! through a mutex are indistinguishable to everything that reads them.
+//!
+//! A bare `atomic_thread_fence` is still missing. It orders against every other thread rather than
+//! against one object, so there is no address to key it on and the tables here are keyed by
+//! address. A program that synchronizes through a fence and nothing else is one this can report
+//! against wrongly, which is the direction that matters, and it is on the milestone.
 
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -573,6 +580,43 @@ interpose! {
     {
         // SAFETY: as `sem_wait`.
         unsafe { real::sem_post(sem) }
+    }
+}
+
+/// What generated code calls, which is the one edge that is not a call in the program itself.
+///
+/// Everything else in this module is an interposed `pthread` function, so the program calls it by
+/// name and the wrapper is what the linker resolves. A C11 atomic is a machine instruction, so
+/// there is nothing to interpose and the compiler emits these instead: `rucc_safety`'s `edges` puts
+/// a release in front of an atomic that publishes and an acquire after one that takes, keyed on the
+/// atomic object's own address. That is the same key a mutex uses, and deliberately, so that a
+/// program synchronizing through both is one table and one clock rather than two of each.
+///
+/// Its own module rather than the `exports` beside it, because that one is written by the
+/// interposition macro out of the table above and these two are not rows: there is no C library
+/// function here to wrap and no return value to look at.
+pub mod edges {
+    use core::ffi::c_void;
+
+    /// Publishes this thread's clock at `object`, before the atomic that carries the edge runs.
+    ///
+    /// # Safety
+    ///
+    /// `object` is whatever address the program computed for the atomic and is never read through.
+    /// Nothing here dereferences it: it is hashed and used as a key.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_release(object: *mut c_void) {
+        super::released(object);
+    }
+
+    /// Takes whatever was published at `object`, after the atomic that carries the edge has run.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_release`]. The address is a key and is never read through.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_acquire(object: *mut c_void) {
+        super::acquired(object);
     }
 }
 

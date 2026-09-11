@@ -386,6 +386,25 @@ impl MemOrder {
     pub const fn is_valid_for_rmw(self) -> bool {
         !matches!(self, Self::NotAtomic)
     }
+
+    /// Whether this ordering publishes everything before it, which is the release half.
+    ///
+    /// Asked by the race detector rather than by the back end. A release is a synchronization edge
+    /// in the sense of `spec/safe-memory/09-type-init-and-races.md` section 9.5, so it is where a
+    /// thread's clock has to be written down for whoever takes the other end.
+    #[must_use]
+    pub const fn is_release(self) -> bool {
+        matches!(self, Self::Release | Self::AcqRel | Self::SeqCst)
+    }
+
+    /// Whether this ordering takes everything published before it, which is the acquire half.
+    ///
+    /// The other end of [`MemOrder::is_release`]. `acq_rel` and `seq_cst` answer yes to both, which
+    /// is what makes a read-modify-write one edge in and one edge out.
+    #[must_use]
+    pub const fn is_acquire(self) -> bool {
+        matches!(self, Self::Acquire | Self::AcqRel | Self::SeqCst)
+    }
 }
 
 impl fmt::Display for MemOrder {
@@ -740,6 +759,20 @@ mod tests {
         assert!(!MemOrder::Acquire.is_valid_for_store());
         assert!(MemOrder::SeqCst.is_valid_for_load());
         assert!(MemOrder::SeqCst.is_valid_for_store());
+    }
+
+    #[test]
+    fn the_two_halves_of_an_edge_are_the_orderings_that_carry_one() {
+        let releases: Vec<&str> =
+            MemOrder::all().filter(|order| order.is_release()).map(MemOrder::name).collect();
+        assert_eq!(releases, ["release", "acq_rel", "seq_cst"]);
+        let acquires: Vec<&str> =
+            MemOrder::all().filter(|order| order.is_acquire()).map(MemOrder::name).collect();
+        assert_eq!(acquires, ["acquire", "acq_rel", "seq_cst"]);
+        // Relaxed is atomic and is not an edge, which is the distinction the race detector rests
+        // on: it says the word does not tear and it says nothing about what happened around it.
+        assert!(!MemOrder::Relaxed.is_release());
+        assert!(!MemOrder::Relaxed.is_acquire());
     }
 
     #[test]

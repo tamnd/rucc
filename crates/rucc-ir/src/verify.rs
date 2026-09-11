@@ -1612,6 +1612,15 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // The two halves of a synchronization edge, which take the address of the atomic
+            // object the edge is keyed on and nothing else. No length, because an edge is not
+            // about a range of bytes: it is about everything the thread did either side of it.
+            Opcode::MetaRelease | Opcode::MetaAcquire => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+            }
+
             // The region markers, which say something about the code between them rather than
             // about any value, so there is nothing here but the operand count.
             Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => {

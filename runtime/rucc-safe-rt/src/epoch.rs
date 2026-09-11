@@ -66,9 +66,11 @@
 //! The compiler's half is in. `-fsafety-races` puts a `__rucc_meta_epoch` after every store of a
 //! pointer and a `__rucc_check_race` in front of it, and `=pointer` puts one in front of a read of a
 //! pointer too, so the plane a program runs with holds what that program wrote and is asked about it
-//! where the program can act on the answer. What is left is the ordering that is not a call at all,
-//! which is the atomics: it has nowhere to be interposed and so has to come from the compiler, and
-//! until it does the flag stays off by default.
+//! where the program can act on the answer. The ordering that is not a call at all is in with it: an
+//! atomic that publishes gets a `__rucc_meta_release` in front of it and one that takes gets a
+//! `__rucc_meta_acquire` after it, keyed on the atomic object, which is the last edge that had
+//! nowhere to be interposed. What is left there is a bare `atomic_thread_fence`, which orders
+//! against every thread rather than against an object and so has no address to be keyed on.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;
