@@ -189,6 +189,14 @@ pub struct Counts {
     /// watches pointer shaped words and not every byte a program stores. [`mod@rucc_session`]'s
     /// `Races` is where that is argued.
     pub stamped: usize,
+    /// Halves of a synchronization edge put around an atomic, which is nought, one or two of them
+    /// per atomic depending on what the program asked that atomic to order.
+    ///
+    /// Zero without `-fsafety-races`, and zero with it in a program that uses no atomics, which is
+    /// most of them. Counted apart from `stamped` because it is not a plane write: the two of them
+    /// answer different questions and a build with a great many of one and none of the other is a
+    /// build somebody should be able to see.
+    pub edged: usize,
     /// Blocks that opened a scope, which is one per `restrict` clique that has an access in it.
     ///
     /// Kept apart from `promised` because it is the part of the cost that is paid per call rather
@@ -212,6 +220,7 @@ impl Counts {
         self.moved += other.moved;
         self.stamped += other.stamped;
         self.watched += other.watched;
+        self.edged += other.edged;
         self.promised += other.promised;
         self.scoped += other.scoped;
     }
@@ -356,6 +365,16 @@ pub fn insert(
                 } else {
                     counts.skipped += 1;
                 }
+            }
+            // The edges, which are nothing like the rest of this walk: they put no question and
+            // record nothing about the bytes the atomic touched. What they do is tell the epoch
+            // plane that two threads were ordered here, which is the one thing a plane made of
+            // per thread counters cannot work out for itself. Both modes emit them, because what
+            // separates the modes is which classes are reported and an edge reports nothing.
+            Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::AtomicRmw | Opcode::Cmpxchg
+                if races.records() =>
+            {
+                counts.edged += edges(func, inst);
             }
             _ => {}
         }
@@ -850,6 +869,79 @@ fn raced(
     true
 }
 
+/// Puts a `meta_release` in front of an atomic, a `meta_acquire` after it, or both, or neither.
+///
+/// The synchronization edges of `spec/safe-memory/09-type-init-and-races.md` section 9.5, for the
+/// one kind of edge that cannot be interposed. Every other edge the monitor knows about is a
+/// `pthread` call and `rucc_safe_rt::sync` wraps it. A C11 release store is a machine instruction,
+/// so there is no call to wrap and the compiler is the only thing in the build that can say an
+/// ordering happened here.
+///
+/// This matters more than a missing recording does, and in the opposite direction. Everywhere else
+/// in this pass, instrumentation nobody wrote costs recall: a store that was not stamped is a race
+/// that is not found. Here it costs precision. The epoch plane is a counter per thread and nothing
+/// else, so two threads that really were ordered, by an edge this pass did not emit, are two
+/// threads whose clocks say they are concurrent, and the check reports a race in a program that
+/// has none. That is why these go in before the check is ever on by default.
+///
+/// Which side the marker lands on is which side the ordering is on. A release publishes everything
+/// the thread has already done, so the clock has to be written down while that is still true, which
+/// is in front of the atomic. An acquire takes an ordering from whatever the atomic just read, so
+/// it is not there to be taken until the atomic has run, which puts it after. An `acq_rel` or a
+/// `seq_cst` read-modify-write is both, and gets one of each.
+///
+/// No thinning by what the atomic carries, unlike [`stamped`] and [`raced`]. A release on an atomic
+/// `int` is the ordinary publication pattern, the flag being set is not the pointer, and refusing
+/// to record that edge because no pointer went through it would lose exactly the ordering the
+/// pointers stored before it depend on.
+///
+/// A `fence` is not here. It orders against every other thread rather than against one object, so
+/// there is no address to key an edge on and the table `rucc_safe_rt::sync` keeps is keyed by
+/// address. A program that synchronizes through a bare fence and nothing else is one this can
+/// report against wrongly, and it is written down on the milestone rather than worked around.
+fn edges(func: &mut Func, atomic: Inst) -> usize {
+    let Some(pointer) = keyed(func, atomic) else { return 0 };
+    let order = match func[atomic].extra {
+        Extra::Mem(at) => func[at].order,
+        Extra::Rmw(_, at) => func[at].order,
+        _ => return 0,
+    };
+
+    let span = func.span(atomic);
+    let mut put = 0;
+    if order.is_release() {
+        let args = func.push_values(&[pointer]);
+        let data = InstData { args, ..InstData::new(Opcode::MetaRelease) };
+        let made = func.create_inst(data, &[], span);
+        func.insert_before(made, atomic);
+        put += 1;
+    }
+    if order.is_acquire() {
+        let args = func.push_values(&[pointer]);
+        let data = InstData { args, ..InstData::new(Opcode::MetaAcquire) };
+        let made = func.create_inst(data, &[], span);
+        func.insert_after(made, atomic);
+        put += 1;
+    }
+    put
+}
+
+/// The address an atomic operates on, which is the key its edge is filed under.
+///
+/// The same shape as [`pointer_of`] and a different set of opcodes: an `atomic_store` writes
+/// through its second operand for the reason an ordinary store does, and the other three take the
+/// object first because nothing comes before it.
+fn keyed(func: &Func, atomic: Inst) -> Option<Value> {
+    let args = &func[func[atomic].args];
+    let at = match func[atomic].opcode {
+        Opcode::AtomicStore => 1,
+        Opcode::AtomicLoad | Opcode::AtomicRmw | Opcode::Cmpxchg => 0,
+        _ => return None,
+    };
+    let &value = args.get(at)?;
+    func[value].ty.is_ptr().then_some(value)
+}
+
 /// Puts `cap_of` and `check_deriv` immediately before one `ptr_add`.
 ///
 /// Judgement J2, which is the one that catches a pointer walking off its object *before* anything
@@ -955,7 +1047,7 @@ fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, Flags, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict, Signature,
+        Builder, Flags, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict, RmwOp, Signature,
         TbaaNode, print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
@@ -1575,6 +1667,126 @@ mod tests {
         let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
         assert_eq!(counts.watched, 0);
         assert!(!print_func(&module, &func, &names).contains("check_race"));
+    }
+
+    /// An atomic store, an atomic load and an atomic read-modify-write in one function.
+    ///
+    /// Each takes the ordering it is given, so one builder covers every case the edges have an
+    /// opinion about: which side a marker lands on, and whether one lands at all.
+    fn three_atomics(names: &mut Interner, store: MemOrder, load: MemOrder, rmw: MemOrder) -> Func {
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("atomics"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let extra = Extra::Mem(b.func().add_mem(MemInfo { order: store, ..info }));
+        let args = b.func().push_values(&[v, p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicStore) }, &[]);
+
+        let extra = Extra::Mem(b.func().add_mem(MemInfo { order: load, ..info }));
+        let args = b.func().push_values(&[p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicLoad) }, &[i64_]);
+
+        let at = b.func().add_mem(MemInfo { order: rmw, ..info });
+        let args = b.func().push_values(&[p, v]);
+        let extra = Extra::Rmw(RmwOp::Add, at);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicRmw) }, &[i64_]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_release_publishes_in_front_of_its_atomic_and_an_acquire_takes_after_it() {
+        // The edges of section 9.5 that are not a call and so have nowhere to be interposed. Which
+        // side a marker lands on is which side the ordering is on: a release publishes everything
+        // the thread has already done, so the clock has to be written down while that is still
+        // true, and an acquire takes an ordering from what the atomic just read, which is not there
+        // to be taken until the atomic has run.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "edges.c");
+
+        let mut func =
+            three_atomics(&mut names, MemOrder::Release, MemOrder::Acquire, MemOrder::Relaxed);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "the release and the acquire, and not the relaxed one");
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("meta_release").count(), 1, "{printed}");
+        assert_eq!(printed.matches("meta_acquire").count(), 1, "{printed}");
+        assert!(printed.contains("meta_release %0\n    atomic_store"), "{printed}");
+        assert!(printed.contains("= atomic_load"), "{printed}");
+        let read = printed.find("atomic_load").expect("the load is in there");
+        let took = printed.find("meta_acquire").expect("and so is the edge it takes");
+        assert!(read < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_modify_write_that_orders_both_ways_carries_both_halves_of_an_edge() {
+        // `acq_rel` and `seq_cst` publish and take, which is what makes a lock built out of one
+        // compare and exchange a lock this can follow. One marker each side, since the two are
+        // about different moments and collapsing them would put the publication after the read.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "both.c");
+
+        let mut func =
+            three_atomics(&mut names, MemOrder::Relaxed, MemOrder::Relaxed, MemOrder::AcqRel);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "one of each, around the one atomic that orders anything");
+
+        let printed = print_func(&module, &func, &names);
+        let published = printed.find("meta_release").expect("the publishing half is in there");
+        let changed = printed.find("atomic_rmw").expect("so is the atomic");
+        let took = printed.find("meta_acquire").expect("and so is the taking half");
+        assert!(published < changed && changed < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_relaxed_atomic_is_no_edge_and_neither_is_any_atomic_in_a_build_that_is_not_watching() {
+        // Relaxed is atomic and is not an ordering. It says the word does not tear and it says
+        // nothing about what happened either side of it, so an edge taken there would be an
+        // ordering that does not exist, and inventing one hides the races it covers up.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "relaxed.c");
+
+        let mut loose =
+            three_atomics(&mut names, MemOrder::Relaxed, MemOrder::Relaxed, MemOrder::Relaxed);
+        let counts = insert(&mut loose, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 0);
+        let printed = print_func(&module, &loose, &names);
+        assert!(
+            !printed.contains("meta_release") && !printed.contains("meta_acquire"),
+            "{printed}"
+        );
+
+        // And nothing at all without the flag, which is where every other part of this plane is.
+        let mut off =
+            three_atomics(&mut names, MemOrder::SeqCst, MemOrder::SeqCst, MemOrder::SeqCst);
+        let counts = insert(&mut off, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.edged, 0);
+        let printed = print_func(&module, &off, &names);
+        assert!(
+            !printed.contains("meta_release") && !printed.contains("meta_acquire"),
+            "{printed}"
+        );
     }
 
     #[test]

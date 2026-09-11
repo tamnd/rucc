@@ -158,6 +158,8 @@ fn calls(
             Opcode::MetaInit => written(func, names, word, inst),
             Opcode::MetaInitCopy => carried(func, names, word, inst),
             Opcode::MetaEpoch => stamped(func, names, word, inst),
+            Opcode::MetaRelease => published(func, names, inst),
+            Opcode::MetaAcquire => taken(func, names, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -515,6 +517,26 @@ fn stamped(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
     call(func, names, inst, "__rucc_meta_epoch", params, &[], &[pointer, bytes]);
 }
 
+/// `meta_release` becomes `__rucc_meta_release(object)`.
+///
+/// One operand and no length, because an edge is about everything the thread did rather than about
+/// a range of bytes, and no descriptor, because publishing a clock decides nothing and so has
+/// nothing to report. The runtime entry point is the same `sync::released` the `pthread` wrappers
+/// call, keyed on the address the same way, so an ordering established through an atomic and one
+/// established through a mutex are the same edge to everything that reads them.
+fn published(func: &mut Func, names: &mut Interner, inst: Inst) {
+    let [object] = func[func[inst].args] else { return };
+    call(func, names, inst, "__rucc_meta_release", &[Type::PTR], &[], &[object]);
+}
+
+/// `meta_acquire` becomes `__rucc_meta_acquire(object)`.
+///
+/// The other end of [`published`], and the same shape.
+fn taken(func: &mut Func, names: &mut Interner, inst: Inst) {
+    let [object] = func[func[inst].args] else { return };
+    call(func, names, inst, "__rucc_meta_acquire", &[Type::PTR], &[], &[object]);
+}
+
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
 ///
 /// No descriptor, and these two are the only ones of these that have none. The other four are
@@ -663,7 +685,7 @@ fn emit(module: &mut Module, names: &mut Interner, index: usize, row: Descriptor
 #[cfg(test)]
 mod tests {
     use rucc_ir::{
-        Builder, MemInfo, MemOrder, MetaNode, Restrict, TbaaNode, print_func, verify_func,
+        Builder, MemInfo, MemOrder, MetaNode, Restrict, RmwOp, TbaaNode, print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -842,6 +864,68 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
         module.add_func(func);
         module
+    }
+
+    /// A module with one function holding a `seq_cst` atomic store, edges in.
+    ///
+    /// Sequentially consistent because it publishes and takes both, so one atomic covers the two
+    /// markers and the order they came out in is readable off one printed function.
+    fn ordering(names: &mut Interner) -> Module {
+        let mut module = Module::new(names.intern("edge.c"), &target());
+        let plane = Plane::build(&mut module);
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("publish"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::SeqCst,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let at = b.func().add_mem(info);
+        let args = b.func().push_values(&[p, v]);
+        let extra = Extra::Rmw(RmwOp::Add, at);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicRmw) }, &[i64_]);
+        b.ret(&[]);
+
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn the_two_halves_of_an_edge_become_the_calls_the_interposed_locks_already_make() {
+        // One operand each, no length and no descriptor. An edge is not about a range of bytes, it
+        // is about everything the thread did either side of it, and publishing a clock decides
+        // nothing so there is no row to point at. The runtime entry points are the same two the
+        // `pthread` wrappers call, keyed on an address the same way, so an ordering established
+        // through an atomic and one established through a mutex are one table and one clock.
+        let mut names = Interner::new();
+        let mut module = ordering(&mut names);
+        lower(&mut module, &mut names);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("call @__rucc_meta_release(%0) : (ptr)\n"), "{printed}");
+        assert!(printed.contains("call @__rucc_meta_acquire(%0) : (ptr)\n"), "{printed}");
+
+        // In front of the atomic and behind it, which is the order the ordering itself is in.
+        let published = printed.find("__rucc_meta_release").expect("the publishing half lowered");
+        let changed = printed.find("atomic_rmw").expect("the atomic is still there");
+        let took = printed.find("__rucc_meta_acquire").expect("and the taking half lowered");
+        assert!(published < changed && changed < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     /// A module with one function that reads through its parameter as an `int`, checks in.

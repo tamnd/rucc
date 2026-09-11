@@ -1017,6 +1017,15 @@ mod tests {
         let args = b.func().push_values(&[p, derived, off]);
         b.inst(InstData { args, ..InstData::new(Opcode::MetaInitCopy) }, &[]);
 
+        // The two halves of a synchronization edge, which take the address the edge is keyed on
+        // and no length, since an edge is about everything the thread did rather than about bytes.
+        let mut edge = |opcode| {
+            let args = b.func().push_values(&[p]);
+            b.inst(InstData { args, ..InstData::new(opcode) }, &[]);
+        };
+        edge(Opcode::MetaRelease);
+        edge(Opcode::MetaAcquire);
+
         let reason = names.intern("hand written assembly, checked by review");
         b.inst(
             InstData { extra: Extra::Reason(reason), ..InstData::new(Opcode::SafeRegionBegin) },

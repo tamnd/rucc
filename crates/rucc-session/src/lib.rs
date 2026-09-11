@@ -293,9 +293,12 @@ impl fmt::Display for Subobject {
 /// the compiler where instrumentation nobody wrote costs a false report instead of a missed one.
 /// Every ordering the monitor has was carried by a synchronization edge somebody interposed, so two
 /// threads that an edge nobody saw really did join look exactly like two threads nothing joined.
-/// The edges that are calls are interposed already. The ordering that is not a call at all, which
-/// is the atomics, has to come from the compiler, and until it does a program that hands a pointer
-/// between threads through an atomic and nothing else would be reported for doing nothing wrong.
+/// The edges that are calls are interposed already, and the ordering that is not a call at all is
+/// emitted by this pass beside the checks: an atomic that publishes gets a `meta_release` in front
+/// of it and one that takes gets a `meta_acquire` after it. What is still missing is a bare
+/// `atomic_thread_fence`, which orders against every thread rather than against an object and so
+/// has no address an edge could be keyed on, so a program that synchronizes through one and nothing
+/// else is one this can still report against wrongly.
 ///
 /// Which is also why the default stays [`Races::Off`] after the flag works. Turning it on is a
 /// decision about a program, not about a build.

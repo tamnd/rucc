@@ -94,9 +94,12 @@
 //! The compiler's half is in. `-fsafety-races` puts a `__rucc_meta_epoch` after every store of a
 //! pointer and a `__rucc_check_race` in front of it, and `=pointer` puts one in front of a read of a
 //! pointer as well, so a program built with it fills its own plane and asks it questions rather than
-//! leaving both to the C library wrappers. What is left is the ordering that is not a call at all,
-//! which is the atomics, and that has to come from the compiler too.
-//! That last one is a gate rather than a gap. This is the only plane in the crate where missing
+//! leaving both to the C library wrappers. The ordering that is not a call at all comes from the
+//! compiler with them: a `__rucc_meta_release` in front of an atomic that publishes and a
+//! `__rucc_meta_acquire` after one that takes, both landing in the same tables the interposed
+//! primitives use. A bare `atomic_thread_fence` is the one edge still missing, since it orders
+//! against every thread rather than against an object and so has no address to be keyed on.
+//! That one is a gate rather than a gap. This is the only plane in the crate where missing
 //! instrumentation costs a false report rather than a missed one, because two threads an edge
 //! nobody saw really did join look exactly like two threads nothing joined.
 //!
