@@ -43,11 +43,15 @@
 //! linker already knows how to do, it costs the same one instruction the index cost, and the
 //! reporter reads it by dereferencing it.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_ir::{
-    CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Module, Opcode,
-    Signature, Type, Value,
+    CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta, Module,
+    Opcode, Signature, Type, Value,
 };
+
+use crate::plane;
 
 /// How wide one descriptor is, which `rucc_safe_rt::fail::Descriptor` fixes.
 pub const WIDTH: u64 = 16;
@@ -101,11 +105,15 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
     // the name of the descriptor it is about, and a name is the position in this list, so both ends
     // agree without either holding the module.
     let mut written: Vec<Descriptor> = Vec::new();
+    // The same reason the descriptors are collected: a plane write names a node of the module's
+    // metadata table and the module is not reachable while one of its functions is borrowed out of
+    // it. The table is a handful of nodes, so it is read once here rather than per instruction.
+    let numbers = plane::numbers(module, names);
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        calls(&mut module[id], names, word, &mut written);
+        calls(&mut module[id], names, word, &numbers, &mut written);
     }
     for (index, row) in written.iter().enumerate() {
         emit(module, names, index, *row);
@@ -114,7 +122,13 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
 }
 
 /// Rewrites every check in one function, and takes the capabilities out afterwards.
-fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Descriptor>) {
+fn calls(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    numbers: &HashMap<Meta, u32>,
+    table: &mut Vec<Descriptor>,
+) {
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for &inst in &insts {
@@ -122,6 +136,7 @@ fn calls(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Desc
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
+            Opcode::MetaType => judgement(func, names, word, numbers, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -216,6 +231,33 @@ fn deriv(
     let desc = record(func, names, table, inst, row);
     let params = &[Type::PTR, Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
+}
+
+/// `meta_type` becomes `__rucc_meta_type(pointer, size, type)`.
+///
+/// No descriptor, and it is the only thing here with a payload that has none. A plane write refuses
+/// nothing and reports nothing: it records the fact that the check of the same name will later ask
+/// about, so there is no failure for a descriptor to describe.
+///
+/// The type is a number rather than a node, and `crate::plane` is where the number comes from and
+/// why it is a hash of the type's name. It travels in thirty two bits because the plane holds
+/// thirty two bits per byte of program memory, which is document 05 section 5.2.3's measurement and
+/// not a choice made here.
+fn judgement(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    numbers: &HashMap<Meta, u32>,
+    inst: Inst,
+) {
+    let [pointer, length] = func[func[inst].args] else { return };
+    let Extra::Node(node) = func[inst].extra else { return };
+    let Some(&number) = numbers.get(&node) else { return };
+    let bytes = fitted(func, inst, length, word);
+    let small = Type::int(32);
+    let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
+    let params = &[Type::PTR, word, small];
+    call(func, names, inst, "__rucc_meta_type", params, &[], &[pointer, bytes, ty]);
 }
 
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
@@ -369,7 +411,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
-    use crate::insert;
+    use crate::{Plane, insert};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -398,10 +440,22 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func);
+        insert(&mut func, &planeless(names).0);
         let mut module = Module::new(names.intern("read.c"), &target());
         module.add_func(func);
         module
+    }
+
+    /// A plane for a function that stores nothing, and the numbering that goes with it.
+    ///
+    /// Every function in these tests reads or derives and none of them stores, so there is nothing
+    /// to record and the entries are never named. What the two are for is that [`crate::insert`]
+    /// and [`calls`] take them whether or not the function has a store in it.
+    fn planeless(names: &mut Interner) -> (Plane, HashMap<Meta, u32>) {
+        let mut module = Module::new(names.intern("planeless.c"), &target());
+        let plane = Plane::build(&mut module);
+        let numbers = plane::numbers(&module, names);
+        (plane, numbers)
     }
 
     #[test]
@@ -504,10 +558,11 @@ mod tests {
         let args = b.func().push_values(&[p, n]);
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
-        insert(&mut func);
+        let (plane, numbers) = planeless(&mut names);
+        insert(&mut func, &plane);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
         assert_eq!(table, [Descriptor { judgement: DERIVE, class: 0, size: 0 }]);
     }
 
@@ -539,7 +594,8 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &mut table);
+        let numbers = planeless(&mut names).1;
+        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
         assert_eq!(table, [Descriptor { judgement: ACCESS, class: 0, size: 0 }]);
 
         let mut module = Module::new(names.intern("sweep.c"), &target());
@@ -584,7 +640,8 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(32), &mut table);
+        let numbers = planeless(&mut names).1;
+        calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block).collect::<Vec<_>>())
@@ -621,7 +678,8 @@ mod tests {
         let mut func = asking(&mut names, Type::int(64));
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &mut table);
+        let numbers = planeless(&mut names).1;
+        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
         assert!(table.is_empty(), "{table:?}");
 
         let mut module = Module::new(names.intern("cover.c"), &target());
@@ -650,7 +708,8 @@ mod tests {
         let mut func = asking(&mut names, Type::int(64));
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(32), &mut table);
+        let numbers = planeless(&mut names).1;
+        calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block).collect::<Vec<_>>())

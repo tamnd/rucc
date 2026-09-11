@@ -422,7 +422,10 @@ mod tests {
         let extra = Extra::Mem(b.func().add_mem(info));
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
-        insert(&mut func);
+        // The function reads and never stores, so it records nothing and the plane it is
+        // instrumented against is one with no types in it.
+        let mut elsewhere = Module::new(names.intern("reader.c"), &target());
+        insert(&mut func, &crate::Plane::build(&mut elsewhere));
         func
     }
 

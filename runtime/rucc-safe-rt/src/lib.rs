@@ -50,9 +50,12 @@
 //! disagree. Four of document 03's type classes and one of its spatial classes are that plane
 //! answering a question. It is mapped over every watched region beside the lifetime plane, an
 //! instance forgets its bytes' types when it begins, and [`check`] has judgement J3 and the two
-//! judgements that record it. What is missing is the compiler's half, the store that makes the
-//! judgement and the access that asks the question, so nothing calls any of it yet. The init and
-//! epoch planes are not here at all.
+//! judgements that record it. The compiler's half has started: `rucc_safety::plane` is where a
+//! store records what its bytes were stored through, so `__rucc_meta_type` is called by a program
+//! built with `-fsafety` and the plane holds what it says. What nothing calls yet is J3 itself,
+//! because a copy still carries no type across and a check against a plane that only some of the
+//! writes maintain refuses programs that are correct. The init and epoch planes are not here at
+//! all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates

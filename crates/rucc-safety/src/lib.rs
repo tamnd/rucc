@@ -34,11 +34,21 @@
 //! which are what `spec/safe-memory/10-boundaries.md` section 10.2 means by a trust set that is
 //! counted per build rather than asserted.
 //!
-//! The type, initialization and race checks are not here, because their planes are not written
-//! yet and a check against a plane nobody maintains would either report on every access or on
-//! none. Those are S5 and S6. Neither are the plane writes: `meta_begin` and `meta_end` for an
-//! automatic instance need the escape analysis of document 08 section 8.4, and until that exists
-//! the only instances the runtime knows about are the ones the allocator reports.
+//! And the first of the planes, in [`mod@plane`]: every store now records what the bytes it wrote
+//! were stored through, which is the judgement C 6.5 says a store makes and the thing the type
+//! check of milestone S5 will later ask about. The question is not here yet, and the order is
+//! deliberate. A check against a plane that only some of the writes maintain reports on programs
+//! that are correct, and the writes are not all in: a `memcpy` carries the source's effective type
+//! to the destination and there is no opcode for that yet, so a copy leaves whatever the bytes said
+//! before it standing over what it wrote.
+//!
+//! The initialization and race checks are not here, because their planes are not written at all and
+//! a check against a plane nobody maintains would either report on every access or on none. Those
+//! are the rest of S5 and S6. Neither are the other plane writes: `meta_begin` and `meta_end` for
+//! an automatic instance need the escape analysis of document 08 section 8.4, and until that exists
+//! the only instances the runtime knows about are the ones the allocator reports, which is also why
+//! a store to a local records into a plane that is not there and costs a call that decides
+//! nothing.
 //!
 //! # Why the rank matters
 //!
@@ -57,11 +67,13 @@
 
 pub mod boundary;
 pub mod lower;
+pub mod plane;
 pub mod summary;
 pub mod wrap;
 
 pub use boundary::{Sites, WITNESS, witness};
 pub use lower::{Descriptor, SECTION, lower};
+pub use plane::Plane;
 pub use summary::{Frames, Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
@@ -89,6 +101,13 @@ pub struct Counts {
     /// Accesses that got nothing, because the pointer they go through is not a value this pass
     /// can take the capability of.
     pub skipped: usize,
+    /// Stores that recorded what the bytes they wrote were stored through.
+    ///
+    /// Not in `--emit=safety-summary` yet, which is the one count here that is not. The summary
+    /// reports a class as a pair, how many went in and how many are left, and nothing discharges a
+    /// plane write today, so the pair would be one number written twice. It goes in beside the
+    /// first rule that removes one.
+    pub judged: usize,
 }
 
 impl Counts {
@@ -98,6 +117,7 @@ impl Counts {
         self.live += other.live;
         self.derived += other.derived;
         self.skipped += other.skipped;
+        self.judged += other.judged;
     }
 }
 
@@ -112,10 +132,15 @@ impl Counts {
 /// the flag, because a pass that decides for itself whether it runs is a pass whose effect cannot
 /// be read off the pipeline.
 pub fn run(module: &mut Module) -> Counts {
+    // Before the walk, because the entries live in the module and a function is borrowed out of
+    // the module while its stores are being instrumented. It is also the reason this is the entry
+    // point rather than [`insert`]: there is one plane per module and every function records into
+    // the same one.
+    let plane = Plane::build(module);
     let mut counts = Counts::default();
     for id in module.funcs() {
         if !module[id].is_declaration() {
-            counts.add(insert(&mut module[id]));
+            counts.add(insert(&mut module[id], &plane));
         }
     }
     counts
@@ -139,7 +164,7 @@ pub fn run(module: &mut Module) -> Counts {
 /// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
 /// whole design: this pass is a walk anybody can read, and the deletions are rules that are
 /// verified.
-pub fn insert(func: &mut Func) -> Counts {
+pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
     let mut counts = Counts::default();
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -150,6 +175,9 @@ pub fn insert(func: &mut Func) -> Counts {
                     check(func, inst, pointer);
                     counts.checked += 1;
                     counts.live += 1;
+                    if func[inst].opcode == Opcode::Store && judge(func, plane, inst, pointer) {
+                        counts.judged += 1;
+                    }
                 }
                 None => counts.skipped += 1,
             },
@@ -203,6 +231,47 @@ fn check(func: &mut Func, access: Inst, pointer: Value) {
     let args = func.push_values(&[capability, pointer]);
     let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
     func.insert_before(live, access);
+}
+
+/// Puts a `meta_type` immediately after one store, recording what its bytes were stored through.
+///
+/// The judgement of C 6.5: a store through an lvalue of type `T` sets the effective type of what it
+/// wrote to `T`, and the plane is where that is written down. What the store names is the aliasing
+/// node the walk put on it, and [`Plane::entry`] is the translation from that to the entry the
+/// plane holds, including the two cases that are not a type.
+///
+/// After the store rather than before it, which is the one thing about the placement that matters.
+/// The bytes are stored through that type once the store has happened, and a plane that said so
+/// first would be describing a store that the bounds check in front of it may yet refuse.
+///
+/// The length is a value rather than a field of the payload because that is the shape the opcode
+/// has, and it is a `meta_type` over a range because one store writes a run of bytes. It is written
+/// in sixty four bits here and put into the target's width by [`lower::lower`], which is where the
+/// only thing that knows the target's width is.
+fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
+    let Extra::Mem(info) = func[store].extra else { return false };
+    let size = covered(func, store, func[info].size);
+    // A store whose width nothing states covers no bytes anybody can name, and a plane write over
+    // nothing is an instruction with no effect.
+    if size == 0 {
+        return false;
+    }
+    let node = plane.entry(func[info].tbaa);
+
+    let span = func.span(store);
+    let word = Type::int(64);
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
+    func.insert_after(made, store);
+    let length = func[made].results().next().expect("a constant created with one result has one");
+
+    let args = func.push_values(&[pointer, length]);
+    let data = InstData { args, extra: Extra::Node(node), ..InstData::new(Opcode::MetaType) };
+    let judged = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the store, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(judged, made);
+    true
 }
 
 /// How many bytes an access covers.
@@ -330,7 +399,8 @@ fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, Flags, MemInfo, MemOrder, Restrict, Signature, print_func, verify_func,
+        Builder, Flags, MemInfo, MemOrder, MetaNode, PlaneNode, Restrict, Signature, TbaaNode,
+        print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -338,6 +408,16 @@ mod tests {
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// A module to record into, and the plane entries it holds.
+    ///
+    /// The plane is the module's, so a test that instruments a bare function still has to have one
+    /// to hand. It is empty of types here, since the functions these tests build name none.
+    fn planed(names: &mut Interner, unit: &str) -> (Module, Plane) {
+        let mut module = Module::new(names.intern(unit), &target());
+        let plane = Plane::build(&mut module);
+        (module, plane)
     }
 
     /// A function that loads through its parameter and stores what it read back.
@@ -372,11 +452,17 @@ mod tests {
     fn every_access_gets_a_bounds_check_and_a_lifetime_check() {
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
-        assert_eq!(insert(&mut func), Counts { checked: 2, live: 2, derived: 0, skipped: 0 });
+        let (module, plane) = planed(&mut names, "both.c");
+        assert_eq!(
+            insert(&mut func, &plane),
+            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1 }
+        );
 
-        let module = Module::new(names.intern("both.c"), &target());
         assert_eq!(
             print_func(&module, &func, &names),
+            // The plane write is after the store and not in front of it. The bytes were stored
+            // through that type once the store has happened, and the check in front of it may yet
+            // refuse the store it is about.
             "func @both(ptr) -> i32, linkage(external) {\n\
              block0(%0: ptr):\n    \
              %1 = cap_of %0\n    \
@@ -387,9 +473,61 @@ mod tests {
              check_bounds %3, %0, size 4, align 4\n    \
              check_live %3, %0\n    \
              store %2 -> %0, size 4, align 4\n    \
+             %4 = iconst.i64 4\n    \
+             meta_type %0, %4, tbaa !1\n    \
              return %2\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn a_store_records_the_type_it_stored_through() {
+        // The judgement of C 6.5, which is the half of the type plane the compiler makes rather
+        // than asks. The access names a type, so the entry the store records is that type rather
+        // than the distinguished value a store that names nothing records.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("typed.c"), &target());
+        let root = names.intern("char");
+        let root =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+        let int = names.intern("int");
+        let int =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
+        let plane = Plane::build(&mut module);
+
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("record"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int),
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane).judged, 1);
+
+        let printed = print_func(&module, &func, &names);
+        // Four bytes, which the payload does not say and the type of the value stored does.
+        assert!(printed.contains("%3 = iconst.i64 4\n"), "{printed}");
+        // The entry for `int`, which is the node the plane made for the node the access named.
+        let entry = plane.entry(Some(int));
+        assert_eq!(module[entry], MetaNode::Plane(PlaneNode::Type(int)));
+        let wanted = format!("meta_type %0, %3, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     #[test]
@@ -414,9 +552,9 @@ mod tests {
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
 
-        insert(&mut func);
+        let (module, plane) = planed(&mut names, "walk.c");
+        insert(&mut func, &plane);
 
-        let module = Module::new(names.intern("walk.c"), &target());
         assert_eq!(
             print_func(&module, &func, &names),
             "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
@@ -455,9 +593,10 @@ mod tests {
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
 
-        insert(&mut func);
+        let (module, plane) = planed(&mut names, "back.c");
+        insert(&mut func, &plane);
 
-        let printed = print_func(&Module::new(names.intern("back.c"), &target()), &func, &names);
+        let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
     }
 
@@ -481,9 +620,12 @@ mod tests {
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
 
-        assert_eq!(insert(&mut func), Counts { checked: 0, live: 0, derived: 1, skipped: 0 });
+        let (module, plane) = planed(&mut names, "walk.c");
+        assert_eq!(
+            insert(&mut func, &plane),
+            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0 }
+        );
 
-        let module = Module::new(names.intern("walk.c"), &target());
         assert_eq!(
             print_func(&module, &func, &names),
             // The stride is one, because the offset here is a block parameter and nothing about
@@ -510,9 +652,9 @@ mod tests {
         // IR, which is only true if the result is a module the verifier accepts.
         let mut names = Interner::new();
         let mut func = one_of_each(&mut names);
-        insert(&mut func);
+        let (module, plane) = planed(&mut names, "both.c");
+        insert(&mut func, &plane);
 
-        let module = Module::new(names.intern("both.c"), &target());
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
@@ -536,7 +678,10 @@ mod tests {
         module.add_func(two);
         module.add_func(declared);
 
-        assert_eq!(run(&mut module), Counts { checked: 4, live: 4, derived: 0, skipped: 0 });
+        assert_eq!(
+            run(&mut module),
+            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2 }
+        );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
@@ -552,8 +697,9 @@ mod tests {
         let zero = b.iconst(i32_, 0);
         b.ret(&[zero]);
 
+        let (_module, plane) = planed(&mut names, "nothing.c");
         let before = func.counts();
-        assert_eq!(insert(&mut func), Counts::default());
+        assert_eq!(insert(&mut func, &plane), Counts::default());
         assert_eq!(func.counts(), before);
     }
 }
