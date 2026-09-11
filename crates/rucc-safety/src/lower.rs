@@ -160,6 +160,8 @@ fn calls(
             Opcode::MetaEpoch => stamped(func, names, word, inst),
             Opcode::MetaRelease => published(func, names, inst),
             Opcode::MetaAcquire => taken(func, names, inst),
+            Opcode::MetaFenceRelease => published_everywhere(func, names, inst),
+            Opcode::MetaFenceAcquire => taken_everywhere(func, names, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -535,6 +537,22 @@ fn published(func: &mut Func, names: &mut Interner, inst: Inst) {
 fn taken(func: &mut Func, names: &mut Interner, inst: Inst) {
     let [object] = func[func[inst].args] else { return };
     call(func, names, inst, "__rucc_meta_acquire", &[Type::PTR], &[], &[object]);
+}
+
+/// `meta_fence_release` becomes `__rucc_meta_fence_release()`.
+///
+/// No operands at all, which is the whole difference between a fence and an atomic here. A fence
+/// orders against every other thread rather than against one object, so there is no address to pass
+/// and the runtime keeps one cell for every fence in the program instead of a table keyed by one.
+fn published_everywhere(func: &mut Func, names: &mut Interner, inst: Inst) {
+    call(func, names, inst, "__rucc_meta_fence_release", &[], &[], &[]);
+}
+
+/// `meta_fence_acquire` becomes `__rucc_meta_fence_acquire()`.
+///
+/// The other end of [`published_everywhere`], and the same shape.
+fn taken_everywhere(func: &mut Func, names: &mut Interner, inst: Inst) {
+    call(func, names, inst, "__rucc_meta_fence_acquire", &[], &[], &[]);
 }
 
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
@@ -922,6 +940,47 @@ mod tests {
         let changed = printed.find("atomic_rmw").expect("the atomic is still there");
         let took = printed.find("__rucc_meta_acquire").expect("and the taking half lowered");
         assert!(published < changed && changed < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    /// A module with one function holding a `seq_cst` fence, edges in.
+    fn barrier(names: &mut Interner) -> Module {
+        let mut module = Module::new(names.intern("fence.c"), &target());
+        let plane = Plane::build(&mut module);
+
+        let mut func = Func::new(names.intern("barrier"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        let extra = Extra::Order(MemOrder::SeqCst);
+        b.inst(InstData { extra, ..InstData::new(Opcode::Fence) }, &[]);
+        b.ret(&[]);
+
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn the_edge_a_fence_carries_becomes_a_call_that_takes_nothing_at_all() {
+        // No operand, which is the whole difference. A fence orders against every other thread
+        // rather than against one object, so there is no address to hand the runtime and it keeps
+        // one clock for every fence in the program instead of a table keyed by one.
+        let mut names = Interner::new();
+        let mut module = barrier(&mut names);
+        lower(&mut module, &mut names);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("call @__rucc_meta_fence_release() : ()\n"), "{printed}");
+        assert!(printed.contains("call @__rucc_meta_fence_acquire() : ()\n"), "{printed}");
+
+        let published = printed.find("fence_release").expect("the publishing half lowered");
+        let barrier = printed.find("    fence ").expect("the fence is still there");
+        let took = printed.find("fence_acquire").expect("and the taking half lowered");
+        assert!(published < barrier && barrier < took, "{printed}");
 
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");

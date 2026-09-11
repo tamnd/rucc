@@ -330,6 +330,22 @@ pub enum Opcode {
     /// edge nobody recorded look concurrent, and a race is reported against a program doing nothing
     /// wrong. That is why the edges go in before the race check is ever on by default.
     MetaAcquire,
+    /// Everything this thread has done so far is published at no object in particular.
+    ///
+    /// What a release fence is, and the reason it cannot reuse [`Opcode::MetaRelease`]: a fence
+    /// orders against every other thread rather than against one object, so there is no address to
+    /// key it on and it takes no operands at all. The relaxed atomic that usually sits beside it in
+    /// the source is not the key either, because the fence orders everything, not that one word.
+    ///
+    /// The runtime pays for that with one cell shared by every fence in the program, which orders
+    /// more pairs of threads than the program really ordered. That direction is safe. A thread put
+    /// further ahead than it needed to be reports fewer races, never a wrong one.
+    MetaFenceRelease,
+    /// Everything published at any release fence is now ordered before this thread.
+    ///
+    /// The other half of [`Opcode::MetaFenceRelease`], after the fence rather than in front of it,
+    /// for the same reason [`Opcode::MetaAcquire`] goes after its atomic.
+    MetaFenceAcquire,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
     MetaTransfer,
     /// A declared exemption starts here, with the reason it was declared.
@@ -536,6 +552,8 @@ impl Opcode {
             Self::MetaEpoch => "meta_epoch",
             Self::MetaRelease => "meta_release",
             Self::MetaAcquire => "meta_acquire",
+            Self::MetaFenceRelease => "meta_fence_release",
+            Self::MetaFenceAcquire => "meta_fence_acquire",
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
             Self::SafeRegionEnd => "safe_region_end",
@@ -829,6 +847,8 @@ impl Opcode {
             | Self::MetaEpoch
             | Self::MetaRelease
             | Self::MetaAcquire
+            | Self::MetaFenceRelease
+            | Self::MetaFenceAcquire
             | Self::MetaTransfer
             | Self::SafeRegionBegin
             | Self::SafeRegionEnd
@@ -1068,6 +1088,8 @@ static ALL: &[Opcode] = &[
     Opcode::MetaEpoch,
     Opcode::MetaRelease,
     Opcode::MetaAcquire,
+    Opcode::MetaFenceRelease,
+    Opcode::MetaFenceAcquire,
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
     Opcode::SafeRegionEnd,

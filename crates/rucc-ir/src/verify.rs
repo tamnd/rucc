@@ -1634,6 +1634,13 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // The two halves of the edge a fence carries, which take nothing at all. A fence
+            // orders against every other thread rather than against one object, so there is no
+            // address here to be the key and no operand that could carry one.
+            Opcode::MetaFenceRelease | Opcode::MetaFenceAcquire => {
+                self.takes(opcode, arity, 0);
+            }
+
             // The region markers, which say something about the code between them rather than
             // about any value, so there is nothing here but the operand count.
             Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => {

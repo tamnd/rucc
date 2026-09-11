@@ -175,6 +175,16 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
         "`rucc_safety::lower`, into the call that publishes this thread's clock at an atomic",
     ),
     (Opcode::MetaAcquire, "`rucc_safety::lower`, into the call that takes the other end of it"),
+    // The same pair for a fence, which are the same calls with no key, since a fence orders
+    // against every thread rather than against an object.
+    (
+        Opcode::MetaFenceRelease,
+        "`rucc_safety::lower`, into the call that publishes this thread's clock to everyone",
+    ),
+    (
+        Opcode::MetaFenceAcquire,
+        "`rucc_safety::lower`, into the call that takes what any release fence published",
+    ),
     // The `restrict` contract, which is judgement J8 and is the one check that records as well as
     // asks. What it records goes in a slot the block owns, and the two markers are what open and
     // close that slot, so all four are calls to the runtime the same way.
@@ -232,7 +242,7 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The sixteen the safety pass does emit are on
+    // back end can be handed that reaches one. The eighteen the safety pass does emit are on
     // `ELSEWHERE`.
     (
         Opcode::CapLoad,

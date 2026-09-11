@@ -339,10 +339,10 @@ const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 /// what each of them does is read the lifetime plane and then either return a number or report.
 /// Reporting ends the program under `-fsafety=detect` and records under `-fsafety=recover`, and
 /// neither of those hands storage back. Six of them write a plane rather than reading one, which is
-/// memory of the runtime's own and not storage the program was ever given, and the two edges move a
+/// memory of the runtime's own and not storage the program was ever given, and the four edges move a
 /// clock that lives beside the thread, which is the same answer for the same reason.
 ///
-/// These seventeen and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
+/// These nineteen and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
 /// `__rucc_alloc_purge` and the frame calls and the rest, and those are exactly the things that do
 /// end a lifetime. Nothing generated calls them, so leaving them out costs nothing, and a name
 /// added here without reading what it does would be a hole in the safety this compiler is for.
@@ -360,6 +360,8 @@ const RUNTIME_NEVER_FREES: &[&str] = &[
     "__rucc_extent_back",
     "__rucc_meta_acquire",
     "__rucc_meta_epoch",
+    "__rucc_meta_fence_acquire",
+    "__rucc_meta_fence_release",
     "__rucc_meta_init",
     "__rucc_meta_init_copy",
     "__rucc_meta_init_handed",
