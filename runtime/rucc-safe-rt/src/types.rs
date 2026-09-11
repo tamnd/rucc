@@ -153,6 +153,15 @@ const HETEROGENEOUS: Slot = 1 << 31;
 /// The largest identifier a slot can hold, and the largest side entry index.
 const LIMIT: u32 = HETEROGENEOUS - 1;
 
+/// The largest id the compiler may number a type with.
+///
+/// The same number as the one above, under the name the other end of the contract knows it by. An
+/// id past this has the bit that says a granule's bytes disagree, so a store of one over a whole
+/// granule leaves a slot that later reads as an index into the side table, and the plane then reads
+/// whatever address that index works out to. The compiler mirrors this beside [`FIRST_INTERNED`],
+/// and that is the whole of what keeps it from happening.
+pub const LAST_INTERNED: TypeId = LIMIT;
+
 /// The table of per byte entries for the granules whose bytes disagree.
 ///
 /// Separate from the plane itself because it is allocated rather than direct mapped: a direct
@@ -311,10 +320,17 @@ impl<'a> Types<'a> {
 
     /// The judgement a store makes: `[lo, lo + len)` was stored through a `ty`.
     ///
+    /// # Panics
+    ///
+    /// Never in a release build. An id past [`LAST_INTERNED`] is a compiler that did not reduce its
+    /// hash into the range this plane has, and the plane it would leave behind reads as a side entry
+    /// index rather than as a type.
+    ///
     /// # Safety
     ///
     /// `[lo, lo + len)` is inside the mapping this plane was built for.
     pub unsafe fn set(&self, lo: usize, len: usize, ty: TypeId) {
+        debug_assert!(ty <= LAST_INTERNED, "an id the plane has no room for");
         let mut at = lo;
         while at < lo + len {
             let next = (at / GRANULE + 1) * GRANULE;
@@ -493,6 +509,20 @@ mod tests {
 
         assert!(!fake.allows(64, 32, B), "the bytes are an A now");
         assert!(fake.allows(64, 32, A));
+    }
+
+    #[test]
+    fn the_largest_id_there_is_still_reads_back_as_a_type() {
+        // The top of the range, where a slot is all ones but for the bit that says the bytes
+        // disagree. A whole granule stored through it has to read back as that type rather than as
+        // a granule with a side entry, since the bit is the only thing telling the two apart.
+        let fake = Fake::new(64, 8);
+
+        fake.set(0, 8, LAST_INTERNED);
+
+        assert_eq!(fake.read(0), LAST_INTERNED);
+        assert!(fake.allows(0, 8, LAST_INTERNED));
+        assert!(!fake.allows(0, 8, A));
     }
 
     #[test]

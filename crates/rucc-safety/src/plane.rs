@@ -66,6 +66,15 @@ const POINTER_FIRST: u32 = 2;
 /// than a table of a hundred names.
 const FIRST_INTERNED: u32 = POINTER_FIRST + 8;
 
+/// The last id the runtime can hold for a byte.
+///
+/// `rucc_safe_rt::types::LAST_INTERNED`, mirrored here for the reason [`FIRST_INTERNED`] is. The
+/// plane keeps the top bit of a slot for a granule whose bytes do not all say the same thing, so an
+/// id with that bit set is read back as an index into the table those granules keep their bytes in,
+/// and the plane then walks off to whatever address that index works out to. A number is only ever
+/// made here, so this is the range it has to be made in.
+const LAST_INTERNED: u32 = u32::MAX >> 1;
+
 /// The plane entries one module needs, and the aliasing node each of them is for.
 ///
 /// Built once per module rather than per function, because a metadata node belongs to the module
@@ -154,9 +163,12 @@ fn number(module: &Module, names: &Interner, node: PlaneNode) -> u32 {
 /// The number the type spelled `name` travels as.
 ///
 /// Biased past what the runtime has spent on the values that are not types, so that the type whose
-/// spelling happens to hash to zero is not read back as a byte nobody has stored through.
+/// spelling happens to hash to zero is not read back as a byte nobody has stored through, and
+/// reduced into what a slot can hold, so that the half of all spellings whose hash has the top bit
+/// set are not read back as an index into the side table. What the reduction costs is a hash of
+/// thirty one bits rather than thirty two, which is the width [`LAST_INTERNED`] says the plane has.
 pub(crate) fn identifier(name: &str) -> u32 {
-    FIRST_INTERNED + fnv(name) % (u32::MAX - FIRST_INTERNED)
+    FIRST_INTERNED + fnv(name) % (LAST_INTERNED - FIRST_INTERNED + 1)
 }
 
 /// FNV-1a over the bytes of a name.
@@ -250,6 +262,29 @@ mod tests {
         // that landed on it would be a type every access was permitted against.
         for name in VOCABULARY {
             assert!(identifier(name) >= FIRST_INTERNED, "{name} is numbered as a reserved value");
+        }
+    }
+
+    #[test]
+    fn no_type_is_numbered_past_what_the_plane_can_hold() {
+        // The other end of the range, and the one that cost a segfault to find. A slot whose top
+        // bit is set is a granule whose bytes disagree and the rest of it is an index into the
+        // table they are kept in, so a type numbered up there is a store that leaves the plane
+        // pointing at an address nothing mapped. Half of all spellings hash that high, including
+        // `int` and `long`, so this is not an unlucky corner.
+        for name in VOCABULARY {
+            assert!(identifier(name) <= LAST_INTERNED, "{name} is numbered past the plane");
+        }
+    }
+
+    #[test]
+    fn a_spelling_whose_hash_has_the_top_bit_set_is_still_numbered_inside_the_range() {
+        // The test above is today's vocabulary. This is the property, checked against enough
+        // spellings that a reduction which does nothing could not pass it.
+        for n in 0..2000 {
+            let name = format!("type{n}");
+            let id = identifier(&name);
+            assert!((FIRST_INTERNED..=LAST_INTERNED).contains(&id), "{name} is numbered {id}");
         }
     }
 
