@@ -85,7 +85,7 @@
 //! assert!(line.contains(&"-m".to_owned()) && line.contains(&"aarch64linux".to_owned()));
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-sysroot/0.10.22")]
+#![doc(html_root_url = "https://docs.rs/rucc-sysroot/0.10.23")]
 // Every public item here is read by somebody bringing up a target, and an undocumented one is a
 // question they have to answer by reading the body.
 #![deny(missing_docs)]
