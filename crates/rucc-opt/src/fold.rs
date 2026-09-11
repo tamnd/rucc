@@ -56,7 +56,7 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
 
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction that became a constant.
 const FOLDED: &str = "integer instruction folded to a constant";
@@ -84,8 +84,10 @@ impl Pass for Fold {
     fn preserves(&self) -> Preserved {
         // An instruction becomes a constant where it stands. No block moves, no edge moves,
         // and a terminator is not one of the instructions this folds, so every analysis in the
-        // cache is about the same graph afterwards as it was before.
-        Preserved::ALL
+        // cache is about the same graph afterwards as it was before. Not the liveness, though:
+        // the operands the folded instruction read are read by nobody now, and a value whose
+        // last reader went is live over less of the function than it was.
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {

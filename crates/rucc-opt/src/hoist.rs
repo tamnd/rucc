@@ -186,7 +186,7 @@ impl Pass for Hoist {
         // No edge moves and no block appears, so the graph and everything built on it stand. What
         // does not is liveness, in both directions at once: the preheader reads a value it did not
         // read before and the body stops reading one it did.
-        Preserved::ALL.without(Analysis::Liveness).without(Analysis::Pressure)
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {

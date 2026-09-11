@@ -49,7 +49,7 @@
 use rucc_ir::{Block, Def, Func, Inst, Opcode};
 
 use crate::uses::{count, operands};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction taken out.
 const REMOVED: &str = "instruction with no effects and no users removed";
@@ -81,8 +81,12 @@ impl Pass for Dce {
 
     fn preserves(&self) -> Preserved {
         // Instructions go and blocks do not. A terminator is never dead, because it has an
-        // effect, so no block loses the thing that gives it its edges.
-        Preserved::ALL
+        // effect, so no block loses the thing that gives it its edges. What does go is a use, and
+        // the last use of a value is the end of its live range, so the liveness is not what it
+        // was and neither is anything counted off it. Nothing had caught this because no pass
+        // before this one in any pipeline builds the liveness, and an analysis nobody has built
+        // is an analysis nobody can be wrong about.
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
@@ -183,7 +187,7 @@ mod tests {
     };
 
     use crate::stats::Kind;
-    use crate::{Fuel, Pass, dce::Dce};
+    use crate::{Analysis, Fuel, Pass, dce::Dce};
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -214,6 +218,23 @@ mod tests {
         // The add, and then the constant that only it read. A single walk in this order would
         // have removed the add and left the three behind, which is what the worklist is for.
         assert_eq!(left(&func, block), 2);
+    }
+
+    #[test]
+    fn the_counts_in_the_cache_go_with_the_uses_that_were_removed() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let a = build.iconst(Type::int(32), 2);
+        let b = build.iconst(Type::int(32), 3);
+        build.binary(Opcode::Add, a, b, Flags::NONE);
+        build.ret(&[a]);
+        let mut an = crate::machine::fixtures::analyses();
+        // Two values are live where the add is and one is live once it has gone, which is the
+        // fact this pass used to say it had left standing.
+        an.pressure(&func);
+        assert!(Dce.run(&mut func, &mut an, &mut Fuel::unlimited()).changed());
+        assert!(an.settle(&func, Dce.preserves(), true).is_empty(), "the pass was caught out");
+        assert!(!an.holds(Analysis::Pressure), "a stale count was left for the next pass to read");
     }
 
     #[test]
