@@ -69,7 +69,7 @@ Every rule is data in the `safety/` namespace from the day it is written, not re
 
 Three more of document 13.5's measurements land here, all of which can invalidate document 02's Tier E row:
 
-- **PICO+CHOP composition** (document 17 question 3): discharge rate with each source alone and together.
+- **PICO+CHOP composition** (document 17 question 3): discharge rate with each source alone and together. Done, and the answer is that they do not compose. The sources hardly overlap in which checks they discharge and the combination is worth nothing on the clock, because the loop passes have already taken the checks that were costing anything.
 - **Call-frame elision rate** (document 17 question 4).
 - **Register pressure**: spill/fill delta on the pointer-heavy benchmarks.
 
