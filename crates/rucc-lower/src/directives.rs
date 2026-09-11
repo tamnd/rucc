@@ -532,13 +532,13 @@ impl<'a> Assembler<'a> {
             piece.linkage = self.linkage.get(&piece.name).copied().unwrap_or(Linkage::Internal);
             piece.visibility =
                 self.visibility.get(&piece.name).copied().unwrap_or(Visibility::Default);
-            if let Some(&said) = self.sizes.get(&piece.name)
-                && u64::try_from(said) != Ok(piece.size)
-            {
-                return Err(unsupported(format!(
-                    "a '.size' of '{}' that is not what was written under it",
-                    piece.name
-                )));
+            if let Some(&said) = self.sizes.get(&piece.name) {
+                if u64::try_from(said) != Ok(piece.size) {
+                    return Err(unsupported(format!(
+                        "a '.size' of '{}' that is not what was written under it",
+                        piece.name
+                    )));
+                }
             }
         }
         // The offsets above are counted from the start of the block and the block starts wherever
