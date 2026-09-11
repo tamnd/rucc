@@ -37,9 +37,14 @@
 //! # What is here so far
 //!
 //! The arithmetic and the reads and writes, with the shadow handed in, which is the same division
-//! [`crate::plane`] explains for the lifetime plane. Nothing here maps the shadow, nothing reserves
-//! it beside a region yet, and no generated code reaches it: the judgement a store makes and the
-//! question a read asks are the compiler's half of the same milestone.
+//! [`crate::plane`] explains for the lifetime plane. Where the shadow comes from is
+//! [`crate::alloc`], which reserves one for every watched region beside the other two planes, and
+//! what makes a byte unwritten is an instance beginning there. `crate::check` has the question a
+//! read asks and the two judgements that record what it asks about.
+//!
+//! What is missing is the caller. No generated code reaches those three yet, because which range a
+//! store names is section 9.3's padding rule and that is the compiler's half of the same
+//! milestone.
 
 /// How many bytes of program memory one byte of this plane covers.
 ///
