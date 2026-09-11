@@ -8,6 +8,21 @@
 //! object files we produce get linked against object files GCC produced and one of us has to
 //! give way.
 //!
+//! # What ships is not this crate
+//!
+//! Section 12.8 settled in tamnd/rucc#912 that the archive a cross link reads is C compiled by
+//! rucc itself, for two reasons that are both about thirty targets. The Rust path needs a Rust
+//! target for every row of `spec/cross-compile/04-target-matrix.md` and that table has rows rustc
+//! does not have, and the staticlib rustc produces brings Rust's own `compiler_builtins` with it,
+//! which is 4.5 MB for the four routines below against a 10 MB budget for every tier-1 and tier-2
+//! archive together.
+//!
+//! So this crate is the reference implementation rather than the shipped one. Section 12.8 asks
+//! for the soft float paths to be differentially tested against a reference over the whole hazard
+//! list, and this is what it means by one. Keeping it is cheaper than writing a second set of
+//! tests for the C, and a reference compiled by a different compiler is a better reference than
+//! one compiled by the compiler under test.
+//!
 //! # Status
 //!
 //! The block routines are here: `memcpy`, `memmove`, `memset` and `memcmp`, which are what
