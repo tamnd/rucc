@@ -225,3 +225,27 @@ extern void stops_here(int);
 void stops_here(int a) {
   bail(a);
 }
+
+// An `asm` written at file scope, whose template is directives and therefore says what the
+// object file itself holds rather than what any function does. A section, a label, the bytes
+// under it, and a second label whose distance from the first is the size: that is the whole of
+// what the incbin header writes, and what a hand written table of constants writes as well. Each
+// label becomes an object of its own, and they are laid out in the order written so that the
+// distance the template computed is the distance the program gets.
+__asm__(".section .rodata\n"
+        ".globl table\n"
+        ".balign 8\n"
+        "table:\n"
+        ".long 11\n"
+        ".long 22\n"
+        ".long 33\n"
+        "table_end:\n"
+        ".globl table_count\n"
+        ".balign 4\n"
+        "table_count:\n"
+        ".long (table_end - table) / 4\n");
+
+extern const int table[];
+extern const int table_count;
+
+int reads_the_table(int i) { return table[i] + table_count; }

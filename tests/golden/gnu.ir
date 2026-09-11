@@ -3,6 +3,9 @@
 target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
+global @table : bytes 12 = { i32 11, i32 22, i32 33 }, align 8, linkage(external), constant
+global @table_end : bytes 0 = {}, align 1, linkage(internal), constant
+global @table_count : i32 = 3, align 4, linkage(external), constant
 global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.2 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
@@ -302,6 +305,20 @@ func @stops_here(i32), linkage(external) {
 block0(%0: i32):
     call @bail(%0) : (i32)
     return
+}
+
+func @reads_the_table(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @table
+    %2 = sext.i64 %0
+    %3 = iconst.i64 4
+    %4 = mul.nsw %2, %3
+    %5 = ptr_add %1, %4
+    %6 = load.i32 %5, align 4, tbaa !1
+    %7 = global_addr @table_count
+    %8 = load.i32 %7, align 4, tbaa !1
+    %9 = add.nsw %6, %8
+    return %9
 }
 
 !0 = tbaa "char", offset 0

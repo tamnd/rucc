@@ -101,7 +101,7 @@ mod stmt;
 mod tast;
 
 pub use crate::asm::{
-    Asm, AsmId, AsmOperand, AsmOperandList, LabelList, LabelRef, StrList, StrRef,
+    Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, LabelRef, StrList, StrRef,
 };
 pub use crate::check::{Checked, Checker, Context, library_name, unimplemented_builtin};
 pub use crate::convert::Conv;

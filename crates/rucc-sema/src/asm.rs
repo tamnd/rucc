@@ -17,6 +17,7 @@
 
 use rucc_ast::AsmQuals;
 use rucc_base::{Idx, IdxRange, Symbol};
+use rucc_diag::Span;
 
 use crate::expr::ExprId;
 use crate::tast::StrId;
@@ -56,6 +57,22 @@ pub struct Asm {
     pub labels: LabelList,
     /// The qualifiers, with `volatile` set for a statement that implies it.
     pub quals: AsmQuals,
+}
+
+/// One `asm` written at file scope, outside any function.
+///
+/// Its own type rather than an [`Asm`] with empty lists, because the two are different things
+/// under the same keyword. A statement's template refers to operands by number and is one
+/// instruction of a function; a file-scope one has no operands to refer to, so `%` in it means
+/// nothing in particular, and what it says is what the translation unit itself contains. Keeping
+/// them apart is what lets the walk over the tree read the template as written rather than as a
+/// format string with nothing filled into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileAsm {
+    /// The template, as the program wrote it.
+    pub template: StrId,
+    /// Where it was written, for the messages about what is in it.
+    pub span: Span,
 }
 
 /// One operand of an assembly statement.

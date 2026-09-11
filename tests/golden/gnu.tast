@@ -485,3 +485,20 @@ decl #75 stops_here : void(int) function external defined
             decl #71 bail : void(int) function
           convert lvalue : int
             decl #76 a : int lvalue
+decl #77 table : const int[] object external static declared
+decl #78 table_count : const int object external static declared
+decl #80 reads_the_table : int(int) function external defined
+  params
+    decl #79 i : int object automatic defined
+  body
+    block
+      return
+        binary + : int
+          convert lvalue : int
+            subscript : const int lvalue
+              convert array-decay : const int *
+                decl #77 table : const int[] lvalue
+              convert lvalue : int
+                decl #79 i : int lvalue
+          convert lvalue : int
+            decl #78 table_count : const int lvalue

@@ -39,6 +39,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
 use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
 
+use crate::asm::FileAsm;
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
@@ -133,8 +134,14 @@ impl Checker<'_> {
                     None => self.tast.add_decl_refs(&[]),
                 }
             }
-            ast::Decl::Asm(_) => {
-                self.declaration_unsupported("an assembler statement at file scope", span);
+            // It declares no object and no function, so the run it leaves behind is empty and
+            // what it says is kept beside the declarations rather than among them. Nothing is
+            // read out of the template here: what is in one is the assembler's business, and the
+            // walk to the IR is the first thing with somewhere to put what it says.
+            ast::Decl::Asm(id) => {
+                let template = self.ast[id].template;
+                let template = self.asm_string(template, span);
+                self.tast.add_file_asm(FileAsm { template, span });
                 self.tast.add_decl_refs(&[])
             }
             // An attribute declaration appertains to nothing by definition, so there is nothing
@@ -1470,13 +1477,6 @@ impl Checker<'_> {
             self.types.kind(self.types.canonical(ty)),
             TypeKind::Array { len: ArrayLen::Unknown, .. }
         )
-    }
-
-    /// A declaration form that is recognised and not checked yet.
-    fn declaration_unsupported(&mut self, what: &str, span: Span) {
-        self.report(
-            Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
-        );
     }
 }
 

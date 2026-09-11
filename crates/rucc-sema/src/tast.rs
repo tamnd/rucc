@@ -22,7 +22,7 @@ use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_types::{TypeId, VlaId};
 
-use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, LabelList, StrList};
+use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
 use crate::expr::{Expr, ExprId, ExprList};
 use crate::stmt::{Case, CaseId, Stmt, StmtId, StmtList};
@@ -104,6 +104,7 @@ pub struct Tast {
     vlas: Vec<ExprId>,
     adjusted: Vec<(DeclId, TypeId)>,
     asms: Vec<Asm>,
+    file_asms: Vec<FileAsm>,
 
     expr_refs: Vec<ExprId>,
     stmt_refs: Vec<StmtId>,
@@ -133,6 +134,21 @@ impl Tast {
     /// Adds a declaration at file scope.
     pub fn add_top_level(&mut self, decl: DeclId) {
         self.top_level.push(decl);
+    }
+
+    /// The `asm` written at file scope, in the order they were written.
+    ///
+    /// Beside [`Tast::top_level`] rather than in it, because one of these declares no object and
+    /// no function and so is not a [`Decl`]. What it is instead is a contribution to the object
+    /// file, which is a thing only the walk to the IR has anywhere to put.
+    #[must_use]
+    pub fn file_asms(&self) -> &[FileAsm] {
+        &self.file_asms
+    }
+
+    /// Adds an `asm` written at file scope.
+    pub fn add_file_asm(&mut self, asm: FileAsm) {
+        self.file_asms.push(asm);
     }
 
     /// Adds an expression, with the source it came from.
