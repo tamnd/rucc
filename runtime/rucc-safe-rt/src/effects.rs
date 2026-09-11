@@ -528,11 +528,12 @@ impl Watch {
 /// gathers(v, k)        the same, read
 /// acquires(m)          the lock m, taking whatever ordering it was released with
 /// releases(m)          the lock m, publishing the clock it is given up at
+/// waits(m)             the lock m, given up for the length of the call and taken back after
 /// joins(t)             the thread t, taking everything it did before it finished
 /// spawns(f)            a thread running f, which the row gives an ordering to itself
 /// ```
 ///
-/// The last four are the `Ordering` group and they are the one clause that is not about a range.
+/// The last five are the `Ordering` group and they are the one clause that is not about a range.
 /// They have an arm of their own here because a range judgement happens before the call and an
 /// ordering edge does not: a release has to be published before the lock is really given up, or a
 /// thread that takes the lock next reads a clock from before the work it is being handed, and an
@@ -826,6 +827,11 @@ macro_rules! __judge {
 /// behind work it was never handed. A join is an acquire against a thread rather than against a
 /// lock and it is tested the same way, since a join that failed was told nothing about whether the
 /// thread has finished. A spawn is the row's own business and this passes it straight through.
+///
+/// A wait is both halves in one call and it is the one word that does not test the return value.
+/// `pthread_cond_wait` releases the caller's mutex inside itself and holds it again by the time it
+/// comes back, however it comes back, so a timed wait that gave up on its deadline is still a
+/// thread holding a lock that somebody else gave up in the meantime.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __edge {
@@ -846,6 +852,12 @@ macro_rules! __edge {
             $crate::sync::joined($thread.cast());
         }
         waited
+    }};
+    (waits, $lock:ident, $body:block) => {{
+        $crate::sync::released($lock.cast());
+        let woke = $body;
+        $crate::sync::acquired($lock.cast());
+        woke
     }};
     (spawns, $start:ident, $body:block) => {
         $body

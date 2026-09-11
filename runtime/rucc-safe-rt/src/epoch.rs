@@ -255,7 +255,14 @@ impl Clock {
     /// that thread's last store looking concurrent with everything this one does next. That is a
     /// report about a program whose locking is correct, which is the one thing this detector is not
     /// allowed to produce.
+    ///
+    /// Seeing [`NONE`] is not an edge and moves nothing. A lock nobody has published under carries
+    /// no ordering at all, and counting one for it would advance a brand new thread's clock off
+    /// zero for every lock it ever takes that nobody had released.
     pub fn sync(&mut self, seen: Stamp) {
+        if seen == NONE {
+            return;
+        }
         self.count = self.count.max(clock(seen).saturating_add(1)).min(CLOCKS);
     }
 }
@@ -574,6 +581,17 @@ mod tests {
         clock.sync(theirs);
         clock.tick();
         assert!(!unordered(theirs, clock.now()));
+    }
+
+    #[test]
+    fn a_lock_that_carries_nothing_does_not_advance_the_clock_of_whoever_takes_it() {
+        // Most locks, most of the time. Counting one for an edge nobody published would walk a
+        // thread's clock up for every lock it takes that nothing has ever released, which is a
+        // thread drifting ahead of its peers for no reason anybody could point at.
+        let mut clock = Clock::new(1);
+        let start = clock.now();
+        clock.sync(NONE);
+        assert_eq!(clock.now(), start);
     }
 
     #[test]
