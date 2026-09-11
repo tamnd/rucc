@@ -172,7 +172,18 @@ impl Pass for Licm {
         order.sort_by_key(|&id| std::cmp::Reverse(loops.depth(id)));
 
         let mut pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
+        // Blocks whose counts a hoist has changed since the numbers above were worked out. A hoist
+        // takes instructions from inside one loop and puts them in its preheader, so no block
+        // outside those can hold a different number afterwards, and a loop sharing none of them
+        // would read the same answer out of a fresh computation as out of this one. Recomputing
+        // for it anyway is a walk of the whole function, and a function with hundreds of loops
+        // side by side in it used to pay that hundreds of times. tamnd/rucc#1015.
+        let mut stale: HashSet<Block> = HashSet::new();
         for id in order {
+            if loops.blocks(id).iter().any(|block| stale.contains(block)) {
+                pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
+                stale.clear();
+            }
             let job = Job {
                 machine,
                 cfg: &cfg,
@@ -183,9 +194,10 @@ impl Pass for Licm {
             };
             if job.run(func, &pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
-                // asked what it holds. Recomputing is linear in the function and the alternative
-                // is deciding the outer loop against a number the inner loop invalidated.
-                pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
+                // asked what it holds. The alternative to noticing that is deciding the outer loop
+                // against a number the inner loop invalidated.
+                stale.extend(loops.blocks(id).iter().copied());
+                stale.extend(loops.preheader(&cfg, id));
             }
         }
         stats
