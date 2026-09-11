@@ -495,6 +495,20 @@ struct Mark {
     saved: Option<Value>,
 }
 
+/// Where an exact overflow check is sending its answer.
+///
+/// The two halves of the destination type that the arithmetic in [`Body::overflow_exactly`] asks
+/// about, carried together because every step of it asks about both at once: how many bits there
+/// are to fit into, and whether one of them is the sign.
+#[derive(Debug, Clone, Copy)]
+struct Destination {
+    /// The type of the value being stored, which the exact answer is narrowed to.
+    ty: Type,
+    /// Whether that type has a sign, which decides both what the narrowing extends back as and
+    /// which side of zero the answer is allowed to reach further on.
+    signed: bool,
+}
+
 /// A jump whose stack cannot be settled where it is built.
 ///
 /// A `goto` is allowed to name a label the walk has not reached yet, so what the stack should be
@@ -4318,13 +4332,13 @@ impl<'u> Body<'_, 'u> {
         let left = self.extension(lhs, wide, span);
         let right = self.extension(rhs, wide, span);
         let addr = self.value(out);
-        let narrow = self.value_type(written, span);
-        let into = repr::is_signed(self.types(), self.target(), written);
+        let into = Destination {
+            ty: self.value_type(written, span),
+            signed: repr::is_signed(self.types(), self.target(), written),
+        };
         let (kept, bit) = match op {
-            OverflowOp::Add | OverflowOp::Sub => {
-                self.exact_sum(op, left, right, wide, narrow, into, span)
-            }
-            OverflowOp::Mul => self.exact_product(left, right, wide, narrow, into, span),
+            OverflowOp::Add | OverflowOp::Sub => self.exact_sum(op, left, right, wide, into, span),
+            OverflowOp::Mul => self.exact_product(left, right, wide, into, span),
         };
         let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
         bit
@@ -4367,8 +4381,7 @@ impl<'u> Body<'_, 'u> {
         left: [Value; 2],
         right: [Value; 2],
         wide: Type,
-        narrow: Type,
-        into: bool,
+        into: Destination,
         span: Span,
     ) -> (Value, Value) {
         let ([a_low, a_ext], [b_low, b_ext]) = (left, right);
@@ -4383,9 +4396,9 @@ impl<'u> Body<'_, 'u> {
         let high = self.build(span).binary(opcode, a_ext, b_ext, Flags::NONE);
         let high = self.build(span).binary(opcode, high, crossed, Flags::NONE);
 
-        let kept = self.widen(low, into, narrow, span);
-        let back = self.widen(kept, into, wide, span);
-        let want = if into {
+        let kept = self.widen(low, into.signed, into.ty, span);
+        let back = self.widen(kept, into.signed, wide, span);
+        let want = if into.signed {
             let top = self.build(span).iconst(wide, i128::from(wide.bits() - 1));
             self.build(span).binary(Opcode::AShr, back, top, Flags::NONE)
         } else {
@@ -4426,8 +4439,7 @@ impl<'u> Body<'_, 'u> {
         left: [Value; 2],
         right: [Value; 2],
         wide: Type,
-        narrow: Type,
-        into: bool,
+        into: Destination,
         span: Span,
     ) -> (Value, Value) {
         let ([a_low, a_ext], [b_low, b_ext]) = (left, right);
@@ -4441,11 +4453,11 @@ impl<'u> Body<'_, 'u> {
 
         // How many bits of magnitude the destination has room for, which is one less than its width
         // when a bit of it is the sign.
-        let room = if into { narrow.bits() - 1 } else { narrow.bits() };
+        let room = if into.signed { into.ty.bits() - 1 } else { into.ty.bits() };
         if room < wide.bits() {
             let most = self.build(span).iconst(wide, (1i128 << room).wrapping_sub(1));
             // One more below zero than above it, and the mask is the minus one that adds it.
-            let limit = if into {
+            let limit = if into.signed {
                 self.build(span).binary(Opcode::Sub, most, mask, Flags::NONE)
             } else {
                 most
@@ -4453,13 +4465,13 @@ impl<'u> Body<'_, 'u> {
             let over = self.build(span).icmp(IntPred::Ugt, mag, limit);
             bit = self.build(span).binary(Opcode::Or, bit, over, Flags::NONE);
         }
-        if !into {
+        if !into.signed {
             let held = self.build(span).binary(Opcode::And, mag, mask, Flags::NONE);
             let zero = self.build(span).iconst(wide, 0);
             let below = self.build(span).icmp(IntPred::Ne, held, zero);
             bit = self.build(span).binary(Opcode::Or, bit, below, Flags::NONE);
         }
-        let kept = self.widen(low, into, narrow, span);
+        let kept = self.widen(low, into.signed, into.ty, span);
         (kept, bit)
     }
 
