@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The math library builtins that take a number to an integer or pick one of two are implemented, which is `ceil`, `floor`, `trunc`, `round`, `rint`, `nearbyint`, `fmax` and `fmin`, each in the three widths. A call to one is a call to the library function of that name, which is what gcc 16.2.0 emits for it too: `jmp ceil` at the default architecture, reaching the `roundsd` instruction only under `-msse4.1`. That measurement is what settled the question the issue was blocked on, since a program that writes one of these and links without `-lm` fails under gcc as well, so leaving the call is the compatible answer and not a shortcut. Before this a call to any of them was refused with `E0686` and sqlite needed a patched source to get past it.
+
+- Six of the eight are answered at translation time when their arguments are constants, which is the one thing a call cannot do. `double x = __builtin_ceil(1.5);` at file scope initializes an object with static storage duration, so there is no point in the program at which a call could be made, and gcc folds it. `rint` and `nearbyint` are deliberately not folded, because what they answer depends on the rounding mode the program is running under and gcc refuses a static initializer written with one for that reason, and `fmax` and `fmin` of a nan are not folded either, because the rule that the answer is the other operand is the library's rather than the machine's and gcc will not fold that one. A half goes away from zero for `round` and not to even, which is the one place C and the default rounding of IEEE 754 disagree. The plain names fold too, since `math.h` declares `ceil` and never spells the prefixed name, and `-fno-builtin` and `-fno-builtin-ceil` turn that off and leave the prefixed spelling alone. tamnd/rucc#226.
+
 ## 0.10.21
 
 ### Added

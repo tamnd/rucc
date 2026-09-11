@@ -21,11 +21,18 @@
 //! no arithmetic trait at all: an operator with a discarded status is exactly the kind of quiet
 //! wrongness this module exists to prevent.
 //!
+//! The three operations that return a number alone are the ones that cannot round.
+//! [`Float::to_integral`] lands on a number the format already holds, and [`Float::larger`] and
+//! [`Float::smaller`] hand back an operand rather than computing anything, so a [`Status`] from any
+//! of them would be a value the caller has to look at and that is always nothing.
+//!
 //! # What is not here
 //!
-//! A rounding mode other than to nearest. C's `#pragma STDC FENV_ACCESS` and the dynamic rounding
-//! modes change what the running program does rather than what a translation time constant means,
-//! and a constant is folded to nearest whatever the mode is.
+//! A rounding mode other than to nearest, for the operations that round. C's `#pragma STDC
+//! FENV_ACCESS` and the dynamic rounding modes change what the running program does rather than
+//! what a translation time constant means, and a constant is folded to nearest whatever the mode
+//! is. [`Float::to_integral`] takes a direction because there the direction is the operation: what
+//! `ceil` and `floor` differ in is where they land and not what mode they ran under.
 //!
 //! A nan payload out of an operation. [`Float`] carries one, since `__builtin_nan` can spell one
 //! and a static initializer written with it has to keep it, but every nan produced here is the
@@ -33,6 +40,26 @@
 //! IEEE 754 leaves to the implementation and which no C program can see.
 
 use std::cmp::Ordering;
+
+/// Which integer a value is taken to, for [`Float::to_integral`].
+///
+/// The four are C's `trunc`, `ceil`, `floor` and `round`, and they are the four of that family
+/// whose answer does not depend on the rounding mode the program is running under. `rint` and
+/// `nearbyint` are the two that do, and there is no variant for them here: a compiler that folded
+/// one would be answering for a mode it cannot know, which is why gcc will not fold one either and
+/// says so by refusing `static double x = __builtin_rint(2.5);` as not a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integral {
+    /// Toward zero, which drops the fraction and keeps the sign. C's `trunc`.
+    TowardZero,
+    /// Toward positive infinity. C's `ceil`.
+    Upward,
+    /// Toward negative infinity. C's `floor`.
+    Downward,
+    /// To the nearest, with a half going away from zero rather than to even. C's `round`, and the
+    /// one place in C where a tie does not go to even.
+    NearestTiesAway,
+}
 
 use crate::float::{Category, Float, Format, Status, round};
 
@@ -224,6 +251,103 @@ impl Float {
         }
         let magnitudes = self.compare_magnitude(other);
         Some(if self.sign { magnitudes.reverse() } else { magnitudes })
+    }
+
+    /// The integer nearest this number in the direction given, as a number of the same format.
+    ///
+    /// This is C's `trunc`, `ceil`, `floor` and `round`, which differ in the direction alone. The
+    /// answer is always exact: an integer whose magnitude is at most this number's is a number the
+    /// format already holds, and rounding up cannot need a bit the format has not got, because the
+    /// only way a carry leaves the significand is when every kept bit was a one and the answer is
+    /// then a power of two. So nothing here can be inexact and nothing rounds twice.
+    ///
+    /// A nan, an infinity and a zero come back as they were, which is what the library functions
+    /// do. So does a number that is an integer already, including every number too large to have a
+    /// fraction at all. The sign survives in every case, so `ceil(-0.5)` is a negative zero and
+    /// not a positive one, which is the answer a rewriting into arithmetic would miss.
+    #[must_use]
+    pub fn to_integral(self, toward: Integral) -> Float {
+        let Category::Finite = self.category else { return self };
+        let (significand, exponent) = self.parts();
+        // A number scaled by a power of two that is not negative has no bits below the point.
+        if exponent >= 0 {
+            return self;
+        }
+        let dropped = exponent.unsigned_abs();
+        // Everything a hundred and twenty eight places below the point is smaller than any
+        // significand can carry back up, so the whole number is a fraction below a half.
+        let (kept, fraction, half) = if dropped >= 128 {
+            (0, true, false)
+        } else {
+            let rest = significand & ((1 << dropped) - 1);
+            (significand >> dropped, rest != 0, rest >= 1 << (dropped - 1))
+        };
+        if !fraction {
+            return self;
+        }
+        let away = match toward {
+            Integral::TowardZero => false,
+            Integral::Upward => !self.sign,
+            Integral::Downward => self.sign,
+            Integral::NearestTiesAway => half,
+        };
+        let magnitude = kept + u128::from(away);
+        if magnitude == 0 {
+            return Float::zero(self.format, self.sign);
+        }
+        // Exact, for the reason in the doc comment, so there is no status to hand back.
+        let (value, _) = Float::from_unsigned(magnitude, self.format);
+        value.with_sign(self.sign)
+    }
+
+    /// The larger of the two, which is C's `fmax`.
+    ///
+    /// The nan rule is the library's rather than the hardware's, and it is the reason this is not
+    /// the `maxsd` instruction with a different name: a nan beside a number gives the number, so
+    /// the function is a way to ignore one operand rather than a comparison. Two nans give a quiet
+    /// nan, since there is nothing else to hand back.
+    ///
+    /// Two zeros are decided by their signs, so a negative zero is the smaller, although the two
+    /// compare equal. 7.12.12.2 leaves that to the implementation and this is gcc's answer,
+    /// measured from what its own folding writes rather than read out of the manual.
+    ///
+    /// # Panics
+    ///
+    /// If the two numbers are not in the same format.
+    #[must_use]
+    pub fn larger(self, other: Float) -> Float {
+        self.pick(other, Ordering::Greater)
+    }
+
+    /// The smaller of the two, which is C's `fmin`, on the same terms as [`Float::larger`].
+    ///
+    /// # Panics
+    ///
+    /// If the two numbers are not in the same format.
+    #[must_use]
+    pub fn smaller(self, other: Float) -> Float {
+        self.pick(other, Ordering::Less)
+    }
+
+    /// Whichever of the two is on the side asked for.
+    fn pick(self, other: Float, want: Ordering) -> Float {
+        let format = self.agreed_format(other);
+        if self.is_nan() {
+            return if other.is_nan() { Float::nan(format) } else { other };
+        }
+        if other.is_nan() {
+            return self;
+        }
+        // Two zeros compare equal, so the comparison below would hand back whichever is second
+        // and the answer would depend on the order the operands were written in.
+        if self.is_zero() && other.is_zero() {
+            let wanted = matches!(want, Ordering::Less);
+            return if self.sign == wanted { self } else { other };
+        }
+        match self.compare(other) {
+            Some(order) if order == want => self,
+            _ => other,
+        }
     }
 
     /// The nearest number to this one in another format, rounded to nearest with ties to even.
@@ -876,6 +1000,117 @@ mod tests {
         // The host agrees about where the quiet bit is.
         assert_eq!(Float::nan(Format::Double).to_bits(), u128::from(f64::NAN.to_bits()));
         assert!(Float::from_bits(Format::Double, u128::from(f64::NAN.to_bits())).is_nan());
+    }
+
+    /// The host is the oracle again, and its `round` is C's: a half goes away from zero rather
+    /// than to even, which is the one place C and IEEE's default disagree.
+    #[test]
+    fn a_number_taken_to_an_integer_lands_where_the_host_puts_it() {
+        let mut state = 0x5eed_1234_u64;
+        for _ in 0..20000 {
+            let bits = next(&mut state);
+            let value = f64::from_bits(bits);
+            if !value.is_finite() {
+                continue;
+            }
+            for (name, toward, theirs) in [
+                ("trunc", Integral::TowardZero, value.trunc()),
+                ("ceil", Integral::Upward, value.ceil()),
+                ("floor", Integral::Downward, value.floor()),
+                ("round", Integral::NearestTiesAway, value.round()),
+            ] {
+                let mine = double(value).to_integral(toward);
+                assert_eq!(
+                    host(mine).to_bits(),
+                    theirs.to_bits(),
+                    "{name} of {value:e} gave {}",
+                    host(mine)
+                );
+            }
+        }
+    }
+
+    /// The small numbers, where the answer is a zero whose sign is the only thing left of the
+    /// number that went in, and the large ones, which have no fraction to take.
+    #[test]
+    fn the_sign_of_a_number_rounded_away_to_nothing_is_still_there() {
+        let cases: &[(f64, Integral, f64)] = &[
+            (-0.5, Integral::Upward, -0.0),
+            (-0.2, Integral::Upward, -0.0),
+            (-0.5, Integral::TowardZero, -0.0),
+            (0.5, Integral::Downward, 0.0),
+            (0.4, Integral::NearestTiesAway, 0.0),
+            (-0.4, Integral::NearestTiesAway, -0.0),
+            (-0.0, Integral::Upward, -0.0),
+            (0.5, Integral::NearestTiesAway, 1.0),
+            (-0.5, Integral::NearestTiesAway, -1.0),
+            (2.5, Integral::NearestTiesAway, 3.0),
+            (-2.5, Integral::NearestTiesAway, -3.0),
+            (1e300, Integral::Upward, 1e300),
+            (f64::MIN_POSITIVE / 4.0, Integral::Downward, 0.0),
+            (-f64::MIN_POSITIVE / 4.0, Integral::Upward, -0.0),
+        ];
+        for &(value, toward, want) in cases {
+            let mine = double(value).to_integral(toward);
+            assert_eq!(host(mine).to_bits(), want.to_bits(), "{toward:?} of {value:e}");
+        }
+        // A nan and an infinity come back as they were, which no host call is needed to say.
+        assert!(double(f64::NAN).to_integral(Integral::Upward).is_nan());
+        let infinity = double(f64::NEG_INFINITY).to_integral(Integral::Upward);
+        assert!(infinity.is_infinite() && infinity.is_negative());
+    }
+
+    /// Every format, since the significand and the exponent are the only things the operation
+    /// reads and the four formats keep them in four different places.
+    #[test]
+    fn a_half_is_taken_to_an_integer_in_every_format() {
+        for format in
+            [Format::Half, Format::Single, Format::Double, Format::X87Extended, Format::Quad]
+        {
+            let (half, _) = Float::parse("2.5", format).expect("a number");
+            let (three, _) = Float::parse("3", format).expect("a number");
+            let (two, _) = Float::parse("2", format).expect("a number");
+            assert_eq!(half.to_integral(Integral::Upward), three, "{format:?}");
+            assert_eq!(half.to_integral(Integral::TowardZero), two, "{format:?}");
+            assert_eq!(half.to_integral(Integral::NearestTiesAway), three, "{format:?}");
+            assert_eq!(
+                half.negated().to_integral(Integral::Downward),
+                three.negated(),
+                "{format:?}"
+            );
+        }
+    }
+
+    /// The values gcc 16.2.0 folds these to, including the two the standard leaves open.
+    #[test]
+    fn the_larger_of_two_is_the_one_the_library_would_return() {
+        let (one, two) = (double(1.0), double(2.0));
+        assert_eq!(host(one.larger(two)), 2.0);
+        assert_eq!(host(one.smaller(two)), 1.0);
+        assert_eq!(host(two.larger(one)), 2.0);
+        assert_eq!(host(two.smaller(one)), 1.0);
+        // A nan is ignored whichever side it is on, which is the rule that makes these library
+        // functions rather than the machine's comparison.
+        let nan = double(f64::NAN);
+        assert_eq!(host(nan.larger(two)), 2.0);
+        assert_eq!(host(two.larger(nan)), 2.0);
+        assert_eq!(host(nan.smaller(two)), 2.0);
+        assert!(nan.larger(nan).is_nan());
+        // Two zeros are ordered by their signs although they compare equal.
+        let (zero, minus) = (double(0.0), double(-0.0));
+        let zeros: &[(&str, Float, f64)] = &[
+            ("fmax(0, -0)", zero.larger(minus), 0.0),
+            ("fmax(-0, 0)", minus.larger(zero), 0.0),
+            ("fmin(0, -0)", zero.smaller(minus), -0.0),
+            ("fmin(-0, 0)", minus.smaller(zero), -0.0),
+        ];
+        for &(name, mine, want) in zeros {
+            assert_eq!(host(mine).to_bits(), want.to_bits(), "{name}");
+        }
+        // An infinity is the end of the range and not a special case.
+        let infinity = double(f64::INFINITY);
+        assert!(infinity.larger(two).is_infinite());
+        assert_eq!(host(infinity.smaller(two)), 2.0);
     }
 
     #[test]

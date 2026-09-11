@@ -639,6 +639,12 @@ impl Checker<'_> {
         if let Some(value) = self.sign_library_value(callee, function, &args, span) {
             return value;
         }
+        // The six the compiler can answer when it is handed constants, which is what a static
+        // initializer written with one needs. In `check/builtin/math.rs`, with why the call is
+        // still a call everywhere else and why two of the family are deliberately not there.
+        if let Some(value) = self.math_library_value(callee, function, &args, span) {
+            return value;
+        }
         // The byte swaps, which are arithmetic and not a call to anything. In
         // `check/builtin/bswap.rs`, with why the name alone decides them.
         if let Some(value) = self.bswap_builtin_value(function, &args, span) {
