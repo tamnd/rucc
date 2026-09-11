@@ -232,6 +232,16 @@ const O1: &[&str] = &[
 /// them about a pointer that has not changed since it was allocated, and the pass that would take
 /// those out ran seven passes ago. `spec/safe-memory/13-performance.md` section 13.1 measured the
 /// cost and tamnd/rucc#893 is the rest of it.
+///
+/// `ivopts` goes last of the loop passes, because it is the one that decides what the loop's
+/// variables finally are and everything above it is still moving code around. It is followed by
+/// `simplify-cfg` and the pair cannot be separated. Section 28.4 has a loop stop asking its counter
+/// anything, and the counter goes on being incremented round the loop until the parameter carrying
+/// it is taken away. `crate::dce` says in its own documentation that it cannot do that, because the
+/// only reader left is the addition feeding the parameter back and a use count never reaches zero
+/// on a cycle. `crate::simplify_cfg` can, and says it was written for this. Without it the loop
+/// pays for the new pointer and keeps the old counter as well, which over the corpus is about half
+/// of what choosing badly costs.
 const O2: &[&str] = &[
     "fold",
     "simplify",
@@ -256,6 +266,8 @@ const O2: &[&str] = &[
     "split",
     "canon",
     "licm",
+    "ivopts",
+    "simplify-cfg",
     "discharge",
     "dce",
 ];
@@ -286,6 +298,8 @@ const O3: &[&str] = &[
     "split",
     "canon",
     "licm",
+    "ivopts",
+    "simplify-cfg",
     "discharge",
     "dce",
 ];
@@ -1032,6 +1046,23 @@ mod tests {
             assert!(
                 level[at..].contains(&"licm"),
                 "a level splits a loop and never looks at the guard again"
+            );
+        }
+    }
+
+    #[test]
+    fn every_level_that_chooses_induction_variables_takes_the_old_one_away_afterwards() {
+        // The counter a loop stops asking anything is still incremented round it, and what removes
+        // the parameter carrying it is `simplify-cfg` rather than `dce`. See the comment on `O2`.
+        // A level that chooses and then stops keeps both variables and is worse off than if it had
+        // never chosen at all.
+        for level in [super::O1, super::O2, super::O3, super::OS, super::OZ] {
+            let Some(at) = level.iter().position(|pass| *pass == "ivopts") else {
+                continue;
+            };
+            assert!(
+                level[at + 1..].contains(&"simplify-cfg"),
+                "a level chooses induction variables and leaves the one it stopped using behind"
             );
         }
     }

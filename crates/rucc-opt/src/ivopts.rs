@@ -730,10 +730,22 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
     if group.exit && cand.chrec.step.as_number().is_some_and(|step| step != 0) {
         return Cost::ZERO;
     }
-    if group.chrec.ty != cand.chrec.ty {
-        // A conversion between the two is arithmetic on the sequence, and `crate::scev` refuses
-        // to widen a chrec whose ends are symbolic, so the honest answer is that this candidate
-        // does not serve this group rather than a price for a conversion nobody checked.
+    // Two sequences in different types mean different things to the two kinds of use, so the
+    // question is asked once and answered twice.
+    //
+    // For a value it is a conversion, which is arithmetic on the sequence, and `crate::scev`
+    // refuses to widen a chrec whose ends are symbolic, so the honest answer is that this
+    // candidate does not serve this group rather than a price for a conversion nobody checked.
+    //
+    // For an address it is not a conversion at all. The address is the candidate read as the
+    // index of an addressing mode, which is the ordinary `a[i]`: the group's sequence is a
+    // pointer, the candidate's is the counter, and the width the counter is read at is the index
+    // register's rather than the sequence's. Refusing it here is refusing the only case
+    // [`address_cost`] below says it exists to price, and it leaves every address group with its
+    // own pointer as the one thing that can serve it, which is a choice made before the cost
+    // model is asked rather than by it.
+    let indexing = group.kind == Kind::Address && cand.chrec.ty.is_int();
+    if group.chrec.ty != cand.chrec.ty && !indexing {
         return Cost::INFINITE;
     }
     let Some(scale) = ratio(cand.chrec.step, group.chrec.step) else { return Cost::INFINITE };
@@ -752,8 +764,27 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
         return Cost::INFINITE;
     };
     match group.kind {
-        Kind::Address => address_cost(table, scale, rest),
+        Kind::Address => address_cost(table, scale, rest) + index_cost(table, cand.chrec.ty),
         Kind::Compare | Kind::Generic => value_cost(table, group.chrec.ty, scale, rest),
+    }
+}
+
+/// What reading this candidate as the index of an addressing mode costs before the mode itself.
+///
+/// An index register is a pointer wide on every one of rucc's targets, so a candidate counting in
+/// something narrower is extended first and the extension is an instruction. A candidate already
+/// that wide pays nothing, and neither does a pointer, which is what a group's own candidate is.
+///
+/// Per use, like everything else `serve` answers, and that is the pessimistic reading: two uses a
+/// block apart share one extension in the emitted code and this charges for two. The direction is
+/// deliberate. What it overprices is keeping the counter, which is the side section 28.7 says to
+/// be careful about being wrong on, and a group large enough for the difference to decide
+/// anything is a group where the pointer was going to win regardless.
+fn index_cost(table: &CostTable, ty: Type) -> Cost {
+    if ty.is_int() && ty.bits() < Width::W64.bits() {
+        Cost::cycles(table.movsx)
+    } else {
+        Cost::ZERO
     }
 }
 
@@ -1174,9 +1205,10 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cost, Cycles, GROUPED, Ivopts,
-        KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_EVERY_TURN, OUT_OF_FUEL, POPULATION, Plain,
-        RETARGETED, REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, address_cost, width,
+        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
+        GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
+        NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, Plain, RETARGETED, REWRITTEN, USE_ADDRESS,
+        USE_COMPARE, USE_GENERIC, address_cost, serve, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1417,15 +1449,38 @@ mod tests {
         pred
     }
 
+    /// How wide one element of the array the loops below walk is.
+    ///
+    /// Sixty four, which is a `struct` of sixteen words rather than a bare `int`, and the choice
+    /// decides what the tests underneath are able to be about. No addressing mode on any of rucc's
+    /// targets holds a scale of sixty four, so the index has to be multiplied out before every
+    /// access, and a pointer that adds sixty four a turn is strictly fewer instructions. That is
+    /// the shape the pass is for. An array of `int` is the shape it is not: `(%rax,%rcx,4)` is one
+    /// mode and holding an index in it costs almost nothing, so a pointer of its own buys the loop
+    /// an increment and a register and saves it next to nothing. The last test in this module is
+    /// the one that says so, and it is the only one below that walks an array of `int`.
+    const STRIDE: i128 = 64;
+
     /// The address of `base[i + away]`, in the block being built.
     fn element(build: &mut Builder<'_>, base: Value, counter: Value, away: i128) -> Value {
-        let four = build.iconst(Type::int(64), 4);
-        let by = build.binary(Opcode::Mul, counter, four, Flags::NSW);
+        strided(build, base, counter, away, STRIDE)
+    }
+
+    /// The same address over an array whose elements are `width` bytes wide.
+    fn strided(
+        build: &mut Builder<'_>,
+        base: Value,
+        counter: Value,
+        away: i128,
+        width: i128,
+    ) -> Value {
+        let each = build.iconst(Type::int(64), width);
+        let by = build.binary(Opcode::Mul, counter, each, Flags::NSW);
         let at = build.binary(Opcode::PtrAdd, base, by, Flags::NONE);
         if away == 0 {
             return at;
         }
-        let past = build.iconst(Type::int(64), away * 4);
+        let past = build.iconst(Type::int(64), away * width);
         build.binary(Opcode::PtrAdd, at, past, Flags::NONE)
     }
 
@@ -1479,6 +1534,44 @@ mod tests {
             walked.cycles + table.add,
             "an index costs exactly what an addition costs here, which is the number the whole \
              trade turns on",
+        );
+    }
+
+    #[test]
+    fn the_counter_serves_an_address_and_pays_for_the_extension_the_index_wants() {
+        // The comparison the whole search is about, and the one nothing used to ask. The group is
+        // `a[i]`, a pointer sequence stepping by the width of an element, and the candidate is the
+        // counter, an `i32`. Reading the counter as an index is what the address already does, so
+        // the price is the mode plus what widening the counter to an index register costs. A
+        // counter already that wide pays for the mode alone.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let array = some_value();
+        let group = Group {
+            kind: super::Kind::Address,
+            chrec: Chrec {
+                base: Invariant::of(array),
+                step: Invariant::number(4),
+                ty: Type::PTR,
+                flags: Flags::NONE,
+            },
+            uses: Vec::new(),
+            exit: false,
+        };
+        let counting = |ty| Cand {
+            chrec: Chrec {
+                base: Invariant::number(0),
+                step: Invariant::number(1),
+                ty,
+                flags: Flags::NONE,
+            },
+            origin: Origin::Original,
+        };
+        let mode = table.addr_cost(AddrMode::BaseIndexScale);
+        assert_eq!(serve(table, &group, &counting(Type::int(64))), mode);
+        assert_eq!(
+            serve(table, &group, &counting(Type::int(32))),
+            mode + Cost::cycles(table.movsx)
         );
     }
 
@@ -1575,11 +1668,11 @@ mod tests {
         sound(&func, &mut names);
     }
 
-    /// Two arrays walked at once, which is the case the loop's own variables cannot express.
+    /// Two arrays walked at once, which is the case the loop's own variables cannot pay for.
     ///
-    /// The counter serves the exit test and neither address, because an address is a pointer and
-    /// the counter is an integer, so the choosing has to add something. What it must not do is add
-    /// one variable per access when one serves both.
+    /// The counter can serve both addresses, by being the index of a mode, and at this stride that
+    /// costs a multiply before every one of them. So the choosing adds something. What it must not
+    /// do is add one variable per access when one serves both.
     #[test]
     fn a_walk_of_two_arrays_takes_a_variable_it_did_not_have() {
         let mut names = Interner::new();
@@ -1754,7 +1847,8 @@ mod tests {
         bottom_close(&mut func, &it, 7);
         Builder::new(&mut func, it.out).ret(&[]);
         let before = stores(&func);
-        assert_eq!(before, vec![0, 4, 8, 12, 16, 20, 24], "seven turns, and the last one counts");
+        let want: Vec<i128> = (0..7).map(|turn| turn * STRIDE).collect();
+        assert_eq!(before, want, "seven turns, and the last one counts");
 
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
@@ -1932,6 +2026,41 @@ mod tests {
 
         let stats = choose(&mut func);
         assert_eq!(stats.events().len(), 0);
+        assert!(!stats.changed());
+    }
+
+    /// The array of `int` the rest of this module deliberately does not walk.
+    ///
+    /// Every loop above steps by [`STRIDE`], which is a width no addressing mode holds, and every
+    /// one of them comes out with a pointer. This is the same loop over four byte elements, and it
+    /// has to come out the other way. `(%rax,%rcx,4)` is a mode x86-64 has, so the counter is
+    /// already the index of it and the only thing a pointer of its own would remove is a scale the
+    /// hardware applies for free. The loop keeps what it was written with.
+    ///
+    /// This is the test that has to fail for the pass to go back to what it did before #918, where
+    /// an address group could only ever be served by a pointer made for it and the cost model was
+    /// never asked. Getting it wrong costs about a percent of `.text` across the corpus, which is
+    /// what kept the pass out of every pipeline until now.
+    #[test]
+    fn a_walk_the_modes_hold_keeps_the_counter_it_has() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = strided(&mut build, base, it.counter, 0, 4);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = params(&func, it.head);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 1, "the address was looked at");
+        assert_eq!(stats.count(Kind::Note, CANDIDATE), 3, "and a pointer for it was costed");
+        assert_eq!(stats.count(Kind::Note, KEPT), 1, "and it lost to the counter");
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 0);
+        assert_eq!(params(&func, it.head), before, "nothing new goes round the loop");
         assert!(!stats.changed());
     }
 }
