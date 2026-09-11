@@ -46,6 +46,7 @@ use rucc_types::{
 use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run, shifted};
 use crate::repr;
+use crate::restrict::Scopes;
 use crate::ssa::{Ssa, Var};
 use crate::unit::{Protector, Unit};
 
@@ -91,6 +92,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         jumps: Vec::new(),
         grows: false,
         aligned: HashMap::new(),
+        restrict: Scopes::default(),
     };
     body.ssa.seal(body.func, entry);
 
@@ -114,6 +116,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // The slots first, so that every `alloca` is at the top of the entry block, and then the
     // parameters, whose stores have to come after the slots they store into.
     let params = tast[params].to_vec();
+    // Which `restrict` pointers the function declares, before anything in it is walked, because
+    // the scope a parameter's promise covers is the whole body and the numbers have to be settled
+    // before the first access carries one.
+    body.restrict = Scopes::of_params(tast, body.unit.types, &params, &mut body.unit.cliques);
     // Whether anything in the function grows the stack, which decides what a `goto` can do.
     let declared: Vec<TypeId> = params.iter().chain(locals.iter()).map(|&d| tast[d].ty).collect();
     body.grows = declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
@@ -331,13 +337,18 @@ struct Place {
     /// `spec/safe-memory/09-type-init-and-races.md` and which only a store through a member
     /// carries anything in.
     owns: u32,
+    /// Which `restrict` scope the access is in and which pointer it went through.
+    ///
+    /// Worked out from the names the place was written with, which is what
+    /// [`restrict`](mod@crate::restrict) does, and read by layer 5 of the alias analysis.
+    restrict: Restrict,
 }
 
 impl Place {
     /// A place that is not a member of a union, which is every place but the ones [`Body::member`]
     /// builds out of one.
     const fn new(at: Where, ty: TypeId) -> Self {
-        Self { at, ty, punned: false, owns: 0 }
+        Self { at, ty, punned: false, owns: 0, restrict: Restrict::NONE }
     }
 }
 
@@ -468,6 +479,9 @@ struct Body<'a, 'u> {
     /// cast from a narrower type and lost its low bits is row S7 of document 03, and the check is
     /// what finds it.
     aligned: HashMap<Value, u32>,
+    /// The `restrict` pointers the function declares, which is what an access carries a clique
+    /// and a base from. Empty for a function that declares none, which is nearly all of them.
+    restrict: Scopes,
 }
 
 /// One open scope, and the stack pointer as it was before anything in it grew the stack.
@@ -1106,7 +1120,7 @@ impl<'u> Body<'_, 'u> {
         } else {
             self.access(place.ty)
         };
-        let info = MemInfo { owns: place.owns, ..info };
+        let info = MemInfo { owns: place.owns, restrict: place.restrict, ..info };
         // The smaller of what the type would give the access and what the layout left the address
         // with, for an address the layout settled. They differ only where something was packed.
         let Where::Addr(addr) = place.at else { return info };
@@ -2256,14 +2270,12 @@ impl<'u> Body<'_, 'u> {
                 let addr = self.global_addr(symbol, span);
                 Place::new(Where::Addr(addr), ty)
             }
-            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
-                let addr = self.value(operand);
-                Place::new(Where::Addr(addr), ty)
-            }
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => self.place_of_deref(operand, ty),
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
                 let addr = self.element(base, index, ty, span);
-                Place::new(Where::Addr(addr), ty)
+                let through = self.through(base);
+                Place { restrict: through, ..Place::new(Where::Addr(addr), ty) }
             }
             // An aggregate is read by address rather than by value, so the conversion that
             // reads one is the identity and the place under it is the answer.
@@ -2695,7 +2707,11 @@ impl<'u> Body<'_, 'u> {
         let addr = self.address_of(place, span);
         let record = self.types().canonical(self.tast()[base].ty);
         let TypeKind::Record(id) = self.types().kind(record) else {
-            return Place { punned: place.punned, ..Place::new(Where::Addr(addr), ty) };
+            return Place {
+                punned: place.punned,
+                restrict: place.restrict,
+                ..Place::new(Where::Addr(addr), ty)
+            };
         };
         let (kind, found) = {
             let info = self.types().record_info(id);
@@ -2706,7 +2722,7 @@ impl<'u> Body<'_, 'u> {
         // does not change which bytes they are.
         let punned = place.punned || kind == RecordKind::Union;
         let Some(member) = found else {
-            return Place { punned, ..Place::new(Where::Addr(addr), ty) };
+            return Place { punned, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) };
         };
         let byte = member.offset;
         let owns = self.owned(id, record, kind, byte, place.owns);
@@ -2725,10 +2741,15 @@ impl<'u> Body<'_, 'u> {
             // how the loads under it are aligned.
             let addr = self.offset(addr, byte, span);
             let run = Run::at(base, byte, member.bit, width);
-            return Place { punned, owns, ..Place::new(Where::Bits(addr, run), ty) };
+            return Place {
+                punned,
+                owns,
+                restrict: place.restrict,
+                ..Place::new(Where::Bits(addr, run), ty)
+            };
         }
         let addr = self.offset(addr, byte, span);
-        Place { punned, owns, ..Place::new(Where::Addr(addr), ty) }
+        Place { punned, owns, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) }
     }
 
     /// How many bytes of its record a member at `byte` owns, counting the padding after it.
@@ -3528,7 +3549,16 @@ impl<'u> Body<'_, 'u> {
     /// The place `*p` names.
     fn place_of_deref(&mut self, operand: ExprId, ty: TypeId) -> Place {
         let addr = self.value(operand);
-        Place::new(Where::Addr(addr), ty)
+        let through = self.through(operand);
+        Place { restrict: through, ..Place::new(Where::Addr(addr), ty) }
+    }
+
+    /// The `restrict` scope a pointer this access is about to go through came from.
+    ///
+    /// Nothing for the great majority of accesses, since a clique of zero is what a function that
+    /// declares no `restrict` pointer gives everything in it.
+    fn through(&self, pointer: ExprId) -> Restrict {
+        self.restrict.value(self.unit.tast, self.unit.types, pointer)
     }
 
     /// `++x`, `--x`, `x++` and `x--`, which are one read, one add and one write.

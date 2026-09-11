@@ -33,6 +33,7 @@ mod bits;
 mod body;
 mod reach;
 mod repr;
+mod restrict;
 mod ssa;
 mod unit;
 

@@ -201,6 +201,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         wrapping,
         aliasing,
         padding,
+        cliques: 0,
         tree: aliasing::Tree::default(),
         contract,
         module,
@@ -232,6 +233,10 @@ pub(crate) struct Unit<'a> {
     aliasing: bool,
     /// Whether an access says how far the padding after it reaches. See [`Context::padding`].
     pub(crate) padding: bool,
+    /// How many `restrict` scopes have been handed out, which is a number the whole module shares
+    /// so that no two functions promise different things with the same one. See
+    /// [`restrict`](mod@crate::restrict) for why that matters before there is an inliner.
+    pub(crate) cliques: u16,
     /// The type based aliasing tree built so far, which is one per module.
     tree: aliasing::Tree,
     /// How far a multiply and an addition may be fused. See [`Context::contract`].
