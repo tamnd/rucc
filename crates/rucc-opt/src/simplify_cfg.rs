@@ -52,6 +52,13 @@
 //! `spec/optimizer/28-induction-variables.md` has a loop stop asking its counter anything, and
 //! before this the counter went on being incremented round a loop that had no other use for it.
 //!
+//! What the addition is left reading matters, and this used to leave it reading the parameter that
+//! had just gone. The argument for that was that the addition is dead and `crate::dce` is the pass
+//! for what is dead, and the argument is true at every level except the one where it counts:
+//! `-O0` runs this pass and nothing else, so nothing came along behind it and the operand reached
+//! the printer as a use with no definition. So the addition goes here, with the parameter that
+//! stranded it, and the `strand` function below carries the argument for why that is always safe.
+//!
 //! Cross jumping is the one transformation of section 21.1 that is not here at all, and that is
 //! section 21.1's last paragraph telling us not to: it costs a branch to save a copy, so it belongs
 //! at the machine level under `-Os`, which is document 37.
@@ -475,6 +482,7 @@ fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     let live = live(func, entry, &addressed(func));
     let edges = incoming(func);
     let mut changed = false;
+    let mut gone: HashSet<Value> = HashSet::new();
     for block in func.blocks().collect::<Vec<Block>>() {
         let mut taking = Vec::new();
         for (index, &param) in func[block].params.iter().enumerate() {
@@ -493,10 +501,58 @@ fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         for _ in &taking {
             stats.optimized(NOTHING_READS_IT);
         }
+        gone.extend(taking.iter().map(|&index| func[block].params[index]));
         take_params(func, block, &taking, edges.get(&block));
         changed = true;
     }
+    if !gone.is_empty() {
+        strand(func, gone);
+    }
     changed
+}
+
+/// Takes out the instructions that were reading a parameter the step above removed.
+///
+/// Without this the step above leaves a use of a value nothing defines, which is a function the
+/// verifier is entitled to refuse and a printed IR that does not read back. It was written the
+/// other way round, on the argument that what is stranded is dead and [`crate::dce`] is the pass
+/// that takes what is dead. That holds at every level except the one that matters most, because
+/// `-O0` runs this pass and no other, so at `-O0` nothing came along afterwards and the dangling
+/// operand reached the printer. That was issue 1016.
+///
+/// Every instruction this removes is dead, and the proof is [`live`] read backwards. Live spreads
+/// from a result to the operands that produced it, so an instruction whose result were live would
+/// have made its operands live, and the parameter it reads was removed exactly because nothing
+/// made it live. A terminator's operands and an effectful instruction's operands are live by
+/// seeding, so neither of those can be reading a removed parameter either. The same argument
+/// applies again to the results of what goes, which is why this follows the chain.
+///
+/// # Fuel
+///
+/// None, for the reason this module's documentation gives about the blocks a fold strands: this is
+/// the second half of a transformation that has already been paid for, and a budget that could
+/// stop between the two halves would hand the verifier a use with no definition.
+fn strand(func: &mut Func, mut gone: HashSet<Value>) {
+    loop {
+        let mut spread = false;
+        for block in func.blocks().collect::<Vec<Block>>() {
+            for inst in func.insts(block).collect::<Vec<Inst>>() {
+                if !func[func[inst].args].iter().any(|value| gone.contains(value)) {
+                    continue;
+                }
+                let results: Vec<Value> = func[inst].results().collect();
+                for result in results {
+                    spread |= gone.insert(result);
+                }
+                func.remove_inst(inst);
+            }
+        }
+        // A second walk only when something this removed produced a value of its own, since that
+        // value may be read further down and layout order is not a promise about where.
+        if !spread {
+            return;
+        }
+    }
 }
 
 /// Every value something that happens reads, worked out from nothing live outwards.
@@ -1983,6 +2039,46 @@ mod tests {
         let stats = simplify(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 0);
         assert_eq!(func[Block::from_usize(1)].params.len(), 2);
+    }
+
+    /// A counter nothing reads, with two instructions behind it rather than one.
+    ///
+    /// The addition reads the parameter and the doubling reads the addition, so taking the
+    /// parameter out strands the first and taking the first out strands the second. The condition
+    /// is asked about the function's own parameter so that nothing here folds and the loop stays a
+    /// loop.
+    fn counting_into_nothing() -> (Func, Value, Value) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let limit = func.append_param(entry, Type::int(32));
+        let counter = func.append_param(head, Type::int(32));
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(head, &[zero]);
+        let mut build = Builder::new(&mut func, head);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NONE);
+        let twice = build.binary(Opcode::Add, next, next, Flags::NONE);
+        let going = build.icmp(IntPred::Ne, limit, one);
+        build.br_if(going, head, &[next], out, &[]);
+        Builder::new(&mut func, out).ret(&[]);
+        (func, next, twice)
+    }
+
+    #[test]
+    fn what_was_reading_a_parameter_nothing_reads_goes_with_it() {
+        let (mut func, next, twice) = counting_into_nothing();
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::NOTHING_READS_IT), 1);
+        // Both of them, and the second one is the point: it was never reading the parameter, it
+        // was reading what did, so one walk that only took the direct readers would have left a
+        // use of a value nothing defines. This is issue 1016.
+        assert_eq!(lives_in(&func, next), None);
+        assert_eq!(lives_in(&func, twice), None);
     }
 
     #[test]

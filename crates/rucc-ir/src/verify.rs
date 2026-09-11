@@ -542,8 +542,21 @@ impl<'a> Verifier<'a> {
     fn uses(&mut self, func: &'a Func, inst: Inst, doms: &Doms, layout: &Layout) {
         let block = layout.block_of(inst).expect("walking the blocks");
         let check = |verifier: &mut Self, value: Value| match func[value].def {
-            Def::Param { block: def, .. } => {
-                if !doms.dominates(def, block) {
+            Def::Param { block: def, index } => {
+                // Where a value says it comes from is a record the value keeps, and a pass that
+                // takes a parameter out leaves that record behind rather than paying to clear it.
+                // So the block has to be asked whether the parameter is still one of its own, and
+                // dominating a block it is no longer a parameter of proves nothing. This is the
+                // check that was missing when a use with no definition reached the printer, which
+                // was issue 1016.
+                let at = func[def].params.get(index as usize).copied();
+                if at != Some(value) {
+                    verifier.error(format!(
+                        "%{} is a parameter block{} no longer has",
+                        value.raw(),
+                        def.raw()
+                    ));
+                } else if !doms.dominates(def, block) {
                     verifier.error(format!(
                         "%{} arrives at block{} and does not reach here",
                         value.raw(),
@@ -2866,6 +2879,30 @@ ifunc @f = @g, linkage(external)
         assert_eq!(
             one_error(&module, &func, &names),
             "@f block0 return: %0 is produced by an instruction that is not in the function"
+        );
+    }
+
+    #[test]
+    fn a_value_whose_parameter_has_been_taken_out_is_reported() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let i32_ = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let body = func.create_block();
+        let param = func.append_param(body, i32_);
+        Builder::new(&mut func, entry).jump(body, &[]);
+        let mut b = Builder::new(&mut func, body);
+        let one = b.iconst(i32_, 1);
+        b.binary(Opcode::Add, param, one, Flags::NONE);
+        b.ret(&[]);
+        // What control flow simplification used to leave behind when it took out a parameter
+        // nothing reads. The value still says which block it arrives at and that block still
+        // dominates this one, so the dominance question answers yes and says nothing.
+        func.retain_params(body, |_| false);
+        assert_eq!(
+            one_error(&module, &func, &names),
+            "@f block1 add: %0 is a parameter block1 no longer has"
         );
     }
 
