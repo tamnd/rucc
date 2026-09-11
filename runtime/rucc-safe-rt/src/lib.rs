@@ -97,9 +97,9 @@
 //! leaving both to the C library wrappers. The ordering that is not a call at all comes from the
 //! compiler with them: a `__rucc_meta_release` in front of an atomic that publishes and a
 //! `__rucc_meta_acquire` after one that takes, both landing in the same tables the interposed
-//! primitives use. A bare `atomic_thread_fence` is the one edge still missing, since it orders
-//! against every thread rather than against an object and so has no address to be keyed on.
-//! That one is a gate rather than a gap. This is the only plane in the crate where missing
+//! primitives use. A bare `atomic_thread_fence` is in with them, as a pair of calls with no key at
+//! all, since it orders against every thread rather than against an object and so has no address to
+//! be keyed on. This is the only plane in the crate where missing
 //! instrumentation costs a false report rather than a missed one, because two threads an edge
 //! nobody saw really did join look exactly like two threads nothing joined.
 //!

@@ -295,10 +295,10 @@ impl fmt::Display for Subobject {
 /// threads that an edge nobody saw really did join look exactly like two threads nothing joined.
 /// The edges that are calls are interposed already, and the ordering that is not a call at all is
 /// emitted by this pass beside the checks: an atomic that publishes gets a `meta_release` in front
-/// of it and one that takes gets a `meta_acquire` after it. What is still missing is a bare
-/// `atomic_thread_fence`, which orders against every thread rather than against an object and so
-/// has no address an edge could be keyed on, so a program that synchronizes through one and nothing
-/// else is one this can still report against wrongly.
+/// of it and one that takes gets a `meta_acquire` after it. A bare `atomic_thread_fence` gets the
+/// same pair with no key, since it orders against every thread rather than against an object and so
+/// has no address an edge could be keyed on, and the runtime holds one clock for every fence in the
+/// program rather than a table.
 ///
 /// Which is also why the default stays [`Races::Off`] after the flag works. Turning it on is a
 /// decision about a program, not about a build.

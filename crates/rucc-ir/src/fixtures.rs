@@ -150,6 +150,8 @@ block0(%0: ptr, %1: i64):
     meta_init_copy %0, %9, %1
     meta_release %0
     meta_acquire %0
+    meta_fence_release
+    meta_fence_acquire
     safe_region_begin \"hand written assembly, checked by review\"
     safe_region_end
     restrict_enter %0, size 112, align 8, restrict(1, 2)

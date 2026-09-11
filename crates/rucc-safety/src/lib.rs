@@ -376,6 +376,12 @@ pub fn insert(
             {
                 counts.edged += edges(func, inst);
             }
+            // The same edge without a key. A fence is the other way a C program orders two
+            // threads without calling anything, and the reason it is a separate arm is that it
+            // has no address in it at all.
+            Opcode::Fence if races.records() => {
+                counts.edged += fenced(func, inst);
+            }
             _ => {}
         }
     }
@@ -895,10 +901,7 @@ fn raced(
 /// to record that edge because no pointer went through it would lose exactly the ordering the
 /// pointers stored before it depend on.
 ///
-/// A `fence` is not here. It orders against every other thread rather than against one object, so
-/// there is no address to key an edge on and the table `rucc_safe_rt::sync` keeps is keyed by
-/// address. A program that synchronizes through a bare fence and nothing else is one this can
-/// report against wrongly, and it is written down on the milestone rather than worked around.
+/// A `fence` goes through [`fenced`] instead, because it has no address in it to be the key.
 fn edges(func: &mut Func, atomic: Inst) -> usize {
     let Some(pointer) = keyed(func, atomic) else { return 0 };
     let order = match func[atomic].extra {
@@ -921,6 +924,40 @@ fn edges(func: &mut Func, atomic: Inst) -> usize {
         let data = InstData { args, ..InstData::new(Opcode::MetaAcquire) };
         let made = func.create_inst(data, &[], span);
         func.insert_after(made, atomic);
+        put += 1;
+    }
+    put
+}
+
+/// Puts a `meta_fence_release` in front of a fence, a `meta_fence_acquire` after it, or both.
+///
+/// The other way a C program orders two threads without calling anything, and the harder half of
+/// [`edges`]. A fence orders against every other thread rather than against one object, so there is
+/// no address in it to file the edge under and the markers it gets take no operands. The relaxed
+/// atomic that usually sits next to a fence in the source is not the key either: what the fence
+/// orders is everything the thread did, not that one word, and keying on the word would miss every
+/// other pair the fence really ordered.
+///
+/// So the runtime keeps one cell for all of them, and that orders more pairs of threads than the
+/// program did. `rucc_safe_rt::sync` carries the argument for why that is the safe direction, which
+/// is the same argument the stale entries there already rest on: a thread put further ahead than it
+/// needed to be reports fewer races, never a race that is not there. Given that a missing edge is
+/// the one kind of missing instrumentation that costs precision, too much ordering beats none.
+///
+/// Which side the marker lands on is the same question as in [`edges`] and has the same answer.
+fn fenced(func: &mut Func, fence: Inst) -> usize {
+    let Extra::Order(order) = func[fence].extra else { return 0 };
+
+    let span = func.span(fence);
+    let mut put = 0;
+    if order.is_release() {
+        let made = func.create_inst(InstData::new(Opcode::MetaFenceRelease), &[], span);
+        func.insert_before(made, fence);
+        put += 1;
+    }
+    if order.is_acquire() {
+        let made = func.create_inst(InstData::new(Opcode::MetaFenceAcquire), &[], span);
+        func.insert_after(made, fence);
         put += 1;
     }
     put
@@ -1787,6 +1824,80 @@ mod tests {
             !printed.contains("meta_release") && !printed.contains("meta_acquire"),
             "{printed}"
         );
+    }
+
+    /// One fence with the ordering it is given, and nothing else in the function.
+    fn one_fence(names: &mut Interner, order: MemOrder) -> Func {
+        let mut func = Func::new(names.intern("fenced"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        b.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_fence_carries_the_same_edge_as_an_atomic_with_no_object_to_key_it_on() {
+        // The other way a C program orders two threads without calling anything. A fence orders
+        // against every other thread rather than against one object, so the markers take no
+        // operands: there is no address in a fence that could be the key, and the relaxed atomic
+        // beside it in the source is not the key either, since what the fence orders is everything
+        // the thread did rather than that one word.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "fence.c");
+
+        let mut func = one_fence(&mut names, MemOrder::SeqCst);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "seq_cst publishes and takes, so one of each");
+
+        let printed = print_func(&module, &func, &names);
+        assert!(
+            printed.contains(
+                "meta_fence_release
+    fence"
+            ),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "fence seq_cst
+    meta_fence_acquire"
+            ),
+            "{printed}"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_release_fence_publishes_and_an_acquire_fence_takes_and_neither_does_the_other() {
+        // The halves apart, which is the shape a fence is usually written in: a release fence
+        // after the record is filled and an acquire fence before it is read.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "halves.c");
+
+        let mut publishing = one_fence(&mut names, MemOrder::Release);
+        let counts =
+            insert(&mut publishing, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 1);
+        let printed = print_func(&module, &publishing, &names);
+        assert!(printed.contains("meta_fence_release"), "{printed}");
+        assert!(!printed.contains("meta_fence_acquire"), "{printed}");
+
+        let mut taking = one_fence(&mut names, MemOrder::Acquire);
+        let counts = insert(&mut taking, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 1);
+        let printed = print_func(&module, &taking, &names);
+        assert!(printed.contains("meta_fence_acquire"), "{printed}");
+        assert!(!printed.contains("meta_fence_release"), "{printed}");
+
+        // And nothing at all without the flag, the same as every other part of this plane.
+        let mut off = one_fence(&mut names, MemOrder::SeqCst);
+        let counts = insert(&mut off, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.edged, 0);
+        assert!(!print_func(&module, &off, &names).contains("meta_fence"));
     }
 
     #[test]

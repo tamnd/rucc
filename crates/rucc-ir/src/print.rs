@@ -1026,6 +1026,11 @@ mod tests {
         edge(Opcode::MetaRelease);
         edge(Opcode::MetaAcquire);
 
+        // The same two halves for a fence, which take nothing, since a fence orders against
+        // every thread rather than against an object and so has no address to be keyed on.
+        b.inst(InstData::new(Opcode::MetaFenceRelease), &[]);
+        b.inst(InstData::new(Opcode::MetaFenceAcquire), &[]);
+
         let reason = names.intern("hand written assembly, checked by review");
         b.inst(
             InstData { extra: Extra::Reason(reason), ..InstData::new(Opcode::SafeRegionBegin) },

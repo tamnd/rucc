@@ -69,8 +69,9 @@
 //! where the program can act on the answer. The ordering that is not a call at all is in with it: an
 //! atomic that publishes gets a `__rucc_meta_release` in front of it and one that takes gets a
 //! `__rucc_meta_acquire` after it, keyed on the atomic object, which is the last edge that had
-//! nowhere to be interposed. What is left there is a bare `atomic_thread_fence`, which orders
-//! against every thread rather than against an object and so has no address to be keyed on.
+//! nowhere to be interposed. A bare `atomic_thread_fence` gets the same pair with no key, because
+//! it orders against every thread rather than against an object, and the runtime keeps one clock
+//! for all of them.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;

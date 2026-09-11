@@ -80,10 +80,11 @@
 //! tables under the same keys, so an ordering established through an atomic and one established
 //! through a mutex are indistinguishable to everything that reads them.
 //!
-//! A bare `atomic_thread_fence` is still missing. It orders against every other thread rather than
-//! against one object, so there is no address to key it on and the tables here are keyed by
-//! address. A program that synchronizes through a fence and nothing else is one this can report
-//! against wrongly, which is the direction that matters, and it is on the milestone.
+//! A bare `atomic_thread_fence` comes from the compiler too, and it is the odd one out: it orders
+//! against every other thread rather than against one object, so there is no address to key it on
+//! and neither table above can hold it. It gets `FENCED` instead, which is one cell for every
+//! fence in the program. Whether the fence beside an `int` and the fence beside a `char` are the
+//! same edge is a question that cell cannot answer and does not try to.
 
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -288,6 +289,51 @@ pub fn exited() {
         return;
     }
     EXITED.publish(me, stamp);
+}
+
+/// Every release fence in the program, as one clock.
+///
+/// A bare clock rather than a [`Stamp`], which is the one place in this file that is true. The cell
+/// is written with `fetch_max` and a stamp packs the thread number above the clock, so a max over
+/// stamps would be a max over thread numbers: whichever thread has the highest number would own the
+/// cell forever and a fence on thread one would never be seen again. The thread number is no loss,
+/// because what an acquire fence does with this is push its own count past it and
+/// [`crate::epoch::Clock::sync`] reads only the count.
+///
+/// One cell for every fence in the program is more ordering than the program has. A release fence
+/// on thread C and an acquire fence on thread B order B against C even if the two of them never
+/// touched the same object. That is the same trade the stale entries in the tables above already
+/// make and it goes the same way: over-ordering puts a thread further ahead than it needed to be,
+/// and a thread further ahead reports fewer races, never a race that is not there. Since a missing
+/// edge is the one kind of missing instrumentation that costs precision rather than recall, too
+/// much ordering is the side to be wrong on.
+static FENCED: AtomicU64 = AtomicU64::new(0);
+
+/// A release fence has been reached, so publish what this thread is at to everyone.
+///
+/// `fetch_max` rather than a store, because a fence on a thread that is behind must not pull the
+/// cell back and undo an edge some other thread has already been given.
+pub fn published_everywhere() {
+    let stamp = epoch::here();
+    if stamp == epoch::NONE {
+        return;
+    }
+    FENCED.fetch_max(epoch::clock(stamp), Release);
+}
+
+/// An acquire fence has been reached, so take everything any release fence published.
+///
+/// The clock goes back into a stamp with a thread number of zero, which is not a thread and never
+/// will be, since thread numbers start at one. Nothing looks at it: what reads a stamp here is
+/// [`crate::epoch::Clock::sync`], and that reads the count and the check against
+/// [`crate::epoch::NONE`] and nothing else. `stamp(0, count)` is the count, which is not zero
+/// whenever any fence has run.
+pub fn taken_everywhere() {
+    let count = FENCED.load(Acquire);
+    if count == 0 {
+        return;
+    }
+    epoch::sync(epoch::stamp(0, count));
 }
 
 /// A join has just finished, so take everything the thread that ended did.
@@ -592,8 +638,11 @@ interpose! {
 /// atomic object's own address. That is the same key a mutex uses, and deliberately, so that a
 /// program synchronizing through both is one table and one clock rather than two of each.
 ///
+/// A fence gets the same pair with no key, since it orders against every thread rather than against
+/// an object, and those two go to `FENCED` instead of to a table.
+///
 /// Its own module rather than the `exports` beside it, because that one is written by the
-/// interposition macro out of the table above and these two are not rows: there is no C library
+/// interposition macro out of the table above and these four are not rows: there is no C library
 /// function here to wrap and no return value to look at.
 pub mod edges {
     use core::ffi::c_void;
@@ -617,6 +666,27 @@ pub mod edges {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_meta_acquire(object: *mut c_void) {
         super::acquired(object);
+    }
+
+    /// Publishes this thread's clock to every thread, before the release fence runs.
+    ///
+    /// # Safety
+    ///
+    /// It takes nothing and reads none of the program's memory. `unsafe` only because everything
+    /// generated code calls is declared that way.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_fence_release() {
+        super::published_everywhere();
+    }
+
+    /// Takes whatever any release fence published, after the acquire fence has run.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_fence_release`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_fence_acquire() {
+        super::taken_everywhere();
     }
 }
 
@@ -657,6 +727,42 @@ mod tests {
         acquired(lock);
         assert!(!unordered(theirs, epoch::here()));
         assert_ne!(thread(theirs), thread(epoch::here()), "two threads, not one");
+    }
+
+    #[test]
+    fn a_fence_orders_two_threads_that_never_touched_the_same_object() {
+        // The fence edge, which has no key at all. The other thread publishes at a release fence
+        // and this one takes at an acquire fence, and the two of them name nothing in common:
+        // ordering against every thread is what a fence is for, and the single cell is how a
+        // table keyed by address holds an edge that has no address.
+        let theirs = std::thread::spawn(|| {
+            let stamp = epoch::tick();
+            published_everywhere();
+            stamp
+        })
+        .join()
+        .expect("the thread ran");
+
+        assert!(unordered(theirs, epoch::here()), "and before the fence it was concurrent");
+        taken_everywhere();
+        assert!(!unordered(theirs, epoch::here()));
+        assert!(clock(epoch::here()) > clock(theirs), "strictly past, as at a lock");
+    }
+
+    #[test]
+    fn the_fence_edge_moves_this_thread_without_changing_which_thread_it_is() {
+        // The clock goes into the cell bare and comes back out in a stamp with a thread number of
+        // zero, which is not a thread and never will be. Nothing reads that number: what reads a
+        // stamp here is `Clock::sync`, and it looks at the count and at the check against `NONE`
+        // and at nothing else. What it must not do is leave this thread answering to zero.
+        let me = thread(epoch::here());
+        let was = clock(epoch::here());
+
+        published_everywhere();
+        taken_everywhere();
+
+        assert_eq!(thread(epoch::here()), me, "still this thread");
+        assert!(clock(epoch::here()) > was, "and strictly past what it published, as at a lock");
     }
 
     #[test]
