@@ -390,7 +390,9 @@ impl Blocks {
         at: PhysReg,
         range: Range,
     ) -> impl Iterator<Item = &Blocked> + '_ {
-        let first = self.all.partition_point(|one| (one.class, one.at, one.point) < (class, at, range.start));
+        let first = self
+            .all
+            .partition_point(|one| (one.class, one.at, one.point) < (class, at, range.start));
         self.all[first..]
             .iter()
             .take_while(move |one| one.class == class && one.at == at && one.point <= range.end)
