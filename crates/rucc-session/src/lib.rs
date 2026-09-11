@@ -281,6 +281,77 @@ impl fmt::Display for Subobject {
     }
 }
 
+/// Whether pointer races are watched, from `-fsafety-races=`.
+///
+/// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.5, which is document 03's C1
+/// through C4 and is judgement J9 of document 04 section 4.4. A thread counts its own metadata
+/// stores, a store through a pointer shaped slot leaves that count in the epoch plane, and an
+/// access that finds a count from another thread which nothing it has done orders is a race that
+/// really happened in the interleaving that really ran.
+///
+/// A flag rather than a default, and the reason is not cost. It is that this is the one plane in
+/// the compiler where instrumentation nobody wrote costs a false report instead of a missed one.
+/// Every ordering the monitor has was carried by a synchronization edge somebody interposed, so two
+/// threads that an edge nobody saw really did join look exactly like two threads nothing joined.
+/// The edges that are calls are interposed already. The ordering that is not a call at all, which
+/// is the atomics, has to come from the compiler, and until it does a program that hands a pointer
+/// between threads through an atomic and nothing else would be reported for doing nothing wrong.
+///
+/// Which is also why the default stays [`Races::Off`] after the flag works. Turning it on is a
+/// decision about a program, not about a build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Races {
+    /// `-fsafety-races=off`. Nothing records into the epoch plane and nothing asks it anything.
+    #[default]
+    Off,
+    /// `-fsafety-races=metadata`. The classes that produce a wrong pointer rather than a wrong
+    /// number, which section 9.5 lists as C1, C3 and C4, and which Tier E carries.
+    Metadata,
+    /// `-fsafety-races=pointer`. The same, and C2 as well, which is a race on a pointer word
+    /// reported in its own right rather than only used to decide one of the other three.
+    Pointer,
+}
+
+impl Races {
+    /// The spelling this is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Races::Off => "off",
+            Races::Metadata => "metadata",
+            Races::Pointer => "pointer",
+        }
+    }
+
+    /// Whether a store through a pointer shaped slot records which thread made it.
+    ///
+    /// Both of the modes that are not off, because every class section 9.5 lists is decided by
+    /// comparing against a stamp a store left behind. What the two modes differ about is which
+    /// comparisons are reported, and that is a question at the access rather than at the store.
+    pub const fn records(self) -> bool {
+        !matches!(self, Races::Off)
+    }
+}
+
+impl fmt::Display for Races {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Races {
+    type Err = ();
+
+    /// Parses the part after `-fsafety-races=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "off" => Races::Off,
+            "metadata" => Races::Metadata,
+            "pointer" => Races::Pointer,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// Whether the `restrict` contract is checked, from `-fsafety-restrict`.
 ///
 /// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.6, which is row Y8 of document
@@ -1595,6 +1666,11 @@ pub struct Options {
     /// Means nothing unless `safety` asked for a tier. Off by default, which section 9.6 argues
     /// for: the cost lands entirely inside the loops `restrict` is written for.
     pub promise: Promise,
+    /// Whether pointer races are watched, from `-fsafety-races=`.
+    ///
+    /// Means nothing unless `safety` asked for a tier. Off by default, and [`Races`] says why that
+    /// one is not a cost argument like the others.
+    pub races: Races,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -1946,6 +2022,7 @@ impl Options {
             padding: Padding::default(),
             subobject: Subobject::default(),
             promise: Promise::default(),
+            races: Races::default(),
             emit: EmitKind::default(),
             debug_info: false,
             compress: Compress::None,

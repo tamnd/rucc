@@ -63,11 +63,13 @@
 //! variable waited on and a semaphore posted each carry an ordering. That matters more here than the
 //! coverage of anything else in the crate does, for the reason the section above this one gives.
 //!
-//! The compiler's half is what is missing. No generated code calls `__rucc_meta_epoch` or
-//! `__rucc_check_race` yet, so the plane a program runs with is empty unless the C library wrappers
-//! filled it, and the ordering that is not a call at all, which is the atomics, has nowhere to be
-//! interposed and so has to come from the compiler too. That is the same order the type plane and
-//! the init plane went in, and it is the order that keeps a plane's arithmetic reviewable on its own.
+//! The compiler's half is half in. `-fsafety-races` puts a `__rucc_meta_epoch` after every store of
+//! a pointer, so the plane a program runs with holds what that program wrote and not only what the C
+//! library wrappers filled in. Nothing calls `__rucc_check_race` yet, so nothing puts a question to
+//! the plane at an access, and the ordering that is not a call at all, which is the atomics, has
+//! nowhere to be interposed and so has to come from the compiler too. That is the same order the
+//! type plane and the init plane went in, and it is the order that keeps a plane's arithmetic
+//! reviewable on its own.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;

@@ -468,6 +468,7 @@ mod tests {
             8,
             crate::Subobject::Off,
             crate::Promise::Off,
+            crate::Races::Off,
         );
         func
     }

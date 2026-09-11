@@ -1218,6 +1218,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     "`{form}` is not a form of -fsafety-restrict. The flag takes no value."
                 )));
             }
+            // Section 9.5's races, which take a value because the section gives them three modes
+            // and the difference between two of them is which classes get reported rather than how
+            // much is recorded. `-fno-` is the same as `=off` and is spelled out here for the same
+            // reason the two above spell theirs out.
+            _ if arg.starts_with("-fsafety-races=") => {
+                let mode = &arg["-fsafety-races=".len()..];
+                opts.races = mode.parse().map_err(|()| {
+                    err(format!("`{mode}` is not a race mode, which is off, metadata or pointer"))
+                })?;
+            }
+            "-fno-safety-races" => opts.races = rucc_session::Races::Off,
             // The sanitizers of document 12, which are checks at run time rather than a way of
             // generating the same program. Each name is held to gcc 16's list, and what is still
             // asked for by the end of the line is answered after the loop, so that a command line
@@ -2809,6 +2820,29 @@ mod tests {
 
         let e = parse_args(&args(&["-fsafety-restrict=blocks", "a.c"])).unwrap_err();
         assert!(e.message.contains("takes no value"), "{}", e.message);
+    }
+
+    #[test]
+    fn safety_races_takes_a_mode_and_defaults_to_watching_nothing() {
+        // Three modes rather than a bare flag, because section 9.5 gives two answers that record
+        // the same thing and report different classes, so a flag with no value could not say which
+        // was wanted. Off by default for the reason on `rucc_session::Races`, which is not a cost
+        // argument: this is the one plane where an edge nobody interposed costs a false report.
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.races, rucc_session::Races::Off);
+
+        let (opts, _) = compile(&["-fsafety-races=metadata", "a.c"]);
+        assert_eq!(opts.races, rucc_session::Races::Metadata);
+
+        let (opts, _) = compile(&["-fsafety-races=pointer", "a.c"]);
+        assert_eq!(opts.races, rucc_session::Races::Pointer);
+
+        // Last one wins, as it does for every other mode flag here.
+        let (opts, _) = compile(&["-fsafety-races=pointer", "-fno-safety-races", "a.c"]);
+        assert_eq!(opts.races, rucc_session::Races::Off);
+
+        let e = parse_args(&args(&["-fsafety-races=all", "a.c"])).unwrap_err();
+        assert!(e.message.contains("off, metadata or pointer"), "{}", e.message);
     }
 
     #[test]

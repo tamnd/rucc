@@ -149,6 +149,7 @@ fn calls(
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::MetaInit => written(func, names, word, inst),
             Opcode::MetaInitCopy => carried(func, names, word, inst),
+            Opcode::MetaEpoch => stamped(func, names, word, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -461,6 +462,18 @@ fn carried(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
     call(func, names, inst, "__rucc_meta_init_copy", params, &[], &[to, from, bytes]);
 }
 
+/// `meta_epoch` becomes `__rucc_meta_epoch(pointer, length)`.
+///
+/// The same shape as [`written`], and carrying no thread and no count for the reason the opcode
+/// gives: which thread is running and how far it has counted are facts about the moment the program
+/// gets here, so the runtime reads them and nothing this pass could pass in would be either.
+fn stamped(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [pointer, length] = func[func[inst].args] else { return };
+    let bytes = fitted(func, inst, length, word);
+    let params = &[Type::PTR, word];
+    call(func, names, inst, "__rucc_meta_epoch", params, &[], &[pointer, bytes]);
+}
+
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
 ///
 /// No descriptor, and these two are the only ones of these that have none. The other four are
@@ -614,7 +627,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
-    use crate::{Plane, Promise, Subobject, insert};
+    use crate::{Plane, Promise, Races, Subobject, insert};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -644,7 +657,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off, Races::Off);
         let mut module = Module::new(names.intern("read.c"), &target());
         module.add_func(func);
         module
@@ -675,7 +688,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off, Races::Off);
         let mut module = Module::new(names.intern("read.c"), &target());
         module.add_func(func);
         module
@@ -715,7 +728,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Memcpy) }, &[]);
         b.ret(&[]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off, Races::Off);
         let mut module = Module::new(names.intern("move.c"), &target());
         module.add_func(func);
         module
@@ -751,7 +764,41 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        module.add_func(func);
+        module
+    }
+
+    /// A module with one function that stores a pointer through its parameter, checks in.
+    ///
+    /// `-fsafety-races=metadata`, so the store carries the epoch plane's write as well as the other
+    /// two. The value stored is a pointer because that is the only kind of store the epoch plane
+    /// takes, which [`crate::stamped`] argues.
+    fn racing(names: &mut Interner) -> Module {
+        let mut module = Module::new(names.intern("stamp.c"), &target());
+        let plane = Plane::build(&mut module);
+
+        let mut func =
+            Func::new(names.intern("stamp"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let q = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[q, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
         module.add_func(func);
         module
     }
@@ -792,7 +839,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
         module.add_func(func);
         module
     }
@@ -1025,6 +1072,26 @@ mod tests {
     }
 
     #[test]
+    fn a_store_of_a_pointer_becomes_the_call_that_says_which_thread_wrote_it() {
+        // Two operands and no descriptor, which is the same shape the init plane's write has. A
+        // plane write refuses nothing, so there is no row to point at, and neither the thread nor
+        // its count is something this pass could pass in: both are facts about the moment the
+        // program reaches the call, so the runtime reads them for itself.
+        let mut names = Interner::new();
+        let mut module = racing(&mut names);
+        lower(&mut module, &mut names);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("call @__rucc_meta_epoch(%0, %"), "{printed}");
+        assert!(printed.contains(") : (ptr, i64)\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
     fn a_copy_becomes_the_calls_that_move_the_planes_across() {
         // Three operands each and no descriptor. A plane write refuses nothing, and neither what
         // the copied bytes are nor whether anything ever wrote them is a thing the compiler knows,
@@ -1180,7 +1247,7 @@ mod tests {
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
         let (plane, numbers) = planeless(&mut names);
-        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
 
         let mut table = Vec::new();
         calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
