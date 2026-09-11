@@ -40,7 +40,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rucc_tuple::{Arch, DataModel, Env, Os, TargetTuple, Version};
+use rucc_tuple::{Arch, DataModel, Endian, Env, Os, TargetTuple, Version};
 
 /// One target's sysroot: where its headers are, where its link inputs are, and where the record
 /// of what they are is.
@@ -204,20 +204,52 @@ impl Sysroot {
     /// The data model is not in it, on purpose, for the reason [`Sysroot::header_arch`] gives: the
     /// family's files carry the branch themselves. `s390x` and `loongarch` are spelled the way
     /// glibc's own `sysdeps` tree spells them, which is not the same shortening for both.
+    ///
+    /// # Why powerpc is the only family whose byte order is in the name
+    ///
+    /// The byte order is in the name exactly where the installed text depends on it, and that is one
+    /// family. Measured on glibc 2.44, by installing a family's headers twice with
+    /// `make install-headers` and diffing the two installs. `aarch64_be-linux-gnu` against
+    /// `aarch64-linux-gnu` is 474 files each and an empty diff, so one directory serves both orders.
+    /// `powerpc64-linux-gnu` against `powerpc64le-linux-gnu` is 474 files each and one file that
+    /// differs, `bits/long-double.h`, because little endian powerpc can redirect `long double` to
+    /// the float128 ABI and big endian powerpc cannot, so one install defines
+    /// `__LDOUBLE_REDIRECTS_TO_FLOAT128_ABI` as `(__LDBL_MANT_DIG__ == 113)` and the other defines
+    /// it as `0`. One directory for both orders would hand half of the powerpc rows a macro that is
+    /// wrong about their own ABI.
+    ///
+    /// The word size is not in the name, for powerpc either. The third run of the same experiment,
+    /// `powerpc-linux-gnu` against `powerpc64-linux-gnu` with the order held fixed, is 474 files
+    /// each and an empty diff, which is the x86 answer again: `bits/wordsize.h` is two files in
+    /// glibc's `sysdeps` tree for powerpc and they are byte identical, and both of them branch on
+    /// `__powerpc64__`. So the name is the family and the order and nothing else, which is why it is
+    /// `powerpc` and `powerpcle` rather than a spelling per width.
+    ///
+    /// `bits/endianness.h` is not the reason, which is worth saying because it reads like the
+    /// obvious one and tamnd/rucc#940 was written around it. glibc's copies of that file for arm,
+    /// aarch64 and powerpc branch on `__BIG_ENDIAN__` and `_BIG_ENDIAN` inside the file, the same
+    /// way `bits/wordsize.h` branches on `__x86_64__`, so both orders install the same text into it.
+    /// musl 1.2.5 does the same in `bits/alltypes.h` and `bits/signal.h` and ships no per order
+    /// directory under `arch/` at all, which is why [`Sysroot::header_arch`]'s musl names carry no
+    /// order either.
     fn header_family(&self) -> &'static str {
-        match self.target.arch() {
-            Arch::X86_64 | Arch::X86 => "x86",
+        match (self.target.arch(), self.target.endian()) {
+            (Arch::X86_64 | Arch::X86, _) => "x86",
             // Arm64EC is a Windows ABI and never has glibc headers. It answers with the family it
             // belongs to rather than with a word that is not a directory anywhere.
-            Arch::Aarch64 | Arch::Arm64Ec => "aarch64",
-            Arch::Arm => "arm",
-            Arch::Riscv64 | Arch::Riscv32 => "riscv",
-            Arch::S390x => "s390x",
-            Arch::PowerPc64 => "powerpc",
-            Arch::LoongArch64 => "loongarch",
+            (Arch::Aarch64 | Arch::Arm64Ec, _) => "aarch64",
+            (Arch::Arm, _) => "arm",
+            (Arch::Riscv64 | Arch::Riscv32, _) => "riscv",
+            (Arch::S390x, _) => "s390x",
+            // `powerpc` is the big endian directory because that is the name glibc's own `sysdeps`
+            // tree uses and big endian is what the bare spelling means everywhere in this tuple
+            // model. `powerpcle` is the GNU spelling of the other one.
+            (Arch::PowerPc64, Endian::Big) => "powerpc",
+            (Arch::PowerPc64, Endian::Little) => "powerpcle",
+            (Arch::LoongArch64, _) => "loongarch",
             // There is no glibc for wasm. The arm of the match exists because the type is closed
             // and a wildcard here would quietly name a directory for a future architecture.
-            Arch::Wasm32 => "wasm32",
+            (Arch::Wasm32, _) => "wasm32",
         }
     }
 }
