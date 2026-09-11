@@ -56,6 +56,25 @@
 //! that the check passed, and a check that passed put its bytes inside one instance whatever
 //! capability it named.
 //!
+//! # The conjunct that is not about bytes
+//!
+//! A `check_bounds` tests two things, because document 06 section 6.3 put the access alignment on
+//! it rather than in a check of its own: that the bytes are inside one instance, and that the
+//! address starts where an access of that alignment may start. Everything above is about the
+//! first. A check that goes takes the second away with it, so nothing goes until something has
+//! answered it, which is [`aligned`] and which reads the object the address came from and the
+//! steps taken from it. An access that assumes nothing about where it starts has nothing to
+//! answer, and a member of a packed record is exactly that.
+//!
+//! A global is settled elsewhere and arrives as [`Flags::ALIGNED`], for the reason
+//! [`Flags::STATIC`] beside it exists: how aligned a global is lives on the module and a pass is
+//! given a function. Without that the gate would cost seventeen times what it costs, which is the
+//! measurement in the changelog and is what says the flag earns its bit.
+//!
+//! What is left is a pointer this function was handed, one it loaded out of memory, and one a call
+//! gave back. It is counted rather than argued about, the same as everything else here, so
+//! `-fopt-info-missed` says what the rest of the `!aligned` fact of section 6.2.4 would be worth.
+//!
 //! # The fact nobody had to check for
 //!
 //! Section 7.2 lists four sources of a discharge and puts the frontend first, because the majority
@@ -270,6 +289,16 @@ const PAST_A_CALL: &str =
 /// The same, for a lifetime check. Section 8.8 is about this number rather than the one above.
 const PAST_A_CALL_LIVE: &str =
     "lifetime check kept, a call between it and the check that covers it might free";
+
+/// Recorded for a bounds check kept because nothing here says where the access starts.
+///
+/// The alignment conjunct of judgement J1 rides on `check_bounds`, so taking the check out takes
+/// the alignment test with it. Recorded only for a check a rule had already answered the bytes of,
+/// so the number is what the gate costs rather than how many checks have an alignment, which makes
+/// it what the `!aligned` fact of `spec/safe-memory/06-instrumentation.md` section 6.2.4 would be
+/// worth.
+const UNKNOWN_ALIGNMENT: &str =
+    "bounds check kept, nothing here says the address is aligned to what the access assumes";
 
 /// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
@@ -543,6 +572,16 @@ impl Pass for Discharge {
                                 }
                             })
                         };
+                        // Asked once a rule has answered the bounds rather than in front of them
+                        // all, because a check that was staying anyway costs the gate nothing and
+                        // the number somebody reads has to be what it actually costs. A check kept
+                        // here still runs, so it still establishes what it was about.
+                        let why = why.filter(|_| {
+                            aligned(func, inst) || {
+                                stats.missed(UNKNOWN_ALIGNMENT);
+                                false
+                            }
+                        });
                         let Some(why) = why else {
                             if scope.bounds.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL);
@@ -736,7 +775,7 @@ pub(crate) struct Fact {
     /// The value the address was computed from.
     pub(crate) base: Value,
     /// How far past it the access starts.
-    offset: i128,
+    pub(crate) offset: i128,
     /// How many bytes it covers.
     size: i128,
 }
@@ -954,6 +993,118 @@ fn declared(func: &Func, base: Value) -> Option<Fact> {
     }
     let Extra::Mem(info) = func[inst].extra else { return None };
     Some(Fact::whole(base, i128::from(func[info].size)))
+}
+
+/// The alignment an allocator promises, in bytes.
+///
+/// C says storage an allocator hands back is aligned for any object with a fundamental alignment,
+/// which is sixteen bytes on the targets this compiles for. Eight is claimed rather than sixteen
+/// because the claim has to hold wherever this pass runs and the pass is given a function rather
+/// than a target. What it costs is an access that assumes more than eight bytes, which is a
+/// `long double` or a vector, keeping a check it could have lost.
+const ALLOCATED: u64 = 8;
+
+/// How far into an expression [`divides`] reads before it gives up.
+///
+/// A subscript is a multiply and a constant and the answer is two steps in. The bound is here
+/// because the walk is over an expression the program wrote and nothing about an expression stops
+/// it from being as deep as the source file is long.
+const DEEP: u32 = 4;
+
+/// Whether the address a check is about starts where the access assumes it does.
+///
+/// The alignment conjunct of judgement J1 rides on `check_bounds`, which document 06 section 6.3
+/// settled, so a check that goes takes the test of it with it and something here has to have
+/// answered it first. An access that assumes nothing about where it starts has nothing to answer,
+/// and that is what an alignment of one is and what a member of a packed record gets.
+///
+/// What answers it is the object the address was computed from and the steps taken from it, which
+/// is the same ground the bounds question walks. An `alloca` says what it is aligned to and an
+/// allocator promises [`ALLOCATED`], and each step from there leaves whatever the step itself
+/// divides by. So `p[i]` on an `int *` out of `malloc` is answered by the four in the subscript's
+/// own multiply, and `(int *)(p + 1)` is not answered at all, which is row S7 and the whole reason
+/// this is here.
+///
+/// A global is not read here at all. It arrives as [`Flags::ALIGNED`] from `crate::extents`, which
+/// is given the module this is not, and the flag is the whole of what this asks about one.
+///
+/// A pointer this cannot read the origin of is zero, which answers nothing and keeps the check.
+/// That is a block parameter, a pointer loaded out of memory, and one handed in.
+/// [`UNKNOWN_ALIGNMENT`] counts them.
+fn aligned(func: &Func, check: Inst) -> bool {
+    let Extra::Mem(info) = func[check].extra else { return false };
+    let claim = u64::from(func[info].align);
+    if claim <= 1 || func[check].flags.contains(Flags::ALIGNED) {
+        return true;
+    }
+    let Some(&pointer) = func[func[check].args].get(1) else { return false };
+    settled(func, pointer) >= claim
+}
+
+/// What a pointer is known to be aligned to, in bytes, or zero when nothing here says.
+///
+/// Every number involved is a power of two, so the greatest common divisor of two of them is the
+/// smaller, which is why the steps are gathered with a `min` and why they start at the largest
+/// number there is instead of at zero. Zero is the answer and not a step, since an alignment of
+/// zero is not something an access can assume and a claim is never met by one.
+fn settled(func: &Func, pointer: Value) -> u64 {
+    let mut steps = u64::MAX;
+    let mut value = pointer;
+    loop {
+        let Def::Result { inst, .. } = func[value].def else { return 0 };
+        match func[inst].opcode {
+            Opcode::Alloca => {
+                let Extra::Mem(info) = func[inst].extra else { return 0 };
+                return steps.min(u64::from(func[info].align));
+            }
+            Opcode::Call if func[inst].flags.contains(Flags::HEAP) => {
+                return steps.min(ALLOCATED);
+            }
+            Opcode::PtrAdd => {
+                let args = &func[func[inst].args];
+                let (Some(&from), Some(&by)) = (args.first(), args.get(1)) else { return 0 };
+                steps = steps.min(divides(func, by, DEEP));
+                value = from;
+            }
+            _ => return 0,
+        }
+    }
+}
+
+/// The largest power of two that divides a step, or one when nothing here says.
+///
+/// One is the answer for anything unreadable and it is the right one: every number divides by one,
+/// so a step nobody can read leaves a pointer aligned to a byte and no more. Zero divides by
+/// everything, which is a walk that took no step and has to leave what it started with alone.
+fn divides(func: &Func, step: Value, depth: u32) -> u64 {
+    if let Some(number) = constant(func, step) {
+        let Ok(size) = u64::try_from(number.unsigned_abs()) else { return 1 };
+        return if size == 0 { u64::MAX } else { 1 << size.trailing_zeros() };
+    }
+    let Def::Result { inst, .. } = func[step].def else { return 1 };
+    let args = &func[func[inst].args];
+    let (Some(&left), Some(&right)) = (args.first(), args.get(1)) else { return 1 };
+    if depth == 0 {
+        return 1;
+    }
+    match func[inst].opcode {
+        // A subscript, which is an index nobody knows anything about times the element size.
+        Opcode::Mul => {
+            divides(func, left, depth - 1).saturating_mul(divides(func, right, depth - 1))
+        }
+        Opcode::Shl => match constant(func, right) {
+            Some(by) if (0..64).contains(&by) => {
+                divides(func, left, depth - 1).checked_shl(by as u32).unwrap_or(u64::MAX)
+            }
+            _ => 1,
+        },
+        // Two numbers added divide by whatever they both divide by, which is a field offset added
+        // to a subscript and is how a member of an array of records comes out.
+        Opcode::Add | Opcode::Sub => {
+            divides(func, left, depth - 1).min(divides(func, right, depth - 1))
+        }
+        _ => 1,
+    }
 }
 
 /// The object an allocator made, when the address a check is about was computed from one and this
@@ -1609,6 +1760,115 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+    }
+
+    /// The same check over an access that assumes something about where it starts.
+    ///
+    /// [`check`] assumes nothing, which is the right default for the tests above it: what they are
+    /// about is which bytes a check covers, and an access that assumes nothing has no alignment to
+    /// answer and so reaches every rule. These are the ones about the alignment itself.
+    fn assuming(build: &mut Builder<'_>, pointer: Value, size: u64, align: u32) {
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+    }
+
+    #[test]
+    fn a_check_whose_alignment_nothing_here_settles_stays() {
+        // A pointer from outside, so nothing says what it is aligned to, and a second check of the
+        // same bytes that dominance would otherwise take. The bytes are covered and the alignment
+        // is not, and the check tests both, so it stays. One remark and not two: the first check
+        // was staying whatever anybody said about its alignment, and what the number is for is
+        // what the gate costs.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 4, 4);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn a_check_inside_a_local_at_an_offset_the_local_is_aligned_through_goes() {
+        // An eight byte aligned slot read four bytes in, which is a member of a record and the
+        // commonest access there is. The offset leaves four of the eight, the access assumes four,
+        // and the check goes the way it did before any of this.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let field = past(&mut build, slot, 4);
+        assuming(&mut build, field, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn a_check_a_cast_moved_off_the_alignment_stays_however_well_its_bytes_are_covered() {
+        // Row S7 written in IR. The bytes are inside the slot and the slot is aligned, but the
+        // access starts one byte in and assumes four, and one byte in is where the alignment is
+        // lost. This is the check the misaligned read needs and the one the accounting run found
+        // going missing.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let odd = past(&mut build, slot, 1);
+        assuming(&mut build, odd, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 0);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn a_subscript_that_steps_by_the_width_it_reads_settles_its_own_alignment() {
+        // `p[i]` on an `int *` an allocator made. Nobody knows what the index is, and nobody has
+        // to: the step is the index times four, four divides it whatever the index turns out to
+        // be, and the allocation it starts from is aligned to more than that.
+        let (_, mut func, inside, _, pointer, index) = allocation(64);
+        let mut build = Builder::new(&mut func, inside);
+        let four = build.iconst(Type::int(64), 4);
+        let step = build.binary(Opcode::Mul, index, four, Flags::NONE);
+        let args = build.func().push_values(&[pointer, step]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        assuming(&mut build, at, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn a_step_by_something_nobody_can_read_settles_nothing() {
+        // A step the ranges do bound, so the bytes are answered and the check was on its way out,
+        // and a step nothing says the low bits of, so where the access starts is not answered. A
+        // mask of seven is nought to seven and three is one of those.
+        let (_, mut func, block, _, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        let step = low_bits(&mut build, index, 7);
+        let args = build.func().push_values(&[slot, step]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        assuming(&mut build, at, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
     }
 
     #[test]

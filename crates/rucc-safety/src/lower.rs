@@ -157,12 +157,17 @@ fn calls(
     }
 }
 
-/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, descriptor)`.
+/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, descriptor)`.
 ///
 /// The size is the payload's for the check the front end wrote and the third operand's for the
 /// hoisted check of section 7.4, which is about a range the program worked out rather than about
 /// one access. The descriptor says zero bytes for that one, which is the field's own reading of a
 /// check that is not about an access of a known width, because the width is not known here either.
+///
+/// The alignment is the payload's too, and it is the whole of judgement J1's `addr mod align = 0`
+/// conjunct: the runtime tests it and nothing else here does. A hoisted check passes one, which
+/// says the range it is about assumes nothing, because the range is a span of bytes a loop will
+/// walk rather than one access and the accesses inside it carry their own.
 fn bounds(
     func: &mut Func,
     names: &mut Interner,
@@ -187,8 +192,10 @@ fn bounds(
         Some(value) => fitted(func, inst, value, word),
         None => konst(func, inst, Imm::int(i128::from(size), word), word),
     };
-    let params = &[Type::PTR, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_bounds", params, &[], &[pointer, bytes, desc]);
+    let claim = if computed.is_some() { 1 } else { i128::from(func[mem].align) };
+    let align = konst(func, inst, Imm::int(claim, word), word);
+    let params = &[Type::PTR, word, word, Type::PTR];
+    call(func, names, inst, "__rucc_check_bounds", params, &[], &[pointer, bytes, align, desc]);
 }
 
 /// The same number in the width the runtime's own declaration asks for.
@@ -560,6 +567,37 @@ mod tests {
         module
     }
 
+    /// The same function [`checked`] builds, over an access that may assume nothing about where
+    /// it starts, which is what a member of a packed record is.
+    fn unaligned(names: &mut Interner) -> Module {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("read"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 4,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+
+        insert(&mut func, &planeless(names).0, 8);
+        let mut module = Module::new(names.intern("read.c"), &target());
+        module.add_func(func);
+        module
+    }
+
     /// A plane for a function that stores nothing, and the numbering that goes with it.
     ///
     /// Every function in these tests reads or derives and none of them stores, so there is nothing
@@ -697,18 +735,19 @@ mod tests {
                  block0(%0: ptr):\n    \
                  %1 = global_addr @__rucc_safety_desc_0\n    \
                  %2 = iconst.i64 4\n    \
-                 call @__rucc_check_bounds(%0, %2, %1) : (ptr, i64, ptr)\n    \
-                 %3 = global_addr @__rucc_safety_desc_1\n    \
-                 call @__rucc_check_live(%0, %3) : (ptr, ptr)\n    \
-                 %4 = global_addr @__rucc_safety_desc_2\n    \
-                 %5 = iconst.i64 4\n    \
-                 %6 = iconst.i32 {number}\n    \
-                 call @__rucc_check_type(%0, %5, %6, %4) : (ptr, i64, i32, ptr)\n    \
-                 %7 = global_addr @__rucc_safety_desc_3\n    \
-                 %8 = iconst.i64 4\n    \
-                 call @__rucc_check_init(%0, %8, %7) : (ptr, i64, ptr)\n    \
-                 %9 = load.i32 %0, size 4, align 4, tbaa !1\n    \
-                 return %9\n\
+                 %3 = iconst.i64 4\n    \
+                 call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n    \
+                 %4 = global_addr @__rucc_safety_desc_1\n    \
+                 call @__rucc_check_live(%0, %4) : (ptr, ptr)\n    \
+                 %5 = global_addr @__rucc_safety_desc_2\n    \
+                 %6 = iconst.i64 4\n    \
+                 %7 = iconst.i32 {number}\n    \
+                 call @__rucc_check_type(%0, %6, %7, %5) : (ptr, i64, i32, ptr)\n    \
+                 %8 = global_addr @__rucc_safety_desc_3\n    \
+                 %9 = iconst.i64 4\n    \
+                 call @__rucc_check_init(%0, %9, %8) : (ptr, i64, ptr)\n    \
+                 %10 = load.i32 %0, size 4, align 4, tbaa !1\n    \
+                 return %10\n\
                  }}\n"
             )
         );
@@ -756,10 +795,10 @@ mod tests {
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
         assert!(
-            printed.contains("call @__rucc_meta_type(%0, %5, %6) : (ptr, i64, i32)\n"),
+            printed.contains("call @__rucc_meta_type(%0, %6, %7) : (ptr, i64, i32)\n"),
             "{printed}"
         );
-        assert!(printed.contains("call @__rucc_meta_init(%0, %7) : (ptr, i64)\n"), "{printed}");
+        assert!(printed.contains("call @__rucc_meta_init(%0, %8) : (ptr, i64)\n"), "{printed}");
 
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -795,6 +834,28 @@ mod tests {
         }
     }
 
+    /// The alignment is the access's own and not its width.
+    ///
+    /// Two numbers that are four apiece in [`checked`] and would look alike if only one of them
+    /// went through. The access here is four bytes wide and may assume nothing about where it
+    /// starts, which is what the front end says about a member of a packed record, and what has
+    /// to arrive at the runtime is four bytes and an alignment of one.
+    #[test]
+    fn the_alignment_that_goes_through_is_the_one_the_access_may_assume() {
+        let mut names = Interner::new();
+        let mut module = unaligned(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 3);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("%2 = iconst.i64 4\n"), "{printed}");
+        assert!(printed.contains("%3 = iconst.i64 1\n"), "{printed}");
+        assert!(
+            printed.contains("call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n"),
+            "{printed}"
+        );
+    }
+
     #[test]
     fn every_check_becomes_a_call_carrying_the_descriptor_it_is_described_by() {
         let mut names = Interner::new();
@@ -808,14 +869,15 @@ mod tests {
              block0(%0: ptr):\n    \
              %1 = global_addr @__rucc_safety_desc_0\n    \
              %2 = iconst.i64 4\n    \
-             call @__rucc_check_bounds(%0, %2, %1) : (ptr, i64, ptr)\n    \
-             %3 = global_addr @__rucc_safety_desc_1\n    \
-             call @__rucc_check_live(%0, %3) : (ptr, ptr)\n    \
-             %4 = global_addr @__rucc_safety_desc_2\n    \
-             %5 = iconst.i64 4\n    \
-             call @__rucc_check_init(%0, %5, %4) : (ptr, i64, ptr)\n    \
-             %6 = load.i32 %0, size 4, align 4\n    \
-             return %6\n\
+             %3 = iconst.i64 4\n    \
+             call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n    \
+             %4 = global_addr @__rucc_safety_desc_1\n    \
+             call @__rucc_check_live(%0, %4) : (ptr, ptr)\n    \
+             %5 = global_addr @__rucc_safety_desc_2\n    \
+             %6 = iconst.i64 4\n    \
+             call @__rucc_check_init(%0, %6, %5) : (ptr, i64, ptr)\n    \
+             %7 = load.i32 %0, size 4, align 4\n    \
+             return %7\n\
              }\n"
         );
     }
@@ -947,7 +1009,8 @@ mod tests {
             "func @sweep(ptr, i64), linkage(external) {\n\
              block0(%0: ptr, %1: i64):\n    \
              %2 = global_addr @__rucc_safety_desc_0\n    \
-             call @__rucc_check_bounds(%0, %1, %2) : (ptr, i64, ptr)\n    \
+             %3 = iconst.i64 1\n    \
+             call @__rucc_check_bounds(%0, %1, %3, %2) : (ptr, i64, i64, ptr)\n    \
              return\n\
              }\n"
         );

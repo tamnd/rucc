@@ -1,4 +1,5 @@
-//! How big the objects a module declares are, and which safety checks that already answers.
+//! How big the objects a module declares are and how aligned, and which checks that already
+//! answers.
 //!
 //! Design: `spec/safe-memory/07-check-elimination.md` section 7.2, which lists four sources of a
 //! discharge and puts the frontend first: "The overwhelming majority of accesses in real C are to a
@@ -24,6 +25,14 @@
 //! frontend left as arithmetic is an offset this does not read, and the check keeps its price. What
 //! is lost that way is a missed optimization and never a wrong answer, since a fact nobody wrote
 //! down is a check that stays.
+//!
+//! How aligned goes the same way and for the same reason, as [`Flags::ALIGNED`] on a bounds check
+//! whose address the global settles. That is a second fact about the same objects, asked by the
+//! same pass, and it is separate because neither implies the other: a global holds every byte an
+//! access reads and can still leave it starting a byte in, which is row S7 of
+//! `spec/safe-memory/03-bug-model.md`. What is worked out is the address rather than the object,
+//! since a global aligned to sixteen read four bytes in is aligned to four and read one byte in is
+//! aligned to one.
 //!
 //! # What the flag says and what it does not
 //!
@@ -62,11 +71,12 @@
 use std::collections::HashMap;
 
 use rucc_base::Symbol;
-use rucc_ir::{Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value};
+use rucc_ir::{Def, Extra, Flags, Func, FuncId, Global, Inst, Linkage, Module, Opcode, Pic, Value};
 
 use crate::discharge::{Fact, about, alive, covers, derives};
 
-/// Marks every check whose bytes are inside a global this module defines, saying how many.
+/// Marks every check whose bytes are inside a global this module defines, and every bounds check
+/// whose address one of those globals settles the alignment of.
 ///
 /// Only sets the flag, never clears one, for the reason [`crate::nofree::annotate`] gives: the flag
 /// is an assertion, so a caller that put one there meant it.
@@ -75,6 +85,7 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
     if sizes.is_empty() {
         return 0;
     }
+    let aligns = aligns(module, pic);
     let mut marked = 0;
     let ids: Vec<FuncId> = module.funcs().collect();
     for id in ids {
@@ -85,6 +96,12 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
         let insts: Vec<Inst> =
             func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
         for inst in insts {
+            // Two facts about one check and neither implies the other. A global holds every byte
+            // an access reads and still leaves it starting a byte in, and an access one byte into
+            // a global this module cannot vouch for is aligned by the object next to nothing.
+            if !func[inst].flags.contains(Flags::ALIGNED) && starts(func, inst, &aligns) {
+                func[inst].flags |= Flags::ALIGNED;
+            }
             if func[inst].flags.contains(Flags::STATIC) || !inside(func, inst, &sizes) {
                 continue;
             }
@@ -137,6 +154,62 @@ fn object(func: &Func, base: Value, sizes: &HashMap<Symbol, u64>) -> Option<Fact
     Some(Fact::whole(base, i128::from(size)))
 }
 
+/// How aligned each of those globals is.
+///
+/// Kept apart from [`extents`] rather than folded into one map, because the two are asked at
+/// different times by different things: `crate::params` wants the sizes and nothing else, and this
+/// is only built when there is a check to answer.
+fn aligns(module: &Module, pic: Pic) -> HashMap<Symbol, u32> {
+    let mut aligns: HashMap<Symbol, u32> = HashMap::new();
+    for id in module.globals() {
+        let global = &module[id];
+        if !vouched(global, pic) {
+            continue;
+        }
+        // The smaller of two answers, for the reason [`extents`] keeps the smaller of two sizes.
+        let at = aligns.entry(global.name).or_insert(global.align);
+        *at = (*at).min(global.align);
+    }
+    aligns
+}
+
+/// What is left of a global's alignment `offset` bytes into it.
+///
+/// The same arithmetic `rucc-lower` does over a record's members, which is the alignment of an
+/// address inside an object being what the offset leaves of the object's. A negative offset is not
+/// inside the object at all and the bounds question will have said so, so it answers nothing here.
+fn settled(align: u32, offset: i128) -> u32 {
+    let Ok(offset) = u64::try_from(offset) else { return 1 };
+    if offset == 0 {
+        return align.max(1);
+    }
+    // Capped at a shift the type can take, which is far above any alignment a global has.
+    align.min(1 << offset.trailing_zeros().min(16)).max(1)
+}
+
+/// Whether the address a bounds check is about starts where its access assumes it does.
+///
+/// The global says what it is aligned to and the offset says what is left of that, and the access
+/// says what it assumes. An access that assumes nothing is not marked, because there is nothing
+/// there to answer and a flag saying so would be noise on every check over a `char`.
+fn starts(func: &Func, inst: Inst, aligns: &HashMap<Symbol, u32>) -> bool {
+    if func[inst].opcode != Opcode::CheckBounds || func[func[inst].args].len() > 2 {
+        return false;
+    }
+    let Extra::Mem(info) = func[inst].extra else { return false };
+    let claim = func[info].align;
+    if claim <= 1 {
+        return false;
+    }
+    let Some(asked) = about(func, inst) else { return false };
+    let Def::Result { inst: made, .. } = func[asked.base].def else { return false };
+    if func[made].opcode != Opcode::GlobalAddr {
+        return false;
+    }
+    let Extra::Symbol(name) = func[made].extra else { return false };
+    aligns.get(&name).is_some_and(|&align| settled(align, asked.offset) >= claim)
+}
+
 /// How big each global this module both defines and can vouch for is.
 ///
 /// A name that somehow arrives twice keeps the smaller of the two sizes. That cannot happen in a
@@ -146,19 +219,25 @@ pub(crate) fn extents(module: &Module, pic: Pic) -> HashMap<Symbol, u64> {
     let mut sizes: HashMap<Symbol, u64> = HashMap::new();
     for id in module.globals() {
         let global = &module[id];
-        if global.is_declaration() || global.size == 0 || global.tls.is_some() {
-            continue;
-        }
-        if !matches!(global.linkage, Linkage::External | Linkage::Internal) {
-            continue;
-        }
-        if pic.replaceable(global.linkage, global.visibility) {
+        if !vouched(global, pic) {
             continue;
         }
         let at = sizes.entry(global.name).or_insert(global.size);
         *at = (*at).min(global.size);
     }
     sizes
+}
+
+/// Whether what this module says about a global is what the program will run.
+///
+/// The four conditions of the module comment's "which globals are believed", in the order it
+/// gives them.
+fn vouched(global: &Global, pic: Pic) -> bool {
+    !global.is_declaration()
+        && global.size != 0
+        && global.tls.is_none()
+        && matches!(global.linkage, Linkage::External | Linkage::Internal)
+        && !pic.replaceable(global.linkage, global.visibility)
 }
 
 #[cfg(test)]
@@ -261,6 +340,101 @@ mod tests {
                     .count()
             })
             .sum()
+    }
+
+    /// The same check over an access that assumes something about where it starts.
+    fn assuming(build: &mut Builder<'_>, pointer: Value, size: u64, align: u32) {
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+    }
+
+    /// How many instructions in the module say the address they are about is aligned.
+    fn settled(module: &Module) -> usize {
+        module
+            .funcs()
+            .map(|id| {
+                let func = &module[id];
+                func.blocks()
+                    .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                    .filter(|&inst| func[inst].flags.contains(Flags::ALIGNED))
+                    .count()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_check_at_an_offset_the_global_is_aligned_through_says_so() {
+        // The global is aligned to eight, the access is four bytes in and assumes four, and four
+        // is what the offset leaves of the eight.
+        let (mut names, mut module) = defined();
+        func(&mut names, &mut module, |build, at| {
+            let field = past(build, at, 4);
+            assuming(build, field, 4, 4);
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(settled(&module), 1);
+    }
+
+    #[test]
+    fn a_check_one_byte_into_a_global_says_nothing_however_aligned_the_global_is() {
+        // Row S7 into a global. Every byte the access reads is inside the object, so the other
+        // flag goes on and this one does not.
+        let (mut names, mut module) = defined();
+        func(&mut names, &mut module, |build, at| {
+            let odd = past(build, at, 1);
+            assuming(build, odd, 4, 4);
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(settled(&module), 0);
+        assert_eq!(flagged(&module), 1);
+    }
+
+    #[test]
+    fn a_check_that_assumes_nothing_about_where_it_starts_is_not_marked() {
+        // A `char` read, which has nothing for this to answer. The flag is a fact somebody asks
+        // for and a fact nobody will ask for is noise on every check in the program.
+        let (mut names, mut module) = defined();
+        func(&mut names, &mut module, |build, at| {
+            check(build, at, 1);
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(settled(&module), 0);
+    }
+
+    #[test]
+    fn a_check_into_a_global_this_module_cannot_vouch_for_says_nothing() {
+        // The same bar the extent has to clear, for the same reason: a definition the linker takes
+        // from somewhere else is an object this module never saw.
+        let (mut names, mut module) = module(64, Linkage::Weak, true);
+        func(&mut names, &mut module, |build, at| {
+            let field = past(build, at, 8);
+            assuming(build, field, 4, 4);
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(settled(&module), 0);
+    }
+
+    #[test]
+    fn an_access_that_assumes_more_than_the_global_has_is_not_marked() {
+        // A global aligned to eight read at its own address by something that wants sixteen, which
+        // is a `long double` or a vector and is not something the object answers.
+        let (mut names, mut module) = defined();
+        func(&mut names, &mut module, |build, at| {
+            assuming(build, at, 16, 16);
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(settled(&module), 0);
     }
 
     #[test]
