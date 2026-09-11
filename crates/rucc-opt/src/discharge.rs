@@ -1031,6 +1031,10 @@ const DEEP: u32 = 4;
 /// A pointer this cannot read the origin of is zero, which answers nothing and keeps the check.
 /// That is a block parameter, a pointer loaded out of memory, and one handed in.
 /// [`UNKNOWN_ALIGNMENT`] counts them.
+///
+/// The two answers given before [`settles`] is asked are not arithmetic and so are not a rule's.
+/// An access of one byte assumes nothing about where it starts, so there is nothing to prove about
+/// it, and the flag is a fact `crate::extents` established over the whole module and wrote down.
 fn aligned(func: &Func, check: Inst) -> bool {
     let Extra::Mem(info) = func[check].extra else { return false };
     let claim = u64::from(func[info].align);
@@ -1038,7 +1042,34 @@ fn aligned(func: &Func, check: Inst) -> bool {
         return true;
     }
     let Some(&pointer) = func[func[check].args].get(1) else { return false };
-    settled(func, pointer) >= claim
+    settles(settled(func, pointer), claim)
+}
+
+/// Whether an address known to be a multiple of one number meets an access's claim.
+///
+/// The companion to [`covers`] for the alignment conjunct, and it decides nothing either. The walk
+/// in [`settled`] worked out a number the address divides by, and whether that answers the access
+/// is the rule file's to say. The address is opaque in the question, because nothing here knows
+/// what it is and the answer is about every address the walk's number holds of.
+///
+/// It is worth saying what the rule catches that the comparison it replaced did not. `known` being
+/// the larger number is not `claim` dividing it, and the two agree only because both are powers of
+/// two. Every number that gets here is one, for the reason the head in `safety.model` writes out,
+/// and now that reason is written somewhere a solver reads rather than only somewhere a person
+/// does.
+fn settles(known: u64, claim: u64) -> bool {
+    let mut question = Question::default();
+    let at = question.opaque();
+    let at = question.app("value.i64", &[at]);
+    let known = question.number(i128::from(known));
+    let known = question.app("iconst.i64", &[known]);
+    let claim = question.number(i128::from(claim));
+    let claim = question.app("iconst.i64", &[claim]);
+    let term = question.app("aligned.i64", &[at, known, claim]);
+    match safety::TABLE.find(&question, term) {
+        Some(found) => yes(&safety::TABLE, found.rule),
+        None => false,
+    }
 }
 
 /// What a pointer is known to be aligned to, in bytes, or zero when nothing here says.
@@ -1851,6 +1882,21 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn what_answers_an_alignment_claim_is_the_rule_and_not_a_comparison() {
+        // The four cases the rule is asked about, and the fifth is the reason it is a rule. A
+        // number larger than the claim and not a multiple of it answers nothing, and the guard is
+        // written so that the question never gets asked with one, because `super::settled` only
+        // ever gives back a power of two. The last one is the same point from the other end: the
+        // largest number there is is larger than every claim and divides nothing, and what the
+        // walk means by it is that it took no step rather than that it found an alignment.
+        assert!(super::settles(8, 8));
+        assert!(super::settles(16, 8));
+        assert!(!super::settles(4, 8));
+        assert!(!super::settles(0, 8));
+        assert!(!super::settles(u64::MAX, 8));
     }
 
     #[test]
