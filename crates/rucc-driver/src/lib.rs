@@ -189,6 +189,7 @@ options:
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
   -fwrapv, -fwrapv-pointer, -fno-strict-overflow   signed or pointer overflow wraps
   -ftrapv                signed overflow stops the program instead
+  -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
@@ -642,6 +643,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.wrapping.signed = false;
             }
             "-fno-trapv" => opts.wrapping.trap = false,
+            // The two flags that say what a plain `char` is, which is one question with two
+            // spellings each: gcc reads `-fno-signed-char` as `-funsigned-char` and
+            // `-fno-unsigned-char` as `-fsigned-char`, so there are four ways to write two
+            // answers and the last one written wins. Nothing is set until one of them is given,
+            // because the target's own ABI is the answer otherwise and it is not the same answer
+            // everywhere: x86-64 and Apple's arm64 are signed, Linux's arm64 is not.
+            "-fsigned-char" | "-fno-unsigned-char" => opts.char_signed = Some(true),
+            "-funsigned-char" | "-fno-signed-char" => opts.char_signed = Some(false),
+            // And the size of an enumeration, which is the other thing in this group that changes
+            // the ABI rather than the code.
+            "-fshort-enums" => opts.short_enums = true,
+            "-fno-short-enums" => opts.short_enums = false,
             // And the request, which is the one that cannot be granted. It is a real difference and
             // not a preference: two files each writing `int g;` link under `-fcommon` and are a
             // duplicate definition without it, which is the whole reason the flag survives.
@@ -2842,6 +2855,59 @@ mod tests {
         assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: false, trap: true });
     }
 
+    /// What a plain `char` is, which is four spellings of two answers and nothing by default.
+    ///
+    /// Nothing is the target's own answer and has to stay distinct from both of the others, since
+    /// the same command line means a signed `char` on x86-64 and an unsigned one on Linux's arm64.
+    /// The negative spellings are the other flag rather than a way of asking for the default, which
+    /// was measured against gcc 16: `-fno-signed-char` defines `__CHAR_UNSIGNED__` and
+    /// `-fno-unsigned-char` does not.
+    #[test]
+    fn the_signedness_of_a_plain_char_is_asked_for_in_four_ways() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.char_signed, None);
+
+        for flag in ["-fsigned-char", "-fno-unsigned-char"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.char_signed, Some(true), "{flag}");
+        }
+
+        for flag in ["-funsigned-char", "-fno-signed-char"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.char_signed, Some(false), "{flag}");
+        }
+
+        // And the last one wins, which is what a build that sets one globally and the other for a
+        // directory relies on.
+        let (opts, _) = compile(&["-c", "-funsigned-char", "-fsigned-char", "a.c"]);
+        assert_eq!(opts.char_signed, Some(true));
+
+        // And what is asked for reaches the target, because that is what every other part of the
+        // compiler asks. The triple is one whose own answer is the opposite, so a session that
+        // ignored the flag would still read as signed here.
+        let (opts, _) =
+            compile(&["-c", "--target=aarch64-unknown-linux-gnu", "-fsigned-char", "a.c"]);
+        assert!(Session::new(*opts).target.char_is_signed);
+        let (opts, _) = compile(&["-c", "--target=aarch64-unknown-linux-gnu", "a.c"]);
+        assert!(!Session::new(*opts).target.char_is_signed);
+    }
+
+    /// And the size of an enumeration, which is one question with two spellings.
+    #[test]
+    fn the_smallest_enumeration_is_asked_for_and_taken_back() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.short_enums);
+
+        let (opts, _) = compile(&["-c", "-fshort-enums", "a.c"]);
+        assert!(opts.short_enums);
+
+        let (opts, _) = compile(&["-c", "-fshort-enums", "-fno-short-enums", "a.c"]);
+        assert!(!opts.short_enums);
+
+        let (opts, _) = compile(&["-c", "-fno-short-enums", "-fshort-enums", "a.c"]);
+        assert!(opts.short_enums);
+    }
+
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
     ///
     /// `-fcf-protection=all` is the spelling somebody writes from memory, and a compiler that read
@@ -3268,7 +3334,10 @@ mod tests {
         // what it asks for is the opposite of what the flags on that line ask for. The one it went
         // up by last is the split of the line that lists what this compiler does anyway into that
         // and what it assumes anyway, which are two different claims that were sharing a line until
-        // the second of them got a second flag and the line stopped fitting.
-        assert!(USAGE.lines().count() < 56, "usage text has grown past one screen");
+        // the second of them got a second flag and the line stopped fitting. The one it went up by
+        // last is the three flags that change the ABI rather than the code, which have to be given
+        // to every file in a program or none of them and which therefore belong somewhere a person
+        // reading this list will see them.
+        assert!(USAGE.lines().count() < 57, "usage text has grown past one screen");
     }
 }

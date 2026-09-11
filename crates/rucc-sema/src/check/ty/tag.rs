@@ -36,6 +36,13 @@
 //! whenever the value fits in one, which is what makes the enumerators of `enum { 1 }` `int`
 //! rather than `unsigned int`, and it is the underlying type otherwise. Where C23's underlying
 //! type was written it is that type and none of the above applies.
+//!
+//! `-fshort-enums` puts `unsigned char` and `unsigned short`, or `signed char` and `short`, in
+//! front of those candidates, so `enum { 1 }` is one byte and `enum { -200 }` is two. It changes
+//! nothing else: an enumerator is still `int` where the value fits in one, an enumeration the
+//! program wrote an underlying type for is still that type, and the size of an enumeration too
+//! wide for an `int` is unchanged. Measured against gcc 16 in both `-std=c17` and `-std=c23`,
+//! which agree with each other and with this.
 
 use std::collections::HashSet;
 
@@ -580,13 +587,23 @@ impl Checker<'_> {
     }
 
     /// The type the enumerators are represented in, where the program did not say.
+    ///
+    /// The signedness is decided by whether anything is negative and the width by the first
+    /// candidate that holds both ends, so the two lists differ only in where they start.
+    /// `-fshort-enums` starts them at a byte instead of at an `int`, and the last two entries are
+    /// the same either way, which is why an enumeration too wide for an `int` is the same type
+    /// under both and why the flag is invisible to a program whose enumerators are all large.
     fn enum_underlying(&mut self, values: &[(Symbol, i128, Span)]) -> TypeId {
         let low = values.iter().map(|&(_, value, _)| value).min().unwrap_or(0);
         let high = values.iter().map(|&(_, value, _)| value).max().unwrap_or(0);
-        let candidates =
-            if low >= 0 { [IntKind::UInt, IntKind::ULong] } else { [IntKind::Int, IntKind::Long] };
-        let mut chosen = self.types.int(candidates[1]);
-        for kind in candidates {
+        let candidates: &[IntKind] = match (low >= 0, self.cx.short_enums) {
+            (true, false) => &[IntKind::UInt, IntKind::ULong],
+            (false, false) => &[IntKind::Int, IntKind::Long],
+            (true, true) => &[IntKind::UChar, IntKind::UShort, IntKind::UInt, IntKind::ULong],
+            (false, true) => &[IntKind::SChar, IntKind::Short, IntKind::Int, IntKind::Long],
+        };
+        let mut chosen = self.types.int(candidates[candidates.len() - 1]);
+        for &kind in candidates {
             let ty = self.types.int(kind);
             let (least, greatest) = self.enum_bounds(Some(ty));
             if low >= least && high <= greatest {
@@ -1137,6 +1154,79 @@ mod tests {
             let ty = checker.declared_type(specs, hole);
             assert_eq!(underlying(&checker, ty), expected);
         }
+        assert!(messages(&checker).is_empty());
+    }
+
+    /// And `-fshort-enums` puts two narrower candidates in front of those, and changes nothing else.
+    ///
+    /// The values and the answers are gcc 16's, measured in both `-std=c17` and `-std=c23` on the
+    /// linux box: one byte for `1`, for `-1` and for `200`, two for `300` and for `-200`, and the
+    /// same four and eight byte answers as above once the value stops fitting in a narrower type.
+    /// The two hundreds are the pair that shows the signedness is decided first and the width
+    /// second, since the same magnitude is one byte unsigned and two bytes signed.
+    #[test]
+    fn the_smallest_type_that_holds_them_is_the_candidate_where_the_flag_was_given() {
+        let mut fixture = Fixture::new();
+        let one = constant(&mut fixture, 1, IntKind::Int);
+        let minus_one = negative(&mut fixture, 1);
+        let two_hundred = constant(&mut fixture, 200, IntKind::Int);
+        let three_hundred = constant(&mut fixture, 300, IntKind::Int);
+        let minus_two_hundred = negative(&mut fixture, 200);
+        let unsigned_max = constant(&mut fixture, 4_294_967_295, IntKind::UInt);
+        let signed_max = constant(&mut fixture, 9_223_372_036_854_775_807, IntKind::Long);
+        let cases = [
+            (vec![enumerator(&mut fixture, "a", Some(one))], "unsigned char"),
+            (vec![enumerator(&mut fixture, "b", Some(minus_one))], "signed char"),
+            (vec![enumerator(&mut fixture, "c", Some(two_hundred))], "unsigned char"),
+            (vec![enumerator(&mut fixture, "j", Some(three_hundred))], "unsigned short"),
+            (vec![enumerator(&mut fixture, "d", Some(minus_two_hundred))], "short"),
+            (vec![enumerator(&mut fixture, "e", Some(unsigned_max))], "unsigned int"),
+            (
+                vec![
+                    enumerator(&mut fixture, "f", Some(minus_one)),
+                    enumerator(&mut fixture, "g", Some(unsigned_max)),
+                ],
+                "long",
+            ),
+            (
+                vec![
+                    enumerator(&mut fixture, "h", Some(signed_max)),
+                    enumerator(&mut fixture, "i", None),
+                ],
+                "unsigned long",
+            ),
+        ];
+        let specs: Vec<_> = cases
+            .iter()
+            .map(|(enumerators, expected)| {
+                (enumeration(&mut fixture, None, None, enumerators), *expected)
+            })
+            .collect();
+        let hole = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker_with_short_enums();
+        for (specs, expected) in specs {
+            let ty = checker.declared_type(specs, hole);
+            assert_eq!(underlying(&checker, ty), expected);
+        }
+        assert!(messages(&checker).is_empty());
+    }
+
+    /// And an enumeration the program wrote an underlying type for is that type whatever the flag
+    /// says, which is what makes C23's spelling the way to ask for a size and keep it.
+    #[test]
+    fn the_type_the_program_wrote_is_not_narrowed_by_the_flag() {
+        let mut fixture = Fixture::new();
+        let one = constant(&mut fixture, 1, IntKind::Int);
+        let enumerators = [enumerator(&mut fixture, "a", Some(one))];
+        let int_specs = fixture.keywords(&[BuiltinSet::INT]);
+        let written = fixture.type_name(int_specs, &[]);
+        let specs = enumeration(&mut fixture, None, Some(written), &enumerators);
+        let hole = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker_with_short_enums();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(underlying(&checker, ty), "int");
         assert!(messages(&checker).is_empty());
     }
 

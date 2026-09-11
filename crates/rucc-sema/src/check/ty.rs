@@ -1465,6 +1465,13 @@ mod tests {
         pub(super) fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
+
+        /// The same under `-fshort-enums`, which is the only flag any of these tests turns on.
+        pub(super) fn checker_with_short_enums(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.short_enums = true;
+            Checker::new(&self.ast, cx)
+        }
     }
 
     /// A fixed array bound, which is the common case and three lines every time.

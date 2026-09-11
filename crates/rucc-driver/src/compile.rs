@@ -264,6 +264,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 // everywhere else is the program's own here and means whatever it defined.
                 builtins: opts.builtins && opts.hosted,
                 no_builtin: &opts.no_builtin,
+                short_enums: opts.short_enums,
             },
         );
         checker.check_unit();
