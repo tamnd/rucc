@@ -63,6 +63,8 @@ Cross compilation makes header search a target property rather than a machine pr
 3. The target's libc headers: from `--sysroot` if given, otherwise from our bundled tree for that tuple, otherwise, and only when the target is the host, from the host's directories as `library.rs` computes them today.
 4. Nothing else. No `/usr/local/include` when cross compiling, ever; it is a host directory and its presence in a cross build is a bug.
 
+A tree the user named keeps whatever shape its author gave it. A buildroot or Yocto or distribution tree puts the headers under `usr/include` and ours puts them under two directories named after the tuple, so step 3 takes the directories found under the named root rather than assuming one layout and then finding nothing in it.
+
 `-nostdinc` removes 3, `-nobuiltininc` removes 2, `--sysroot` replaces 3's root, `-isysroot` is the Darwin spelling and applies to 3 only. `-print-search-dirs` and a new `-print-sysroot` report what was chosen, which is document 12's surface.
 
 **The failure this ordering prevents** is host contamination: a cross build that silently picks up a host header, produces something that works on the build machine, and does not work anywhere else. Document 02 claim 5 (byte-identical output across hosts) is the test that catches it, and it catches it *only* because the rule above makes step 3 host-independent when cross compiling.
