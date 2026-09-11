@@ -48,6 +48,12 @@ jobs:
         run: cargo xtask malformed
       - name: target table
         run: cargo xtask targets --check
+      # The recorded cross link lines. Here rather than in the test matrix because it needs no
+      # toolchain and no target machine, and because a loader path or an emulation name that changed
+      # by accident is something a reviewer should see in the diff of this job rather than in a
+      # binary that will not start on somebody else's machine.
+      - name: recorded link lines
+        run: cargo xtask link-lines --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 

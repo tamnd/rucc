@@ -1,0 +1,107 @@
+target    armv7-none-eabi
+format    elf
+emulation armelf_linux_eabi
+loader    none
+sysroot   <cache>/sysroots/armv7-none-eabi
+
+[static]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-none-eabi
+  -static
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/armv7-none-eabi/lib
+  main.o
+  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+
+[static-pie]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-none-eabi
+  -static
+  -pie
+  --no-dynamic-linker
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/armv7-none-eabi/lib
+  main.o
+  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+
+[dynamic]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-none-eabi
+  -pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/armv7-none-eabi/lib
+  main.o
+  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-none-eabi
+  -no-pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/armv7-none-eabi/lib
+  main.o
+  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+
+[shared]
+  -o
+  main
+  -m
+  armelf_linux_eabi
+  --sysroot=<cache>/sysroots/armv7-none-eabi
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/armv7-none-eabi/lib
+  main.o
+  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a

@@ -1,0 +1,20 @@
+target    aarch64-ios-simulator
+format    macho
+emulation none
+loader    none
+sysroot   <cache>/sysroots/aarch64-ios-simulator
+
+[static]
+  refused: there is no cross link line for aarch64-ios-simulator yet, because its object format is macho and that linker takes a different line rather than a different spelling of this one
+
+[static-pie]
+  refused: there is no cross link line for aarch64-ios-simulator yet, because its object format is macho and that linker takes a different line rather than a different spelling of this one
+
+[dynamic]
+  refused: there is no cross link line for aarch64-ios-simulator yet, because its object format is macho and that linker takes a different line rather than a different spelling of this one
+
+[dynamic-no-pie]
+  refused: there is no cross link line for aarch64-ios-simulator yet, because its object format is macho and that linker takes a different line rather than a different spelling of this one
+
+[shared]
+  refused: there is no cross link line for aarch64-ios-simulator yet, because its object format is macho and that linker takes a different line rather than a different spelling of this one

@@ -1,0 +1,107 @@
+target    x86_64-none
+format    elf
+emulation elf_x86_64
+loader    none
+sysroot   <cache>/sysroots/x86_64-none
+
+[static]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-none
+  -static
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/x86_64-none/lib
+  main.o
+  <cache>/sysroots/x86_64-none/lib/librucc_builtins.a
+
+[static-pie]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-none
+  -static
+  -pie
+  --no-dynamic-linker
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/x86_64-none/lib
+  main.o
+  <cache>/sysroots/x86_64-none/lib/librucc_builtins.a
+
+[dynamic]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-none
+  -pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/x86_64-none/lib
+  main.o
+  <cache>/sysroots/x86_64-none/lib/librucc_builtins.a
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-none
+  -no-pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/x86_64-none/lib
+  main.o
+  <cache>/sysroots/x86_64-none/lib/librucc_builtins.a
+
+[shared]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-none
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/x86_64-none/lib
+  main.o
+  <cache>/sysroots/x86_64-none/lib/librucc_builtins.a

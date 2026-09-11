@@ -1,0 +1,86 @@
+target    x86_64-linux-android
+format    elf
+emulation elf_x86_64
+loader    /system/bin/linker64
+sysroot   <cache>/sysroots/x86_64-linux-android
+
+[static]
+  refused: x86_64-linux-android cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: x86_64-linux-android cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-android
+  -pie
+  -dynamic-linker
+  /system/bin/linker64
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-android/lib/Scrt1.o
+  <cache>/sysroots/x86_64-linux-android/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-android/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-android/lib/libc.so
+  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-android/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-android
+  -no-pie
+  -dynamic-linker
+  /system/bin/linker64
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-android/lib/crt1.o
+  <cache>/sysroots/x86_64-linux-android/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-android/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-android/lib/libc.so
+  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-android/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  elf_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-android
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-android/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-android/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-android/lib/libc.so
+  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-android/lib/crtn.o

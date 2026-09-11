@@ -1,0 +1,107 @@
+target    aarch64-none
+format    elf
+emulation aarch64linux
+loader    none
+sysroot   <cache>/sysroots/aarch64-none
+
+[static]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-none
+  -static
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/aarch64-none/lib
+  main.o
+  <cache>/sysroots/aarch64-none/lib/librucc_builtins.a
+
+[static-pie]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-none
+  -static
+  -pie
+  --no-dynamic-linker
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/aarch64-none/lib
+  main.o
+  <cache>/sysroots/aarch64-none/lib/librucc_builtins.a
+
+[dynamic]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-none
+  -pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/aarch64-none/lib
+  main.o
+  <cache>/sysroots/aarch64-none/lib/librucc_builtins.a
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-none
+  -no-pie
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/aarch64-none/lib
+  main.o
+  <cache>/sysroots/aarch64-none/lib/librucc_builtins.a
+
+[shared]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-none
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  -L<cache>/sysroots/aarch64-none/lib
+  main.o
+  <cache>/sysroots/aarch64-none/lib/librucc_builtins.a

@@ -43,6 +43,7 @@ tasks:
   targets           regenerate docs/TARGETS.md from the target table, or check it with --check
   abi-corpus        regenerate tests/abi-corpus from the layout engine, or check it with --check
   abi-signatures    regenerate tests/abi-signatures, or check it with --check
+  link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
   abi-differential  compile the signature corpus with both compilers in both directions and run it
   builtins          build rucc-builtins as a static library for a target
   bench             time the throughput floor workload against the reference compiler
@@ -77,6 +78,7 @@ fn main() -> ExitCode {
         Some("version") => version(),
         Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-corpus") => abi_corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("link-lines") => link_lines(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-differential") => differential::differential(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -1152,6 +1154,33 @@ fn abi_signatures(args: &[String]) -> Result<()> {
     })
 }
 
+/// Regenerates the recorded link lines, or checks them.
+///
+/// The third generator of this shape, and the reason is the same one: the lines come from
+/// `rucc_sysroot::argv` and `xtask` has nothing on its dependency list, so the work is in
+/// `rucc-targets` and this is the name people type.
+///
+/// What it guards is worth saying. A recorded line is the only check in this repository that a
+/// loader path, an emulation name or the ordering of the start files is still what it was, and all
+/// three are strings that nothing at link time verifies: a wrong loader produces a binary the kernel
+/// refuses to start, and a wrong emulation produces one for the wrong machine. Neither shows up in
+/// any other test here, because neither needs a compiler to be wrong.
+fn link_lines(args: &[String]) -> Result<()> {
+    let mode = if args.iter().any(|a| a == "--check") { "--check" } else { "--write" };
+    let status = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc-targets", "--", "link-lines", mode])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::Failed {
+        task: "link-lines",
+        problems: vec!["tests/link-lines does not match the line rucc-sysroot builds".to_owned()],
+    })
+}
+
 /// What to print about the checks that did not run.
 ///
 /// Always a line, including when there is nothing to report. `cargo xtask ci` saying nothing about
@@ -1188,6 +1217,7 @@ fn ci() -> Result<()> {
     targets(&["--check".to_owned()])?;
     abi_corpus(&["--check".to_owned()])?;
     abi_signatures(&["--check".to_owned()])?;
+    link_lines(&["--check".to_owned()])?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
         let status = Command::new(bin)

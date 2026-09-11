@@ -1,0 +1,86 @@
+target    aarch64-linux-gnu
+format    elf
+emulation aarch64linux
+loader    /lib/ld-linux-aarch64.so.1
+sysroot   <cache>/sysroots/aarch64-linux-gnu
+
+[static]
+  refused: aarch64-linux-gnu cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: aarch64-linux-gnu cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-linux-gnu
+  -pie
+  -dynamic-linker
+  /lib/ld-linux-aarch64.so.1
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-linux-gnu/lib/Scrt1.o
+  <cache>/sysroots/aarch64-linux-gnu/lib/crti.o
+  -L<cache>/sysroots/aarch64-linux-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-linux-gnu/lib/libc.so
+  <cache>/sysroots/aarch64-linux-gnu/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-linux-gnu/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-linux-gnu
+  -no-pie
+  -dynamic-linker
+  /lib/ld-linux-aarch64.so.1
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-linux-gnu/lib/crt1.o
+  <cache>/sysroots/aarch64-linux-gnu/lib/crti.o
+  -L<cache>/sysroots/aarch64-linux-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-linux-gnu/lib/libc.so
+  <cache>/sysroots/aarch64-linux-gnu/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-linux-gnu/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  aarch64linux
+  --sysroot=<cache>/sysroots/aarch64-linux-gnu
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/aarch64-linux-gnu/lib/crti.o
+  -L<cache>/sysroots/aarch64-linux-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-linux-gnu/lib/libc.so
+  <cache>/sysroots/aarch64-linux-gnu/lib/librucc_builtins.a
+  <cache>/sysroots/aarch64-linux-gnu/lib/crtn.o

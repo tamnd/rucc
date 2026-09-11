@@ -1,0 +1,86 @@
+target    x86_64-linux-gnux32
+format    elf
+emulation elf32_x86_64
+loader    /libx32/ld-linux-x32.so.2
+sysroot   <cache>/sysroots/x86_64-linux-gnux32
+
+[static]
+  refused: x86_64-linux-gnux32 cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[static-pie]
+  refused: x86_64-linux-gnux32 cannot be linked statically against a generated sysroot, because its libc there is a stub: it carries the names the platform's libc exports and none of the code behind them, which is what a dynamic link reads and not what a static one needs. Link it dynamically, or use a musl target, which ships a real libc.a
+
+[dynamic]
+  -o
+  main
+  -m
+  elf32_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-gnux32
+  -pie
+  -dynamic-linker
+  /libx32/ld-linux-x32.so.2
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-gnux32/lib/Scrt1.o
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-gnux32/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-gnux32/lib/libc.so
+  <cache>/sysroots/x86_64-linux-gnux32/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o
+
+[dynamic-no-pie]
+  -o
+  main
+  -m
+  elf32_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-gnux32
+  -no-pie
+  -dynamic-linker
+  /libx32/ld-linux-x32.so.2
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crt1.o
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-gnux32/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-gnux32/lib/libc.so
+  <cache>/sysroots/x86_64-linux-gnux32/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o
+
+[shared]
+  -o
+  main
+  -m
+  elf32_x86_64
+  --sysroot=<cache>/sysroots/x86_64-linux-gnux32
+  -shared
+  --eh-frame-hdr
+  --hash-style=gnu
+  -z
+  relro
+  -z
+  now
+  -z
+  noexecstack
+  --build-id=none
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crti.o
+  -L<cache>/sysroots/x86_64-linux-gnux32/lib
+  main.o
+  <cache>/sysroots/x86_64-linux-gnux32/lib/libc.so
+  <cache>/sysroots/x86_64-linux-gnux32/lib/librucc_builtins.a
+  <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o

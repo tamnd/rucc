@@ -1,11 +1,13 @@
-//! The musl link line.
+//! The link line, for each of the three cases a target's libc can be.
 //!
-//! Design: `spec/cross-compile/08-sysroots.md` section 8.2 and `spec/cross-compile/09-libc-stubs.md`
-//! section 9.3.
+//! Design: `spec/cross-compile/08-sysroots.md` section 8.2, `spec/cross-compile/09-libc-stubs.md`
+//! section 9.3 and `spec/cross-compile/11-linking.md` section 11.3.
 
 use std::path::{Path, PathBuf};
 
-use rucc_sysroot::{LinkLine, LinkMode, Sysroot, link::musl_loader};
+use rucc_sysroot::argv::{Invocation, argv};
+use rucc_sysroot::link::{glibc_loader, libc, loader, musl_loader};
+use rucc_sysroot::{Libc, LinkLine, LinkMode, Sysroot};
 use rucc_tuple::TargetTuple;
 
 /// The target with this spelling.
@@ -41,29 +43,41 @@ fn crtn_goes_after_the_libraries_and_crti_goes_before_them() {
 }
 
 #[test]
-fn the_three_modes_differ_in_the_first_start_file() {
+fn the_modes_differ_in_the_first_start_file() {
     // The one that runs before `main`. A static-pie binary has to relocate itself before anything
     // else happens and `rcrt1.o` is what does that, so the mode picks the file rather than a flag
-    // being enough.
+    // being enough. A shared object has no first start file at all, since nothing starts one.
     for (mode, first) in [
-        (LinkMode::Static, "crt1.o"),
-        (LinkMode::StaticPie, "rcrt1.o"),
-        (LinkMode::Dynamic, "Scrt1.o"),
+        (LinkMode::Static, Some("crt1.o")),
+        (LinkMode::StaticPie, Some("rcrt1.o")),
+        (LinkMode::Dynamic, Some("Scrt1.o")),
+        (LinkMode::DynamicNoPie, Some("crt1.o")),
+        (LinkMode::Shared, None),
     ] {
         let line = LinkLine::musl(&sysroot("x86_64-linux-musl"), mode);
-        assert_eq!(names(&line.start)[0], first, "{mode:?}");
+        let names = names(&line.start);
+        assert_eq!(names.first().map(String::as_str), first.or(Some("crti.o")), "{mode:?}");
+        assert_eq!(names.last().map(String::as_str), Some("crti.o"), "{mode:?}");
     }
 }
 
 #[test]
 fn a_dynamic_link_names_the_loader_and_a_static_one_does_not() {
-    let dynamic = LinkLine::musl(&sysroot("aarch64-linux-musl"), LinkMode::Dynamic);
-    assert!(dynamic.flags.iter().any(|flag| flag == "-dynamic-linker"));
-    assert!(dynamic.flags.iter().any(|flag| flag == "/lib/ld-musl-aarch64.so.1"));
+    // The flags are `argv`'s and the loader is this module's, which is the division: what will
+    // start the program is a fact about the target, and how it is told to the linker is not.
+    let args = |mode| {
+        let sysroot = sysroot("aarch64-linux-musl");
+        let options = Invocation { mode, ..Invocation::default() };
+        argv(target("aarch64-linux-musl"), &sysroot, &options).expect("a line")
+    };
+    let dynamic = args(LinkMode::Dynamic);
+    let at = dynamic.iter().position(|arg| arg == "-dynamic-linker").expect("the flag");
+    assert_eq!(dynamic[at + 1], "/lib/ld-musl-aarch64.so.1");
+    assert_eq!(loader(target("aarch64-linux-musl")), Some("/lib/ld-musl-aarch64.so.1"));
 
-    let stat = LinkLine::musl(&sysroot("aarch64-linux-musl"), LinkMode::Static);
-    assert!(stat.flags.iter().any(|flag| flag == "-static"));
-    assert!(!stat.flags.iter().any(|flag| flag == "-dynamic-linker"));
+    let still = args(LinkMode::Static);
+    assert!(still.contains(&"-static".to_owned()));
+    assert!(!still.contains(&"-dynamic-linker".to_owned()));
 }
 
 #[test]
@@ -71,11 +85,66 @@ fn every_line_says_the_stack_is_not_executable() {
     // Several linkers still assume an executable stack when no input object says otherwise, and one
     // assembly file with no `.note.GNU-stack` is enough to get there. Saying it on the line is
     // cheaper than finding out which object failed to.
-    for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::Dynamic] {
-        let line = LinkLine::musl(&sysroot("riscv64-linux-musl"), mode);
-        let joined = line.flags.join(" ");
-        assert!(joined.contains("-z noexecstack"), "{mode:?} did not say it");
+    for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::Dynamic, LinkMode::Shared] {
+        let sysroot = sysroot("riscv64-linux-musl");
+        let options = Invocation { mode, ..Invocation::default() };
+        let args = argv(target("riscv64-linux-musl"), &sysroot, &options).expect("a line");
+        assert!(args.join(" ").contains("-z noexecstack"), "{mode:?} did not say it");
     }
+}
+
+#[test]
+fn glibc_and_musl_name_different_loaders_for_the_same_machine() {
+    // Not two spellings of one path. glibc's names come from each port's history, so three of them
+    // are called `ld64.so` and i386's has no architecture in it at all, and a binary naming the
+    // wrong one does not start.
+    assert_eq!(glibc_loader(target("x86_64-linux-gnu")), "/lib64/ld-linux-x86-64.so.2");
+    assert_eq!(musl_loader(target("x86_64-linux-musl")), "/lib/ld-musl-x86_64.so.1");
+    // Two files called `ld64.so` with two different numbers in two different directories, which is
+    // the clearest case for this being a table rather than a rule.
+    assert_eq!(glibc_loader(target("s390x-linux-gnu")), "/lib/ld64.so.1");
+    assert_eq!(glibc_loader(target("powerpc64le-linux-gnu")), "/lib64/ld64.so.2");
+    assert_eq!(glibc_loader(target("i686-linux-gnu")), "/lib/ld-linux.so.2");
+    assert_eq!(glibc_loader(target("armv7a-linux-gnueabihf")), "/lib/ld-linux-armhf.so.3");
+    assert_eq!(glibc_loader(target("riscv64-linux-gnu")), "/lib/ld-linux-riscv64-lp64d.so.1");
+}
+
+#[test]
+fn a_target_with_no_libc_of_ours_has_no_loader_to_name() {
+    // Three different reasons for the same answer: freestanding has no libc, WASI has no loader of
+    // this kind, and Darwin and Windows have one whose path is not on the link line.
+    for spelling in ["x86_64-none", "wasm32-wasi", "aarch64-macos", "x86_64-windows-gnu"] {
+        assert_eq!(loader(target(spelling)), None, "{spelling}");
+    }
+}
+
+#[test]
+fn the_libc_the_target_names_picks_the_line() {
+    // glibc is linked against dynamically, so what goes on the line is the generated `libc.so`
+    // rather than an archive, and musl's is the real `libc.a`. The shape is the same and the files
+    // are not, which is why the dispatch is one function.
+    let gnu = LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic);
+    assert_eq!(names(&gnu.libraries), ["libc.so", "librucc_builtins.a"]);
+    let musl = LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static);
+    assert_eq!(names(&musl.libraries), ["libc.a", "librucc_builtins.a"]);
+}
+
+#[test]
+fn the_three_cases_of_section_8_2_are_three_different_lines() {
+    // What the sysroot holds rather than what the target is called: nothing, a real archive, or a
+    // stub shared object. Every other difference between these targets leaves the line alone.
+    assert_eq!(libc(target("x86_64-linux-musl")), Libc::Archive);
+    assert_eq!(libc(target("x86_64-linux-gnu")), Libc::Stub);
+    assert_eq!(libc(target("x86_64-freebsd")), Libc::Stub);
+    assert_eq!(libc(target("aarch64-linux-android")), Libc::Stub);
+    assert_eq!(libc(target("armv7m-none-eabi")), Libc::None);
+
+    // And a freestanding line is our runtime and nothing else, with no start files at either end,
+    // because the files that would be there come from a libc this target does not have.
+    let bare = LinkLine::for_target(&sysroot("armv7m-none-eabi"), LinkMode::Static);
+    assert!(bare.start.is_empty());
+    assert!(bare.end.is_empty());
+    assert_eq!(names(&bare.libraries), ["librucc_builtins.a"]);
 }
 
 #[test]
