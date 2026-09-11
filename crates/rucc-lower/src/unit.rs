@@ -31,8 +31,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AttrSet, DataList, Datum, Func, Global, Imm, Linkage as IrLinkage, Meta, Module, Reloc,
-    SymbolRef, TlsModel, Type, Visibility as IrVisibility,
+    Alias, AttrSet, DataList, Datum, FpContract, Func, Global, Imm, Linkage as IrLinkage, Meta,
+    Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
@@ -143,6 +143,15 @@ pub struct Context<'a> {
     /// [`Context::wrapping`] is: a body from a unit that named its types and a body from one that
     /// did not keep their own answers when they end up in the same module.
     pub aliasing: bool,
+    /// How far a multiply and an addition may be fused into one rounding, which is
+    /// `-ffp-contract=`.
+    ///
+    /// A fact about the compilation like the ones above it, and the one of them that is written
+    /// down rather than acted on: it goes onto every function with a body as
+    /// [`rucc_ir::Attrs::fp_contract`], because the place that would fuse anything is the code
+    /// generator and by the time it runs the command line is gone and the two operations it might
+    /// fuse may have come from different statements.
+    pub contract: FpContract,
 }
 
 /// What the walk produced.
@@ -160,7 +169,8 @@ pub struct Lowered {
 /// `name` is the module's name, which is the file the tree came from.
 #[must_use]
 pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
-    let Context { tast, types, target, names, visibility, protector, wrapping, aliasing } = cx;
+    let Context { tast, types, target, names, visibility, protector, wrapping, aliasing, contract } =
+        cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
         tast,
@@ -172,6 +182,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         wrapping,
         aliasing,
         tree: aliasing::Tree::default(),
+        contract,
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -201,6 +212,8 @@ pub(crate) struct Unit<'a> {
     aliasing: bool,
     /// The type based aliasing tree built so far, which is one per module.
     tree: aliasing::Tree,
+    /// How far a multiply and an addition may be fused. See [`Context::contract`].
+    pub(crate) contract: FpContract,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are

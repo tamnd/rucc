@@ -300,6 +300,69 @@ impl Wrapping {
     pub const NONE: Self = Self { signed: false, pointer: false, trap: false };
 }
 
+/// How far a multiply and an addition may be fused into one rounding, from `-ffp-contract=`.
+///
+/// A fused multiply add computes `a * b + c` with one rounding instead of two, which is both
+/// faster and closer to the exact answer, and is therefore a different answer. C lets an
+/// implementation do it within one expression and lets a program turn it off with the
+/// `FP_CONTRACT` pragma, gcc does it across a whole function by default, and code that cares about
+/// reproducing a result bit for bit turns it off everywhere.
+///
+/// This is the command line's answer to that question, and it is carried into the IR as an
+/// attribute on each function so that the code generator still has it by the time it would matter.
+/// It is a separate question from the flag on one instruction: a licence granted to an expression
+/// the optimizer has since taken apart is a licence about operations that no longer sit together,
+/// and only the function level answer survives that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Contract {
+    /// `-ffp-contract=off`. Never, so every rounding the source asked for happens.
+    ///
+    /// The default here, which is not gcc's. gcc defaults to `fast` under its own dialects and to
+    /// `off` under a strict `-std=`, and the reason the default is this one anyway is that nothing
+    /// in this compiler fuses anything: the two settings are the same program today, and of the two
+    /// this is the one that does not write a licence nobody reads onto every function in the file.
+    /// The day the code generator learns to fuse, the default moves to gcc's, and that is a change
+    /// to the code generator rather than to this flag.
+    #[default]
+    Off,
+    /// `-ffp-contract=on`. Within one expression, which is what C allows an implementation to do
+    /// without being asked.
+    On,
+    /// `-ffp-contract=fast`. Anywhere in the function, across statements and across whatever the
+    /// optimizer has rearranged, which is what gcc does under its own dialects.
+    Fast,
+}
+
+impl Contract {
+    /// The spelling after the `=`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Contract::Off => "off",
+            Contract::On => "on",
+            Contract::Fast => "fast",
+        }
+    }
+}
+
+impl fmt::Display for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Contract {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "off" => Contract::Off,
+            "on" => Contract::On,
+            "fast" => Contract::Fast,
+            _ => return Err(()),
+        })
+    }
+}
+
 impl Protector {
     /// The spelling this is asked for by, which is the whole flag rather than a part of one,
     /// because these are four flags and not one flag with an argument.
@@ -1091,6 +1154,12 @@ pub struct Options {
     /// access with no type on it is one the alias analysis has no type based reason to separate
     /// from any other, which is what the flag asks for.
     pub strict_aliasing: bool,
+    /// How far a multiply and an addition may be fused into one rounding, from `-ffp-contract=`.
+    ///
+    /// See [`Contract`]. This is the only one of the floating point flags with anywhere to be kept,
+    /// because it is the only one this compiler could act on: the rest of that group withdraw
+    /// licences that nothing here takes in the first place.
+    pub fp_contract: Contract,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1321,6 +1390,7 @@ impl Options {
             char_signed: None,
             short_enums: false,
             strict_aliasing: true,
+            fp_contract: Contract::Off,
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

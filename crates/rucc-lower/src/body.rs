@@ -120,6 +120,12 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     if protects(&body, &locals, &escaped) {
         body.func.attrs.set |= AttrSet::STACK_PROTECT;
     }
+    // And what the command line said about fusing a multiply and an addition, which is a fact about
+    // the compilation rather than about this function and is written onto it because the place that
+    // would act on it is the code generator, which runs long after the command line is gone. Only a
+    // function with a body gets it: there is nothing to fuse in a declaration, and an attribute
+    // saying what may be done to code that is not here would be a claim about somebody else's file.
+    body.func.attrs.fp_contract = body.unit.contract;
     for &param in &params {
         body.declare(param, escaped.contains(&param));
     }
