@@ -71,7 +71,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rucc_sysroot::layout::Sysroot;
+use rucc_sysroot::layout::{Kernel, Sysroot};
 use rucc_sysroot::{LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Triple};
 
@@ -335,6 +335,27 @@ fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option
     }
     let cache = opts.cache.as_deref()?;
     Some(Sysroot::in_cache(cache, target.tuple()))
+}
+
+/// The kernel headers that go with [`cross_sysroot`], for the targets that have any.
+///
+/// The same three conditions, asked through the same function, because the two halves of one
+/// target's system headers have to be decided together or a compile could read glibc's `sys/stat.h`
+/// against this machine's `asm/stat.h`. A `None` here on a Linux target where the sysroot is `Some`
+/// means only one thing, which is that the cache has no kernel tree for that architecture, and the
+/// directory is still named for the reason [`crate::library::header_dirs`] gives.
+///
+/// Not under the sysroot, because `linux/` and `asm-generic/` are the same nine megabytes for every
+/// target that shares an architecture, and a copy per target is eight copies of one thing.
+#[must_use]
+pub fn cross_kernel(target: Triple, opts: &LinkOptions) -> Option<Kernel> {
+    kernel_for(target, opts, Triple::host())
+}
+
+/// The same answer with the host as a parameter, for the same reason as [`cross_for`].
+fn kernel_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Kernel> {
+    cross_for(target, opts, host)?;
+    Kernel::for_target(opts.cache.as_deref()?, target.tuple())
 }
 
 /// How the result is linked, as the five cases a sysroot link line is written over.

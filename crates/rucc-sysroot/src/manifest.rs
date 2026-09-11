@@ -48,7 +48,8 @@ use rucc_tuple::TargetTuple;
 
 /// The licence an input arrives under.
 ///
-/// The list is section 8.2's table with one variant per row, rather than a free text field, because
+/// The list is section 8.2's table with one variant per row, plus the kernel headers, which every
+/// Linux row needs and which no row is about. A closed list rather than a free text field, because
 /// the question [`Licence::redistributable`] answers has to have an answer for every input and a
 /// string does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,6 +61,14 @@ pub enum Licence {
     Lgpl,
     /// The BSD libcs, which are permissive.
     Bsd,
+    /// The Linux uapi headers, which are GPL-2.0 with the syscall note.
+    ///
+    /// The note is the whole reason this is a separate variant and not a refusal: it says that
+    /// using the headers to make a system call does not put the calling program under the GPL,
+    /// which is what every libc and every cross toolchain relies on. Redistributing the headers
+    /// themselves carries the GPL's own obligation, and the pinned source URL in the manifest is
+    /// how it is met, the same way it is for glibc.
+    LinuxUapi,
     /// mingw-w64, which is a mix of permissive licences and public domain headers.
     MingwPermissive,
     /// Ours. The compiler's own headers and its runtime.
@@ -74,7 +83,7 @@ pub enum Licence {
 impl Licence {
     /// Whether an artifact containing this input can be published.
     ///
-    /// Two of the seven answer false, and they are the two section 8.6 calls legal walls rather
+    /// Two of the eight answer false, and they are the two section 8.6 calls legal walls rather
     /// than engineering. A sysroot containing either is a local thing on the machine of somebody
     /// who accepted the licence themselves.
     #[must_use]
@@ -89,6 +98,7 @@ impl Licence {
             Licence::Mit => "mit",
             Licence::Lgpl => "lgpl",
             Licence::Bsd => "bsd",
+            Licence::LinuxUapi => "gpl-2.0-with-linux-syscall-note",
             Licence::MingwPermissive => "mingw-permissive",
             Licence::Apache2 => "apache-2.0",
             Licence::AppleSdk => "apple-sdk",
@@ -111,6 +121,7 @@ impl FromStr for Licence {
             "mit" => Ok(Licence::Mit),
             "lgpl" => Ok(Licence::Lgpl),
             "bsd" => Ok(Licence::Bsd),
+            "gpl-2.0-with-linux-syscall-note" => Ok(Licence::LinuxUapi),
             "mingw-permissive" => Ok(Licence::MingwPermissive),
             "apache-2.0" => Ok(Licence::Apache2),
             "apple-sdk" => Ok(Licence::AppleSdk),
