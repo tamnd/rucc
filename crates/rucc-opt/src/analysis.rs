@@ -259,6 +259,18 @@ impl Analyses {
         (cfg, doms, loops)
     }
 
+    /// The dominator tree, the frontiers and the loop forest at once, for the same reason.
+    ///
+    /// A second combination rather than a longer first one, because [`Analyses::forest`]'s caller
+    /// does not want the frontiers and computing them for it would be paying to avoid a copy.
+    pub fn closure(&mut self, func: &Func) -> (&Dominators, &Frontiers, &Loops) {
+        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
+        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
+        let fronts: &Frontiers = self.frontiers.get_or_insert_with(|| Frontiers::new(cfg, doms));
+        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
+        (doms, fronts, loops)
+    }
+
     /// The dominance frontier of every block, computed if it is not already here.
     pub fn frontiers(&mut self, func: &Func) -> &Frontiers {
         let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
