@@ -150,6 +150,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CheckLive, "`rucc_safety::lower`, the same call over the lifetime plane"),
     (Opcode::CheckDeriv, "`rucc_safety::lower`, the same call where the pointer is computed"),
     (Opcode::CheckType, "`rucc_safety::lower`, the same call, carrying the type asked about"),
+    (
+        Opcode::CheckInit,
+        "`rucc_safety::lower`, the same call over the init plane, carrying no type",
+    ),
     // The four plane writes the same pass emits, which become calls the same way. A judgement
     // decides nothing, so none of the calls carries a descriptor row.
     (Opcode::MetaType, "`rucc_safety::lower`, into the call that records what a store stored"),
@@ -209,7 +213,7 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The eleven the safety pass does emit are on
+    // back end can be handed that reaches one. The twelve the safety pass does emit are on
     // `ELSEWHERE`.
     (
         Opcode::CapLoad,
@@ -224,7 +228,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     ),
     (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
     (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#856"),
-    (Opcode::CheckInit, "the same, over the init plane, which is S5's too", "tamnd/rucc#431"),
     (Opcode::CheckRace, "the same, over the epoch plane, which is S5's as well", "tamnd/rucc#431"),
     // The plane writes, which the runtime does for itself today because the only ranges anything
     // asks about are the ones its own allocator handed out. A stack object needs these.

@@ -122,6 +122,12 @@ pub struct Summary {
     /// Fewer than `bounds`, because only a read asks and only a read the front end named a type
     /// for has a question to put. `crate::ask` is where both of those are argued.
     pub effective_type: Class,
+    /// Initialization checks, which is document 03's Y6 asked of the init plane.
+    ///
+    /// The same count as the reads in `bounds`, because the question is whether the bytes hold
+    /// anything at all and that is a question about every read. `crate::filled` is where the
+    /// difference from `effective_type` is argued.
+    pub initialization: Class,
     /// Accesses that got no check at all, because the pointer they go through is not a value the
     /// insertion pass can take the capability of. A hole rather than a discharge, which is why it
     /// is not folded into either number above.
@@ -168,6 +174,7 @@ impl Summary {
         out.push_str(&format!("    \"lifetime\": {},\n", class(self.lifetime)));
         out.push_str(&format!("    \"derivation\": {},\n", class(self.derivation)));
         out.push_str(&format!("    \"type\": {},\n", class(self.effective_type)));
+        out.push_str(&format!("    \"init\": {},\n", class(self.initialization)));
         out.push_str(&format!("    \"unchecked\": {}\n", self.unchecked));
         out.push_str("  },\n");
         out.push_str("  \"trust\": {\n");
@@ -226,6 +233,7 @@ pub fn summarize(
         lifetime: Class { emitted: emitted.live, remaining: 0 },
         derivation: Class { emitted: emitted.derived, remaining: 0 },
         effective_type: Class { emitted: emitted.asked, remaining: 0 },
+        initialization: Class { emitted: emitted.filled, remaining: 0 },
         unchecked: emitted.skipped,
         interposed,
         rows: INTERPOSED.len(),
@@ -258,6 +266,7 @@ pub fn summarize(
                 Opcode::CheckLive => summary.lifetime.remaining += 1,
                 Opcode::CheckDeriv => summary.derivation.remaining += 1,
                 Opcode::CheckType => summary.effective_type.remaining += 1,
+                Opcode::CheckInit => summary.initialization.remaining += 1,
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
@@ -333,7 +342,11 @@ fn checks_left(func: &rucc_ir::Func) -> usize {
         .filter(|&inst| {
             matches!(
                 func[inst].opcode,
-                Opcode::CheckBounds | Opcode::CheckLive | Opcode::CheckDeriv | Opcode::CheckType
+                Opcode::CheckBounds
+                    | Opcode::CheckLive
+                    | Opcode::CheckDeriv
+                    | Opcode::CheckType
+                    | Opcode::CheckInit
             )
         })
         .count()
@@ -499,6 +512,7 @@ mod tests {
             lifetime: Class { emitted: 12, remaining: 11 },
             derivation: Class { emitted: 3, remaining: 3 },
             effective_type: Class { emitted: 7, remaining: 7 },
+            initialization: Class { emitted: 9, remaining: 8 },
             unchecked: 1,
             interposed: 2,
             rows: 27,
@@ -544,6 +558,10 @@ mod tests {
         );
         assert!(
             text.contains("\"type\": { \"emitted\": 7, \"remaining\": 7, \"discharged\": 0 }"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"init\": { \"emitted\": 9, \"remaining\": 8, \"discharged\": 1 }"),
             "{text}"
         );
     }

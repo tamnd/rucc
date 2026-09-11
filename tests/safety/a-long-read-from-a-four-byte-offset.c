@@ -7,8 +7,16 @@ void free(void *p);
    whole number of fields and none of the fields were eight bytes wide. */
 int main(void) {
     char *packet = malloc(64);
-    long *field = (long *)(packet + 4);
-    long seen = *field;
+    long *field;
+    long seen;
+    int i;
+    /* The packet arrives filled, so that the only thing wrong with the read below is its
+       alignment. */
+    for (i = 0; i < 64; i++) {
+        packet[i] = 0;
+    }
+    field = (long *)(packet + 4);
+    seen = *field;
     free(packet);
     return seen == 0 ? 0 : 1;
 }

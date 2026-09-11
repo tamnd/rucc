@@ -342,6 +342,33 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
     unsafe { region.init.set(dst, len) }
 }
 
+/// The judgement a call out of this build makes: whatever it was handed may now hold something.
+///
+/// A pointer passed to a function this compiler did not build goes somewhere nothing reports from.
+/// The callee may have filled every byte of it, and the plane did not hear about any of it, so the
+/// next read here would be refused over storage that was written in front of us. Document 10
+/// section 10.1's rule is never to assume, and the only thing this crate knows after such a call is
+/// that it no longer knows.
+///
+/// So the whole instance is marked written, rather than the argument's own range, because the
+/// callee was handed a pointer and not a length and there is nothing in the call that says how far
+/// it went. That is the permissive direction, which is the one section 9.2 says this plane thins
+/// in, and what it costs is every uninitialized read of an instance that was ever handed out.
+///
+/// Nothing happens for an address outside every region, or one in an arena whose allocator has said
+/// nothing, since there is no instance there to say anything about.
+///
+/// # Safety
+///
+/// `addr` is whatever the program computed and is never read through.
+pub unsafe fn handed(addr: *const c_void) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let Some((lo, len)) = crate::recover::extent(&region, addr) else { return };
+    // SAFETY: the run came out of the plane over this region, so the init plane covers it too.
+    unsafe { region.init.set(lo, len) }
+}
+
 /// How many of the `size` bytes from `addr` on are inside the region, so a plane walk stays inside
 /// the plane.
 ///
@@ -642,6 +669,15 @@ pub mod exports {
         // SAFETY: as above.
         unsafe { super::spread(dst, src, len) };
     }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_init`]. One address, and it is never read through.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_init_handed(addr: *const c_void) {
+        // SAFETY: as above.
+        unsafe { super::handed(addr) };
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +758,12 @@ mod tests {
     fn spread(dst: *const c_void, src: *const c_void, len: usize) {
         // SAFETY: as above, for both.
         unsafe { super::spread(dst, src, len) }
+    }
+
+    /// The judgement a call out of the build makes about what it was handed.
+    fn handed(addr: *const c_void) {
+        // SAFETY: as above.
+        unsafe { super::handed(addr) }
     }
 
     /// Two types out of the compiler's universe, in the spelling the plane gives them.
@@ -937,6 +979,55 @@ mod tests {
         assert!(!refused(|| filled(at(ptr, 0), 8)));
         // SAFETY: as above.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_pointer_handed_out_of_the_build_leaves_its_whole_instance_written() {
+        let _turn = turn();
+        // Section 10.7's incremental adoption, from this plane's side. The library was handed a
+        // pointer and not a length, so there is nothing in the call that says how far it went, and
+        // the only honest answer about an instance nothing here watched being written is that the
+        // question can no longer be asked about it.
+        let ptr = alloc(64);
+        assert!(refused(|| filled(at(ptr, 0), 8)));
+
+        handed(at(ptr, 0));
+
+        assert!(!refused(|| filled(at(ptr, 0), 8)));
+        assert!(!refused(|| filled(at(ptr, 56), 8)), "the instance runs past where the call began");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_pointer_handed_out_says_nothing_about_the_instance_beside_it() {
+        let _turn = turn();
+        // The run stops where the instance does, which is what keeps one call to a library from
+        // silencing the whole heap.
+        let first = alloc(64);
+        let second = alloc(64);
+        assert_ne!(first, second, "two instances, so there is a neighbour to be wrong about");
+
+        handed(at(first, 0));
+
+        assert!(!refused(|| filled(at(first, 0), 8)));
+        assert!(refused(|| filled(at(second, 0), 8)), "the neighbour was written off too");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(first);
+            dealloc(second);
+        }
+    }
+
+    #[test]
+    fn a_pointer_handed_out_that_no_region_covers_records_nothing() {
+        let _turn = turn();
+        // A local or a global going to a library. There is no instance to say anything about, and
+        // walking one out of a region that does not exist would be inventing it.
+        let mut local = [0_u8; 64];
+        let addr: *const c_void = local.as_mut_ptr().cast();
+        handed(addr);
+        assert!(!refused(|| filled(addr, 64)));
     }
 
     #[test]

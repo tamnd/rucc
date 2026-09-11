@@ -137,6 +137,7 @@ fn calls(
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             Opcode::CheckType => typed(func, names, word, numbers, table, inst),
+            Opcode::CheckInit => began(func, names, word, table, inst),
             Opcode::MetaType => judgement(func, names, word, numbers, inst),
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::MetaInit => written(func, names, word, inst),
@@ -272,6 +273,38 @@ fn typed(
     let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
     let params = &[Type::PTR, word, small, Type::PTR];
     call(func, names, inst, "__rucc_check_type", params, &[], &[pointer, bytes, ty, desc]);
+}
+
+/// `check_init` becomes `__rucc_check_init(pointer, size, descriptor)`.
+///
+/// No type number, because the plane it asks holds no types: one bit per byte, and the bit says
+/// whether anything was ever stored there. So the call is the shape [`bounds`] has rather than the
+/// shape [`typed`] has, and the size is the access's own width for the reason given there.
+///
+/// The descriptor says J1, as the type plane's does. The init plane is one of the planes document
+/// 04 section 4.4's first judgement names, so a read the plane refused is an access the planes did
+/// not permit, and that is already the sentence the reporter prints.
+fn began(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+) {
+    let [_capability, pointer] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+
+    let row = Descriptor {
+        judgement: ACCESS,
+        class: 0,
+        // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
+        size: u16::try_from(size).unwrap_or(u16::MAX),
+    };
+    let desc = record(func, names, table, inst, row);
+    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let params = &[Type::PTR, word, Type::PTR];
+    call(func, names, inst, "__rucc_check_init", params, &[], &[pointer, bytes, desc]);
 }
 
 /// `meta_type` becomes `__rucc_meta_type(pointer, size, type)`.
@@ -645,12 +678,13 @@ mod tests {
 
     #[test]
     fn a_read_of_the_plane_becomes_the_call_that_carries_the_type_asked_about() {
-        // Three rows rather than two, because the type check is a judgement and a judgement that
-        // refuses has to say what it refused. The type travels as the same number a store of the
-        // same type would have recorded, which is the only way the two can be compared.
+        // Four rows rather than two, because a read now asks two questions of two planes and each
+        // of them is a judgement that has to say what it refused. The type travels as the same
+        // number a store of the same type would have recorded, which is the only way the two can be
+        // compared, and the init question carries no type at all.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 3);
+        assert_eq!(lower(&mut module, &mut names), 4);
 
         // The printer writes an `i32` immediate as a signed number and the identifier is a hash
         // that uses the whole width, so what appears is the same bits read the other way round.
@@ -670,8 +704,11 @@ mod tests {
                  %5 = iconst.i64 4\n    \
                  %6 = iconst.i32 {number}\n    \
                  call @__rucc_check_type(%0, %5, %6, %4) : (ptr, i64, i32, ptr)\n    \
-                 %7 = load.i32 %0, size 4, align 4, tbaa !1\n    \
-                 return %7\n\
+                 %7 = global_addr @__rucc_safety_desc_3\n    \
+                 %8 = iconst.i64 4\n    \
+                 call @__rucc_check_init(%0, %8, %7) : (ptr, i64, ptr)\n    \
+                 %9 = load.i32 %0, size 4, align 4, tbaa !1\n    \
+                 return %9\n\
                  }}\n"
             )
         );
@@ -684,8 +721,9 @@ mod tests {
     #[test]
     fn the_judgement_a_type_check_names_is_the_one_about_the_planes() {
         // J1 rather than a judgement of its own. Document 04 section 4.4's first judgement is an
-        // access the capability, the planes or the alignment did not permit, and the type plane is
-        // one of the planes, so that is the sentence the reporter should print.
+        // access the capability, the planes or the alignment did not permit, and both the type
+        // plane and the init plane are planes, so that is the sentence the reporter should print
+        // for either of them.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
         lower(&mut module, &mut names);
@@ -702,7 +740,7 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(rows, [ACCESS, ACCESS, ACCESS]);
+        assert_eq!(rows, [ACCESS, ACCESS, ACCESS, ACCESS]);
     }
 
     #[test]
@@ -761,7 +799,7 @@ mod tests {
     fn every_check_becomes_a_call_carrying_the_descriptor_it_is_described_by() {
         let mut names = Interner::new();
         let mut module = checked(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 2);
+        assert_eq!(lower(&mut module, &mut names), 3);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
@@ -773,8 +811,11 @@ mod tests {
              call @__rucc_check_bounds(%0, %2, %1) : (ptr, i64, ptr)\n    \
              %3 = global_addr @__rucc_safety_desc_1\n    \
              call @__rucc_check_live(%0, %3) : (ptr, ptr)\n    \
-             %4 = load.i32 %0, size 4, align 4\n    \
-             return %4\n\
+             %4 = global_addr @__rucc_safety_desc_2\n    \
+             %5 = iconst.i64 4\n    \
+             call @__rucc_check_init(%0, %5, %4) : (ptr, i64, ptr)\n    \
+             %6 = load.i32 %0, size 4, align 4\n    \
+             return %6\n\
              }\n"
         );
     }
