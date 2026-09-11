@@ -162,6 +162,12 @@ typedef __typeof__(nullptr) nullptr_t;
 #define __STDDEF_H
 #define _ANSI_STDDEF_H
 
+/* Undefined first, the way gcc's own header does it, because this is not always the first
+ * definition of the name in the translation unit. A program that writes its own `offsetof`
+ * under `#ifndef offsetof` and only later reaches a header that includes this one has already
+ * defined it, and a second definition with a different body is a diagnostic on a line the
+ * program did not write. sqlite's `shell.c` is exactly that program. */
+#undef offsetof
 #define offsetof(type, member) __builtin_offsetof(type, member)
 
 #endif
