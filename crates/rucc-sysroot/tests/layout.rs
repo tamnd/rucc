@@ -85,7 +85,7 @@ fn glibc_names_its_header_directory_after_the_family_and_musl_after_the_architec
     for (tuple, family, own) in [
         ("i686-linux-gnu", "x86", "i386"),
         ("riscv64-linux-gnu", "riscv", "riscv64"),
-        ("powerpc64le-linux-gnu", "powerpc", "powerpc64"),
+        ("powerpc64le-linux-gnu", "powerpcle", "powerpc64"),
         ("loongarch64-linux-gnu", "loongarch", "loongarch64"),
     ] {
         let gnu = Sysroot::in_cache(cache, target(tuple));
@@ -93,6 +93,50 @@ fn glibc_names_its_header_directory_after_the_family_and_musl_after_the_architec
         let musl = Sysroot::in_cache(cache, target(&tuple.replace("-gnu", "-musl")));
         assert_eq!(musl.header_arch(), own, "{tuple} reads the wrong musl directory");
     }
+}
+
+#[test]
+fn the_byte_order_is_in_the_glibc_directory_name_for_powerpc_and_for_no_other_family() {
+    // Measured on glibc 2.44, by installing the headers twice for a family, once per order, and
+    // diffing the two installs. `aarch64_be` against `aarch64` is 474 files each and an empty diff,
+    // so one directory serves both orders. `powerpc64` against `powerpc64le` is 474 files each and
+    // one file that differs, `bits/long-double.h`, because little endian powerpc can redirect
+    // `long double` to the float128 ABI and big endian powerpc cannot. One directory for both would
+    // hand half the powerpc rows a macro that is wrong about their own ABI. The name is the family
+    // and the order and not the width, because the third run of the experiment, 32-bit against
+    // 64-bit powerpc with the order held fixed, is 474 files each and an empty diff as well.
+    // tamnd/rucc#940.
+    let cache = Path::new("/cache");
+    let le = Sysroot::in_cache(cache, target("powerpc64le-linux-gnu"));
+    let be = Sysroot::in_cache(cache, target("powerpc64-linux-gnu"));
+    assert_eq!(le.header_arch(), "powerpcle");
+    assert_eq!(be.header_arch(), "powerpc");
+    assert_ne!(le.arch_include(), be.arch_include());
+
+    // And nowhere else, because a directory per order where the text is the same is a copy of the
+    // same files under two names.
+    for (little, big) in [
+        ("aarch64-linux-gnu", "aarch64_be-linux-gnu"),
+        ("armv7-linux-gnueabihf", "armv7eb-linux-gnueabihf"),
+    ] {
+        let one = Sysroot::in_cache(cache, target(little));
+        let other = Sysroot::in_cache(cache, target(big));
+        assert_eq!(
+            one.header_arch(),
+            other.header_arch(),
+            "{little} and {big} read the same text and should read the same directory"
+        );
+        // Still two sysroots. The headers are shared and the link inputs are not.
+        assert_ne!(one.cache_key(), other.cache_key());
+    }
+
+    // musl carries no order either, for the same reason read off its own source: the files that
+    // depend on the order branch inside themselves, `bits/alltypes.h` and `bits/signal.h` on
+    // `__BIG_ENDIAN__`, and `arch/` in musl 1.2.5 has no per order directory at all.
+    let musl_le = Sysroot::in_cache(cache, target("powerpc64le-linux-musl"));
+    let musl_be = Sysroot::in_cache(cache, target("powerpc64-linux-musl"));
+    assert_eq!(musl_le.header_arch(), "powerpc64");
+    assert_eq!(musl_be.header_arch(), "powerpc64");
 }
 
 #[test]

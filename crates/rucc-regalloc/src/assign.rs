@@ -364,13 +364,48 @@ enum Want {
     Allowed,
 }
 
+/// Every register every instruction in the function insists on, arranged to be asked about.
+///
+/// Built once and never changed afterwards, and there is only one question ever asked of it: of the
+/// constraints naming one register of one class, is there one at a point some interval covers. So
+/// the entries are ordered by the register they name and then by the point, and the question is a
+/// binary search for the start of the interval followed by a walk that stops at its end.
+///
+/// It used to be a flat list walked from one end for every candidate register of every interval,
+/// which is quadratic in the size of a function and is most of the compile on a large one. See
+/// tamnd/rucc#1003 for the profile that found it.
+struct Blocks {
+    /// The constraints, sorted by class, then by register, then by point.
+    all: Vec<Blocked>,
+}
+
+impl Blocks {
+    /// The constraints on one register of one class at the points an interval covers.
+    ///
+    /// Both ends of the walk come from the ordering rather than from a test, so what comes back is
+    /// exactly what the old `covers` call used to keep and in the same order.
+    fn over(
+        &self,
+        class: RegClass,
+        at: PhysReg,
+        range: Range,
+    ) -> impl Iterator<Item = &Blocked> + '_ {
+        let first = self
+            .all
+            .partition_point(|one| (one.class, one.at, one.point) < (class, at, range.start));
+        self.all[first..]
+            .iter()
+            .take_while(move |one| one.class == class && one.at == at && one.point <= range.end)
+    }
+}
+
 /// Whether a register is one this interval could have.
 ///
 /// The exception is the value a reuse is coalescing with, which holds the register right up to the
 /// point the new value takes it over and is the one thing that may overlap.
 fn available(
     active: &[Held],
-    blocked: &[Blocked],
+    blocked: &Blocks,
     live: &Live,
     interval: Interval,
     at: PhysReg,
@@ -380,11 +415,8 @@ fn available(
     let taken = active
         .iter()
         .any(|held| held.at == at && held.class == interval.class && Some(held.reg) != except);
-    let insisted = blocked.iter().any(|one| {
-        one.at == at
-            && one.class == interval.class
-            && one.by != Some(interval.reg)
-            && interval.range.covers(one.point)
+    let insisted = blocked.over(interval.class, at, interval.range).any(|one| {
+        one.by != Some(interval.reg)
             && (want == Want::Clear || live.anywhere_in(interval.reg, one.block))
     });
     !taken && !insisted
@@ -395,7 +427,7 @@ fn available(
 fn coalesce(
     assignment: &Assignment,
     active: &[Held],
-    blocked: &[Blocked],
+    blocked: &Blocks,
     live: &Live,
     interval: Interval,
     reuse: Reuse,
@@ -421,7 +453,7 @@ fn coalesce(
 fn spill_one(
     assignment: &mut Assignment,
     active: &mut Vec<Held>,
-    blocked: &[Blocked],
+    blocked: &Blocks,
     live: &Live,
     interval: Interval,
 ) {
@@ -451,7 +483,7 @@ fn spill_one(
 /// A physical register an operand names outright counts the same way. Nothing before allocation
 /// writes one except an instruction that has to, and it has to for the length of that one
 /// instruction, which is the same statement a fixed constraint makes.
-fn blocked(func: &Func, order: &Order) -> Vec<Blocked> {
+fn blocked(func: &Func, order: &Order) -> Blocks {
     let mut blocked = Vec::new();
     let mut claimed: Vec<(RegClass, PhysReg)> = Vec::new();
     for block in func.blocks() {
@@ -490,7 +522,13 @@ fn blocked(func: &Func, order: &Order) -> Vec<Blocked> {
             }
         }
     }
-    blocked
+    // Program order already has the points ascending, but the registers one instruction claims are
+    // walked outside the two points rather than inside them, so the list arrives in order by
+    // instruction and not by register. A sort by the key the lookup searches on is what makes it
+    // searchable, and it is stable so two constraints on one register at one point keep the order
+    // the instruction wrote them in.
+    blocked.sort_by_key(|one: &Blocked| (one.class, one.at, one.point));
+    Blocks { all: blocked }
 }
 
 /// The register an operand has to be in, which is the one a constraint asks for or the one the
