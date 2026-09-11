@@ -24,6 +24,7 @@ mod implib;
 mod pressure;
 mod runner;
 mod safety;
+mod size;
 mod stubs;
 mod unwind;
 
@@ -48,6 +49,7 @@ tasks:
   abi-differential  compile the signature corpus with both compilers in both directions and run it
   builtins          build rucc-builtins as a static library for a target
   bench             time the throughput floor workload against the reference compiler
+  size              measure the distribution against the budget in document 13.1
   disasm            check every instruction we encode against an independent decoder
   stubs             write a sysroot's libraries per ELF target and read them back with readelf
   implib            write an import library per Windows target and hold it against llvm-dlltool
@@ -91,6 +93,7 @@ fn main() -> ExitCode {
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
         Some("safety") => safety::safety(),
+        Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
         Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("cost") => cost::cost(&std::env::args().skip(2).collect::<Vec<_>>()),
