@@ -122,7 +122,11 @@ pub(crate) fn stubs() -> Result<()> {
 /// value here is in the second opinion rather than in the second run. A mac keeps the homebrew ones
 /// out of the way of the system tools and a linux distribution puts llvm under a directory named for
 /// its version, so both places are looked in.
-fn find() -> Vec<PathBuf> {
+///
+/// `cargo xtask real-libc` reads the two sides of its comparison with the first of these, so the
+/// search is here rather than in that file. A reader found in one place and not the other would be a
+/// difference between the two tasks and neither one is about where a reader is installed.
+pub(crate) fn find() -> Vec<PathBuf> {
     let mut versioned: Vec<PathBuf> = std::fs::read_dir("/usr/lib")
         .into_iter()
         .flatten()
