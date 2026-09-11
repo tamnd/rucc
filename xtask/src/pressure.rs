@@ -82,13 +82,29 @@ struct Row {
 
 /// Compiles every benchmark both ways and prints the table.
 ///
+/// `extra` is the `-f` flags the caller wants both sides compiled with, in the order they gave
+/// them. Both sides get them and not only the side with the monitor on, for the reason
+/// `crate::cost` gives: a flag that changed the code on one side alone would turn the delta into a
+/// measurement of the flag rather than of the monitor.
+///
 /// # Errors
 ///
-/// [`Error::Io`] when a program will not compile, or when the compiler wrote a listing this could
-/// not read back.
-pub(crate) fn pressure() -> Result<()> {
+/// [`Error::Io`] when an argument is not a `-f` flag, when a program will not compile, or when the
+/// compiler wrote a listing this could not read back.
+pub(crate) fn pressure(extra: &[String]) -> Result<()> {
+    for arg in extra {
+        if !arg.starts_with("-f") {
+            return Err(Error::Io(format!(
+                "pressure takes `-f` flags and `{arg}` is not one. The level is fixed at {LEVEL} \
+                 because both sides have to be the compiler we ship"
+            )));
+        }
+    }
     let benches = benches()?;
     println!("pressure: {} programs, {LEVEL} both sides, --target={TRIPLE}", benches.len());
+    if !extra.is_empty() {
+        println!("pressure: both sides also compiled with {}", extra.join(" "));
+    }
 
     let rucc = compiler()?;
     let work = root().join("target").join("pressure");
@@ -101,8 +117,8 @@ pub(crate) fn pressure() -> Result<()> {
 
     let mut rows = Vec::new();
     for bench in &benches {
-        let off = measure(&rucc, &work, bench, "off", "-fsafety=off")?;
-        let on = measure(&rucc, &work, bench, "on", "-fsafety=detect")?;
+        let off = measure(&rucc, &work, bench, "off", "-fsafety=off", extra)?;
+        let on = measure(&rucc, &work, bench, "on", "-fsafety=detect", extra)?;
         rows.push(row(&bench.name, &off, &on));
     }
     report(&rows);
@@ -116,10 +132,12 @@ fn measure(
     bench: &Bench,
     suffix: &str,
     tier: &str,
+    extra: &[String],
 ) -> Result<BTreeMap<String, Cost>> {
     let listing = listing(work, &bench.name, suffix);
     let out = Command::new(rucc)
         .args(["-S", &format!("--target={TRIPLE}"), tier, LEVEL])
+        .args(extra)
         .arg(format!("-Zregister-pressure={}", listing.display()))
         .arg("-o")
         .arg(work.join(format!("{}.{suffix}.s", bench.name)))
@@ -284,6 +302,17 @@ mod tests {
         let on = read("1 1 1 f\n");
         let row = row("a", &off, &on);
         assert!(row.worst.is_none(), "{:?}", row.worst);
+    }
+
+    #[test]
+    fn an_argument_that_is_not_a_flag_is_refused_before_anything_is_compiled() {
+        // The level is not a caller's to pick here, so an argument that looks like one is a
+        // request this cannot honour, and compiling eight programs before saying so wastes a
+        // minute to end up in the same place.
+        let err = pressure(&["-O1".to_owned()]).expect_err("a level is not a flag");
+        let Error::Io(message) = err else { panic!("wrong error") };
+        assert!(message.contains("-O1"), "{message}");
+        assert!(message.contains("-O2"), "{message}");
     }
 
     #[test]

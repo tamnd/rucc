@@ -55,7 +55,8 @@ tasks:
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
-  pressure          compile bench/safety both ways at -O2 and report the spill and fill delta
+  pressure          compile bench/safety both ways at -O2, and with any -f flags given, and
+                    report the spill and fill delta
   aux               simulate the two aux plane layouts and compare their cache misses
   bisect            halve the optimizer's fuel until one rewrite is left holding the bug
   corpus            run the pinned C corpus against the compiler this tree builds
@@ -88,7 +89,7 @@ fn main() -> ExitCode {
         Some("safety") => safety::safety(),
         Some("accounting") => safety::accounting(),
         Some("cost") => cost::cost(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("pressure") => pressure::pressure(),
+        Some("pressure") => pressure::pressure(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("aux") => aux_plane::aux(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),

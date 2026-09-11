@@ -25,6 +25,23 @@ The evidence that this is the right worry is Cpp2Rust's evaluation: 2% on WOFF2 
 
 Instruction count is *permitted* as a supporting metric and is never the headline.
 
+**What it is good for, worked through.** The headline is the wall clock and the supporting metric answers a different question, which is where the time went. Counting instructions under callgrind on the Tier E set at `-O2`, both sides the same commit, splits the eight programs into two groups that want completely different work out of us:
+
+| program | off | on | ratio | in the runtime | share |
+|---|---|---|---|---|---|
+| a-binary-tree-walk | 295577596 | 2229672545 | 7.54x | 1693447163 | 76.0% |
+| a-byte-at-a-time-copy | 131891502 | 263718047 | 2.00x | 0 | 0.0% |
+| a-linked-list-traversal | 101941985 | 970542037 | 9.52x | 765000000 | 78.8% |
+| a-matrix-multiply | 121697825 | 435473067 | 3.58x | 60254327 | 13.8% |
+| a-pointer-chasing-hash-table | 208906963 | 2815978229 | 13.48x | 2327804368 | 82.7% |
+| a-program-that-does-nothing | 118931 | 118939 | 1.00x | 0 | 0.0% |
+| a-strided-column-sum | 158795097 | 337658630 | 2.13x | 19641246 | 5.8% |
+| a-string-scan | 747341242 | 1267156107 | 1.70x | 0 | 0.0% |
+
+The runtime column is every instruction retired inside a `__rucc_` entry point, so it is the checks plus the guard's extent queries. Three programs spend three quarters or more of their instructions there and cost 1.5x to 2.5x on the clock, which is this section's claim stated as a number: they retire seven to thirteen times the instructions for twice the time, because the machine is stalled on the next node either way. The other four have no runtime left to speak of. On `a-matrix-multiply` the 13.8 percent is 160003 calls to `__rucc_extent` at about 377 instructions each, which is the loop split's guard asking once per entry to the inner loop, and no bounds check and no derivation check runs anywhere in the program. On the other three it is nothing at all.
+
+So on half the set the checks are gone at run time and the program is still 1.5x to 2.8x, and every instruction of that is code the compiler emits around where the checks used to be. That is not a thing a wall clock ratio can tell you and it is not a thing an instruction count should ever be the headline for. It is the supporting metric doing the job it is kept for, and it is tracked on #893.
+
 ## 13.2 The baseline question
 
 The most common dishonesty in this literature is an unstated baseline. Ours are stated:
@@ -87,7 +104,7 @@ Not all measurement is scorekeeping. Five specific numbers settle open questions
 
 **Call-frame elision rate (S4).** Document 17 question 4. Measured as the fraction of instrumented calls where the frame is dropped. Done as far as it can be done before a frame exists, and the answer is in document 17 question 4: on SQLite at `-O2` the rule fires on 22 percent of the calls that hand a pointer over, and the reason it does not fire on the rest is almost entirely that the callee still has checks in it rather than that the callee is in another translation unit. The number is a static count of where the rule would fire, because `rucc-safe-rt` has the reader side of the frame and no call site writes one, so there is nothing yet to count at run time.
 
-**Register pressure (S4).** Document 05.2.1's stated risk. Measured as spill/fill delta on the pointer-heavy benchmarks. If capability materialization causes spilling in hot loops, no amount of check elimination saves us and the representation needs revisiting.
+**Register pressure (S4).** Document 05.2.1's stated risk. Measured as spill/fill delta on the pointer-heavy benchmarks, by `cargo xtask pressure`, which asks the allocator rather than the machine and so needs nothing executed. Done, and the risk as stated did not turn up while a different one did. The monitor takes the set from 24 stack slots and 86 stack moves to 89 and 374, and the pointer-heavy rows are not where it happens: the tree walk spills nothing either way and the two chasing rows add 6 and 22 moves. The four array rows add 42, 91, 66 and 61. Compiling both sides with `-fno-split` leaves 40 slots and 170 moves, so 204 of the 288 added moves are the loop split's, which is 71 percent of the pressure the monitor adds and none of it is a materialized capability. It is the guard's carried byte offset per distinct step and the window bound it is tested against, all of them loop-carried, all of them in a frame slot. The representation does not need revisiting. What the split emits around the fast half does, and it is #893.
 
 Each of these can invalidate a number in document 02, and each is scheduled *before* the milestone that would depend on it. That ordering is the point.
 
@@ -116,5 +133,7 @@ Written down in advance so that measuring them is confirmation rather than disco
 **Deep call chains of small functions.** Every instrumented call writes a TLS frame. Inlining removes it, and code that defeats inlining (function pointers, large functions, cross-module calls without LTO) pays it every time.
 
 **Interpreters.** CPython and Lua are in the corpus for precision, and their dispatch loops are pointer-heavy, tagged-pointer-heavy and allocation-heavy at once. Expect the worst numbers in the corpus here.
+
+**A loop the split guard costs more than the checks did.** Not on this list when it was written, and on it now, because the Tier E set found it. A loop whose checks all come out is a loop that carries the guard's bookkeeping instead, one offset per distinct step and a bound to test it against, and on a tight array loop that is more stack traffic than the checks ever were. It shows up as the array half of the table in section 13.1 and as 71 percent of the spilling in section 13.5, and it is the reason the worst Tier E row is a matrix multiply rather than a pointer chase, which is the opposite of what the first entry on this list predicts.
 
 If the measured shape does not match this list, the model is wrong somewhere and finding out where is more valuable than the number itself.
