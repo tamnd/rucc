@@ -21,7 +21,10 @@
 //! 2. The compiler's own headers. Always present, on every target including freestanding, and never
 //!    taken from a sysroot, because `stddef.h` describes the compiler and not the C library.
 //! 3. The target's libc headers, from `--sysroot` if given, otherwise from our bundled tree for
-//!    that tuple, otherwise, and only when the target is the host, from the host's directories.
+//!    that tuple, otherwise, and only when the target is the host, from the host's directories. For
+//!    a Linux target the bundled case is four directories rather than two: the libc's per
+//!    architecture tree, the libc's generic tree, the kernel's `asm/` for the architecture, and the
+//!    kernel's shared tree. That is the order `zig cc -E -v` prints for a glibc target.
 //! 4. Nothing else. No `/usr/local/include` in a cross build, ever.
 //!
 //! `-nostdinc` removes 3, `-nobuiltininc` removes 2, `--sysroot` replaces 3's root, and `-isysroot`
@@ -31,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use rucc_tuple::TargetTuple;
 
-use crate::layout::Sysroot;
+use crate::layout::{Kernel, Sysroot};
 
 /// Which of section 8.5's four steps put a directory in the list.
 ///
@@ -48,6 +51,12 @@ pub enum Origin {
     Sysroot,
     /// Step 3, taken from the tree we bundle for this target.
     Bundled,
+    /// Step 3, taken from the kernel header tree, which is bundled too and is not the libc's.
+    ///
+    /// Separate from [`Origin::Bundled`] because the two trees have different owners, different
+    /// licences and different producers, and a user looking at where `linux/stat.h` came from is
+    /// asking about the kernel and not about glibc.
+    Kernel,
     /// Step 3, taken from the host, which is legal only when the target is the host.
     Host,
 }
@@ -71,6 +80,7 @@ impl Origin {
             Origin::Compiler => "compiler",
             Origin::Sysroot => "sysroot",
             Origin::Bundled => "bundled",
+            Origin::Kernel => "kernel",
             Origin::Host => "host",
         }
     }
@@ -108,6 +118,13 @@ pub struct Options<'a> {
     pub sysroot: &'a [PathBuf],
     /// The tree we bundle for this target, when there is one.
     pub bundled: Option<&'a Sysroot>,
+    /// The kernel headers for this target, when it has any and we have them.
+    ///
+    /// Used only with [`Options::bundled`], because it is the other half of the tree we produced.
+    /// A user who named a tree of their own named one that has a `linux/` in it or does not need
+    /// one, and putting ours underneath it would be composing with a named sysroot, which section
+    /// 8.5 does not do.
+    pub kernel: Option<&'a Kernel>,
     /// The host's own include directories, as the driver computes them today.
     ///
     /// Used only when the target is the host. On any other target this field is ignored, and that
@@ -156,6 +173,12 @@ pub fn include_paths(
         } else if let Some(bundled) = options.bundled {
             for path in bundled.includes() {
                 paths.push(Entry { path, origin: Origin::Bundled });
+            }
+            // After the libc's, because a libc header and a kernel header with the same name are
+            // the libc's: `asm/` and `linux/` are the kernel's own names and nothing in a libc
+            // shadows them, while `sys/` exists in both and the libc's is the one a program means.
+            for path in options.kernel.map(Kernel::includes).unwrap_or_default() {
+                paths.push(Entry { path, origin: Origin::Kernel });
             }
         } else if host == Some(target) {
             // The only place a host directory enters, and it is guarded by the target being the
