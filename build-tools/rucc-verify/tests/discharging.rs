@@ -94,6 +94,17 @@ fn a_guard_is_asserted_rather_than_claimed() {
     assert!(asked.contains("(= (bvshl x k) (bvshl x k))"), "{asked}");
 }
 
+/// What a run prints about its budget has to be the budget, or the line is worse than nothing:
+/// a rule reported as unproved is then either false or out of a number the log got wrong.
+#[test]
+fn a_solver_says_how_long_it_is_giving_a_rule() {
+    let Some(solver) = solver() else {
+        return;
+    };
+    assert!(solver.seconds() >= 90, "a rule gets more than it used to, not less");
+    assert_eq!(solver.within(7).seconds(), 7, "and what was asked for is what is given");
+}
+
 #[test]
 fn the_rules_the_design_document_writes_out_are_discharged() {
     let Some(solver) = solver() else {
@@ -201,7 +212,8 @@ const HARD: &str = "\
       (bounded \"division against multiplication is out of reach at sixty four bits\"))";
 
 /// Enough for the narrow widths and not enough for the real one, which is the whole point of
-/// the rule above. Ten seconds is what the tests would otherwise wait for a shrug.
+/// the rule above. The budget a run of the gate uses is five minutes, and five minutes is a long
+/// time for a test to wait for a shrug it is asking for on purpose.
 fn quick_solver() -> Option<Solver> {
     solver().map(|solver| solver.within(2))
 }
