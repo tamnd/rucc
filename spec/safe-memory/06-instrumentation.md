@@ -54,6 +54,21 @@ check_race   %c, %p                     C1/C3, metadata epoch
 
 The size and the alignment are written after the operands the way the parent's document 08 writes them on a `load`, because they are what the front end knew about the access rather than anything the program computed.
 
+**The `restrict` contract.** Judgement J8, specified in document 09 section 9.6, which is a statement about a pair of accesses rather than about one and so is not a conjunct of J1.
+
+```
+check_restrict_read  %p, size n, restrict(c, b)   J8, reading through base b of clique c
+check_restrict_write %p, size n, restrict(c, b)   J8, writing through it
+restrict_enter %slot, size n, restrict(c, k)      a block of clique c declaring k pointers opens
+restrict_leave %slot                              and closes again
+```
+
+Two opcodes rather than one with a flag, because whether the access wrote is the whole of what decides the pair: two reads of one byte through two `restrict` pointers are not a violation of anything. There is no capability operand, because what these read is the record the enclosing block keeps rather than any plane, and the record is found from the clique. The two numbers are the same `rucc_ir::Restrict` the access itself carries, which is what makes the monitor's scope and the optimizer's layer 5 disjointness query the same fact.
+
+The base on `restrict_enter` is how many pointers the block declares rather than which of them this is, since what opens a block has to say how much of the slot to clear. The slot is storage the block owns, sized by `rucc_safe_rt::restrict::Scope`, and it is an operand rather than something the runtime allocates so that a block's promise costs no allocation and unwinds with the frame.
+
+These four are the only safety instructions that write. Every check above reads a plane and leaves it alone, so the optimizer may hoist one out of a loop or keep the later of two identical ones. These record the range they were asked about, so a check that ran twice saw two accesses and a hoisted check saw one. Both rewrites change what the next check answers, and the memory chain is what refuses them.
+
 **Plane maintenance.** These are the writes that keep the planes true and they are *not* removable by the optimizer except by the rules in document 07 section 7.6, because removing one makes a later check wrong rather than merely slower.
 
 ```

@@ -1562,6 +1562,30 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // The two `restrict` checks, which are one pointer and nothing else. No capability,
+            // because what they read is the record the enclosing block keeps rather than any
+            // plane, and the record is found from the clique in the payload.
+            Opcode::CheckRestrictRead | Opcode::CheckRestrictWrite => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                self.names_a_scope(func, inst, opcode);
+            }
+
+            // The markers around a block that declares `restrict` pointers. The operand is the
+            // storage the record lives in, so it is a pointer, and it is the same one both times.
+            Opcode::RestrictEnter => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                self.names_a_scope(func, inst, opcode);
+            }
+            Opcode::RestrictLeave => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+            }
+
             // The plane writes, which are all a range: where it starts and how long it is. No
             // capability, because a plane write is what makes a capability true rather than
             // something checked against one.
@@ -1596,6 +1620,22 @@ impl<'a> Verifier<'a> {
     }
 
     // The small questions the shapes are made of.
+
+    /// Whether the payload of a `restrict` instruction names a scope for the reader to find.
+    ///
+    /// Clique zero is how an access says the names did not tell the front end where its pointer
+    /// came from, and such an access carries no check at all. One that does carry a check and says
+    /// nothing about which scope it is in would be passed by the runtime every time, so it is a
+    /// lowering bug wearing the shape of a check rather than a check.
+    fn names_a_scope(&mut self, func: &'a Func, inst: Inst, opcode: Opcode) {
+        let Extra::Mem(at) = func[inst].extra else { return };
+        if func[at].restrict.clique == 0 {
+            self.error(format!(
+                "{} is in no restrict scope, so it would ask nothing",
+                opcode.name()
+            ));
+        }
+    }
 
     /// Reports the operand count when it is wrong, and answers whether it was right.
     fn takes(&mut self, opcode: Opcode, got: usize, want: usize) -> bool {

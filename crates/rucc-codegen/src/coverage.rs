@@ -160,6 +160,16 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::MetaTypeCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
     (Opcode::MetaInit, "`rucc_safety::lower`, into the call that says a store wrote a range"),
     (Opcode::MetaInitCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
+    // The `restrict` contract, which is judgement J8 and is the one check that records as well as
+    // asks. What it records goes in a slot the block owns, and the two markers are what open and
+    // close that slot, so all four are calls to the runtime the same way.
+    (
+        Opcode::CheckRestrictRead,
+        "`rucc_safety::lower`, into the call that asks what the block has already reached",
+    ),
+    (Opcode::CheckRestrictWrite, "`rucc_safety::lower`, the same call, saying it wrote"),
+    (Opcode::RestrictEnter, "`rucc_safety::lower`, into the call that opens the block's record"),
+    (Opcode::RestrictLeave, "`rucc_safety::lower`, into the call that closes it again"),
     (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
     (Opcode::CapExtentBack, "`rucc_safety::lower`, the same call about the bytes below an address"),
     // The capability the checks were reading, which the same pass takes out once they are calls,

@@ -2207,7 +2207,10 @@ global @x : cap = 0, align 8, linkage(internal)
                 | Opcode::Cmpxchg
                 | Opcode::CheckBounds
                 | Opcode::CheckType
-                | Opcode::CheckInit => ExtraKind::Mem,
+                | Opcode::CheckInit
+                | Opcode::CheckRestrictRead
+                | Opcode::CheckRestrictWrite
+                | Opcode::RestrictEnter => ExtraKind::Mem,
                 Opcode::VaObject => ExtraKind::VaObject,
                 Opcode::MetaBegin => ExtraKind::Class,
                 Opcode::MetaTransfer => ExtraKind::Owner,

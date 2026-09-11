@@ -71,6 +71,9 @@ const ACCESS: u8 = 1;
 /// Judgement J2, which is what a derivation check decides.
 const DERIVE: u8 = 2;
 
+/// Judgement J8, which is what a `restrict` check decides.
+const RESTRICT: u8 = 8;
+
 /// One descriptor, as much of it as this pass knows.
 ///
 /// The `pc` field of the runtime's descriptor is not here. Filling it means a relocation against
@@ -138,6 +141,10 @@ fn calls(
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             Opcode::CheckType => typed(func, names, word, numbers, table, inst),
             Opcode::CheckInit => began(func, names, word, table, inst),
+            Opcode::CheckRestrictRead => promised(func, names, word, table, inst, false),
+            Opcode::CheckRestrictWrite => promised(func, names, word, table, inst, true),
+            Opcode::RestrictEnter => opened(func, names, inst),
+            Opcode::RestrictLeave => closed(func, names, inst),
             Opcode::MetaType => judgement(func, names, word, numbers, inst),
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::MetaInit => written(func, names, word, inst),
@@ -312,6 +319,82 @@ fn began(
     let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
     let params = &[Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_init", params, &[], &[pointer, bytes, desc]);
+}
+
+/// The two numbers in the one word the runtime reads them out of.
+///
+/// `rucc_safe_rt::restrict::tag` is the other half of this and the two have to agree, so the
+/// packing is written down in both places and tested in both. The clique is the high half and the
+/// base is the low one, which puts the number that identifies the scope where a reader of a hex
+/// dump will see it first.
+fn tag(clique: u16, base: u16) -> u32 {
+    (u32::from(clique) << 16) | u32::from(base)
+}
+
+/// `check_restrict_read` and `check_restrict_write` become
+/// `__rucc_check_restrict(pointer, size, tag, write, descriptor)`.
+///
+/// One function for both, because which of them it was is the fourth argument and nothing else.
+/// The runtime needs to know whether the access wrote because two reads of one byte through two
+/// `restrict` pointers are not a violation of anything: the contract is about modification, so the
+/// pair is refused only when at least one half of it wrote.
+///
+/// The scope is not an argument. The runtime finds it from the clique in the tag, walking the
+/// blocks this thread is inside until it reaches the innermost one with that clique, which is what
+/// makes a recursive function's second activation ask about its own promise and not its caller's.
+fn promised(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+    write: bool,
+) {
+    let [pointer] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+    let named = func[mem].restrict;
+
+    let row = Descriptor {
+        judgement: RESTRICT,
+        class: 0,
+        // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
+        size: u16::try_from(size).unwrap_or(u16::MAX),
+    };
+    let desc = record(func, names, table, inst, row);
+    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let small = Type::int(32);
+    let which =
+        konst(func, inst, Imm::int(i128::from(tag(named.clique, named.base)), small), small);
+    let wrote = konst(func, inst, Imm::int(i128::from(u8::from(write)), small), small);
+    let params = &[Type::PTR, word, small, small, Type::PTR];
+    let args = &[pointer, bytes, which, wrote, desc];
+    call(func, names, inst, "__rucc_check_restrict", params, &[], args);
+}
+
+/// `restrict_enter` becomes `__rucc_restrict_enter(scope, tag)`.
+///
+/// No descriptor, for the reason [`judgement`] gives about a plane write: opening a block refuses
+/// nothing, so there is no failure to describe. The base half of the tag is how many pointers the
+/// block declares rather than which of them this is, since the runtime has to know how much of the
+/// slot to clear before the block starts recording into it.
+fn opened(func: &mut Func, names: &mut Interner, inst: Inst) {
+    let [scope] = func[func[inst].args] else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let named = func[mem].restrict;
+    let small = Type::int(32);
+    let which =
+        konst(func, inst, Imm::int(i128::from(tag(named.clique, named.base)), small), small);
+    call(func, names, inst, "__rucc_restrict_enter", &[Type::PTR, small], &[], &[scope, which]);
+}
+
+/// `restrict_leave` becomes `__rucc_restrict_leave(scope)`.
+///
+/// The slot alone, and no numbers, because closing a block is a matter of putting back whatever it
+/// was inside and the slot already says what that was.
+fn closed(func: &mut Func, names: &mut Interner, inst: Inst) {
+    let [scope] = func[func[inst].args] else { return };
+    call(func, names, inst, "__rucc_restrict_leave", &[Type::PTR], &[], &[scope]);
 }
 
 /// `meta_type` becomes `__rucc_meta_type(pointer, size, type)`.
@@ -712,6 +795,142 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off);
         module.add_func(func);
         module
+    }
+
+    /// One instruction that says something and produces nothing, with a payload or without one.
+    fn marker(b: &mut Builder<'_>, opcode: Opcode, info: Option<MemInfo>, on: &[Value]) {
+        let args = b.func().push_values(on);
+        let extra = match info {
+            Some(info) => Extra::Mem(b.func().add_mem(info)),
+            None => Extra::None,
+        };
+        b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
+    }
+
+    /// A module with one function that reaches two objects through two `restrict` pointers.
+    ///
+    /// Built by hand rather than by [`insert`], because nothing puts these in yet: the pass that
+    /// does is the other half of this and it is not written. What this file is about is the calls,
+    /// so what the function has to be is the shape the verifier believes.
+    fn promising(names: &mut Interner) -> Module {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("kernel"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let empty = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        // The slot the block keeps its record in, whose size is `rucc_safe_rt::restrict::Scope`.
+        let slot = MemInfo { size: 112, align: 8, ..empty };
+        let mut b = Builder::new(&mut func, entry);
+        let extra = Extra::Mem(b.func().add_mem(slot));
+        let scope = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+
+        // Two bases of one clique, which is what a function with two `restrict` parameters gets.
+        let read =
+            MemInfo { size: 4, align: 4, restrict: Restrict { clique: 1, base: 2 }, ..empty };
+        let writ =
+            MemInfo { size: 4, align: 4, restrict: Restrict { clique: 1, base: 1 }, ..empty };
+        let opening = MemInfo { restrict: Restrict { clique: 1, base: 2 }, ..slot };
+        marker(&mut b, Opcode::RestrictEnter, Some(opening), &[scope]);
+        marker(&mut b, Opcode::CheckRestrictRead, Some(read), &[from]);
+        let args = b.func().push_values(&[from]);
+        let extra = Extra::Mem(b.func().add_mem(read));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        marker(&mut b, Opcode::CheckRestrictWrite, Some(writ), &[to]);
+        let args = b.func().push_values(&[loaded, to]);
+        let extra = Extra::Mem(b.func().add_mem(writ));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        marker(&mut b, Opcode::RestrictLeave, None, &[scope]);
+        b.ret(&[]);
+
+        let mut module = Module::new(names.intern("kernel.c"), &target());
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn a_restrict_check_becomes_the_call_that_says_which_pointer_reached_where() {
+        // Two descriptors, one per check, because each of them is a judgement that can refuse and a
+        // judgement that refuses has to say what it refused. The two markers have none, for the
+        // reason a plane write has none: opening and closing a block decides nothing.
+        let mut names = Interner::new();
+        let mut module = promising(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 2);
+
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @kernel(ptr, ptr), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr):\n    \
+             %2 = alloca, size 112, align 8\n    \
+             %3 = iconst.i32 65538\n    \
+             call @__rucc_restrict_enter(%2, %3) : (ptr, i32)\n    \
+             %4 = global_addr @__rucc_safety_desc_0\n    \
+             %5 = iconst.i64 4\n    \
+             %6 = iconst.i32 65538\n    \
+             %7 = iconst.i32 0\n    \
+             call @__rucc_check_restrict(%1, %5, %6, %7, %4) : (ptr, i64, i32, i32, ptr)\n    \
+             %8 = load.i32 %1, size 4, align 4, restrict(1, 2)\n    \
+             %9 = global_addr @__rucc_safety_desc_1\n    \
+             %10 = iconst.i64 4\n    \
+             %11 = iconst.i32 65537\n    \
+             %12 = iconst.i32 1\n    \
+             call @__rucc_check_restrict(%0, %10, %11, %12, %9) : (ptr, i64, i32, i32, ptr)\n    \
+             store %8 -> %0, size 4, align 4, restrict(1, 1)\n    \
+             call @__rucc_restrict_leave(%2) : (ptr)\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn the_judgement_a_restrict_check_names_is_the_one_about_the_pair() {
+        // J8 rather than J1. Document 04 section 4.6 keeps this judgement out of J1 on purpose,
+        // because a single access is never the violation: what is refused is a pair of them, and
+        // the reporter prints a different sentence for it.
+        let mut names = Interner::new();
+        let mut module = promising(&mut names);
+        lower(&mut module, &mut names);
+
+        let rows: Vec<u8> = module
+            .globals()
+            .map(|id| {
+                let init = module[id].init.expect("a descriptor is a definition");
+                match module[init][0] {
+                    Datum::Scalar { value, .. } => {
+                        u8::try_from(module[value].bits()).expect("a judgement is one byte")
+                    }
+                    _ => panic!("a descriptor starts with its judgement"),
+                }
+            })
+            .collect();
+        assert_eq!(rows, [RESTRICT, RESTRICT]);
+    }
+
+    #[test]
+    fn the_two_numbers_are_packed_the_way_the_runtime_unpacks_them() {
+        // The other half of this is `rucc_safe_rt::restrict::tag`, and the two agree by both being
+        // written down rather than by one calling the other, since this crate does not depend on
+        // the runtime. A clique in the low half and a base in the high one would be read as a
+        // scope nobody opened, which the runtime would pass and nobody would notice.
+        assert_eq!(tag(1, 2), 0x0001_0002);
+        assert_eq!(tag(0xffff, 0xffff), u32::MAX);
+        assert_eq!(tag(0, 0), 0);
     }
 
     #[test]

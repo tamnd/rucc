@@ -243,6 +243,22 @@ pub enum Opcode {
     CheckDeriv,
     /// The metadata this access is about to consult has not been changed under it.
     CheckRace,
+    /// This read did not reach a byte another `restrict` pointer of the same block wrote.
+    ///
+    /// Judgement J8, which document 09 section 9.6 specifies and which document 04 section 4.6
+    /// keeps out of J1 because it is a statement about a pair of accesses rather than about one.
+    /// The payload holds the size of the access and the two numbers saying which pointer it went
+    /// through, and those are the same two [`crate::Restrict`] carries on the access itself.
+    ///
+    /// Read and write are two opcodes rather than one with a flag on it, because every bit of
+    /// [`crate::Flags`] is spoken for and because the operand would then be a constant the program
+    /// does not compute, which is the thing [`Opcode::CheckBounds`] says belongs in the payload.
+    CheckRestrictRead,
+    /// The same about a write, which is the half of the pair that makes the other half a violation.
+    ///
+    /// Two accesses that both only read are not a violation of anything, so what the scope records
+    /// is which of them wrote and the check refuses a pair only when at least one did.
+    CheckRestrictWrite,
     /// A storage instance begins here, over a range, with a class.
     ///
     /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
@@ -287,6 +303,22 @@ pub enum Opcode {
     SafeRegionBegin,
     /// The end of the region the last `safe_region_begin` opened.
     SafeRegionEnd,
+    /// A block that declares `restrict` pointers begins here, over a slot to keep its record in.
+    ///
+    /// The operand is the storage the record lives in, which is the block's own stack slot, and the
+    /// payload says how large it is. The clique the block was given is [`crate::Restrict::clique`]
+    /// of the payload and how many pointers it declares is [`crate::Restrict::base`], which is the
+    /// one place that field counts bases rather than naming one.
+    ///
+    /// A marker rather than something the front end could fold into the accesses, because the
+    /// promise is about the block's dynamic extent: a function called twice has made the promise
+    /// twice, and what the second call reached says nothing about the first.
+    RestrictEnter,
+    /// The block the last `restrict_enter` opened ends here.
+    ///
+    /// The operand is the same slot, so that the record can be unlinked from whatever encloses it
+    /// without the runtime having to keep a list of its own.
+    RestrictLeave,
 
     // Control. Every one of these is a terminator.
     /// An unconditional branch, `jump block1(%a, %b)`.
@@ -455,6 +487,8 @@ impl Opcode {
             Self::CheckInit => "check_init",
             Self::CheckDeriv => "check_deriv",
             Self::CheckRace => "check_race",
+            Self::CheckRestrictRead => "check_restrict_read",
+            Self::CheckRestrictWrite => "check_restrict_write",
             Self::MetaBegin => "meta_begin",
             Self::MetaEnd => "meta_end",
             Self::MetaType => "meta_type",
@@ -464,6 +498,8 @@ impl Opcode {
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
             Self::SafeRegionEnd => "safe_region_end",
+            Self::RestrictEnter => "restrict_enter",
+            Self::RestrictLeave => "restrict_leave",
             Self::Jump => "jump",
             Self::BrIf => "br_if",
             Self::Switch => "switch",
@@ -741,6 +777,8 @@ impl Opcode {
             | Self::CheckInit
             | Self::CheckDeriv
             | Self::CheckRace
+            | Self::CheckRestrictRead
+            | Self::CheckRestrictWrite
             | Self::MetaBegin
             | Self::MetaEnd
             | Self::MetaType
@@ -749,7 +787,9 @@ impl Opcode {
             | Self::MetaInitCopy
             | Self::MetaTransfer
             | Self::SafeRegionBegin
-            | Self::SafeRegionEnd => Some(0),
+            | Self::SafeRegionEnd
+            | Self::RestrictEnter
+            | Self::RestrictLeave => Some(0),
             _ if self.is_terminator() => Some(0),
             _ => Some(1),
         }
@@ -800,7 +840,13 @@ impl Opcode {
             // pointer and not about a range, so they carry nothing.
             | Self::CheckBounds
             | Self::CheckType
-            | Self::CheckInit => ExtraKind::Mem,
+            | Self::CheckInit
+            // The two `restrict` checks and the marker that opens their scope. The first two carry
+            // the size of the access and the two numbers saying which pointer it went through, and
+            // the third carries the size of the slot and the numbers describing the scope itself.
+            | Self::CheckRestrictRead
+            | Self::CheckRestrictWrite
+            | Self::RestrictEnter => ExtraKind::Mem,
             // The plane writes. What each one needs beyond the range is different, and the range
             // itself is operands, since the length of a variable length array is a value.
             Self::MetaBegin => ExtraKind::Class,
@@ -966,6 +1012,8 @@ static ALL: &[Opcode] = &[
     Opcode::CheckInit,
     Opcode::CheckDeriv,
     Opcode::CheckRace,
+    Opcode::CheckRestrictRead,
+    Opcode::CheckRestrictWrite,
     Opcode::MetaBegin,
     Opcode::MetaEnd,
     Opcode::MetaType,
@@ -975,6 +1023,8 @@ static ALL: &[Opcode] = &[
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
     Opcode::SafeRegionEnd,
+    Opcode::RestrictEnter,
+    Opcode::RestrictLeave,
     Opcode::Jump,
     Opcode::BrIf,
     Opcode::Switch,
@@ -1405,6 +1455,29 @@ mod tests {
             assert!(opcode.has_effects(), "{name}");
             assert!(opcode.touches_memory(), "{name}");
             assert!(!opcode.writes_memory(), "{name}");
+            assert_eq!(opcode.results(), Some(0), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_restrict_check_writes_memory_because_it_records_what_it_saw() {
+        // The one place the sentence above does not hold. Every other check reads a plane and
+        // leaves it alone, so the optimizer may hoist one out of a loop or keep the later of two
+        // identical ones. These record the range they were asked about into the block's own slot,
+        // so a check that ran twice saw two accesses and a check that was hoisted saw one, and
+        // either rewrite changes what the next one answers. Saying they write memory is how the
+        // memory chain refuses both.
+        let recording = [
+            Opcode::CheckRestrictRead,
+            Opcode::CheckRestrictWrite,
+            Opcode::RestrictEnter,
+            Opcode::RestrictLeave,
+        ];
+        for opcode in recording {
+            let name = opcode.name();
+            assert!(opcode.has_effects(), "{name}");
+            assert!(opcode.touches_memory(), "{name}");
+            assert!(opcode.writes_memory(), "{name}");
             assert_eq!(opcode.results(), Some(0), "{name}");
         }
     }
