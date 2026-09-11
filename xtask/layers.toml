@@ -18,6 +18,12 @@
 # there is nothing about C in it.
 rucc-base = 0
 rucc-tuple = 0
+# rucc-archive is beside them and depends on neither. Rank 0 is what makes it reachable from
+# rucc-stub at rank 1, which is why the ar writer is a crate rather than a module: the import
+# libraries there and the builtins archive want the same container, and a third copy of it in the
+# driver would have been the one that drifted. It is also why the interface takes a flavour rather
+# than a target, since rucc-tuple is at rank 0 too and a crate cannot depend on its own rank.
+rucc-archive = 0
 rucc-diag = 1
 # rucc-abi describes what a target's types look like and how its calls are made, over the ten
 # field tuple and nothing else. It was beside rucc-target for as long as neither depended on the
