@@ -500,6 +500,10 @@ struct Sweep {
     rebuild: Vec<Value>,
     /// How many bytes one access covers.
     reach: i128,
+    /// How far past the window's first byte the walk's first access sits, when that is a distance
+    /// the loop works out rather than one written here. Nothing on almost every sweep, because the
+    /// two are the same address. See [`trailing`].
+    ahead: Option<Plain>,
 }
 
 /// One loop to split, worked out before anything is written.
@@ -870,12 +874,15 @@ fn walked(
     // the extent of whatever owns the first iteration's address, so those two have to be the same
     // object. Either the walk starts on the old pointer, which [`started`] is, or the old pointer
     // walks the loop alongside the new one and one window holds the pair, which [`paired`] is.
-    let (apart, reach) = match source {
-        None => (apart, reach),
-        Some(from) if started(base, apart, from) => (apart, reach),
+    let (apart, reach, ahead) = match source {
+        None => (apart, reach, None),
+        Some(from) if started(base, apart, from) => (apart, reach, None),
         Some(from) => match paired(func, scev, id, base, apart, walk, from) {
-            Some(widened) => widened,
-            None => return Err(NOT_FROM_THE_START),
+            Some((apart, reach)) => (apart, reach, None),
+            None => match trailing(func, scev, id, base, apart, walk, from) {
+                Some((apart, ahead)) => (apart, reach, Some(ahead)),
+                None => return Err(NOT_FROM_THE_START),
+            },
         },
     };
     // Whether an offset inside the window means an access inside the object, which is what dropping
@@ -884,7 +891,7 @@ fn walked(
     if !windowed(reach, walk.down()) {
         return Err(NOT_PROVED);
     }
-    Ok(Sweep { check, base, apart, walk, rebuild, reach })
+    Ok(Sweep { check, base, apart, walk, rebuild, reach, ahead })
 }
 
 /// Whether the first iteration's address is a given pointer rather than somewhere along from it.
@@ -943,10 +950,10 @@ fn started(base: Anchor, apart: Plain, from: Value) -> bool {
 /// the one that stays refused: a pointer running away at its own rate is not placed by either
 /// window.
 ///
-/// The displacements have to be numbers. A distance the loop works out is one the guard would have
-/// to work out again in the preheader and compare against a window it also worked out there, and
-/// that is a second question rather than this one. It is the 103 refusals `bench/safety/
-/// a-strided-column-sum.c` is one of, and it is the open box on tamnd/rucc#885.
+/// The displacements have to be numbers here, since putting the window on the lower of the two and
+/// making it as wide as the gap is arithmetic there is no reason to do at run time when the answer
+/// is already known. A gap the loop works out is [`trailing`], which puts the window somewhere else
+/// and hands the guard the subtraction.
 fn paired(
     func: &Func,
     scev: &mut Scev<'_>,
@@ -965,6 +972,54 @@ fn paired(
     let reach = near.abs_diff(far).checked_add(1)?;
     let apart = Plain { value: None, read: None, scale: 0, offset: near.min(far) };
     Some((apart, i128::try_from(reach).ok()?))
+}
+
+/// The same window when the gap between the two pointers is a distance the loop works out.
+///
+/// [`paired`] needs both displacements to be numbers, because it puts the window on the lower of
+/// the two and makes it as wide as the difference, and neither of those is arithmetic worth doing
+/// where the answer is already known. A subscript computed in an outer loop is not a number. On
+/// SQLite that is 103 of the refusals and `bench/safety/a-strided-column-sum.c` is the shape:
+/// `grid[row * COLS + col]` walked down the rows, where the pointer the check names is the
+/// allocation itself and the walk begins `col` elements into it.
+///
+/// What is done instead is to put the window on the pointer the check names, which is the object
+/// the check is about and so the object the query has to be about, and hand the guard the gap to
+/// take off the window it measured. The preheader of the loop being split is where that happens, it
+/// is a multiply and a subtract, and the value being multiplied is one the outer loop already
+/// worked out.
+///
+/// Two things have to hold and both are asked rather than assumed. The pointer the check names has
+/// to stand still, for the reason [`paired`] gives. And the gap has to come out at or above zero,
+/// since a walk beginning below the pointer the window was measured from is a walk into bytes the
+/// extent said nothing about. That second one is not a range the analysis reads, it is a comparison
+/// the guard makes, and it is the one extra instruction this costs over [`paired`].
+///
+/// A walk that goes down is left alone. Its window is measured backwards from the end of the first
+/// access, so the gap would be a claim about bytes on the other side of the pointer and it is a
+/// different argument rather than this one with a sign changed.
+fn trailing(
+    func: &Func,
+    scev: &mut Scev<'_>,
+    id: LoopId,
+    base: Anchor,
+    apart: Plain,
+    walk: Walk,
+    from: Value,
+) -> Option<(Plain, Plain)> {
+    if !matches!(walk, Walk::By(_)) || walk.down() {
+        return None;
+    }
+    let (anchor, behind, along) = following(func, scev, id, from).ok()?;
+    if anchor != base || along != 0 {
+        return None;
+    }
+    let near = flat(behind)?;
+    // Nothing to hand the guard when the walk's own displacement is a number as well, since that is
+    // the case [`paired`] took and this would be a worse answer to it.
+    apart.value.filter(|_| apart.scale != 0)?;
+    let ahead = Plain { offset: apart.offset.checked_sub(near)?, ..apart };
+    Some((Plain { value: None, read: None, scale: 0, offset: near }, ahead))
 }
 
 /// The displacement as a number, when it is nothing but one.
@@ -1599,12 +1654,22 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
                 }
             },
         };
-        let (window, zero) = spare(&mut build, &mut made, sweep, base, &mut asked);
+        let (window, zero, also) = spare(&mut build, &mut made, sweep, base, &mut asked);
         // Every check has to fit for the fast half to be the one that runs, and this is where the
         // hypothesis the rule is asked under is earned: a window worked out from an extent smaller
         // than the reach is one that wrapped, and none of what follows would mean anything.
         let fits = build.icmp(IntPred::Sge, window, zero);
         made.push(fits);
+        // What the sweep asked for beside that, which is nothing on all but the ones [`trailing`]
+        // took and is the gap being at or above zero on those.
+        let fits = match also {
+            None => fits,
+            Some(more) => {
+                let both = build.binary(Opcode::And, fits, more, Flags::NONE);
+                made.push(both);
+                both
+            }
+        };
         ok = Some(match ok {
             None => fits,
             Some(so_far) => {
@@ -1843,7 +1908,7 @@ fn spare(
     sweep: &Sweep,
     base: Value,
     asked: &mut Asked,
-) -> (Value, Value) {
+) -> (Value, Value, Option<Value>) {
     let word = Type::int(64);
     let first = match asked.first(base, sweep.apart) {
         Some(had) => had,
@@ -1912,7 +1977,19 @@ fn spare(
     let left = build.binary(Opcode::Sub, extent, reach, Flags::NSW);
     made.push(left);
     let zero = asked.number(build, made, 0);
-    (left, zero)
+
+    // The gap [`trailing`] left for the guard to work out, which is how far into the window the
+    // walk's first access sits. Taking it off the window is what makes the window one about the
+    // walk again, and asking it to be at or above zero is what says the walk begins inside the
+    // object the window was measured in rather than somewhere below it.
+    let Some(ahead) = sweep.ahead.and_then(|ahead| displacement(build, made, ahead)) else {
+        return (left, zero, None);
+    };
+    let short = build.binary(Opcode::Sub, left, ahead, Flags::NSW);
+    made.push(short);
+    let above = build.icmp(IntPred::Sge, ahead, zero);
+    made.push(above);
+    (short, zero, Some(above))
 }
 
 /// What the preheader has worked out already, so that one question is asked once.
@@ -2347,6 +2424,48 @@ mod tests {
     }
 
     /// Builds the loop, with the exit test against a number or against a second parameter.
+    /// The same loop as [`walking`], with the counter starting at a number the caller handed in.
+    ///
+    /// `a[start + i]` for `i` from nothing up to `TRIPS`, which is the shape an inner loop over a
+    /// row of a matrix has once the outer loop's subscript is folded into the start. What it gives
+    /// the pass is a walk whose displacement off the array is a value rather than a number.
+    fn offsetting(flags: Flags) -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let params = vec![Type::PTR, word];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let start = func.append_param(entry, word);
+        let counter = func.append_param(head, word);
+
+        Builder::new(&mut func, entry).jump(head, &[start]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(word, WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer);
+        let read = build.load(Type::int(32), pointer, mem(), Flags::NONE);
+        let nothing = build.iconst(Type::int(32), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, done, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(word, 1);
+        let next = build.binary(Opcode::Add, counter, one, flags);
+        let times = build.iconst(word, TRIPS);
+        let limit = build.binary(Opcode::Add, start, times, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, done])
+    }
+
     fn walking(times: Option<i128>, flags: Flags) -> (Interner, Func, Vec<Block>) {
         let mut names = Interner::new();
         let mut params = vec![Type::PTR];
@@ -2983,6 +3102,41 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
         assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost the check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_walk_begins_a_handed_distance_into_the_object_is_taken() {
+        // `a[start + i]`, where the check is about `a` and the walk begins `start` elements in. The
+        // window goes on `a`, which is the object the check is about, and the guard takes the gap
+        // off what it measured there and asks for the gap to be at or above zero.
+        let (mut names, mut func, blocks) = offsetting(Flags::NSW);
+        let head = blocks[1];
+        let (array, walked) = arithmetic(&func, head);
+        deriving(&mut func, head, array, walked);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost the check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_pointer_moves_and_whose_walk_begins_a_handed_distance_in_stays() {
+        // Both pointers walk and the distance off the array is not a number, so neither window is
+        // available: the pair cannot be measured against each other and the one that would go on
+        // the pointer the check names needs that pointer to stand still. It is the gap left over.
+        let (mut names, mut func, blocks) = offsetting(Flags::NSW);
+        let head = blocks[1];
+        let (_, walked) = arithmetic(&func, head);
+        let past = stepped(&mut func, head, walked);
+        deriving(&mut func, head, walked, past);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 1);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 2, "the check is in both halves");
         sound(&func, &mut names);
     }
 
