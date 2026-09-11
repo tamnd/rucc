@@ -166,6 +166,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Over the corpus at `-O2` the extra run is worth 3000 bytes across 1830 programs, 224 of them smaller and 4 larger by 22 bytes between them, with all 1876 results unchanged. The largest savings are the `loop-hoist` cases under register pressure at about 126 bytes each, then the twelve wide `register-pressure` loops, the eight way switch lowerings and `baseline.sort` at about 55 each. Measured before the selector learned to fold into every reader at once the same change was worth 3105 bytes, with ten programs larger rather than four, so what the two of them do to the same addresses composes.
 
+### Fixed
+
+- Four passes that remove a use said they left the liveness where it was, and none of them does. `dce` takes an instruction out, `fold` leaves the operands of the instruction it folded read by nobody, `discharge` removes a check that was reading something, and `narrow` writes new values and stops reading the wide ones, and the last reader of a value going is the end of that value's live range. Nothing caught it because no pass ahead of any of them in any pipeline builds the liveness, and an analysis nobody has built is an analysis nobody can be wrong about. The pipeline that does build one is the next one to be written, and a stale live range is the kind of wrong answer that is found a long way from the pass that caused it.
+
+- A claim about what a pass preserved is read with what each analysis is built out of, in the check as well as in the cache. The cache already threw the register pressure away when the liveness it was counted from went, because the counts are derived and the invalidation walk follows the table in `Analysis::needs`. The check did not: it took the claim literally, so a pass that said it broke the liveness and did not think to also say it broke the counts was reported as having lied about counts that were on their way out anyway. Both now read the claim the same way, through one function, and a pass says what it broke once. Three passes that had learned to say it twice say it once again.
+
 ## 0.10.19
 
 ### Changed

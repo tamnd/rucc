@@ -68,7 +68,7 @@
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
 use crate::uses::count;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each subtree redone at the narrow width.
 const NARROWED: &str = "arithmetic redone at the width the program truncates it to";
@@ -99,8 +99,10 @@ impl Pass for Narrow {
 
     fn preserves(&self) -> Preserved {
         // The arithmetic is redone at another width in the block it was already in. Widths are
-        // not something the graph, the trees or the forest have an opinion about.
-        Preserved::ALL
+        // not something the graph, the trees or the forest have an opinion about. Liveness is
+        // another matter: the narrow arithmetic is new values, and the wide values it was
+        // written from are read in one fewer place or in none.
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {

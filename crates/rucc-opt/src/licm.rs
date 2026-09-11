@@ -147,7 +147,7 @@ impl Pass for Licm {
         // No edge moves and no block appears, so everything about the shape of the function is
         // what it was. What changes is where values are live, and that is not a side effect of
         // the transformation, it is the transformation.
-        Preserved::ALL.without(Analysis::Liveness).without(Analysis::Pressure)
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {

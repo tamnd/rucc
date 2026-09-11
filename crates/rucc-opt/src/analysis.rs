@@ -338,20 +338,34 @@ impl Analyses {
         for &analysis in &lied {
             keeps = keeps.without(analysis);
         }
-        // One pass over the list in dependency order. An analysis survives if the pass said so
-        // and everything it is built out of also survived, and because `needs` only ever names
-        // an earlier analysis, the answer for what it needs is already final by the time this
-        // gets here.
-        let mut alive = [false; Analysis::EVERY.len()];
+        let alive = Self::survivors(keeps);
         for &analysis in Analysis::EVERY {
-            let kept =
-                keeps.keeps(analysis) && analysis.needs().iter().all(|&need| alive[need as usize]);
-            alive[analysis as usize] = kept;
-            if !kept {
+            if !alive[analysis as usize] {
                 self.drop(analysis);
             }
         }
         lied
+    }
+
+    /// What a claim leaves standing, once what each analysis is built out of is taken into
+    /// account.
+    ///
+    /// One pass over the list in dependency order. An analysis survives if the pass said so and
+    /// everything it is built out of also survived, and because `needs` only ever names an
+    /// earlier analysis, the answer for what it needs is already final by the time this gets
+    /// there.
+    ///
+    /// Both callers want the claim read this way rather than literally. A pass that says it broke
+    /// the liveness has broken the register pressure with it whether or not it mentions it, so
+    /// the cache has to throw the counts away, and the check below has no business complaining
+    /// about an answer that is on its way out either.
+    fn survivors(keeps: Preserved) -> [bool; Analysis::EVERY.len()] {
+        let mut alive = [false; Analysis::EVERY.len()];
+        for &analysis in Analysis::EVERY {
+            alive[analysis as usize] =
+                keeps.keeps(analysis) && analysis.needs().iter().all(|&need| alive[need as usize]);
+        }
+        alive
     }
 
     /// Throws every analysis away, whatever any pass said.
@@ -383,12 +397,14 @@ impl Analyses {
     ///
     /// Only the ones that are here, because an analysis nobody asked for is one nobody can have
     /// been misled by, and recomputing it to check a claim about it would be the cache doing
-    /// work the compilation never wanted.
+    /// work the compilation never wanted. Only the ones the claim leaves standing, too, for the
+    /// same reason: what is about to be thrown away cannot mislead anybody either.
     fn lies(&self, func: &Func, keeps: Preserved) -> Vec<Analysis> {
+        let alive = Self::survivors(keeps);
         let wanted: Vec<Analysis> = Analysis::EVERY
             .iter()
             .copied()
-            .filter(|&it| self.holds(it) && keeps.keeps(it))
+            .filter(|&it| self.holds(it) && alive[it as usize])
             .collect();
         if wanted.is_empty() {
             return Vec::new();
@@ -544,6 +560,17 @@ mod tests {
         assert!(an.holds(Analysis::Cfg));
         assert!(!an.holds(Analysis::Liveness));
         assert!(!an.holds(Analysis::Pressure), "a count outlived what it counted");
+    }
+
+    #[test]
+    fn a_claim_is_read_with_what_each_analysis_is_built_out_of() {
+        // So `.without(Analysis::Liveness)` is the whole claim a pass that moved a use has to
+        // make. The counts come off the liveness, so they went with it, and a pass that had to
+        // remember to say so twice would be a pass that eventually forgot.
+        let alive = super::Analyses::survivors(Preserved::ALL.without(Analysis::Liveness));
+        assert!(!alive[Analysis::Liveness as usize]);
+        assert!(!alive[Analysis::Pressure as usize], "a count survived what it was counted from");
+        assert!(alive[Analysis::Loops as usize], "the shape of the function did not change");
     }
 
     #[test]

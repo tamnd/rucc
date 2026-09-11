@@ -205,7 +205,7 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Value};
 
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
-use crate::{Analyses, Cfg, Fuel, Pass, Preserved, Stats, heap};
+use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Preserved, Stats, heap};
 
 /// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
@@ -438,8 +438,9 @@ impl Pass for Discharge {
 
     fn preserves(&self) -> Preserved {
         // Instructions go and blocks do not. A check is not a terminator and removing one leaves
-        // every edge where it was.
-        Preserved::ALL
+        // every edge where it was. What it does not leave where it was is the liveness, because
+        // the check was reading something and now nothing is.
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {

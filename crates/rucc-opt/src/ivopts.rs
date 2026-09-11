@@ -160,7 +160,7 @@ impl Pass for Ivopts {
         // what it was. What is not what it was is which values are live where, because a pointer
         // carried round the loop is live round the whole of it, and the counts per register class
         // that come off that.
-        Preserved::ALL.without(Analysis::Liveness).without(Analysis::Pressure)
+        Preserved::ALL.without(Analysis::Liveness)
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
