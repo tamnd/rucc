@@ -97,12 +97,36 @@ impl Set {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
 
+    /// Them, in order.
+    ///
+    /// The empty words are skipped and the set bits of the rest are taken one at a time rather than
+    /// by testing all sixty four. A set has a word per sixty four values in the whole function, so
+    /// testing every bit of every word costs the size of the function every time somebody asks what
+    /// is live somewhere, whatever the answer turns out to be, and on a function of a hundred and
+    /// ninety thousand instructions that was most of an optimized compile. tamnd/rucc#1015.
     fn iter(&self) -> impl Iterator<Item = Value> + use<'_> {
-        self.words.iter().enumerate().flat_map(|(at, &word)| {
-            (0..64)
-                .filter(move |bit| word & (1 << bit) != 0)
-                .map(move |bit| Value::new((at * 64 + bit) as u32))
+        self.words.iter().enumerate().filter(|&(_, &word)| word != 0).flat_map(|(at, &word)| {
+            Bits(word).map(move |bit| Value::new((at * 64 + bit as usize) as u32))
         })
+    }
+}
+
+/// The set bits of one word, lowest first.
+///
+/// `trailing_zeros` finds the next one and clearing the lowest set bit moves past it, so the work
+/// is one step per bit that is there rather than one per bit there could be.
+struct Bits(u64);
+
+impl Iterator for Bits {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros();
+        self.0 &= self.0 - 1;
+        Some(bit)
     }
 }
 
