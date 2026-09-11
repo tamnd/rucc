@@ -195,6 +195,7 @@ options:
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu|zstd] -gno-split-dwarf   compress debug sections, one file not two
+  -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
@@ -916,6 +917,54 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.prefix_map.debug.push(old, new);
                 opts.prefix_map.profile.push(old, new);
             }
+            // A whole optimization rather than a flag, and the family is taken rather than
+            // refused because of what ignoring it does. There is none of it here yet, so a build
+            // that asks for it gets a program that is correct and slower than it could have been,
+            // which is what section 4.1 means by a hint about speed and what every compilation at
+            // `-O0` already is. The objects settle the rest of the argument: gcc's `-flto` object
+            // holds the bytecode and no machine code at all, and every object here holds the code,
+            // which is exactly what `-ffat-lto-objects` asks gcc for. So a build passing `-flto`
+            // to this compiler gets objects that are more usable than the ones it asked for rather
+            // than different ones. Every value is still checked against gcc's, because somebody
+            // who wrote `-flto=thin` meant clang and had better hear about it here.
+            "-flto" => opts.lto.requested = true,
+            "-fno-lto" => opts.lto.requested = false,
+            _ if arg.starts_with("-flto=") => {
+                let how = &arg["-flto=".len()..];
+                opts.lto.jobs = how.parse().map_err(|()| {
+                    err(format!(
+                        "`{how}` is not a number of link time jobs, which is auto, jobserver or a \
+                         count above zero"
+                    ))
+                })?;
+                opts.lto.requested = true;
+            }
+            _ if arg.starts_with("-flto-partition=") => {
+                let how = &arg["-flto-partition=".len()..];
+                opts.lto.partition = how.parse().map_err(|()| {
+                    err(format!(
+                        "`{how}` is not a partitioning model, which is balanced, 1to1, one, max \
+                         or none"
+                    ))
+                })?;
+            }
+            _ if arg.starts_with("-flto-compression-level=") => {
+                let how = &arg["-flto-compression-level=".len()..];
+                let level =
+                    how.parse::<u8>().ok().filter(|level| *level <= 19).ok_or_else(|| {
+                        err(format!("`{how}` is not a compression level, 0 to 19"))
+                    })?;
+                opts.lto.compression = Some(level);
+            }
+            // Whether the object keeps its machine code as well as the bytecode. It always does
+            // here, so the first of these describes what happens and the second asks for an object
+            // with less in it, which is a smaller file and not a different program, so both are
+            // taken.
+            "-ffat-lto-objects" | "-fno-fat-lto-objects" => {}
+            // Whether the linker is handed a plugin that does the link time work. The design in
+            // `spec/09-optimizer.md` has this driver doing that work itself and never loading a
+            // plugin into anybody, so neither answer is a question it has to hold.
+            "-fuse-linker-plugin" | "-fno-use-linker-plugin" => {}
             // What every name gets when nothing in the source said, which the attribute in the
             // source overrides rather than the other way round. Before the optimizer's `-f`
             // family below for the reason the tier below it is.
@@ -2015,7 +2064,9 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use rucc_session::{Contract, GnucVersion, IncludeForm, OptLevel, Patchable, Visibility};
+    use rucc_session::{
+        Contract, GnucVersion, IncludeForm, LtoJobs, OptLevel, Partition, Patchable, Visibility,
+    };
 
     use super::*;
 
@@ -3426,6 +3477,84 @@ mod tests {
         assert!(failed.contains(".dwo"), "the refusal names the file it would have written");
     }
 
+    /// The `-flto` family, which is the whole of an optimization this compiler does not do.
+    ///
+    /// Taken rather than refused because ignoring it gives a correct program that is slower than
+    /// it could have been, which is section 4.1's hint about speed. The values are still held to
+    /// gcc's, so a command line written for clang is told rather than quietly taken.
+    #[test]
+    fn the_link_time_family_is_read_and_checked_and_nothing_is_done_about_it() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.lto.requested, "nothing asks unless the command line does");
+
+        let (opts, _) = compile(&["-flto", "-c", "a.c"]);
+        assert!(opts.lto.requested);
+        assert_eq!(opts.lto.jobs, LtoJobs::One, "bare -flto is one process, the way gcc reads it");
+
+        // The last of the two directions wins, the same as every other pair of `-f` spellings.
+        assert!(!compile(&["-flto", "-fno-lto", "-c", "a.c"]).0.lto.requested);
+        assert!(compile(&["-fno-lto", "-flto", "-c", "a.c"]).0.lto.requested);
+
+        // A count is a count, and asking for one implies asking for the optimization.
+        for (spelling, want) in [
+            ("auto", LtoJobs::Auto),
+            ("jobserver", LtoJobs::Jobserver),
+            ("1", LtoJobs::One),
+            ("8", LtoJobs::Count(8)),
+        ] {
+            let (opts, _) = compile(&[&format!("-flto={spelling}"), "-c", "a.c"]);
+            assert_eq!(opts.lto.jobs, want, "{spelling}");
+            assert!(opts.lto.requested, "{spelling} asks for it too");
+        }
+
+        // gcc refuses a zero rather than reading it as `-fno-lto`, and `thin` is clang's spelling
+        // of a question gcc answers with `-flto-partition=`, so somebody who wrote it meant a
+        // different compiler and gets told so here rather than getting a serial link.
+        for bad in ["-flto=0", "-flto=thin", "-flto=full", "-flto=-1"] {
+            let failed = refused(&[bad, "-c", "a.c"]);
+            assert!(failed.contains("link time jobs"), "{bad}: {failed}");
+        }
+
+        // How the program is cut up before the work is spread over it.
+        assert_eq!(compile(&["-c", "a.c"]).0.lto.partition, Partition::Balanced, "gcc's default");
+        for (spelling, want) in [
+            ("balanced", Partition::Balanced),
+            ("1to1", Partition::OneToOne),
+            ("one", Partition::One),
+            ("max", Partition::Max),
+            ("none", Partition::None),
+        ] {
+            let (opts, _) = compile(&[&format!("-flto-partition={spelling}"), "-c", "a.c"]);
+            assert_eq!(opts.lto.partition, want, "{spelling}");
+        }
+        assert!(refused(&["-flto-partition=big", "-c", "a.c"]).contains("partitioning model"));
+
+        // And how hard the bytecode is compressed on its way into the object, which is zstd's
+        // range of levels and is the range gcc checks an argument against.
+        assert_eq!(compile(&["-c", "a.c"]).0.lto.compression, None, "whatever it does by default");
+        assert_eq!(compile(&["-flto-compression-level=0", "-c", "a.c"]).0.lto.compression, Some(0));
+        let (opts, _) = compile(&["-flto-compression-level=19", "-c", "a.c"]);
+        assert_eq!(opts.lto.compression, Some(19));
+        for bad in ["-flto-compression-level=20", "-flto-compression-level=-1"] {
+            let failed = refused(&[bad, "-c", "a.c"]);
+            assert!(failed.contains("compression level"), "{bad}: {failed}");
+        }
+
+        // The two pairs that describe an arrangement rather than ask for one. Every object here
+        // holds its machine code, so the fat spelling is what already happens and the other is a
+        // smaller file rather than a different program, and the plugin pair is about a tool the
+        // design in `spec/09-optimizer.md` never loads.
+        for taken in [
+            "-ffat-lto-objects",
+            "-fno-fat-lto-objects",
+            "-fuse-linker-plugin",
+            "-fno-use-linker-plugin",
+        ] {
+            let (opts, _) = compile(&[taken, "-c", "a.c"]);
+            assert!(!opts.lto.requested, "{taken} says nothing about whether to do it");
+        }
+    }
+
     #[test]
     fn the_levels_gcc_spells_differently_are_the_levels_they_mean() {
         assert_eq!(compile(&["-O", "-c", "a.c"]).0.opt_level, OptLevel::O1);
@@ -3753,7 +3882,10 @@ mod tests {
         // the debug output, where the line above them is about how much of it there is. The one it
         // went up by last is the `restrict` contract, which is a setting for the same reason the
         // flag that keeps a write inside its member is and which is the check a person who has been
-        // bitten by a vectorizer comes here looking for.
-        assert!(USAGE.lines().count() < 64, "usage text has grown past one screen");
+        // bitten by a vectorizer comes here looking for. The one it went up by last is link time
+        // optimization, which is a whole optimization rather than a flag and which says so on its
+        // own line, because a build that passes it and reads this looking for what it got is
+        // asking a question no other line here answers.
+        assert!(USAGE.lines().count() < 65, "usage text has grown past one screen");
     }
 }

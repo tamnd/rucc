@@ -458,6 +458,153 @@ impl FromStr for Compress {
     }
 }
 
+/// How many processes the link time work is spread over, which is what `-flto=` takes.
+///
+/// Named for the flag rather than for what it counts, because `Jobs` in the driver is already the
+/// answer to how many files are compiled at once and the two numbers are not the same number.
+///
+/// The link time half of link time optimization is where all of the time goes, because it is the
+/// half that has the whole program in front of it, and gcc's answer is to cut the program into
+/// pieces and generate code for the pieces at once. This says how many at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LtoJobs {
+    /// Bare `-flto`, and `-flto=1`. One process, which is what gcc does when the flag is written
+    /// without a number after it.
+    #[default]
+    One,
+    /// `-flto=auto`. As many as the machine has, worked out when the link runs.
+    Auto,
+    /// `-flto=jobserver`. As many as `make` is willing to hand out, asked for through the
+    /// jobserver pipe it puts in the environment, which is the only answer that does not fight
+    /// with the rest of a parallel build for the same cores.
+    Jobserver,
+    /// `-flto=<n>`. Exactly that many. gcc refuses a zero, so this is never one.
+    Count(u32),
+}
+
+impl FromStr for LtoJobs {
+    type Err = ();
+
+    /// Parses the part after `-flto=`. A number has to be positive, which is gcc's rule: `-flto=0`
+    /// is refused rather than read as `-fno-lto`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "auto" => LtoJobs::Auto,
+            "jobserver" => LtoJobs::Jobserver,
+            _ => match s.parse::<u32>() {
+                Ok(1) => LtoJobs::One,
+                Ok(n) if n > 1 => LtoJobs::Count(n),
+                _ => return Err(()),
+            },
+        })
+    }
+}
+
+impl fmt::Display for LtoJobs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LtoJobs::One => f.write_str("1"),
+            LtoJobs::Auto => f.write_str("auto"),
+            LtoJobs::Jobserver => f.write_str("jobserver"),
+            LtoJobs::Count(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+/// How the program is cut up before the link time work is spread over it, from `-flto-partition=`.
+///
+/// A partition is a set of functions that are generated together, and where the cuts fall decides
+/// both how well the work spreads and how much is visible from inside one piece. The names are
+/// gcc's and so are the shapes: one piece per input file, pieces balanced by size, one piece for
+/// the whole program, a piece per function, or no partitioning at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Partition {
+    /// `-flto-partition=balanced`, and what gcc does when nothing asks. Pieces of roughly equal
+    /// size, which is the answer that spreads the work best and is why it is the default.
+    #[default]
+    Balanced,
+    /// `-flto-partition=1to1`. One piece per input file, which keeps the generated code in the
+    /// same order the inputs were in and is what a build comparing two outputs wants.
+    OneToOne,
+    /// `-flto-partition=one`. The whole program in one piece, which is the most the optimizer can
+    /// see at once and the least the work can be spread over.
+    One,
+    /// `-flto-partition=max`. A piece per function, which is the other end of the same trade.
+    Max,
+    /// `-flto-partition=none`. No partitioning, and no streaming back out to be generated in
+    /// pieces either.
+    None,
+}
+
+impl Partition {
+    /// The spelling this is asked for by, without the `-flto-partition=` in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Partition::Balanced => "balanced",
+            Partition::OneToOne => "1to1",
+            Partition::One => "one",
+            Partition::Max => "max",
+            Partition::None => "none",
+        }
+    }
+}
+
+impl fmt::Display for Partition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Partition {
+    type Err = ();
+
+    /// Parses the part after `-flto-partition=`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "balanced" => Partition::Balanced,
+            "1to1" => Partition::OneToOne,
+            "one" => Partition::One,
+            "max" => Partition::Max,
+            "none" => Partition::None,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// What the `-flto` family asked for, which is a whole optimization this compiler does not do yet.
+///
+/// Link time optimization is the optimizer run once over the whole program instead of once per
+/// translation unit, which is the only way an inliner ever sees across a file boundary and is
+/// where most of what is left on the table after `-O2` is. `spec/09-optimizer.md` says how it will
+/// work here: the IR goes into a section of the object, the driver finds those sections at link
+/// time, merges them into one module and generates code with everything visible.
+///
+/// None of that exists, so the whole family is read, checked and recorded rather than acted on.
+/// That is a different answer from the one `-gsplit-dwarf` gets in the same specification, and the
+/// difference is what ignoring each of them does. Ignoring `-gsplit-dwarf` means a file a build
+/// asked for never appears. Ignoring this means a program that is correct and slower than it could
+/// have been, which is what section 4.1 means by a hint about speed, and which is also what every
+/// compilation at `-O0` already is.
+///
+/// The other half of the argument is about the object. gcc's `-flto` object holds the bytecode and
+/// no machine code at all, so it is only useful to a link that knows about it; the objects here
+/// always hold the code, which is what `-ffat-lto-objects` asks gcc for. So a build that passes
+/// `-flto` to this compiler gets objects that are strictly more usable than the ones it would have
+/// got, rather than different ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lto {
+    /// Whether the last of `-flto` and `-fno-lto` on the command line was the first of the two.
+    pub requested: bool,
+    /// How many processes to spread the link time work over.
+    pub jobs: LtoJobs,
+    /// How the program is cut up before the work is spread.
+    pub partition: Partition,
+    /// How hard to compress the IR on its way into the object, from `-flto-compression-level=`,
+    /// where `None` means whatever the compressor does when nobody says. Between 0 and 19, which
+    /// is zstd's range and is the range gcc checks against.
+    pub compression: Option<u8>,
+}
+
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.
 ///
 /// A canary is a word the prologue copies into the frame above everything a local can be written
@@ -1410,6 +1557,8 @@ pub struct Options {
     /// Nothing reads this yet because nothing writes a debug section yet. It is the same shape of
     /// answer `prefix_map.debug` is, and it is waiting for the same crate.
     pub compress: Compress,
+    /// What the `-flto` family asked for, which nothing does yet.
+    pub lto: Lto,
     /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer`.
     ///
     /// Off by default, which is what gcc does at every level above `-O0` and what leaves the
@@ -1734,6 +1883,7 @@ impl Options {
             emit: EmitKind::default(),
             debug_info: false,
             compress: Compress::None,
+            lto: Lto::default(),
             frame_pointer: false,
             red_zone: true,
             protector: Protector::default(),
