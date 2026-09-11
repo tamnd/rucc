@@ -384,11 +384,15 @@ mod tests {
 
     #[test]
     fn every_file_of_ours_is_under_the_sysroot() {
-        for arg in line("aarch64-linux-musl", LinkMode::Static) {
+        let spelling = "aarch64-linux-musl";
+        // The prefix as this host spells it rather than as a literal, because the question is which
+        // directory these files are in and a Windows separator is a backslash.
+        let root = sysroot(spelling).root().display().to_string();
+        for arg in line(spelling, LinkMode::Static) {
             // The caller's own `main.o` is relative and is theirs. Everything this function named
             // is absolute, and every absolute file on the line is under the sysroot.
             let ours = arg.starts_with('/') && (arg.ends_with(".o") || arg.ends_with(".a"));
-            assert!(!ours || arg.starts_with("/cache/sysroots/"), "{arg}");
+            assert!(!ours || arg.starts_with(&root), "{arg}");
         }
     }
 
