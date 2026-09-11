@@ -11,18 +11,25 @@ use std::process::{Command, Stdio};
 
 /// How long one query gets before the answer is [`Answer::Unknown`], in seconds.
 ///
-/// Ninety, and the number is measured rather than picked. The most expensive rule in the tree is
-/// the `reached` rule in `crates/rucc-opt/rules/safety.rules`, the one about a walk the ranges
-/// bound, which asks about two free addresses and three bounded byte counts at sixty four bits.
-/// z3 settles it in between twelve and sixteen seconds on a laptop. A CI runner is slower than a
-/// laptop by a factor nobody controls, and the ten seconds this used to be was under that rule's
-/// cost on both, which is how a rule that is true and provable got reported as unproved and
-/// stopped the build.
+/// Five minutes, and the number is measured rather than picked. Of the 571 rules the gate is
+/// given, all but five are settled in well under a second each, and whole files of them come back
+/// in under a second together. Four of the five are in `crates/rucc-opt/rules/safety.rules` and
+/// ask about a walk over an object at sixty four bits: five seconds each for `swept` and
+/// `swept.sym`, twenty for `reached`, and fifty four for `swept.down.sym`, which is the largest
+/// claim in the tree. That is z3 5.1.0 on a laptop with nothing else running. The fifth is the
+/// multiply against division in `crates/rucc-codegen/rules/x86-64.rules`, which no budget settles
+/// and which carries a written reason for the bounded proof it gets instead.
+///
+/// The same solver on a six core Linux box, which is the class of machine CI runs on, costs
+/// twenty four seconds for `reached` and between seventy five and eighty three for the downward
+/// sweep. Eighty three against the ninety this used to be is not a budget, it is a race the
+/// slower machine sometimes loses, and losing it reads as a rule nobody has proved. That is how
+/// the same tree proved and failed to prove minutes apart. tamnd/rucc#949.
 ///
 /// The cost of a limit this loose is paid only by a rule that is genuinely not going to settle,
 /// and that rule stops the build either way. The cost of one too tight is a rule that is fine
 /// being reported as unproved, which reads as a real problem and is not one.
-const DEFAULT: u32 = 90;
+const DEFAULT: u32 = 300;
 
 /// A solver that was found.
 #[derive(Debug, Clone)]
@@ -69,6 +76,16 @@ impl Solver {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.program
+    }
+
+    /// How long a rule is being given, for the same report.
+    ///
+    /// A run that says what the budget was is a run whose shrug can be read. Without it, a rule
+    /// reported as unproved is either a rule that is false or a rule that ran out of a number
+    /// nobody printed, and telling those apart is the whole difficulty of tamnd/rucc#949.
+    #[must_use]
+    pub fn seconds(&self) -> u32 {
+        self.seconds
     }
 
     /// Ask one question.

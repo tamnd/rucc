@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 use std::{fs, io};
 
 use rucc_rules::{Matcher, parse};
@@ -105,7 +106,7 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
         eprintln!("rucc-verify: no solver on PATH, and this is the one place that is an error");
         return Ok(ExitCode::FAILURE);
     };
-    println!("rucc-verify: asking {}", solver.name());
+    println!("rucc-verify: asking {}, {} seconds a rule", solver.name(), solver.seconds());
 
     let mut refused = 0;
     let mut bounded = 0;
@@ -146,16 +147,25 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
             }
         };
 
+        // Timed, because the cost of a file is the one thing a run of this cannot be read off
+        // afterwards and is the thing that creeps. A rule that has grown until it is close to the
+        // budget looks exactly like a rule that is nowhere near it until the day it goes over, and
+        // then it looks like a rule that is false.
+        let started = Instant::now();
         match admit(&shown, &rules, &model, &solver) {
             Ok(report) => {
-                println!("{shown}: {report}");
+                println!("{shown}: {report}, in {:.0} seconds", started.elapsed().as_secs_f64());
                 bounded += report.bounded();
                 listing.extend(listed(&shown, &rules, &report));
             }
             Err(errors) => {
                 report(&errors);
                 let count = rules.len();
-                println!("{shown}: {count} {}, and not every one is proved", named(count, "rule"));
+                let took = started.elapsed().as_secs_f64();
+                let rules = named(count, "rule");
+                println!(
+                    "{shown}: {count} {rules} in {took:.0} seconds, and not every one is proved"
+                );
                 refused += 1;
             }
         }
