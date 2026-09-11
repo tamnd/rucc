@@ -35,11 +35,26 @@
 //! # What is here so far
 //!
 //! The stamp, the clock and the plane's arithmetic, with the shadow handed in, which is the
-//! division [`crate::plane`] explains and the other two planes follow. Nothing maps this plane yet
-//! and nothing stamps anything, so no program is watched by it. Mapping it over every watched
-//! region beside the other three, and the judgements that report what it finds, are the next box of
-//! milestone S5.
+//! division [`crate::plane`] explains and the other two planes follow. The plane is mapped over
+//! every watched region beside the other three, an instance forgets its stamps when it begins, each
+//! thread has a clock of its own in the slot [`crate::tls`] keeps, and
+//! [`crate::check::stamped`] is the judgement a store through a pointer shaped slot makes.
+//!
+//! What is missing is every reader. Nothing asks [`unordered`] or [`torn`] anything, so no program
+//! is refused on this plane's account, and judgements C1 through C4 are the next box of milestone
+//! S5. The compiler's half is missing with them: no generated code calls `__rucc_meta_epoch` yet,
+//! so the plane a program runs with is empty unless the C library wrappers filled it. That is the
+//! same order the type plane and the init plane went in, and it is the order that keeps a plane's
+//! arithmetic reviewable on its own.
+//!
+//! The other missing piece is the one edge between threads. [`sync`] is what an interposed lock
+//! calls and nothing interposes a lock yet, so until document 10's synchronization primitives are
+//! wrapped every thread's clock is only its own counting and two threads go on looking concurrent
+//! after their first meeting. That direction loses reports rather than inventing them, which is the
+//! direction everything else here goes in too.
 
+#[cfg(unix)]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A thread number and that thread's own count of its metadata stores, in sixty four bits.
@@ -225,6 +240,108 @@ impl Clock {
     }
 }
 
+/// Where thread numbers come from, for the whole process.
+#[cfg(unix)]
+static NUMBERS: Threads = Threads::new();
+
+/// Each thread's own clock, as the stamp it would write next.
+///
+/// The stamp is the whole of a [`Clock`], so what is kept per thread is the stamp itself and not a
+/// pointer to one. That is why this can live in the slot [`crate::tls`] already has: nothing is
+/// allocated, nothing has to outlive anything, and reading the clock is the one call that module
+/// says it is.
+#[cfg(unix)]
+static CLOCK: crate::tls::Slot = crate::tls::Slot::new();
+
+/// The stamp travels in a slot the size of a pointer, which is what makes keeping it free.
+///
+/// A target whose pointer is narrower would lose the top of the thread number and would start
+/// calling two threads one, so it is refused here rather than at the point where the reports go
+/// quietly missing. Nothing else in this crate would work on such a target either: a granule is
+/// eight bytes because that is a pointer.
+#[cfg(unix)]
+const _: () = assert!(
+    size_of::<usize>() >= size_of::<Stamp>(),
+    "the epoch plane wants a pointer at least as wide as a stamp"
+);
+
+/// Whether the thread local turned out to keep nothing, so that nobody asks it twice.
+///
+/// A process out of `pthread` keys, which [`crate::tls`] degrades to an empty slot for. Without
+/// this latch every call would find the slot empty, take a fresh thread number and look like a new
+/// thread, which walks through the range in a few thousand calls and leaves behind stamps that are
+/// each other's strangers.
+#[cfg(unix)]
+static KEYLESS: AtomicBool = AtomicBool::new(false);
+
+/// This thread's clock, made on first use, or `None` when there is nowhere to keep one.
+///
+/// A thread that has not asked before takes a number here, which is the only place numbers are
+/// handed out.
+///
+/// `None` is the whole degradation for a process with no thread local, and the callers turn it into
+/// [`NONE`], which is a word this plane says nothing about. That is the right direction and it is
+/// the one this file takes everywhere else: the alternative is stamps whose thread numbers mean
+/// nothing, which would report on programs with no race in them.
+#[cfg(unix)]
+fn mine() -> Option<Clock> {
+    if KEYLESS.load(Ordering::Relaxed) {
+        return None;
+    }
+    let held = CLOCK.get() as usize as Stamp;
+    if held != NONE {
+        return Some(Clock { thread: thread(held), count: clock(held) });
+    }
+    let fresh = Clock::new(NUMBERS.next());
+    keep(fresh);
+    if CLOCK.get() as usize as Stamp == NONE {
+        KEYLESS.store(true, Ordering::Relaxed);
+        return None;
+    }
+    Some(fresh)
+}
+
+/// Writes `clock` back as this thread's.
+#[cfg(unix)]
+fn keep(clock: Clock) {
+    // SAFETY: the slot holds a stamp rather than an address and nothing reads through what is
+    // stored, so there is nothing for it to outlive.
+    unsafe { CLOCK.set(clock.now() as usize as *mut core::ffi::c_void) };
+}
+
+/// The stamp this thread should write for a metadata store it is making.
+///
+/// The counting half of every judgement that records something, and the reason a store goes through
+/// one function rather than reading the clock and writing the plane as two separate things.
+#[cfg(unix)]
+pub fn tick() -> Stamp {
+    let Some(mut clock) = mine() else { return NONE };
+    let stamp = clock.tick();
+    keep(clock);
+    stamp
+}
+
+/// The stamp this thread stands at, for a read that wants to compare rather than to record.
+#[cfg(unix)]
+#[must_use]
+pub fn here() -> Stamp {
+    mine().map_or(NONE, |clock| clock.now())
+}
+
+/// Takes the ordering an acquired lock carries, for this thread.
+///
+/// The process wide half of [`Clock::sync`], and the thing document 10's interposed synchronization
+/// primitives call. Nothing calls it yet, because nothing interposes a lock yet, and until something
+/// does every thread's clock is only its own counting, so every pair of threads goes on looking
+/// concurrent after their first meeting. That is the direction that loses reports rather than
+/// inventing them, and it is the first thing the judgements will want.
+#[cfg(unix)]
+pub fn sync(seen: Stamp) {
+    let Some(mut clock) = mine() else { return };
+    clock.sync(seen);
+    keep(clock);
+}
+
 /// How many bytes of program memory one stamp covers.
 ///
 /// Eight, which is the size of a pointer on both of the parent's sixty four bit targets and so is
@@ -289,6 +406,29 @@ impl Epochs {
         unsafe { self.cell(addr).store(stamp, Ordering::Relaxed) }
     }
 
+    /// Records that `stamp` wrote every granule `[at, at + len)` touches.
+    ///
+    /// A granule at either end that the range only covers part of is stamped whole, and that is the
+    /// plane's granularity rather than a rounding error. What keeps it from reporting on two threads
+    /// writing neighbouring bytes is which stores reach here at all: this plane is asked about
+    /// pointer shaped words, an aligned pointer word is a granule, and a granule two threads share is
+    /// one holding no pointer and so one no judgement asks about.
+    ///
+    /// # Safety
+    ///
+    /// The range is inside the mapping this plane was built for.
+    pub unsafe fn fill(&self, at: usize, len: usize, stamp: Stamp) {
+        if len == 0 {
+            return;
+        }
+        let lo = at - at % GRANULE;
+        for granule in 0..(at - lo + len).div_ceil(GRANULE) {
+            // SAFETY: the caller says the range is mapped, so every granule it covers has a slot,
+            // and the walk stops at the last of them.
+            unsafe { self.write(lo + granule * GRANULE, stamp) }
+        }
+    }
+
     /// Forgets everything about `[lo, lo + len)`, which is what an instance beginning there means.
     ///
     /// # Safety
@@ -296,11 +436,8 @@ impl Epochs {
     /// `lo` is granule aligned and the range is inside the mapping this plane was built for.
     pub unsafe fn clear(&self, lo: usize, len: usize) {
         debug_assert!(lo % GRANULE == 0, "a storage instance starts on a granule");
-        for granule in 0..len.div_ceil(GRANULE) {
-            // SAFETY: the caller says the range is mapped, so every granule it covers has a slot,
-            // and the walk stops at the last of them.
-            unsafe { self.write(lo + granule * GRANULE, NONE) }
-        }
+        // SAFETY: the caller's, passed straight on.
+        unsafe { self.fill(lo, len, NONE) }
     }
 
     /// The slot for `addr` as something two threads may touch at once.
@@ -366,6 +503,11 @@ mod tests {
         fn clear(&self, offset: usize, len: usize) {
             // SAFETY: as above.
             unsafe { self.plane.clear(self.base + offset, len) }
+        }
+
+        fn fill(&self, offset: usize, len: usize, stamp: Stamp) {
+            // SAFETY: as above.
+            unsafe { self.plane.fill(self.base + offset, len, stamp) }
         }
 
         fn slot(&self, offset: usize) -> usize {
@@ -488,6 +630,43 @@ mod tests {
             assert_eq!(fake.read(offset), NONE, "granule at {offset} still remembers");
         }
         assert_eq!(fake.read(64), stamp(2, 3), "and the instance beside it is untouched");
+    }
+
+    #[test]
+    fn a_store_that_covers_part_of_a_granule_stamps_it_whole() {
+        // The plane's granularity, said out loud. What keeps this from reporting on two threads
+        // writing neighbouring bytes is which stores reach the plane at all, which is the note on
+        // `Epochs::fill`, and not the arithmetic here.
+        let fake = Fake::new(64);
+        let of = stamp(1, 3);
+
+        fake.fill(3, 2, of);
+        assert_eq!(fake.read(0), of, "the bytes below the store are in the same granule");
+        assert_eq!(fake.read(GRANULE - 1), of, "and so are the bytes above it");
+        assert_eq!(fake.read(GRANULE), NONE, "and the next granule is nobody's");
+
+        fake.fill(GRANULE - 1, 2, of);
+        assert_eq!(fake.read(GRANULE), of, "a store across the line stamps both sides");
+
+        fake.fill(GRANULE * 4, 0, of);
+        assert_eq!(fake.read(GRANULE * 4), NONE, "and a store of nothing stamps nothing");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_counts_its_own_stores_and_another_thread_is_not_it() {
+        // The clock the judgements will stamp with, over the thread local the crate already has.
+        // Two threads getting one number is the failure that matters, because it is the one that
+        // makes a race look like a thread writing its own memory twice.
+        let first = tick();
+        let second = tick();
+        assert_eq!(thread(first), thread(second), "one thread keeps its number");
+        assert!(clock(second) > clock(first), "and counts what it stores");
+        assert_eq!(here(), second, "and asking without storing counts nothing");
+
+        let theirs = std::thread::spawn(tick).join().expect("the thread ran");
+        assert_ne!(thread(theirs), thread(first));
+        assert_ne!(thread(theirs), 0, "and it is a real number rather than nobody's");
     }
 
     #[test]

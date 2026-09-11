@@ -47,6 +47,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::alloc;
+use crate::epoch;
 use crate::fail::Judgement;
 use crate::init;
 use crate::plane::{self, Counter, GRANULE, SLOT, Version};
@@ -95,19 +96,21 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
     if hi <= lo || alloc::overlaps(lo, hi) {
         return false;
     }
-    // All three planes and the side table in one mapping, in the order `alloc::reserve` puts them,
+    // All four planes and the side table in one mapping, in the order `alloc::reserve` puts them,
     // so that an adopted region is watched exactly as closely as one this crate reserved itself. A
-    // region that cannot have all four is not taken on at all, which is the same answer the three
+    // region that cannot have all five is not taken on at all, which is the same answer the three
     // refusals above give and leaves the storage where it was.
     let len = hi - lo;
     let under = alloc::shadow(len);
     let typed = alloc::typing(len);
     let sided = alloc::siding(len);
     let inited = alloc::initing(len);
+    let epoched = alloc::epoching(len);
     let Some(planes) = under
         .checked_add(typed)
         .and_then(|at| at.checked_add(sided))
         .and_then(|at| at.checked_add(inited))
+        .and_then(|at| at.checked_add(epoched))
     else {
         return false;
     };
@@ -116,14 +119,16 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
         origin: shadow.wrapping_sub(lo / GRANULE * SLOT),
         typing: (shadow + under).wrapping_sub(lo / types::GRANULE * types::SLOT),
         initing: (shadow + under + typed + sided).wrapping_sub(lo / init::SPAN),
+        epoching: (shadow + under + typed + sided + inited)
+            .wrapping_sub(lo / epoch::GRANULE * epoch::SLOT),
         side: shadow + under + typed,
         room: (sided / types::ENTRY) as u32,
         base: lo,
         end: hi,
         class,
     };
-    // SAFETY: the mapping is writable and is never handed back, its four spans are laid out by
-    // the arithmetic just above, and all three biases were solved from the same `lo` the bounds
+    // SAFETY: the mapping is writable and is never handed back, its five spans are laid out by
+    // the arithmetic just above, and all four biases were solved from the same `lo` the bounds
     // carry.
     unsafe { alloc::publish(watch) }
 }
@@ -186,6 +191,12 @@ pub unsafe fn split(base: *mut c_void, size: usize, flags: u32) {
     //
     // SAFETY: as above.
     unsafe { region.init.forget(lo, len) };
+    // And the epoch plane, which has the same reason with one thread in it. The stamps there are
+    // the dead instance's writers, and leaving them would make the first store this instance makes
+    // race with a thread that has nothing to do with it.
+    //
+    // SAFETY: as above, and `lo` is granule aligned by construction.
+    unsafe { region.epochs.clear(lo, len) };
 }
 
 /// Judgement J5: the instance at `base` is over and its storage goes back to the region.

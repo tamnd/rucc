@@ -40,6 +40,7 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
+use crate::epoch::Epochs;
 use crate::fail::Judgement;
 use crate::heap::Arena;
 use crate::init::Init;
@@ -105,7 +106,7 @@ pub const fn siding(len: usize) -> usize {
 
 /// How much init plane a region of `len` bytes needs, which is one bit per byte.
 ///
-/// An eighth, which is the cheapest of the four spans and the only one that is exact. There is no
+/// An eighth, which is the cheapest of the five spans and the only one that is exact. There is no
 /// granule to compress here and nothing to round: a byte is the unit C asks the question about, so
 /// the plane answers per byte and `crate::init` says why that is affordable.
 #[must_use]
@@ -113,11 +114,22 @@ pub const fn initing(len: usize) -> usize {
     crate::init::shadow(len)
 }
 
+/// How much epoch plane a region of `len` bytes needs, which is one stamp per granule.
+///
+/// The type plane's granule rather than the lifetime plane's, for the reason `crate::epoch` gives:
+/// a stamp is about the word that was written and a pointer word is eight bytes. It costs a byte
+/// per byte, which is the most expensive of the five spans and is what section 5.2.3 budgeted for
+/// it.
+#[must_use]
+pub const fn epoching(len: usize) -> usize {
+    len / crate::epoch::GRANULE * crate::epoch::SLOT
+}
+
 /// What a region's length is rounded up to.
 ///
 /// A page, so that a length is a length the kernel would have rounded to anyway. What the
 /// arithmetic actually needs is smaller and is worth writing down: the length has to be a whole
-/// number of granules for each shadow to cover it exactly, and the four shadows together have to
+/// number of granules for each shadow to cover it exactly, and the five shadows together have to
 /// be a whole number of granules for the region that follows them to be granule aligned, which
 /// together is a multiple of a hundred and twenty eight. A machine with larger pages maps a little
 /// more than this asks for and nothing reads past what was asked for, so the rounding is a floor
@@ -254,6 +266,12 @@ pub struct Region {
     /// mapped is not watched at all, which keeps every check's question answerable without asking
     /// first whether there is a plane to ask.
     pub init: Init,
+    /// The epoch plane over the same region, a stamp for every eight bytes of it.
+    ///
+    /// Mapped for every watched region for the reason the two above are. It is the most expensive
+    /// of the four at a byte per byte, and it is still address space rather than memory: a region
+    /// whose program never stores a pointer never touches a page of this.
+    pub epochs: Epochs,
     /// The lowest address in the region.
     pub base: usize,
     /// One past the highest.
@@ -302,6 +320,8 @@ struct Slot {
     typing: AtomicUsize,
     /// The bias the init plane's arithmetic is built on.
     initing: AtomicUsize,
+    /// The bias the epoch plane's arithmetic is built on.
+    epoching: AtomicUsize,
     /// The lowest address it covers.
     base: AtomicUsize,
     /// One past the highest.
@@ -317,6 +337,7 @@ impl Slot {
             origin: AtomicUsize::new(0),
             typing: AtomicUsize::new(0),
             initing: AtomicUsize::new(0),
+            epoching: AtomicUsize::new(0),
             base: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
             class: AtomicU32::new(0),
@@ -361,6 +382,8 @@ pub(crate) struct Watch {
     pub typing: usize,
     /// The bias the init plane's arithmetic is built on.
     pub initing: usize,
+    /// The bias the epoch plane's arithmetic is built on.
+    pub epoching: usize,
     /// Where the type plane's side table starts.
     pub side: usize,
     /// How many entries that table holds.
@@ -392,7 +415,8 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
     let at = FILLED.load(Ordering::Relaxed);
     let room = at < REGIONS;
     if room {
-        let Watch { origin, typing, initing, side, room: entries, base, end, class } = watch;
+        let Watch { origin, typing, initing, epoching, side, room: entries, base, end, class } =
+            watch;
         // Before the count grows, like the stores below, and for the same reason: a reader that
         // has acquired the count reads a side table that is already pointed at its mapping.
         //
@@ -402,6 +426,7 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
         SPACE[at].origin.store(origin, Ordering::Relaxed);
         SPACE[at].typing.store(typing, Ordering::Relaxed);
         SPACE[at].initing.store(initing, Ordering::Relaxed);
+        SPACE[at].epoching.store(epoching, Ordering::Relaxed);
         SPACE[at].base.store(base, Ordering::Relaxed);
         SPACE[at].end.store(end, Ordering::Relaxed);
         SPACE[at].class.store(class, Ordering::Relaxed);
@@ -439,10 +464,13 @@ pub fn covering(addr: usize) -> Option<Region> {
             let types = unsafe { Types::new(slot.typing.load(Ordering::Relaxed), &SIDES[at]) };
             // SAFETY: as above.
             let init = unsafe { Init::new(slot.initing.load(Ordering::Relaxed)) };
+            // SAFETY: as above.
+            let epochs = unsafe { Epochs::new(slot.epoching.load(Ordering::Relaxed)) };
             return Some(Region {
                 plane,
                 types,
                 init,
+                epochs,
                 base,
                 end,
                 class: slot.class.load(Ordering::Relaxed),
@@ -476,10 +504,11 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
 /// check. A bias may still wrap, and [`Lifetime`] says so and does its arithmetic modularly.
 ///
 /// The order is the lifetime plane, the type plane, the type plane's side table, the init plane,
-/// and then the region. That is a quarter of a byte per byte for the first, half for each of the
-/// next two and an eighth for the last, so the reservation is a little under two and a half times
-/// what the program can allocate out of it. It is address space rather than memory: the mapping is
-/// anonymous, and a plane a program never touches never costs it a page.
+/// the epoch plane, and then the region. That is half a byte per byte for each of the first three,
+/// an eighth for the init plane and a byte per byte for the epoch plane, so the reservation is a
+/// little over three and a half times what the program can allocate out of it. It is address space
+/// rather than memory: the mapping is anonymous, and a plane a program never touches never costs it
+/// a page, which is what makes the most expensive of the five affordable.
 ///
 /// Called for the first allocation and again whenever every arena is out of room, so a program
 /// that needs eight gibibytes gets them a gibibyte at a time and a program that needs a kilobyte
@@ -495,12 +524,16 @@ fn reserve(want: usize) -> Option<Arena> {
     let typed = typing(len);
     let sided = siding(len);
     let inited = initing(len);
-    let planes = under.checked_add(typed)?.checked_add(sided)?.checked_add(inited)?;
+    let epoched = epoching(len);
+    let planes =
+        under.checked_add(typed)?.checked_add(sided)?.checked_add(inited)?.checked_add(epoched)?;
     let base = map(planes.checked_add(len)?)?;
     let region = base + planes;
     let origin = base.wrapping_sub(region / GRANULE * SLOT);
     let typing = (base + under).wrapping_sub(region / types::GRANULE * types::SLOT);
     let initing = (base + under + typed + sided).wrapping_sub(region / crate::init::SPAN);
+    let epoching = (base + under + typed + sided + inited)
+        .wrapping_sub(region / crate::epoch::GRANULE * crate::epoch::SLOT);
     // Published before the arena is handed back, so that the first instance the arena creates is
     // already visible to a check by the time anything could hold a pointer to it.
     //
@@ -513,6 +546,7 @@ fn reserve(want: usize) -> Option<Arena> {
         origin,
         typing,
         initing,
+        epoching,
         side: base + under + typed,
         room: (sided / types::ENTRY) as u32,
         base: region,
@@ -586,14 +620,17 @@ pub fn alloc(size: usize) -> *mut c_void {
 /// The other half of judgement J4: a fresh instance has no effective type and nothing has written
 /// it.
 ///
-/// Two planes and one region lookup, because the two facts are the same fact said twice. C says
-/// allocated storage has no declared type and takes its type from the first store, so the type
-/// plane has to forget what the previous occupant of these bytes was: without that a block handed
-/// out again would still say what it said last time, and the first honest read of it would be
-/// reported as type confusion, which is the false positive that would make the plane unusable. The
-/// init plane says the same thing from the other side. The bytes hold whatever the previous
-/// occupant left, so a read of one before the program has stored anything there is document 03's
-/// Y6, and an instance beginning is the only moment anything knows a range has become storage.
+/// Three planes and one region lookup, because the first two facts are the same fact said twice and
+/// the third is the same fact said about threads. C says allocated storage has no declared type and
+/// takes its type from the first store, so the type plane has to forget what the previous occupant
+/// of these bytes was: without that a block handed out again would still say what it said last time,
+/// and the first honest read of it would be reported as type confusion, which is the false positive
+/// that would make the plane unusable. The init plane says the same thing from the other side. The
+/// bytes hold whatever the previous occupant left, so a read of one before the program has stored
+/// anything there is document 03's Y6, and an instance beginning is the only moment anything knows a
+/// range has become storage. The epoch plane is the third, and the stamps left in it belong to
+/// whoever wrote these bytes while they were somebody else's, so keeping them would make this
+/// instance's first store race with a thread that never touched this instance.
 ///
 /// It is the whole block rather than the request. The bytes between the request and the end of the
 /// block are the allocator's rounding, they share granules with the request, and leaving them
@@ -607,6 +644,8 @@ fn begun(payload: usize, block: usize) {
     unsafe { region.types.set(payload, len, types::UNTYPED) }
     // SAFETY: the same range, which the init plane covers for the same reason.
     unsafe { region.init.forget(payload, len) }
+    // SAFETY: the same range again, and the payload is granule aligned by `payload_of`.
+    unsafe { region.epochs.clear(payload, len) }
 }
 
 /// What a fill or a copy the allocator itself performed leaves behind: those bytes hold what it
