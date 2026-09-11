@@ -136,6 +136,8 @@ enum Query {
     Multiarch,
     /// `-print-search-dirs`, in the three lines GCC prints.
     SearchDirs,
+    /// `-print-sysroot`, the root the headers and the libraries are read under.
+    Sysroot,
     /// `-print-file-name=<name>`, the full path of a library file.
     FileName(String),
     /// `-print-prog-name=<name>`, the full path of a program.
@@ -196,6 +198,7 @@ options:
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
+  -print-sysroot         the root the headers and the libraries are read under
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
@@ -353,6 +356,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-dumpversion" | "-dumpfullversion" => query = Some(Query::Version),
             "-print-multiarch" => query = Some(Query::Multiarch),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
+            "-print-sysroot" => query = Some(Query::Sysroot),
             "-print-libgcc-file-name" => query = Some(Query::Libgcc),
             _ if arg.starts_with("-print-file-name=") => {
                 query = Some(Query::FileName(arg["-print-file-name=".len()..].to_owned()));
@@ -1199,6 +1203,17 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> String {
                 list(&libraries)
             )
         }
+        // The root the rest of the answers are under, which a build system asks for when it wants
+        // to find a file itself rather than ask for one by name, and which is the first thing to
+        // look at when a cross build read a header nobody expected. A native compile has no
+        // sysroot and the answer is the empty line, which is what GCC prints when it was
+        // configured without one. `--sysroot` wins over ours because it wins everywhere else.
+        Query::Sysroot => link
+            .sysroot
+            .clone()
+            .or_else(|| link::cross_sysroot(opts.target, link).map(|at| at.root().to_path_buf()))
+            .map(|root| root.display().to_string())
+            .unwrap_or_default(),
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -3207,6 +3222,27 @@ mod tests {
     }
 
     #[test]
+    fn the_sysroot_in_effect_is_the_one_the_command_line_named_or_the_one_for_the_target() {
+        // A tree the user named is the answer whatever the target is, because it is the answer to
+        // every other question too.
+        assert_eq!(printed(&["--sysroot=/opt/cross", "-print-sysroot"]), "/opt/cross");
+
+        // A target that is no machine this suite runs on is read under the cache, and the answer is
+        // the root rather than one of the directories under it, since what asks is looking for a
+        // file of its own.
+        let root = cache::dir().join("sysroots").join("riscv64-linux-musl");
+        assert_eq!(
+            printed(&["--target=riscv64-linux-musl", "-print-sysroot"]),
+            root.display().to_string()
+        );
+
+        // And a compile for this machine has no sysroot, which is the empty line GCC prints when it
+        // was configured without one rather than a `/` that would be a claim about the filesystem.
+        let host = Triple::host().expect("a host this compiler knows");
+        assert_eq!(printed(&[&format!("--target={host}"), "-print-sysroot"]), "");
+    }
+
+    #[test]
     fn the_two_dependency_flags_that_stop_after_the_rule_stop_after_the_rule() {
         let (opts, _) = compile(&["-M", "a.c"]);
         assert!(opts.deps.emit && opts.deps.instead_of_compiling);
@@ -3479,7 +3515,10 @@ mod tests {
         // reading this list will see them. The one it went up by last is the floating point group,
         // which is two lines rather than one because the first of them is a choice this compiler
         // records and the rest are claims about what it does anyway, and putting a real setting on
-        // the same line as three flags that change nothing would be misleading about both.
-        assert!(USAGE.lines().count() < 59, "usage text has grown past one screen");
+        // the same line as three flags that change nothing would be misleading about both. The one
+        // it went up by last is the sysroot, which is the question somebody asks when a cross build
+        // read a file nobody expected, and which has no room on the line above it because the
+        // answers there are a path each and this one is the root all of them are under.
+        assert!(USAGE.lines().count() < 60, "usage text has grown past one screen");
     }
 }
