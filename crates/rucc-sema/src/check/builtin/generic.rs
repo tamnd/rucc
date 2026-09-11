@@ -377,7 +377,7 @@ impl Checker<'_> {
         // builds. The rule that decides the type it happens at is in `check/builtin/overflow.rs`,
         // and it needs the argument types as written, which is what it has here.
         if let Some(op) = super::overflow::operation(&spelled) {
-            return self.overflow_builtin(op, &spelled, &checked, span);
+            return self.overflow_builtin(op, &checked, span);
         }
         // The atomic accesses and the barrier are the same: an ordering is something the IR says
         // about an access rather than an argument anything is passed, so a call to one of these

@@ -4210,8 +4210,17 @@ impl<'u> Body<'_, 'u> {
     /// the destination also represents every exact answer that is adjacent to what the destination
     /// can hold, so an answer outside the destination is an answer the round trip changes. There
     /// is no case where the arithmetic wrapped in a way that happens to survive the narrowing.
+    ///
+    /// All of which rests on sema having found a type that holds every value of all three, and for
+    /// one call it cannot. That call goes to [`Body::overflow_exactly`] instead, which is the same
+    /// five steps done without such a type.
     fn overflow(&mut self, op: OverflowOp, args: ExprList, at: TypeId, span: Span) -> Value {
         let [lhs, rhs, out] = [self.tast()[args][0], self.tast()[args][1], self.tast()[args][2]];
+        let written = pointee(self.types(), self.tast()[out].ty).unwrap_or(at);
+        let held = [self.tast()[lhs].ty, self.tast()[rhs].ty, written];
+        if held.into_iter().any(|ty| !self.represents(at, ty, span)) {
+            return self.overflow_exactly(op, [lhs, rhs, out], at, written, span);
+        }
         let wide = self.value_type(at, span);
         let signed = repr::is_signed(self.types(), self.target(), at);
         let left = self.converted(lhs, wide, span);
@@ -4227,7 +4236,6 @@ impl<'u> Body<'_, 'u> {
         let (exact, wrapped) = self.build(span).checked(opcode, left, right);
 
         let addr = self.value(out);
-        let written = pointee(self.types(), self.tast()[out].ty).unwrap_or(at);
         let narrow = self.value_type(written, span);
         let kept = self.widen(exact, signed, narrow, span);
         let back = {
@@ -4259,6 +4267,209 @@ impl<'u> Body<'_, 'u> {
         let signed = repr::is_signed(self.types(), self.target(), self.tast()[operand].ty);
         let value = self.value(operand);
         self.widen(value, signed, wide, span)
+    }
+
+    /// Whether every value of `ty` is a value of `at` as well.
+    ///
+    /// The usual rule, and the only interesting half of it is the mixed one: a signed type is no
+    /// part of an unsigned one at any width, because of the half of it below zero, and an unsigned
+    /// type is part of a signed one only if the signed one is strictly wider, because of the bit
+    /// the sign costs.
+    fn represents(&mut self, at: TypeId, ty: TypeId, span: Span) -> bool {
+        let outer = repr::is_signed(self.types(), self.target(), at);
+        let inner = repr::is_signed(self.types(), self.target(), ty);
+        let wide = self.value_type(at, span).bits();
+        let narrow = self.value_type(ty, span).bits();
+        match (outer, inner) {
+            (true, true) | (false, false) => wide >= narrow,
+            (true, false) => wide > narrow,
+            (false, true) => false,
+        }
+    }
+
+    /// One of the overflow checking builtins when no type holds every value in the call.
+    ///
+    /// There is one shape that gets here, and it is the one that costs a bit more than the widest
+    /// type there is: a hundred and twenty eight bit unsigned type beside a signed one. Instead of
+    /// widening, each operand is carried as a pair of a low word at the width of the arithmetic and
+    /// an extension word that is zero for an unsigned operand and the sign spread out for a signed
+    /// one, so the exact value of an operand is `ext * 2^width + low`. The pair is exact where no
+    /// single value of one type is. jtckdint is written this way throughout, which is what makes
+    /// this worth having rather than a message.
+    ///
+    /// The add and the subtract carry the pair through the arithmetic, and then ask whether the
+    /// exact pair survives the round trip through the type being written to, which is the same
+    /// second test the ordinary path makes with the high word added to it. The multiply cannot do
+    /// that, because the high word of a product is not something the IR has an instruction for, so
+    /// it works on magnitudes instead and compares the magnitude of the product against the bound
+    /// of the destination on the side the sign of the product puts it.
+    ///
+    /// The narrowed value is stored whether or not it fit, exactly as on the ordinary path.
+    fn overflow_exactly(
+        &mut self,
+        op: OverflowOp,
+        args: [ExprId; 3],
+        at: TypeId,
+        written: TypeId,
+        span: Span,
+    ) -> Value {
+        let [lhs, rhs, out] = args;
+        let wide = self.value_type(at, span);
+        let left = self.extension(lhs, wide, span);
+        let right = self.extension(rhs, wide, span);
+        let addr = self.value(out);
+        let narrow = self.value_type(written, span);
+        let into = repr::is_signed(self.types(), self.target(), written);
+        let (kept, bit) = match op {
+            OverflowOp::Add | OverflowOp::Sub => {
+                self.exact_sum(op, left, right, wide, narrow, into, span)
+            }
+            OverflowOp::Mul => self.exact_product(left, right, wide, narrow, into, span),
+        };
+        let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
+        bit
+    }
+
+    /// An operand of an overflow builtin as a low word and an extension word.
+    ///
+    /// The low word is the operand converted to the width of the arithmetic the way the ordinary
+    /// path converts it, which is exact in the low bits whatever the signedness is. The extension
+    /// word is what a wider type would have held above those bits: nothing for an unsigned operand,
+    /// and the sign bit spread across the whole word for a signed one.
+    fn extension(&mut self, operand: ExprId, wide: Type, span: Span) -> [Value; 2] {
+        let signed = repr::is_signed(self.types(), self.target(), self.tast()[operand].ty);
+        let low = self.converted(operand, wide, span);
+        let ext = if signed {
+            let top = self.build(span).iconst(wide, i128::from(wide.bits() - 1));
+            self.build(span).binary(Opcode::AShr, low, top, Flags::NONE)
+        } else {
+            self.build(span).iconst(wide, 0)
+        };
+        [low, ext]
+    }
+
+    /// An exact add or subtract of two pairs, and whether the answer fits where it is going.
+    ///
+    /// The low words are added or subtracted as the unsigned words they are, and what crosses out
+    /// of them is a carry or a borrow of one, which is a comparison: an unsigned sum that came out
+    /// below the operand it started from carried, and a difference of a smaller word from a larger
+    /// one borrowed. The extension words take the same operation and then the crossing bit, which
+    /// leaves the exact answer as a pair again.
+    ///
+    /// The fit test is then the ordinary one asked of the pair rather than of a single value. The
+    /// low word is narrowed to the destination and widened back, and the answer fits only if the
+    /// low word survived that and the high word is what the destination would have put above it,
+    /// which is nothing for an unsigned destination and the sign of what was stored for a signed
+    /// one.
+    fn exact_sum(
+        &mut self,
+        op: OverflowOp,
+        left: [Value; 2],
+        right: [Value; 2],
+        wide: Type,
+        narrow: Type,
+        into: bool,
+        span: Span,
+    ) -> (Value, Value) {
+        let ([a_low, a_ext], [b_low, b_ext]) = (left, right);
+        let opcode = if op == OverflowOp::Add { Opcode::Add } else { Opcode::Sub };
+        let low = self.build(span).binary(opcode, a_low, b_low, Flags::NONE);
+        let crossed = if op == OverflowOp::Add {
+            self.build(span).icmp(IntPred::Ult, low, a_low)
+        } else {
+            self.build(span).icmp(IntPred::Ult, a_low, b_low)
+        };
+        let crossed = self.widen(crossed, false, wide, span);
+        let high = self.build(span).binary(opcode, a_ext, b_ext, Flags::NONE);
+        let high = self.build(span).binary(opcode, high, crossed, Flags::NONE);
+
+        let kept = self.widen(low, into, narrow, span);
+        let back = self.widen(kept, into, wide, span);
+        let want = if into {
+            let top = self.build(span).iconst(wide, i128::from(wide.bits() - 1));
+            self.build(span).binary(Opcode::AShr, back, top, Flags::NONE)
+        } else {
+            self.build(span).iconst(wide, 0)
+        };
+        let bit = self.build(span).icmp(IntPred::Ne, high, want);
+        // The round trip is the identity when the destination is as wide as the arithmetic, which
+        // is most of the calls that get here, and comparing a value against itself is worth not
+        // emitting. The high word is where the answer lives in that case.
+        let bit = if back == low {
+            bit
+        } else {
+            let lost = self.build(span).icmp(IntPred::Ne, back, low);
+            self.build(span).binary(Opcode::Or, bit, lost, Flags::NONE)
+        };
+        (kept, bit)
+    }
+
+    /// An exact multiply of two pairs, and whether the product fits where it is going.
+    ///
+    /// Done on magnitudes, because that turns the question back into the unsigned check the IR
+    /// already has. The magnitude of an operand is the branch free absolute value, and the mask it
+    /// wants is the extension word, which is already all ones for a negative operand and zero for
+    /// the rest. Every magnitude fits unsigned at this width, including the one of the smallest
+    /// signed value there is, which negates to the sign bit standing on its own.
+    ///
+    /// The two magnitudes go through the unsigned check, which gives their product and whether it
+    /// needed more than this width. Negating that product back under the sign of the two operands
+    /// gives the low bits of the exact answer, which is what gets stored.
+    ///
+    /// The product fits in the destination when it needed no more than this width and its magnitude
+    /// is within the bound of the destination on the side it is on. A signed destination reaches one
+    /// further below zero than above it, which is the one place the sign of the product changes the
+    /// bound rather than just the answer. An unsigned destination holds no negative product at all,
+    /// so a magnitude that is not zero under a negative sign is over the bound whatever the bound is.
+    fn exact_product(
+        &mut self,
+        left: [Value; 2],
+        right: [Value; 2],
+        wide: Type,
+        narrow: Type,
+        into: bool,
+        span: Span,
+    ) -> (Value, Value) {
+        let ([a_low, a_ext], [b_low, b_ext]) = (left, right);
+        let mag_a = self.negated_by(a_low, a_ext, span);
+        let mag_b = self.negated_by(b_low, b_ext, span);
+        // Zero when the two operands agree in sign and all ones when they do not, which is both the
+        // sign of the exact product and the mask that puts the magnitude back under it.
+        let mask = self.build(span).binary(Opcode::Xor, a_ext, b_ext, Flags::NONE);
+        let (mag, mut bit) = self.build(span).checked(Opcode::UMulOverflow, mag_a, mag_b);
+        let low = self.negated_by(mag, mask, span);
+
+        // How many bits of magnitude the destination has room for, which is one less than its width
+        // when a bit of it is the sign.
+        let room = if into { narrow.bits() - 1 } else { narrow.bits() };
+        if room < wide.bits() {
+            let most = self.build(span).iconst(wide, (1i128 << room).wrapping_sub(1));
+            // One more below zero than above it, and the mask is the minus one that adds it.
+            let limit = if into {
+                self.build(span).binary(Opcode::Sub, most, mask, Flags::NONE)
+            } else {
+                most
+            };
+            let over = self.build(span).icmp(IntPred::Ugt, mag, limit);
+            bit = self.build(span).binary(Opcode::Or, bit, over, Flags::NONE);
+        }
+        if !into {
+            let held = self.build(span).binary(Opcode::And, mag, mask, Flags::NONE);
+            let zero = self.build(span).iconst(wide, 0);
+            let below = self.build(span).icmp(IntPred::Ne, held, zero);
+            bit = self.build(span).binary(Opcode::Or, bit, below, Flags::NONE);
+        }
+        let kept = self.widen(low, into, narrow, span);
+        (kept, bit)
+    }
+
+    /// A value negated where the mask is all ones and left alone where it is zero.
+    ///
+    /// The usual spelling of it, which works because exclusive or with all ones is the complement
+    /// and subtracting all ones is adding one, and those two together are the negation.
+    fn negated_by(&mut self, value: Value, mask: Value, span: Span) -> Value {
+        let flipped = self.build(span).binary(Opcode::Xor, value, mask, Flags::NONE);
+        self.build(span).binary(Opcode::Sub, flipped, mask, Flags::NONE)
     }
 
     /// One of the atomic accesses, the barrier, or a compare and exchange.
