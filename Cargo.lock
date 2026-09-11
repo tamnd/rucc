@@ -175,6 +175,7 @@ dependencies = [
  "rucc-safety",
  "rucc-sema",
  "rucc-session",
+ "rucc-sysroot",
  "rucc-target",
  "rucc-tuple",
  "rucc-types",
