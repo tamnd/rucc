@@ -117,21 +117,37 @@ fn the_host_directories_are_used_when_the_target_is_the_host_and_there_is_nothin
 fn a_sysroot_the_user_named_beats_the_one_we_bundle() {
     let host = target("aarch64-linux-musl");
     let bundled = Sysroot::in_cache(Path::new("/cache"), host);
-    let named = Sysroot::at(path("/opt/buildroot"), host);
+    // The shape a buildroot tree has, which is not the shape we lay one out in. The caller works
+    // out what is under the root it was given, and step 3 is that list and nothing else.
+    let named = [path("/opt/buildroot/usr/include")];
 
     let found = include_paths(
         host,
         Some(host),
         &Options {
-            sysroot: Some(&named),
+            sysroot: &named,
             bundled: Some(&bundled),
             host_include: &[path("/usr/include")],
             ..Options::default()
         },
     );
     assert!(found.iter().all(|entry| entry.origin == Origin::Sysroot));
-    assert_eq!(found[0].path, path("/opt/buildroot/include/aarch64"));
-    assert_eq!(found[1].path, path("/opt/buildroot/include/generic"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, path("/opt/buildroot/usr/include"));
+}
+
+#[test]
+fn a_tree_the_user_laid_out_our_way_is_named_by_the_layout_rather_than_by_hand() {
+    // The other half of the same field. A user whose tree has our shape passes the two directories
+    // the layout names and gets them as step 3, so there is one spelling of the layout and not two.
+    let host = target("aarch64-linux-musl");
+    let named = Sysroot::at(path("/opt/ours"), host);
+    let includes = named.includes();
+
+    let found =
+        include_paths(host, Some(host), &Options { sysroot: &includes, ..Options::default() });
+    assert_eq!(found[0].path, path("/opt/ours/include/aarch64"));
+    assert_eq!(found[1].path, path("/opt/ours/include/generic"));
 }
 
 #[test]

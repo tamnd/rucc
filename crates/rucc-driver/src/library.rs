@@ -15,13 +15,17 @@
 //! Cross compiling to another operating system produces nothing here on purpose. The host's
 //! `/usr/include` describes the host's library and handing it to a program being built for
 //! somewhere else is worse than handing it nothing, because the failure moves from the
-//! `#include` that could not be resolved to a declaration that is quietly wrong. A cross
-//! build supplies the headers with `--sysroot` or with `-isystem`, which is what every cross
-//! toolchain already does.
+//! `#include` that could not be resolved to a declaration that is quietly wrong.
+//!
+//! What a cross build gets instead is the target's own headers, out of the sysroot for that
+//! target, and [`header_dirs`] is where the two cases meet. It is the header half of what
+//! [`crate::link`] does for the libraries, it decides nothing itself, and the rule it asks is
+//! `rucc_sysroot::search`, which is section 8.5 written once.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rucc_sysroot::{Options, Sysroot, include_paths};
 use rucc_target::{Env, Os, Triple};
 
 /// What the machine says about itself, and what the command line said over the top of it.
@@ -139,6 +143,46 @@ pub fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
         include: if target.os == Os::Windows { std::env::var("INCLUDE").ok() } else { None },
     };
     candidates(target, &machine).into_iter().filter(|dir| dir.is_dir()).collect()
+}
+
+/// The system header directories for this compile, which is step 3 of section 8.5.
+///
+/// Design: `spec/cross-compile/08-sysroots.md` section 8.5.
+///
+/// Three sources and the first that has anything wins: a tree the user named with `--sysroot` or
+/// `-isysroot`, then the sysroot for this target, then this machine's own directories and only when
+/// the target is this machine. `bundled` is [`crate::link::cross_sysroot`], which is the one place
+/// the two kinds of compile are told apart, so the headers a file is compiled against and the
+/// libraries it is linked against cannot disagree about which kind it is.
+///
+/// The ordering between the three is not decided here. It is `rucc_sysroot::search::include_paths`,
+/// which is section 8.5 as a function, and the condition that a host directory is legal only when
+/// the target is the host lives there and nowhere else. What this adds is the part that has to talk
+/// to the machine, which is [`system_dirs`] above.
+///
+/// Steps 1 and 2 are the driver's own. `-I` and its relatives are in [`rucc_session`]'s search path
+/// already, in the order the command line gave them, and the compiler's own headers are not a
+/// directory at all but the `<builtin>` entry the caller pushes before this.
+///
+/// A sysroot that is not on the disk yet is still named. The list is not filtered for existence the
+/// way [`system_dirs`] filters the machine's, because the answer to `rucc --target=... -v` on a
+/// machine where the tree has not been built should be the path it would be at rather than silence.
+#[must_use]
+pub fn header_dirs(
+    target: Triple,
+    sysroot: Option<&Path>,
+    bundled: Option<&Sysroot>,
+) -> Vec<PathBuf> {
+    // Once, because asking can mean running `xcrun`. The answer goes to whichever of the two
+    // fields the command line put it in: with a `--sysroot` these are the directories under the
+    // tree the user named, and without one they are the machine's own.
+    let dirs = system_dirs(target, sysroot);
+    let (named, host) = if sysroot.is_some() { (dirs, Vec::new()) } else { (Vec::new(), dirs) };
+    let options = Options { sysroot: &named, bundled, host_include: &host, ..Options::default() };
+    include_paths(target.tuple(), Triple::host().map(Triple::tuple), &options)
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
 }
 
 /// The SDK to compile against, in the order the platform's own tools look.

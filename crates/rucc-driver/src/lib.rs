@@ -1073,7 +1073,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         // And the library's after ours, which is the other half of the same order. They go on
         // here rather than at the point `--target=` or `--sysroot=` was read because either
         // one changes the answer and the last word on both is the end of the loop.
-        for dir in library::system_dirs(opts.target, sysroot.as_deref()) {
+        //
+        // Which library's is the question `link::cross_sysroot` answers, and it is asked here so
+        // that the headers and the libraries come from the same place. A target that is this
+        // machine reads this machine's headers, and a target that is not reads the ones in the
+        // sysroot for it rather than the ones next door.
+        let cross = link::cross_sysroot(opts.target, &link);
+        for dir in library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref()) {
             opts.search.push_system(dir);
         }
     }
@@ -2379,6 +2385,34 @@ mod tests {
         let (opts, _) = compile(&["-isystem", "sys", "--sysroot=/nowhere-at-all", "a.c"]);
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
         assert_eq!(dirs, ["sys", runtime::DIR]);
+    }
+
+    #[test]
+    fn a_cross_compile_reads_the_targets_own_headers_rather_than_the_ones_next_door() {
+        // The target is not the machine this test runs on wherever it runs, so the answer is the
+        // same on all of them: the two include directories of the sysroot for that target, and
+        // nothing from here. A header read from here is the quiet failure of section 8.5, a program
+        // that builds on the build machine and is wrong everywhere else.
+        let (opts, _) = compile(&["--target=riscv64-linux-musl", "-c", "a.c"]);
+        let dirs: Vec<&std::path::Path> =
+            opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
+        let root = cache::dir().join("sysroots").join("riscv64-linux-musl");
+        assert_eq!(dirs.len(), 3, "{dirs:?}");
+        assert_eq!(dirs[0], std::path::Path::new(runtime::DIR));
+        assert_eq!(dirs[1], root.join("include").join("riscv64"));
+        assert_eq!(dirs[2], root.join("include").join("generic"));
+    }
+
+    #[test]
+    fn a_sysroot_the_user_named_is_still_what_a_cross_compile_reads() {
+        // The tree somebody assembled beats the one we would build, on the headers as on the
+        // libraries. It is empty here, which is why the list comes out short: the directories under
+        // it are checked for rather than assumed, and a tree that is not there offers nothing.
+        let (opts, _) =
+            compile(&["--target=riscv64-linux-musl", "--sysroot=/nowhere-at-all", "-c", "a.c"]);
+        let dirs: Vec<&std::path::Path> =
+            opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(dirs, [std::path::Path::new(runtime::DIR)]);
     }
 
     #[test]
