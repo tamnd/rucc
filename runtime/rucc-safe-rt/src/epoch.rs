@@ -50,10 +50,13 @@
 //!
 //! The reader is here now as well. [`Epochs::stranger`] is the walk that finds a stamp nothing this
 //! thread has done orders, and [`crate::check::raced`] is the check that turns one into a report,
-//! which is judgement J9 and is document 03's C2 and C3. What is left of the four classes is C1, the
-//! torn store, which [`torn`] is the arithmetic of and which nothing can call yet: it compares a
-//! pointer word's stamp against the stamp its aux slot was written at, and the aux slot is the part
-//! of milestone S5 that does not exist.
+//! which is judgement J9 and is document 03's C2 and C3. C4 is in too, and it is not a check of its
+//! own: an instance ending stamps its bytes with the freeing thread, so the refusal
+//! [`crate::check::live`] already made for a use after free can say the free was another thread's
+//! and nothing ordered it against the access. What is left of the four classes is C1, the torn
+//! store, which [`torn`] is the arithmetic of and which nothing can call yet: it compares a pointer
+//! word's stamp against the stamp its aux slot was written at, and the aux slot is the part of
+//! milestone S5 that does not exist.
 //!
 //! The edges are all in. [`sync`] is what an interposed primitive calls and [`crate::sync`] is the
 //! table of them, so a lock given up and taken, a thread created, a thread joined, a condition

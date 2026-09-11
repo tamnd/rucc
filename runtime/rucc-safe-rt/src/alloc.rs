@@ -648,6 +648,39 @@ fn begun(payload: usize, block: usize) {
     unsafe { region.epochs.clear(payload, len) }
 }
 
+/// The other side of [`begun`]: an instance ending leaves the freeing thread's stamp over its
+/// bytes.
+///
+/// Judgement C4 of document 03, from the recording side. A use after free that one thread caused on
+/// its own and a use after free that two threads raced into are the same refusal at the access, and
+/// what tells them apart is who ended the instance and whether anything ordered that against the
+/// thread that then read. The lifetime plane says the storage is over and has no room to say whose
+/// doing that was, so the answer goes where the other per granule facts about threads go.
+///
+/// A free counts a step, rather than stamping with whatever step this thread already stood at. It
+/// is a metadata store like any other, the plane it writes is read by other threads, and a step
+/// that did not move would leave two of this thread's own operations wearing the same stamp.
+///
+/// The stamps it writes over belong to whoever last wrote these bytes, and losing them costs
+/// nothing: [`crate::check::raced`] steps aside for storage nobody owns, so from here until the
+/// block is handed out again the only judgement asking about this range is the lifetime one, and
+/// [`begun`] clears the range before anybody may write it again.
+///
+/// A thread with nowhere to keep a clock writes nothing and leaves what was there. Stamping
+/// [`crate::epoch::NONE`] would be the plane saying it had watched the free and seen nobody, which
+/// is not what happened.
+fn over(payload: usize, block: usize) {
+    let Some(region) = covering(payload) else { return };
+    let stamp = crate::epoch::tick();
+    if stamp == crate::epoch::NONE {
+        return;
+    }
+    let len = block.min(region.end - payload);
+    // SAFETY: the range starts inside the region and is clipped to it, so the epoch plane covers
+    // every granule of it, and the payload is granule aligned by `payload_of`.
+    unsafe { region.epochs.fill(payload, len, stamp) }
+}
+
 /// What a fill or a copy the allocator itself performed leaves behind: those bytes hold what it
 /// wrote.
 ///
@@ -698,14 +731,24 @@ pub unsafe fn dealloc(ptr: *mut c_void) {
         return;
     }
     let payload = ptr as usize;
-    let ended = HEAP.owning(payload, |arena| {
-        // SAFETY: the address is inside the region, which is what `end` asks for. Everything else
-        // about it is the judgement rather than a precondition.
-        unsafe { arena.end(payload) }.is_ok()
-    });
+    // How big it was, read before it is ended, because the header says nothing once it is. The two
+    // answers agree about whether this is one of ours: both are read out of the same header and
+    // both refuse everything that is not the base of a live instance of this arena.
+    let ended = HEAP
+        .owning(payload, |arena| {
+            // SAFETY: the address is inside the region, which is what `extent` and `end` ask for.
+            // Everything else about it is the judgement rather than a precondition.
+            let size = unsafe { arena.extent(payload) }.ok();
+            // SAFETY: as above.
+            unsafe { arena.end(payload) }.is_ok().then_some(size).flatten()
+        })
+        .flatten();
+    if let Some(block) = ended {
+        over(payload, block);
+    }
     // `None` is a free before anything was ever allocated, which is the same judgement: whatever
     // that pointer is, it is not one of ours.
-    if ended != Some(true) {
+    if ended.is_none() {
         // Unless somebody said whose it is. An allocator that tags its instances through section
         // 10.4's API turns the vaguest refusal this crate produces into the specific one, which is
         // document 03's free by the wrong deallocator rather than a free of something unknown.

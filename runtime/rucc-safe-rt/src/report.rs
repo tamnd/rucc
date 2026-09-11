@@ -9,7 +9,8 @@
 //! derivation gets two lines more, since it is the one judgement with two addresses and the refused
 //! one on its own is a number rather than a fact. A refused race gets a line naming both threads and
 //! where each of them stood, which is not on section 6.5's list because that list was written for
-//! judgements about one operation and this one is about two.
+//! judgements about one operation and this one is about two. So does a use after free of storage
+//! another thread ended, which is the same line for the same reason.
 //!
 //! The other three are named here rather than left to be noticed missing. The source location comes
 //! from DWARF through the `pc` field of the descriptor, and nothing fills that field in yet, because
@@ -257,11 +258,12 @@ pub struct Facts<'a> {
     /// stayed in and how far short of it the derivation fell is the sentence somebody can act on,
     /// and until this line existed getting it took a debugger.
     pub base: Option<usize>,
-    /// For judgement J9, the stamp of the write the access raced with.
+    /// The stamp of whatever another thread did to these bytes last, and the asking thread's own.
     ///
-    /// A race is the one judgement whose report is about two threads, and the address alone names
-    /// neither of them. What this carries is the other thread's number and the point in its own
-    /// counting that it wrote at, which together with the asking thread's own is the whole of why
+    /// Two judgements have a report about two threads and the address alone names neither of them.
+    /// For J9 the first stamp is a write of the word, and for J1 it is the free of the storage,
+    /// which is document 03's C4. What this carries is the other thread's number and the point in
+    /// its own counting it stood at, which together with the asking thread's is the whole of why
     /// the monitor called the pair concurrent.
     pub witness: Option<(crate::epoch::Stamp, crate::epoch::Stamp)>,
 }
@@ -285,9 +287,9 @@ pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
     // Before the address rather than after it, because it is the half of a race report that does
     // not depend on there being an address to print and the other lines all do.
     if let Some((found, mine)) = witness {
-        out.text("  written by thread ").dec(crate::epoch::thread(found));
+        out.text("  last touched by thread ").dec(crate::epoch::thread(found));
         out.text(" at its step ").dec(crate::epoch::clock(found));
-        out.text(", read by thread ").dec(crate::epoch::thread(mine));
+        out.text(", reached by thread ").dec(crate::epoch::thread(mine));
         out.text(" at its step ").dec(crate::epoch::clock(mine)).text("\n");
     }
 
@@ -591,8 +593,30 @@ mod tests {
         assert_eq!(
             from(&row, &facts),
             "rucc: memory safety violation\n  judgement J9, a word another thread wrote with \
-             nothing ordering that against this one\n  written by thread 2 at its step 12, read \
-             by thread 1 at its step 10\n"
+             nothing ordering that against this one\n  last touched by thread 2 at its step 12, \
+             reached by thread 1 at its step 10\n"
+        );
+    }
+
+    #[test]
+    fn a_use_after_free_two_threads_raced_into_names_the_one_that_ended_the_storage() {
+        let _turn = turn();
+        // Document 03's C4, which is judgement J1 with the same line under it. A use after free one
+        // thread caused on its own and one two threads raced into are the same refusal at the
+        // access and two different things to go and fix, and this line is the only place the
+        // difference shows.
+        let row = Descriptor { judgement: 1, class: 0, size: 8, pc: 0 };
+        let facts = Facts {
+            site: None,
+            addr: None,
+            base: None,
+            witness: Some((crate::epoch::stamp(4, 7), crate::epoch::stamp(3, 2))),
+        };
+        assert_eq!(
+            from(&row, &facts),
+            "rucc: memory safety violation\n  judgement J1, an access the capability, the planes \
+             or the alignment did not permit\n  last touched by thread 4 at its step 7, reached \
+             by thread 3 at its step 2\n"
         );
     }
 
