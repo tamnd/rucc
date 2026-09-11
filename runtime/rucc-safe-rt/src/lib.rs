@@ -69,8 +69,16 @@
 //! judgements beside every store and every copy, and the C library wrappers record what they wrote
 //! as well, because a plane only some of the writes maintain reports on programs that are correct.
 //! What is missing is the reader: no generated code reaches `__rucc_check_init` yet, so nothing is
-//! refused on this plane's account, and that waits on section 9.3's padding mode. The epoch plane
-//! is not here at all.
+//! refused on this plane's account, and that waits on section 9.3's padding mode.
+//!
+//! [`epoch`] is section 9.5's epoch plane, which is which thread last wrote a word and when in that
+//! thread's own counting. It is the plane the races of document 03's C1 through C4 are answered
+//! from, and what makes those answerable at all cheaply is that the ordering is Lamport's rather
+//! than a vector clock: one word per eight bytes, one compare on the path an access already takes,
+//! and an incompleteness the module writes out. It is the stamp, the clock and the plane's
+//! arithmetic so far. Nothing maps it and nothing stamps anything, so no program is watched by it
+//! yet, and the mapping and the judgements are the next step, the way they were for the two planes
+//! above.
 //!
 //! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
 //! block that declares `restrict` pointers promises that no object modified through one of them is
@@ -106,6 +114,7 @@ pub mod alloc;
 pub mod check;
 #[cfg(unix)]
 pub mod effects;
+pub mod epoch;
 pub mod fail;
 #[cfg(unix)]
 pub mod frame;
