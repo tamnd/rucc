@@ -29,10 +29,11 @@
 //! Every offset reported here is from the stack pointer as it stands in the body of the function,
 //! which is after the prologue and before the epilogue. That is the one base register always
 //! available. A frame pointer is a second way to reach the same bytes and the prologue is what
-//! knows the distance between the two, so nothing here reports an offset from it. The one exception
-//! is [`Frame::incoming`], and it is an exception because the bytes it reports are the caller's
+//! knows the distance between the two, so nothing here reports an offset from it. There are two
+//! exceptions and [`Frame::incoming`] is one of them, because the bytes it reports are the caller's
 //! rather than this function's, which is the one part of the picture a realigned frame loses sight
-//! of. It says which register it counted from.
+//! of. It says which register it counted from. The other is a frame that grows, which is the next
+//! section and where the stack pointer stops being a base register at all.
 //!
 //! # Where the alignment comes from
 //!
@@ -60,6 +61,30 @@
 //! pointer to the incoming arguments stops being a constant. [`Frame::realign`] is where that is
 //! reported and it is why [`Frame::incoming`] answers from the frame pointer in such a frame and
 //! from the stack pointer in every other one.
+//!
+//! # Growing
+//!
+//! A variable length array is bytes the function takes off the stack pointer where the declaration
+//! stands, so in a function that has one the stack pointer is in a different place in the middle of
+//! the body than it was at the top of it. Every other offset in the frame was a distance from the
+//! stack pointer, and a distance from a register that moves is not a distance, so in a frame like
+//! this they are all distances from the frame pointer instead. That is what [`Layout::grows`] says
+//! and [`Frame::grows`] reports, and it is why such a frame keeps a frame pointer whatever the
+//! flags asked for, the same way a realigned one does and for a version of the same reason.
+//!
+//! Three other things follow from it. The red zone is gone, because the zone is the bytes below the
+//! stack pointer and the first thing an array like this does is move the stack pointer down over
+//! them. The frame asks for the convention's alignment even when nothing in it wanted that much, so
+//! that the stack pointer is on a multiple of it when the body starts and stays on one as each
+//! array rounds its own size up. And the bytes the array hands out start above the outgoing
+//! argument area rather than at the stack pointer, because that area stays at the bottom of the
+//! frame wherever the bottom has moved to, which is what [`Frame::below`] is for.
+//!
+//! Realigning and growing together is the one combination that is not here. After the prologue has
+//! forced an alignment the distance from the frame pointer to the body's stack pointer is already
+//! not a constant, so there is no register left for the rest of the frame to be counted from, and
+//! what fixes that is a second pointer held for the purpose. The lowering refuses that pair rather
+//! than this guessing at it.
 
 use rucc_mir::Func;
 use rucc_regalloc::Allocation;
@@ -134,6 +159,13 @@ pub struct Layout<'a> {
     /// Whether the function keeps a frame pointer, which `-fno-omit-frame-pointer` asks for and
     /// which a realigned or a dynamically grown frame requires whatever the flags say.
     pub frame_pointer: bool,
+    /// Whether the function moves the stack pointer while it runs, which is what a variable length
+    /// array does and what the rest of the frame then has to be reached around.
+    ///
+    /// See `Growing` in the module documentation. A frame like this keeps a frame pointer, takes
+    /// its bytes rather than living in the red zone, and reports every offset in its body from the
+    /// frame pointer, because the stack pointer stops being somewhere a constant reaches from.
+    pub grows: bool,
     /// Whether the red zone may be used at all, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
     /// Whether the frame holds a stack protector's canary, which `-fstack-protector` and the
@@ -158,6 +190,7 @@ impl<'a> Layout<'a> {
             outgoing: 0,
             leaf: true,
             frame_pointer: false,
+            grows: false,
             red_zone: true,
             protect: false,
         }
@@ -173,10 +206,12 @@ pub struct Frame {
     locals: Vec<i32>,
     canary: Option<i32>,
     outgoing: u32,
+    below: u32,
     size: u32,
     realign: Option<u32>,
     incoming: Incoming,
     frame_pointer: bool,
+    grows: bool,
 }
 
 impl Frame {
@@ -202,6 +237,14 @@ impl Frame {
             align = align.max(vector);
             saved_sse.push(Save { reg, at: offset(top) });
             top += vector;
+        }
+
+        // A frame that grows hands out the bytes above the outgoing area, and what makes that
+        // address usable for anything is the stack pointer being on a multiple of the convention's
+        // alignment when the body starts. Asking for that much here is what buys it: the area below
+        // is padded to `align` and the frame is rounded to land the stack pointer back on it.
+        if layout.grows {
+            align = align.max(conv.stack_align);
         }
 
         let mut locals = vec![0; layout.locals.len()];
@@ -254,17 +297,35 @@ impl Frame {
         let shifted = outgoing.next_multiple_of(align);
         let body = (top + shifted).next_multiple_of(word);
 
+        let realign = (align > conv.stack_align).then_some(align);
+        // Refused by [`crate::pipeline`] before anything gets here, because the two of them together
+        // want one register twice. See `Growing` above.
+        assert!(
+            !(layout.grows && realign.is_some()),
+            "a frame that grows and forces its alignment needs a second base register"
+        );
+        // Two frames keep one whatever the flags asked for, and each of them for its own version of
+        // the same reason: the prologue is about to leave the stack pointer somewhere no constant
+        // reaches the rest of the frame from, and the frame pointer is the register that still
+        // does. Forcing an alignment is one of the two and growing while the function runs is the
+        // other.
+        let frame_pointer = layout.frame_pointer || realign.is_some() || layout.grows;
+
         // Where the stack pointer sits once the prologue has finished pushing: one return address
-        // short of aligned when the function starts, and one word further off for every push.
-        let pushed =
-            u32::from(layout.frame_pointer) + u32::try_from(saved_int.len()).expect("a frame");
+        // short of aligned when the function starts, and one word further off for every push. The
+        // frame pointer is a push like any other here, which is why this is asked after the two
+        // frames that keep one without being asked to have said so.
+        let pushed = u32::from(frame_pointer) + u32::try_from(saved_int.len()).expect("a frame");
         let entry = wrap(conv.stack_align, conv.return_address);
         let after = (entry + wrap(conv.stack_align, word * pushed)) % conv.stack_align;
 
-        let realign = (align > conv.stack_align).then_some(align);
+        // A frame that grows cannot be one of the free ones. The red zone is the bytes below the
+        // stack pointer, and the first thing a variable length array does is move the stack pointer
+        // down over them, so what was in the zone would be handed out twice.
         let free = layout.leaf
             && layout.red_zone
             && realign.is_none()
+            && !layout.grows
             && align <= word
             && body <= conv.red_zone;
         let size = match realign {
@@ -281,7 +342,16 @@ impl Frame {
 
         // With the stack pointer left where it was, the areas are the same areas in the same order
         // and they are below it rather than above it.
-        let shift = if free { -offset(body) } else { offset(shifted) };
+        //
+        // A frame that grows is counted from the frame pointer instead, which is the same areas in
+        // the same order with one more constant taken off: the prologue pushed the registers and
+        // then took the frame, so the body's stack pointer is that far below where the frame
+        // pointer was set. That distance is what a variable length array destroys and the frame
+        // pointer is what is left, which is why a growing frame keeps one.
+        let mut shift = if free { -offset(body) } else { offset(shifted) };
+        if layout.grows {
+            shift -= offset(size) + offset(word) * i32::try_from(saved_int.len()).expect("a frame");
+        }
         for at in slots
             .iter_mut()
             .chain(locals.iter_mut())
@@ -298,16 +368,19 @@ impl Frame {
             locals,
             canary,
             outgoing,
+            below: shifted,
             size,
             realign,
-            incoming: match realign {
+            incoming: if realign.is_some() || layout.grows {
                 // The prologue saves the frame pointer before it does anything else and points it
                 // at where it saved it, so the caller's stack is one word for that and one return
                 // address above it, whatever the prologue did to the stack pointer afterwards.
-                Some(_) => Incoming::from_frame(offset(word + conv.return_address)),
-                None => Incoming::from_stack(offset(size + word * pushed + conv.return_address)),
+                Incoming::from_frame(offset(word + conv.return_address))
+            } else {
+                Incoming::from_stack(offset(size + word * pushed + conv.return_address))
             },
-            frame_pointer: layout.frame_pointer || realign.is_some(),
+            frame_pointer,
+            grows: layout.grows,
         }
     }
 
@@ -357,6 +430,28 @@ impl Frame {
     #[must_use]
     pub fn outgoing(&self) -> u32 {
         self.outgoing
+    }
+
+    /// How many bytes at the bottom of the frame nothing else may be placed in, which is that area
+    /// padded to the alignment everything above it asked for.
+    ///
+    /// What a variable length array has to step over. It takes its bytes off the stack pointer,
+    /// which leaves them at the bottom of the frame where the next call is going to write its
+    /// arguments, so the address it hands out is this far above the stack pointer rather than the
+    /// stack pointer itself.
+    #[must_use]
+    pub fn below(&self) -> u32 {
+        self.below
+    }
+
+    /// Whether the function moves the stack pointer while it runs.
+    ///
+    /// Every offset in the body of such a frame is from the frame pointer rather than from the
+    /// stack pointer, because a variable length array leaves the stack pointer somewhere no
+    /// constant reaches the rest of the frame from. See `Growing` in the module documentation.
+    #[must_use]
+    pub fn grows(&self) -> bool {
+        self.grows
     }
 
     /// What the prologue has to force the stack pointer to be a multiple of, when a local wants

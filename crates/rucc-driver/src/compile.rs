@@ -1848,15 +1848,35 @@ decl #0 x : int object external static defined
     fn a_construct_the_back_end_cannot_reach_yet_is_reported_against_its_function() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "void a(int n) { int v[n]; v[0] = 1; }\n\
-                      void b(int n) { int v[n]; v[0] = 1; }\n";
+        let source = "void a(int n) { int v[n] __attribute__((aligned(32))); v[0] = 1; }\n\
+                      void b(int n) { int v[n] __attribute__((aligned(32))); v[0] = 1; }\n";
         let result = run(&opts, source);
         assert!(result.failed());
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
         assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
-        assert!(result.messages[0].contains("no rule lowers a `stacksave`"), "{:?}", result);
+        assert!(result.messages[0].contains("wants more alignment"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
+    }
+
+    /// A variable length array is refused under the flag that says every page is touched.
+    ///
+    /// The pages the prologue takes are touched by the prologue. The pages the array takes are
+    /// however many the size worked out to, so touching them is a loop, and there is no loop here
+    /// yet. A function with both is refused rather than compiled to something that keeps the flag's
+    /// name and not what it promises.
+    #[test]
+    fn a_variable_length_array_is_refused_where_every_page_of_the_frame_is_to_be_touched() {
+        let mut opts = options();
+        opts.emit = EmitKind::MirFinal;
+        let source = "void a(int n) { int v[n]; v[0] = 1; }\n";
+        assert!(!run(&opts, source).failed(), "it compiles without the flag");
+
+        opts.stack_clash = true;
+        let result = run(&opts, source);
+        assert!(result.failed());
+        assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
+        assert!(result.messages[0].contains("a page at a time"), "{:?}", result);
     }
 
     /// An opcode the rule language has no word for is named anyway, and pointed at.

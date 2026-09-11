@@ -944,6 +944,46 @@ fn countable(ty: Type) -> bool {
         && ty.bits().is_power_of_two()
 }
 
+/// Rounds up the bytes every variable length array asks for, so that the stack pointer stays where
+/// a call can be made from.
+///
+/// The size of one is whatever the program wrote in the brackets times the size of an element, so
+/// it is any number at all, and the bytes come off the stack pointer where the declaration stands.
+/// A stack pointer moved by an odd number is one no call can be made through afterwards: the
+/// convention says a call arrives with the stack pointer on a multiple of `to`, and every argument
+/// passed on the stack, every spill of a vector register and the alignment of every local below the
+/// array is counted from there. So the number that comes off is the size rounded up, which is
+/// `(size + to - 1) & -to` and is three instructions the machine already has.
+///
+/// Here rather than in the front end because `to` is the convention's and the front end writes one
+/// IR for every target. Here rather than in [`crate::lower`] because it is arithmetic, which is the
+/// one thing a lowering rule deliberately cannot do, and that is what this module is for.
+///
+/// An array asking for more alignment than `to` is not rounded any further and is refused later by
+/// name. Giving it what it asked for means masking the stack pointer as well as subtracting from
+/// it, and after that nothing in the frame has a constant distance from anywhere. See `Growing` in
+/// [`crate::frame`].
+pub fn rounds(func: &mut Func, to: u32) {
+    let found: Vec<Inst> =
+        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    for inst in found {
+        if func[inst].opcode != Opcode::Alloca {
+            continue;
+        }
+        let Some(&size) = func[func[inst].args].first() else { continue };
+        let ty = func[size].ty;
+        if !ty.is_int() {
+            continue;
+        }
+        let up = ahead_const(func, inst, Imm::int(i128::from(to) - 1, ty), ty);
+        let mask = ahead_const(func, inst, Imm::int(-i128::from(to), ty), ty);
+        let over = ahead(func, inst, Opcode::Add, &[size, up], ty);
+        let rounded = ahead(func, inst, Opcode::And, &[over, mask], ty);
+        let args = func.push_values(&[rounded]);
+        func[inst].args = args;
+    }
+}
+
 /// The most moves a copy or a fill becomes before it is left alone for a call instead.
 ///
 /// Thirty two, which is two hundred and fifty six bytes at a word a time and is a structure larger

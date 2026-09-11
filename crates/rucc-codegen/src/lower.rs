@@ -201,16 +201,15 @@ pub enum Unsupported {
         /// What is wrong with where one of the values travels.
         missing: Missing,
     },
-    /// A stack slot whose size is not known until the function runs, which is what a variable
-    /// length array is.
+    /// A stack slot the frame cannot give the bytes it asked for.
     ///
-    /// Not an instruction no rule covers. Growing the stack where the declaration stands is
-    /// arithmetic on the stack pointer, and everything else in the frame then has to be reached
-    /// through a frame pointer instead, and neither of those is a term a rule could be written
-    /// about or a thing the frame here knows how to lay out.
+    /// Not an instruction no rule covers. An `alloca` is built here rather than matched, so what
+    /// goes wrong with one is what the frame can and cannot hold rather than what the rules spell.
     Dynamic {
         /// The `alloca`.
         inst: Inst,
+        /// What the frame could not do about it.
+        growing: Growing,
     },
     /// More parameters of a type that travels on the x87 stack than the stack is deep.
     ///
@@ -267,6 +266,42 @@ impl Written {
     }
 }
 
+/// What the frame could not do about a stack slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Growing {
+    /// An object of a size the number a frame counts bytes in does not reach.
+    Huge,
+    /// A variable length array wanting more alignment than a call leaves the stack pointer with.
+    ///
+    /// Rounding the stack pointer down again after the bytes have been taken would put it
+    /// somewhere no constant reaches the rest of the frame from, so a frame like this needs a
+    /// second base register held for the whole of the function. Nothing here holds one.
+    Aligned,
+    /// A variable length array in a function whose frame is meant to be touched a page at a time.
+    ///
+    /// The pages a prologue takes are touched by the prologue, which knows how many there are when
+    /// it is written. The pages a variable length array takes are not known until the declaration
+    /// runs, so touching them is a loop next to the declaration, and there is no loop here yet.
+    Probed,
+}
+
+impl Growing {
+    /// The rest of the sentence that starts with the slot.
+    #[must_use]
+    pub fn why(self) -> &'static str {
+        match self {
+            Growing::Huge => "is more bytes than a frame counts",
+            Growing::Aligned => {
+                "wants more alignment than the stack pointer is left on, which needs a base \
+                 register nothing here keeps"
+            }
+            Growing::Probed => {
+                "grows the stack, and nothing here touches the pages it takes a page at a time"
+            }
+        }
+    }
+}
+
 impl Unsupported {
     /// The instruction it is about, or nothing for the one arm that is about a signature.
     ///
@@ -307,8 +342,8 @@ impl fmt::Display for Unsupported {
             Unsupported::Returned { missing, .. } => {
                 write!(f, "what this function gives back {}", missing.why())
             }
-            Unsupported::Dynamic { .. } => {
-                f.write_str("nothing here grows the stack for a variable length array")
+            Unsupported::Dynamic { growing, .. } => {
+                write!(f, "this local {}", growing.why())
             }
             Unsupported::Phi { block, count, ty } => {
                 let block = block.index();
@@ -358,6 +393,22 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Which instruction computes the address of a piece of memory whose size the function works
+    /// out while it runs, which is what a variable length array is.
+    ///
+    /// Waiting on [`crate::finish`] for a different number from the one the addresses above are:
+    /// the bytes were taken off the stack pointer by the instruction in front of this one, so where
+    /// they start is however much of the bottom of the frame belongs to the arguments of a call,
+    /// and that is not known until the frame is.
+    pub dynamic: Vec<mir::Inst>,
+    /// Where the function first moves the stack pointer while it runs, if it does at all.
+    ///
+    /// Two things are read off this. One is whether at all, which is what [`crate::frame::Layout`]
+    /// wants, because a frame that moves its stack pointer has a different shape from one that does
+    /// not and the layout is built before the instructions are looked at again. See `Growing` in
+    /// [`crate::frame`]. The other is where, so that a caller that cannot accept such a frame has
+    /// somewhere to point when it says so.
+    pub grown_at: Option<Inst>,
     /// Which instruction reads which of the arguments the caller passed on the stack, as how far up
     /// the caller's argument area it reads.
     ///
@@ -379,6 +430,7 @@ impl Stack {
             leaf: self.calls.is_none(),
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
+            grows: self.grown_at.is_some(),
             ..base
         }
     }
@@ -685,6 +737,18 @@ impl<'a> Lowering<'a> {
                     self.reserve(inst)?;
                     continue;
                 }
+                // Reading the stack pointer and writing it back, which are the two ends of a scope
+                // holding a variable length array. Built here for the reason an `alloca` is: the
+                // value is a register the rule language has no way to name, because what it holds
+                // is not a value the program computed but where the machine's stack had got to.
+                Opcode::StackSave => {
+                    self.stack_pointer(inst, false)?;
+                    continue;
+                }
+                Opcode::StackRestore => {
+                    self.stack_pointer(inst, true)?;
+                    continue;
+                }
                 // The address of a name, built here for the same reason an `alloca` is: what a
                 // rule replaces a term with is instructions over values, and the operand of this
                 // one is a symbol, which is a thing the rule language has no way to bind and the
@@ -981,12 +1045,13 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         // A variable length array carries the size it wants as an operand rather than in the
         // instruction, which is the whole of what tells the two apart here.
-        if !self.source[data.args].is_empty() {
-            return Err(Unsupported::Dynamic { inst });
+        if let Some(&size) = self.source[data.args].first() {
+            return self.grow(inst, size);
         }
         let Extra::Mem(mem) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[mem];
-        let size = u32::try_from(info.size).map_err(|_| Unsupported::Dynamic { inst })?;
+        let size = u32::try_from(info.size)
+            .map_err(|_| Unsupported::Dynamic { inst, growing: Growing::Huge })?;
         let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
 
         // At least one, because the frame divides by the alignment and an object with no
@@ -1003,6 +1068,103 @@ impl<'a> Lowering<'a> {
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
+        Ok(())
+    }
+
+    /// The other kind of `alloca`: one whose size the function does not know until it runs, which
+    /// is what a variable length array is.
+    ///
+    /// Nothing about it is a slot the frame laid out, because the frame is laid out once and this
+    /// happens as often as control reaches the declaration. The bytes come off the stack pointer
+    /// where the declaration stands, which is two instructions:
+    ///
+    /// ```text
+    ///   sub sp, bytes     the stack pointer moves down over the memory, which is what takes it
+    ///   lea reg, [sp+n]   where the memory starts, which is above the outgoing argument area
+    /// ```
+    ///
+    /// The displacement is left at nothing for the reason the constant kind leaves its own at
+    /// nothing, and for a different number: that area belongs to the arguments of whatever this
+    /// function calls, it stays at the bottom of the frame wherever the bottom has moved to, and
+    /// how big it is is not known until every call in the function has been seen.
+    ///
+    /// The bytes are already a multiple of the stack pointer's alignment by the time they arrive,
+    /// because [`crate::expand::rounds`] rounded them up in the IR, so nothing here has to mask the
+    /// stack pointer afterwards and the stack pointer stays somewhere a call can be made from.
+    ///
+    /// Refused for an array wanting more alignment than the convention leaves the stack pointer
+    /// with. Forcing that would be a second rounding of a register the frame already rounded, and
+    /// after it no constant reaches the rest of the frame from anywhere. See `Growing` in
+    /// [`crate::frame`].
+    fn grow(&mut self, inst: Inst, size: Value) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Mem(mem) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[mem];
+        if info.align > self.conv.stack_align {
+            return Err(Unsupported::Dynamic { inst, growing: Growing::Aligned });
+        }
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let bytes = self.reg_of(size)?;
+
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let stack = mir::Reg::physical(self.conv.stack_pointer);
+        let grow = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.grow)));
+        self.out
+            .build(block, grow)
+            .at(span)
+            .operand(mir::Operand::write(stack, self.gpr))
+            .operand(mir::Operand::read(stack, self.gpr))
+            .operand(mir::Operand::read(bytes, self.gpr))
+            .finish();
+
+        let reg = self.new_reg(result);
+        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let sp = mir::Operand::read(stack, self.gpr);
+        let made =
+            self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
+        self.stack.dynamic.push(made);
+        self.stack.grown_at.get_or_insert(inst);
+        Ok(())
+    }
+
+    /// Where the stack pointer is, kept so that something later can put it back.
+    ///
+    /// One move out of the stack pointer and one move into it, which is the whole of what the two
+    /// halves are. What makes them worth writing is where the front end puts them: a scope holding
+    /// a variable length array saves the stack pointer as it opens and puts it back as it closes,
+    /// so a loop declaring one takes its bytes once round rather than once per iteration, and a
+    /// jump out of the scope gives the bytes back on the way out.
+    ///
+    /// The value travels in an ordinary register the allocator hands out, so it may be spilled like
+    /// any other, and a spill slot in a frame that grows is reached through the frame pointer,
+    /// which is exactly the register that still means something after the stack pointer has moved.
+    fn stack_pointer(&mut self, inst: Inst, into: bool) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let stack = mir::Reg::physical(self.conv.stack_pointer);
+        let mov = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move").mov;
+        let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mov}")));
+        let (write, read) = if into {
+            let &saved = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
+            (stack, self.reg_of(saved)?)
+        } else {
+            let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+            (self.new_reg(result), stack)
+        };
+        self.out
+            .build(block, mov)
+            .at(span)
+            .operand(mir::Operand::write(write, self.gpr))
+            .operand(mir::Operand::read(read, self.gpr))
+            .finish();
+        // Only the write is a move of the stack pointer, and it is the one that makes the frame a
+        // growing one. A read of it in a function that never writes it back is a function that
+        // asked where the stack was and did nothing with the answer.
+        if into {
+            self.stack.grown_at.get_or_insert(inst);
+        }
         Ok(())
     }
 
@@ -3753,26 +3915,90 @@ mod tests {
         assert_eq!(frame.local(0), Some(-8));
     }
 
-    #[test]
-    fn a_stack_slot_whose_size_is_not_known_until_it_runs_is_reported() {
-        let i64 = Type::int(64);
-        let (mut names, mut source, block, args) = blank(&[i64]);
-        let info = MemInfo { size: 0, align: 16, ..plain() };
-        let mut build = Builder::new(&mut source, block);
+    /// An `alloca` whose size is an operand, which is a variable length array.
+    fn growing(source: &mut Func, block: Block, size: Value, align: u32) -> Value {
+        let info = MemInfo { size: 0, align, ..plain() };
+        let mut build = Builder::new(source, block);
         let mem = build.func().add_mem(info);
-        let size = build.func().push_values(&[args[0]]);
-        let slot = build.value(
-            InstData { args: size, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+        let args = build.func().push_values(&[size]);
+        build.value(
+            InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
             Type::PTR,
-        );
+        )
+    }
+
+    #[test]
+    fn a_stack_slot_whose_size_is_not_known_until_it_runs_takes_the_bytes_off_the_stack_pointer() {
+        let (mut names, mut source, block, args) = blank(&[Type::int(64)]);
+        let slot = growing(&mut source, block, args[0], 16);
         Builder::new(&mut source, block).ret(&[slot]);
 
-        // A variable length array. Growing the stack where the declaration stands means moving the
-        // stack pointer in the middle of the function and reaching everything else through a
-        // frame pointer afterwards, and the frame here lays out neither.
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+
+        // The bytes come off the stack pointer where the declaration stands and the address is
+        // where the stack pointer then is, which is one subtraction and one `lea` rather than a
+        // slot the frame laid out. Nothing is on the list of locals, because there is nothing
+        // about this the frame could place.
+        let text = mir::print_func(&lowered.func, &names, &REGS);
+        assert!(text.contains("$rsp = x64.sub_rr_64 $rsp, %0"), "{text}");
+        assert!(text.contains("x64.lea_64 [$rsp]"), "{text}");
+        assert!(lowered.stack.locals.is_empty(), "{text}");
+        assert_eq!(lowered.stack.dynamic.len(), 1);
+        assert!(lowered.stack.grown_at.is_some());
+    }
+
+    #[test]
+    fn a_growing_slot_wanting_more_alignment_than_the_stack_pointer_has_is_reported() {
+        let (mut names, mut source, block, args) = blank(&[Type::int(64)]);
+        let slot = growing(&mut source, block, args[0], 32);
+        Builder::new(&mut source, block).ret(&[slot]);
+
+        // Thirty two is more than a call leaves the stack pointer on, so giving it what it asked
+        // for means masking the stack pointer after moving it, and after that no constant reaches
+        // the rest of the frame from the frame pointer either. A second pointer held for the
+        // purpose is what fixes it and there is not one yet.
         let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("nothing grows the stack");
-        assert_eq!(failed.to_string(), "nothing here grows the stack for a variable length array");
+            .expect_err("nothing realigns a frame that grows");
+        assert_eq!(
+            failed.to_string(),
+            "this local wants more alignment than the stack pointer is left on, which needs a \
+             base register nothing here keeps"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_grows_reaches_its_own_locals_through_the_frame_pointer() {
+        let (mut names, mut source, block, args) = blank(&[Type::int(64)]);
+        let fixed = slot(&mut source, block, 4, 4);
+        let mut build = Builder::new(&mut source, block);
+        let nine = build.iconst(Type::int(32), 9);
+        build.store(nine, fixed, plain(), Flags::default());
+        let grown = growing(&mut source, block, args[0], 16);
+        Builder::new(&mut source, block).ret(&[grown]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+        let stack = lowered.stack;
+        let mut out = lowered.func;
+        let env = env();
+        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let layout = stack.layout(Layout::new(&SYSV, REGS));
+        let frame = Frame::of(&out, &allocation, &layout);
+        finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
+
+        // The stack pointer moves in the middle of the function, so the four bytes of the fixed
+        // local are not a constant away from it any more and the frame pointer is what reaches
+        // them. The frame keeps one whatever the flags asked for, takes its bytes rather than
+        // living in the red zone, and the address of the growing slot is off the stack pointer as
+        // it stands after the subtraction rather than off anything the prologue left.
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(frame.grows());
+        assert!(frame.frame_pointer());
+        assert!(frame.size() > 0, "{text}");
+        assert!(text.contains("x64.lea_64 [$rbp"), "{text}");
+        assert!(text.contains("$rsp = x64.sub_rr_64 $rsp"), "{text}");
+        assert!(text.contains("x64.lea_64 [$rsp]"), "{text}");
     }
 
     #[test]

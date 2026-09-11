@@ -29,9 +29,9 @@
 //! one register and a pop writes one. A move writes a register and reads another of the same
 //! class. A load writes a register and reads memory, a store reads a register and writes memory,
 //! and both reach the frame through the stack pointer with a constant added. The arithmetic on
-//! the stack pointer is two-address, so it writes the stack pointer and reads it back. A target
-//! whose instructions do not fit those shapes needs more than a table, and it will say so by not
-//! being able to fill this in.
+//! the stack pointer is two-address, so it writes the stack pointer and reads it back, whether
+//! the amount is a constant or a register. A target whose instructions do not fit those shapes
+//! needs more than a table, and it will say so by not being able to fill this in.
 
 use crate::regs::RegClass;
 
@@ -97,6 +97,14 @@ pub struct FrameInsts {
     pub add: &'static str,
     /// Takes a constant off the stack pointer, which is how a prologue takes the frame.
     pub sub: &'static str,
+    /// Takes whatever is in a register off the stack pointer, which is how a function makes room
+    /// for an array whose size it does not know until it runs.
+    ///
+    /// The same shape as [`Self::sub`] and different in where the amount comes from, which is the
+    /// whole of the difference between the bytes a prologue takes and the bytes a variable length
+    /// array takes. A prologue knows its number when it is written and a declaration in the body
+    /// does not know it until the expression in the brackets has been worked out.
+    pub grow: &'static str,
     /// Clears the low bits of the stack pointer, which is how a prologue forces an alignment
     /// nothing else can give it.
     pub align: &'static str,

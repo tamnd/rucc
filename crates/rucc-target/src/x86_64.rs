@@ -187,6 +187,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     pop: "pop_64",
     add: "add_ri_64",
     sub: "sub_ri_64",
+    grow: "sub_rr_64",
     align: "and_ri_64",
     lea: "lea_64",
     ret: "ret",

@@ -75,6 +75,11 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CallIndirect, "`crate::abi`, the same instruction with the callee in a register"),
     // The frame, which is not known until the allocator has finished running out of registers.
     (Opcode::Alloca, "`crate::lower`, as an address into a frame `crate::frame` lays out later"),
+    // The stack pointer, which is not a value the program computed and so is not a value a rule
+    // could bind. A scope holding a variable length array reads it as it opens and writes it back
+    // as it closes, which is how the bytes are given back.
+    (Opcode::StackSave, "`crate::lower`, as a move out of the stack pointer"),
+    (Opcode::StackRestore, "`crate::lower`, the same move the other way round"),
     // A relocation, which is right because of what the linker does rather than because of what
     // any bitvector equals.
     (Opcode::GlobalAddr, "`crate::lower`, a `lea` off the instruction pointer with a name on it"),
@@ -208,12 +213,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::Prefetch, "one instruction, once the hints have somewhere to go", "tamnd/rucc#313"),
     (Opcode::FrameAddress, "a walk up the frame pointers", "tamnd/rucc#312"),
     (Opcode::ReturnAddress, "the same walk, one word further along", "tamnd/rucc#312"),
-    (
-        Opcode::StackSave,
-        "a frame that can grow, as a variable length array needs",
-        "tamnd/rucc#291",
-    ),
-    (Opcode::StackRestore, "the same", "tamnd/rucc#291"),
     (
         Opcode::SetjmpMarker,
         "a call that returns twice, which the allocator has to be told about",

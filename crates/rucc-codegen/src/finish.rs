@@ -202,7 +202,9 @@ pub fn finish(
 
     // Before anything is written, because these are instructions the lowering already put in the
     // function and every one of them is somewhere the prologue is about to go in front of, which
-    // is what makes an offset from the stack pointer the right thing to write into them.
+    // is what makes an offset from the stack pointer the right thing to write into them. In a
+    // frame that grows it is an offset from the frame pointer instead, so the base register is
+    // rewritten the way an incoming argument's is, and for a version of the same reason.
     //
     // Added rather than assigned. The instruction named here is the `lea` the lowering wrote, or
     // whatever [`crate::fold`] folded that `lea` into, and a reader that took it brought a
@@ -213,6 +215,20 @@ pub fn finish(
         let at = frame.local(local).expect("a local the frame was worked out from");
         let mem = func[inst].mem.expect("the address of a local is an address");
         func[mem].disp += at;
+        if frame.grows() {
+            rebase(func, inst, conv.frame_pointer);
+        }
+    }
+
+    // The bytes a variable length array takes are already off the stack pointer by the time one of
+    // these runs, so what is left to write is how far above the new stack pointer the array starts,
+    // which is however much of the bottom of the frame belongs to the arguments of a call. That
+    // area stays at the bottom wherever the bottom has moved to. Added rather than assigned for the
+    // reason the loop above is: one of these folds into its readers like any other address, and a
+    // reader that took it brought a displacement of its own.
+    for &inst in &stack.dynamic {
+        let mem = func[inst].mem.expect("the address of a growable local is an address");
+        func[mem].disp += offset(frame.below());
     }
 
     // The same, one area further up, and through the frame pointer when that is what reaches it.
@@ -223,15 +239,14 @@ pub fn finish(
         let mem = func[inst].mem.expect("an argument read out of memory is read from an address");
         func[mem].disp += incoming.at + offset(up);
         if incoming.through_frame_pointer {
-            // The base register is an operand of the instruction and the addressing mode holds
-            // where in the operand vector it is, so the register is changed there and not here.
-            let at = func[mem].base.expect("an address the lowering wrote a base register into");
-            let operands = func[inst].operands;
-            func[operands][usize::from(at)].reg = Reg::physical(conv.frame_pointer);
+            rebase(func, inst, conv.frame_pointer);
         }
     }
 
-    let mut writer = Writer { func, conv, insts, names, ahead: None };
+    // Every offset the frame reports is from this one register, which is the stack pointer in an
+    // ordinary frame and the frame pointer in one that moves the stack pointer while it runs.
+    let base = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
+    let mut writer = Writer { func, conv, insts, names, base, ahead: None };
 
     let mut cursors: Vec<(At, Inst)> = Vec::new();
     for edit in &allocation.edits {
@@ -277,11 +292,25 @@ pub fn finish(
 const UNROLLED: u32 = 3;
 
 /// One function having its frame written into it.
+/// Points an address the lowering left counted from the stack pointer at another register.
+///
+/// The base register is an operand of the instruction and the addressing mode holds where in the
+/// operand vector it is, so the register is changed there and not in the mode.
+fn rebase(func: &mut Func, inst: Inst, to: PhysReg) {
+    let mem = func[inst].mem.expect("an address");
+    let at = func[mem].base.expect("an address the lowering wrote a base register into");
+    let operands = func[inst].operands;
+    func[operands][usize::from(at)].reg = Reg::physical(to);
+}
+
 struct Writer<'a> {
     func: &'a mut Func,
     conv: &'a CallRegs,
     insts: &'a FrameInsts,
     names: &'a mut Interner,
+    /// Which register every offset into the frame is counted from, which is the stack pointer
+    /// unless the function moves it while it runs. See `Growing` in [`crate::frame`].
+    base: PhysReg,
     /// The blocks a probing prologue made, which go in front of the one the function began with.
     ///
     /// Empty in every function whose frame is taken in one subtraction, which is every function
@@ -410,13 +439,19 @@ impl Writer<'_> {
         for save in frame.saved_sse() {
             let inst = self.store(sse, save.reg, save.at);
             out.push(inst);
-            // Where it went is an offset from the stack pointer in the body, and the address is
-            // `below` above that, so the two make one constant. Unless the frame realigned, in
-            // which case there is no such constant and the rule is left out rather than guessed;
-            // the one convention that realigns and the one that preserves a vector register are
-            // not the same convention, so nothing reaches this today.
+            // Where it went is an offset from whichever register the frame counts from, and the
+            // address is a constant above that register, so the two make one constant. In an
+            // ordinary frame that register is the stack pointer and the constant is `below`. In one
+            // that grows it is the frame pointer, which the address has been counted from since the
+            // prologue pointed it at where it saved the caller's copy, so the constant is the two
+            // words above it and nothing the prologue did afterwards changes it. A realigned frame
+            // has no such constant at all and the rule is left out rather than guessed; the one
+            // convention that realigns and the one that preserves a vector register are not the
+            // same convention, so nothing reaches any of this today.
             if frame.realign().is_none() {
-                self.saved(inst, sse, save.reg, save.at - below);
+                let above =
+                    if frame.grows() { word + offset(self.conv.return_address) } else { below };
+                self.saved(inst, sse, save.reg, save.at - above);
             }
         }
         // Before the canary and after the frame, which is where gcc puts it. The hook reads the
@@ -854,7 +889,7 @@ impl Writer<'_> {
     /// Reads a register out of the frame.
     fn load(&mut self, class: RegClass, reg: PhysReg, at: i32) -> Inst {
         let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
-        let base = Operand::read(Reg::physical(self.conv.stack_pointer), self.conv.int_class);
+        let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
             .build_loose(load)
             .def(Reg::physical(reg), class)
@@ -865,7 +900,7 @@ impl Writer<'_> {
     /// Writes a register into the frame.
     fn store(&mut self, class: RegClass, reg: PhysReg, at: i32) -> Inst {
         let store = self.opcode(self.insts.moves(class).expect("a class to store").store);
-        let base = Operand::read(Reg::physical(self.conv.stack_pointer), self.conv.int_class);
+        let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
             .build_loose(store)
             .uses(Reg::physical(reg), class)

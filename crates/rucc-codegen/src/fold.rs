@@ -99,9 +99,10 @@ use rucc_target::{FrameInsts, Role};
 
 /// The addresses [`crate::finish`] has still to write a displacement into.
 ///
-/// Two lists, because the frame holds two areas this pass runs before the layout of: a local's
-/// address is an offset into this function's own objects and a stack argument's is an offset into
-/// the caller's area. What they have in common is the shape, a `lea` off the stack pointer with the
+/// Three lists, because the frame holds three kinds of place this pass runs before the layout of:
+/// a local's address is an offset into this function's own objects, a stack argument's is an offset
+/// into the caller's area, and a variable length array's is an offset above wherever the stack
+/// pointer ended up. What they have in common is the shape, a `lea` off the stack pointer with the
 /// displacement left at zero, and what this type is for is that folding one of those away has to
 /// move the entry rather than lose it.
 ///
@@ -115,6 +116,13 @@ pub struct Pending<'a> {
     pub addresses: &'a mut Vec<(mir::Inst, usize)>,
     /// Which instruction reads which of the arguments the caller passed on the stack.
     pub arguments: &'a mut Vec<(mir::Inst, u32)>,
+    /// Which instructions carry the address of a local whose size the program worked out.
+    ///
+    /// There is no number beside one of these, because where a variable length array starts is not
+    /// a place the frame layout hands back: the bytes are already off the stack pointer by the time
+    /// the address is taken, so what gets written in is how much of the bottom of the frame the
+    /// arguments of a call keep, which is the same for all of them.
+    pub dynamic: &'a mut Vec<mir::Inst>,
 }
 
 impl Pending<'_> {
@@ -124,18 +132,22 @@ impl Pending<'_> {
     /// for is handed to all of them, and each of those now carries a displacement of its own that
     /// the frame layout has still to be added to.
     ///
-    /// An address on either list reads the stack pointer and nothing else, so it never reads a
+    /// An address on any of the lists reads the stack pointer and nothing else, so it never reads a
     /// register another one of them wrote, which is what makes it impossible for a reader to end up
     /// on a list twice and be given two offsets.
     fn moved(&mut self, from: mir::Inst, into: &[mir::Inst]) {
         move_entries(self.addresses, from, into);
         move_entries(self.arguments, from, into);
+        if let Some(at) = self.dynamic.iter().position(|&inst| inst == from) {
+            self.dynamic.splice(at..=at, into.iter().copied());
+        }
     }
 
-    /// Whether this instruction is one of the two lists, which is how many readers it may go to.
+    /// Whether this instruction is on one of the lists, which is how many readers it may go to.
     fn holds(&self, inst: mir::Inst) -> bool {
         let named = self.addresses.iter().map(|&(at, _)| at);
-        named.chain(self.arguments.iter().map(|&(at, _)| at)).any(|at| at == inst)
+        let listed = named.chain(self.arguments.iter().map(|&(at, _)| at));
+        listed.chain(self.dynamic.iter().copied()).any(|at| at == inst)
     }
 }
 
@@ -453,12 +465,16 @@ mod tests {
     /// The lists are still there because the pass rewrites them, and a test that is about what it
     /// wrote in them builds its own rather than calling this.
     fn folds(func: &mut mir::Func, names: &mut Interner) -> usize {
-        let (mut locals, mut arguments) = (Vec::new(), Vec::new());
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
         addresses(
             func,
             &FRAME,
             names,
-            &mut Pending { addresses: &mut locals, arguments: &mut arguments },
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
         )
     }
 
@@ -1037,8 +1053,9 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(8))
             .finish();
 
-        let (mut locals, mut arguments) = (vec![(local, 3)], Vec::new());
-        let mut pending = Pending { addresses: &mut locals, arguments: &mut arguments };
+        let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
+        let mut pending =
+            Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
         assert_eq!(addresses(&mut func, &FRAME, &mut names, &mut pending), 1);
 
         let left = shape(&func, &names, block);
@@ -1073,8 +1090,9 @@ mod tests {
                 .finish();
         }
 
-        let (mut locals, mut arguments) = (Vec::new(), vec![(local, 7)]);
-        let mut pending = Pending { addresses: &mut locals, arguments: &mut arguments };
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
+        let mut pending =
+            Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
         let folded = addresses(&mut func, &FRAME, &mut names, &mut pending);
         assert!(locals.is_empty(), "an argument is owed off the other list");
         (folded, func.insts(block).collect(), arguments)
