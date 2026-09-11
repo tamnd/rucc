@@ -46,8 +46,8 @@ use rucc_codegen::coverage::{self, Fired};
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Control, Dumps, EmitKind, Hook, Options, Pic, PrefixMap, Preinclude, Protector, SaveTemps,
-    Session, Std, Wrapping, runtime,
+    Compress, Control, Dumps, EmitKind, Hook, Options, Pic, PrefixMap, Preinclude, Protector,
+    SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_target::Triple;
 
@@ -193,6 +193,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
+  -gz[=none|zlib|zlib-gnu|zstd] -gno-split-dwarf   compress debug sections, one file not two
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
@@ -319,6 +320,36 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     "{arg}: this compiler writes DWARF 5 and no other version, see \
                      spec/11-debug-info.md"
                 )));
+            }
+            // Whether the debug information goes in a file of its own beside the object. gcc
+            // writes that `.dwo` whether or not it found anything to put in it, which means a
+            // build system that declares the file as an output gets one and a make rule that
+            // depends on it fires. Refused for that reason rather than taken: section 4.1 takes a
+            // flag that changes nothing and refuses one that changes what is produced, and a file
+            // that does not appear is the plainest change of that kind there is. The negative
+            // spelling is taken, because putting it all in the object is what happens anyway.
+            "-gno-split-dwarf" => {}
+            "-gsplit-dwarf" => {
+                return Err(err(format!(
+                    "{arg}: this compiler writes no separate `.dwo` file, and a build that \
+                     expects one beside each object would wait for a file that never arrives, \
+                     see spec/11-debug-info.md"
+                )));
+            }
+            // How the debug sections are compressed. There are none yet, so every answer produces
+            // the same bytes and taking the flag promises nothing that is not kept. The value is
+            // still checked, because a typo in a distribution's flags is worth finding when the
+            // compiler reads it rather than when somebody later wonders why nothing got smaller.
+            // Bare `-gz` means `zlib`, which the manual leaves for the reader to discover.
+            "-gz" => opts.compress = Compress::Zlib,
+            _ if arg.starts_with("-gz=") => {
+                let how = &arg["-gz=".len()..];
+                opts.compress = how.parse().map_err(|()| {
+                    err(format!(
+                        "`{how}` is not a way to compress debug sections, which is none, zlib, \
+                         zlib-gnu or zstd"
+                    ))
+                })?;
             }
             "-Werror" => opts.warnings_are_errors = true,
             // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
@@ -3315,6 +3346,49 @@ mod tests {
         assert!(no32.contains("32 bit target"), "{no32}");
     }
 
+    /// `-gz` and the two spellings of the split, which are the two questions about the shape of
+    /// the debug output rather than about how much of it there is.
+    ///
+    /// Both answers here are about what happens when there is debug information to shape, and
+    /// there is none yet, so what is being asserted is that the flags are read and remembered
+    /// rather than that anything changed in the output. That is the whole of what taking them
+    /// claims, and it is worth a test because the day `rucc-debug` writes a section this is where
+    /// it comes to find out what the command line said.
+    #[test]
+    fn the_shape_of_the_debug_output_is_recorded_even_where_there_is_none_of_it() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.compress, Compress::None, "uncompressed unless somebody asks");
+
+        // Bare `-gz` is `-gz=zlib`, measured against gcc 16 rather than read out of the manual,
+        // which describes the flag without ever saying which algorithm it picks.
+        assert_eq!(compile(&["-gz", "-c", "a.c"]).0.compress, Compress::Zlib);
+        for (spelling, want) in [
+            ("none", Compress::None),
+            ("zlib", Compress::Zlib),
+            ("zlib-gnu", Compress::ZlibGnu),
+            ("zstd", Compress::Zstd),
+        ] {
+            let (opts, _) = compile(&[&format!("-gz={spelling}"), "-c", "a.c"]);
+            assert_eq!(opts.compress, want, "{spelling}");
+        }
+
+        // A value nothing here has heard of is refused rather than rounded to the nearest one,
+        // because a build that asked for `zstd` and quietly got `zlib` would ship a file its
+        // reader may not understand and would have no way of finding out.
+        for bad in ["-gz=gzip", "-gz="] {
+            let failed = refused(&[bad, "-c", "a.c"]);
+            assert!(failed.contains("is not a way to compress"), "{bad}: {failed}");
+        }
+
+        // The split is refused in the direction that would have written a file and taken in the
+        // direction that describes what happens. A build system that names the `.dwo` as an
+        // output has to hear about it now rather than at the point the file is missing.
+        let (opts, _) = compile(&["-gno-split-dwarf", "-g", "-c", "a.c"]);
+        assert!(opts.debug_info, "the negative spelling says nothing about how much");
+        let failed = refused(&["-gsplit-dwarf", "-c", "a.c"]);
+        assert!(failed.contains(".dwo"), "the refusal names the file it would have written");
+    }
+
     #[test]
     fn the_levels_gcc_spells_differently_are_the_levels_they_mean() {
         assert_eq!(compile(&["-O", "-c", "a.c"]).0.opt_level, OptLevel::O1);
@@ -3637,7 +3711,9 @@ mod tests {
         // the one that picks a tier. The two it went up by last are the prefix mapping family,
         // which is four flags whose whole job is to keep a build's output the same from two
         // different directories, and which a person chasing a reproducible build comes here
-        // looking for by name.
-        assert!(USAGE.lines().count() < 62, "usage text has grown past one screen");
+        // looking for by name. The one it went up by last is how the debug sections are compressed
+        // and whether they go in a file of their own, which are two questions about the shape of
+        // the debug output, where the line above them is about how much of it there is.
+        assert!(USAGE.lines().count() < 63, "usage text has grown past one screen");
     }
 }
