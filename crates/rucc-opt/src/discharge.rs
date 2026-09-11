@@ -107,6 +107,12 @@
 //! containment question is arithmetic on the thing being proved, and a pass doing that quietly is
 //! what the split between the walk and the rule exists to stop.
 //!
+//! What the range is asked of is the list above and not a shorter one: the local an `alloca`
+//! declares, the object an allocator made where the program has tested it, and the ranges checks
+//! that already ran established. The allocation was missing from that list until tamnd/rucc#880,
+//! which is what left a loop walking an index into its own `malloc` with every check it started
+//! with however plainly the call said how many bytes it made.
+//!
 //! The range is only ever asked with and never recorded. What a check proves when it runs is that
 //! the address the program used was inside the object, and nothing at all about the rest of a
 //! range this pass made up around it. So a check discharged this way records the narrow fact, the
@@ -419,13 +425,30 @@ impl Pass for Discharge {
                         } else if scope.bounds.covers(&asked) {
                             Some(REMOVED)
                         } else {
-                            reach(func, ranges.as_mut(), &asked, inst)
-                                .filter(|wide| {
-                                    declared(func, wide.base)
-                                        .is_some_and(|local| reaches(&local, wide))
-                                        || scope.bounds.reaches(wide)
-                                })
-                                .map(|_| REMOVED_RANGE)
+                            // The same four sources in the same order, asked of the range of
+                            // addresses the walk can reach rather than of the one address the
+                            // constant reader could name. A flag has already been read above and
+                            // reading it again would say the same thing, so what is left is the
+                            // local, the allocation and what the walk carries.
+                            reach(func, ranges.as_mut(), &asked, inst).and_then(|wide| {
+                                if declared(func, wide.base)
+                                    .is_some_and(|local| reaches(&local, &wide))
+                                {
+                                    Some(REMOVED_RANGE)
+                                } else if allocated_around(
+                                    func,
+                                    cfg.as_ref(),
+                                    &mut checked,
+                                    block,
+                                    &[&wide],
+                                ) {
+                                    Some(REMOVED_MADE)
+                                } else if scope.bounds.reaches(&wide) {
+                                    Some(REMOVED_RANGE)
+                                } else {
+                                    None
+                                }
+                            })
                         };
                         let Some(why) = why else {
                             if scope.bounds.covered_before(&asked) {
@@ -543,13 +566,25 @@ impl Pass for Discharge {
                         // addresses, which is that two things saying each end is inside something
                         // say nothing about it being the same something.
                         let why = why.or_else(|| {
-                            spread(func, ranges.as_mut(), inst, inst)
-                                .filter(|(near, far)| {
-                                    declared(func, near.base).is_some_and(|local| {
-                                        reaches(&local, near) && reaches(&local, far)
-                                    }) || scope.bounds.reaches_both(near, far)
-                                })
-                                .map(|_| REMOVED_DERIV_RANGE)
+                            spread(func, ranges.as_mut(), inst, inst).and_then(|(near, far)| {
+                                if declared(func, near.base).is_some_and(|local| {
+                                    reaches(&local, &near) && reaches(&local, &far)
+                                }) {
+                                    Some(REMOVED_DERIV_RANGE)
+                                } else if allocated_around(
+                                    func,
+                                    cfg.as_ref(),
+                                    &mut checked,
+                                    block,
+                                    &[&near, &far],
+                                ) {
+                                    Some(REMOVED_DERIV_MADE)
+                                } else if scope.bounds.reaches_both(&near, &far) {
+                                    Some(REMOVED_DERIV_RANGE)
+                                } else {
+                                    None
+                                }
+                            })
                         });
                         let Some(why) = why else {
                             match narrow {
@@ -816,8 +851,8 @@ fn declared(func: &Func, base: Value) -> Option<Fact> {
     Some(Fact::whole(base, i128::from(func[info].size)))
 }
 
-/// Whether all of those bytes are inside one object an allocator made, at a place this function has
-/// already found out is not null.
+/// The object an allocator made, when the address a check is about was computed from one and this
+/// function has already found out it is not null.
 ///
 /// The same shape as [`declared`] one storey up, with a marked call saying the size instead of an
 /// `alloca` and one more thing to establish. `crate::heap` has the argument for both halves: what a
@@ -825,9 +860,28 @@ fn declared(func: &Func, base: Value) -> Option<Fact> {
 /// has looked, because a null pointer is inside no object and a check on one is a check that is
 /// meant to fail.
 ///
+/// Nothing is claimed when the graph was not built, which is a function this found no allocation in
+/// and so a function where the answer would have been no anyway.
+fn allocation(
+    func: &Func,
+    cfg: Option<&Cfg>,
+    checked: &mut HashMap<Value, HashSet<Block>>,
+    block: Block,
+    base: Value,
+) -> Option<Fact> {
+    let whole = heap::made(func, base)?;
+    let cfg = cfg?;
+    checked
+        .entry(whole.base)
+        .or_insert_with(|| heap::tested(func, cfg, whole.base))
+        .contains(&block)
+        .then_some(whole)
+}
+
+/// Whether all of those bytes are inside one object an allocator made.
+///
 /// Every part has to be inside, and inside the same object, which is what asking [`covers`] with one
-/// fact and several does. Nothing is claimed when the graph was not built, which is a function this
-/// found no allocation in and so a function where the answer would have been no anyway.
+/// fact and several does.
 fn allocated(
     func: &Func,
     cfg: Option<&Cfg>,
@@ -836,15 +890,30 @@ fn allocated(
     parts: &[&Fact],
 ) -> bool {
     let Some(first) = parts.first() else { return false };
-    let Some(whole) = heap::made(func, first.base) else { return false };
-    if !parts.iter().all(|part| covers(&whole, part)) {
-        return false;
-    }
-    let Some(cfg) = cfg else { return false };
-    checked
-        .entry(whole.base)
-        .or_insert_with(|| heap::tested(func, cfg, whole.base))
-        .contains(&block)
+    let Some(whole) = allocation(func, cfg, checked, block, first.base) else { return false };
+    parts.iter().all(|part| covers(&whole, part))
+}
+
+/// Whether every address a walk can reach is inside one object an allocator made.
+///
+/// [`allocated`] for the question [`reach`] and [`spread`] ask. The object comes from the same place
+/// and is believed for the same reason, and what is asked of it is [`reaches`] rather than
+/// [`covers`], so a walk by a step the ranges put numbers on can be answered by a call that says how
+/// many bytes it made.
+///
+/// The wide path used to ask a local and the facts the walk carries and nothing else, so a program
+/// that walked into its own `malloc` by an index kept its checks however plainly the size was
+/// written. That is the first half of tamnd/rucc#880.
+fn allocated_around(
+    func: &Func,
+    cfg: Option<&Cfg>,
+    checked: &mut HashMap<Value, HashSet<Block>>,
+    block: Block,
+    spans: &[&Reach],
+) -> bool {
+    let Some(first) = spans.first() else { return false };
+    let Some(whole) = allocation(func, cfg, checked, block, first.base) else { return false };
+    spans.iter().all(|span| reaches(&whole, span))
 }
 
 /// A lifetime fact grown from one address to the checked range it sits in.
@@ -2204,18 +2273,23 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_HANDED), 1);
     }
 
-    /// A function that allocates `size` bytes and tests the answer against null.
+    /// A function that takes an index, allocates `size` bytes and tests the answer against null.
     ///
-    /// Gives back the block where the test has passed, the block where it has not, and the pointer.
-    /// The flag is put on by hand, because which calls deserve it is a question about a module and
-    /// `crate::heap` is what answers it.
-    fn allocation(size: i128) -> (Interner, Func, Block, Block, Value) {
+    /// Gives back the block where the test has passed, the block where it has not, the pointer and
+    /// the index. The flag is put on by hand, because which calls deserve it is a question about a
+    /// module and `crate::heap` is what answers it.
+    ///
+    /// The index is there for the tests about a walk by a value. A parameter on its own is any
+    /// number at all, so a test that wants a bounded one puts [`low_bits`] over it the same way the
+    /// local tests do.
+    fn allocation(size: i128) -> (Interner, Func, Block, Block, Value, Value) {
         let mut names = Interner::new();
         let name = names.intern("f");
-        let mut func = Func::new(name, Signature::new());
+        let mut func = Func::new(name, Signature::new().with_params(&[Type::int(64)]));
         let entry = func.create_block();
         let inside = func.create_block();
         let outside = func.create_block();
+        let index = func.append_param(entry, Type::int(64));
         let mut build = Builder::new(&mut func, entry);
         let signature = build.func().add_signature(
             Signature::new().with_params(&[Type::int(64)]).with_returns(&[Type::PTR]),
@@ -2231,14 +2305,14 @@ mod tests {
         build.br_if(condition, inside, &[], outside, &[]);
         let mut build = Builder::new(&mut func, outside);
         build.ret(&[]);
-        (names, func, inside, outside, pointer)
+        (names, func, inside, outside, pointer, index)
     }
 
     #[test]
     fn a_check_inside_an_allocation_the_program_tested_goes() {
         // The third of the objects whose extent nobody had to check for. `malloc(16)` says how
         // many bytes it made in the call, and the branch on null is what makes it true here.
-        let (_, mut func, inside, _, pointer) = allocation(16);
+        let (_, mut func, inside, _, pointer, _) = allocation(16);
         let mut build = Builder::new(&mut func, inside);
         let field = past(&mut build, pointer, 8);
         deriv(&mut build, pointer, field, 1);
@@ -2258,7 +2332,7 @@ mod tests {
     fn a_check_on_an_allocation_nobody_tested_stays() {
         // Down the other arm the pointer is null, a null pointer is inside no object at all, and
         // the check is one that is supposed to fail.
-        let (_, mut func, _, outside, pointer) = allocation(16);
+        let (_, mut func, _, outside, pointer, _) = allocation(16);
         let mut build = Builder::new(&mut func, outside);
         access(&mut build, pointer, 4);
         build.ret(&[]);
@@ -2271,7 +2345,7 @@ mod tests {
     fn a_check_past_the_end_of_an_allocation_stays() {
         // Four bytes at offset fourteen is two bytes past the sixteen that were asked for, and
         // those two bytes are what the check is for.
-        let (_, mut func, inside, _, pointer) = allocation(16);
+        let (_, mut func, inside, _, pointer, _) = allocation(16);
         let mut build = Builder::new(&mut func, inside);
         let field = past(&mut build, pointer, 14);
         access(&mut build, field, 4);
@@ -2285,7 +2359,7 @@ mod tests {
     fn a_walk_that_leaves_an_allocation_stays() {
         // One end inside and the other past the end is a walk out of the object, which is what a
         // derivation check is there to catch, so both ends have to be inside before it goes.
-        let (_, mut func, inside, _, pointer) = allocation(16);
+        let (_, mut func, inside, _, pointer, _) = allocation(16);
         let mut build = Builder::new(&mut func, inside);
         let field = past(&mut build, pointer, 32);
         deriv(&mut build, pointer, field, 1);
@@ -2300,7 +2374,7 @@ mod tests {
         // The other reason a fact read off the instruction is worth having. How many bytes an
         // allocator made is not something a callee can change, so unlike a fact from a check that
         // ran this one is still there on the far side of a call.
-        let (mut names, mut func, inside, _, pointer) = allocation(16);
+        let (mut names, mut func, inside, _, pointer, _) = allocation(16);
         let mut build = Builder::new(&mut func, inside);
         access(&mut build, pointer, 4);
         let signature = build.func().add_signature(Signature::new());
@@ -2313,6 +2387,97 @@ mod tests {
         // Both lifetime checks stay, and the second one is the one a `free` inside `g` would make
         // report.
         assert_eq!(lives(&func), 2);
+    }
+
+    /// A function that allocates `size` bytes and never looks at what it got back.
+    ///
+    /// The shape `bench/safety/a-strided-column-sum.c` has. The size on its own must not answer a
+    /// check here, because reading through what `malloc` gave back without testing it is the bug
+    /// this compiler is for.
+    fn untested(size: i128) -> (Interner, Func, Block, Value, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut func = Func::new(name, Signature::new().with_params(&[Type::int(64)]));
+        let block = func.create_block();
+        let index = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let signature = build.func().add_signature(
+            Signature::new().with_params(&[Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let bytes = build.iconst(Type::int(64), size);
+        let call = build.call(names.intern("malloc"), signature, &[bytes]);
+        let at = build.func();
+        at[call].flags |= Flags::HEAP;
+        let pointer = at[call].results().next().expect("a call that gives back a pointer");
+        (names, func, block, pointer, index)
+    }
+
+    #[test]
+    fn a_walk_by_a_step_the_ranges_bound_inside_an_allocation_goes() {
+        // The first half of tamnd/rucc#880. The step is not a constant, so the walk stops at the
+        // `ptr_add` and what answers the check has to be asked of the range of addresses it can
+        // reach. That range is nought to seven plus the four bytes the access wants, all of it
+        // inside the sixteen the call says it made, and the branch on null is what makes the
+        // sixteen true here.
+        let (_, mut func, inside, _, pointer, index) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 1);
+    }
+
+    #[test]
+    fn a_walk_by_a_step_that_can_leave_an_allocation_stays() {
+        // The same function with the mask widened. Nought to thirty one plus four bytes runs off
+        // the end of sixteen, and the bytes past the end are what the check is for.
+        let (_, mut func, inside, _, pointer, index) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let step = low_bits(&mut build, index, 31);
+        let at = walk(&mut build, pointer, step);
+        check(&mut build, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 0);
+    }
+
+    #[test]
+    fn a_derivation_by_a_step_the_ranges_bound_inside_an_allocation_goes() {
+        // The same for the derivation check, which is the one the column sum is left with. Both
+        // ends have to be inside and inside the same object: the near end is the pointer itself and
+        // the far end is anywhere in nought to seven past it.
+        let (_, mut func, inside, _, pointer, index) = allocation(16);
+        let mut build = Builder::new(&mut func, inside);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        deriv(&mut build, pointer, at, 1);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(derivs(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_MADE), 1);
+    }
+
+    #[test]
+    fn a_walk_into_an_allocation_nobody_tested_stays() {
+        // The other half of the rule, which this does not weaken. A program that walks into what
+        // `malloc` gave back without ever looking at it is a program that reads through null when
+        // the allocation fails, and the checks are what report it.
+        let (_, mut func, block, pointer, index) = untested(16);
+        let mut build = Builder::new(&mut func, block);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        check(&mut build, at, 4);
+        deriv(&mut build, pointer, at, 1);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(derivs(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MADE), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_DERIV_MADE), 0);
     }
 
     #[test]
