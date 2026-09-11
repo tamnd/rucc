@@ -1215,6 +1215,52 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// What an access to a packed member is allowed to assume about where it starts.
+    ///
+    /// C 6.2.8 gives an object of type `int` four byte alignment and `packed` takes it away: the
+    /// member goes wherever the members in front of it ended, and an `int` one byte into a record
+    /// is aligned to one. The number on the access has to say so, because it is what the back end
+    /// picks instructions from and what judgement J1 of `spec/safe-memory/04-safety-model.md`
+    /// tests at run time. Four on an address that is a multiple of one is the compiler refusing a
+    /// program that is doing nothing wrong.
+    #[test]
+    fn an_access_to_a_packed_member_says_the_alignment_the_layout_left_it() {
+        let packed = body(concat!(
+            "struct P { char c; int v; } __attribute__((packed));\n",
+            "int f(struct P *p) { return p->v; }\n",
+        ));
+        assert!(packed.contains("load.i32 %2, align 1,"), "{packed}");
+        // The same record without the attribute, which is where the type's own answer is right.
+        let plain = body(concat!(
+            "struct P { char c; int v; };\n",
+            "int f(struct P *p) { return p->v; }\n",
+        ));
+        assert!(plain.contains("load.i32 %2, align 4,"), "{plain}");
+    }
+
+    /// The same, for the two ways of being further in than the member itself.
+    ///
+    /// An array member is stepped through rather than offset to, and a record member is offset to
+    /// twice, and both have to carry the outer record's alignment with them. A step of a whole
+    /// number of elements leaves what the element width and the address had in common, which for
+    /// a one byte aligned base is one byte however wide the elements are.
+    #[test]
+    fn what_is_inside_a_packed_member_is_no_more_aligned_than_the_member_is() {
+        let stepped = body(concat!(
+            "struct P { char c; int v[4]; } __attribute__((packed));\n",
+            "int f(struct P *p, int i) { return p->v[i]; }\n",
+        ));
+        assert!(stepped.contains(", align 1,"), "{stepped}");
+        assert!(!stepped.contains(", align 4,"), "{stepped}");
+        let nested = body(concat!(
+            "struct Inner { int v; };\n",
+            "struct P { char c; struct Inner in; } __attribute__((packed));\n",
+            "int f(struct P *p) { return p->in.v; }\n",
+        ));
+        assert!(nested.contains(", align 1,"), "{nested}");
+        assert!(!nested.contains(", align 4,"), "{nested}");
+    }
+
     /// The same attribute on a declaration rather than on a type, which asks that this object or
     /// this function be at a multiple of that, and which is where a program that has to hand a
     /// buffer to hardware or keep two counters off one cache line writes it.
