@@ -27,6 +27,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
@@ -44,6 +45,7 @@ use rucc_types::{TypeId, TypeKind, Types, compatible};
 use crate::abi::{self, Plan};
 use crate::aliasing;
 use crate::body;
+use crate::directives;
 use crate::reach;
 use crate::repr;
 
@@ -110,7 +112,6 @@ pub struct Wrapping {
 ///
 /// The interner is mutable because the walk invents names the program never wrote: the label a
 /// string literal is emitted under, and the mangled name of a function-scope `static`.
-#[derive(Debug)]
 pub struct Context<'a> {
     /// The typed tree.
     pub tast: &'a Tast,
@@ -161,6 +162,29 @@ pub struct Context<'a> {
     /// generator and by the time it runs the command line is gone and the two operations it might
     /// fuse may have come from different statements.
     pub contract: FpContract,
+    /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
+    /// template wrote it and handing back either the bytes or what went wrong.
+    ///
+    /// Passed in rather than reached for, because the walk has no business opening files and
+    /// because a caller that put its sources somewhere other than a disk has put this file there
+    /// too. The name is resolved the way an assembler resolves it, which is against the directory
+    /// the compiler was run in and not against the directory the source was found in.
+    pub read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+}
+
+// Written out rather than derived because a closure has no `Debug`, and printing one would say
+// nothing anyway. What is worth reading here is the settings, so those are what this prints.
+impl fmt::Debug for Context<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Context")
+            .field("visibility", &self.visibility)
+            .field("protector", &self.protector)
+            .field("wrapping", &self.wrapping)
+            .field("aliasing", &self.aliasing)
+            .field("padding", &self.padding)
+            .field("contract", &self.contract)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the walk produced.
@@ -189,6 +213,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         aliasing,
         padding,
         contract,
+        read,
     } = cx;
     let module = Module::new(names.intern(name), target);
     let mut unit = Unit {
@@ -204,6 +229,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         cliques: 0,
         tree: aliasing::Tree::default(),
         contract,
+        read,
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
@@ -241,6 +267,8 @@ pub(crate) struct Unit<'a> {
     tree: aliasing::Tree,
     /// How far a multiply and an addition may be fused. See [`Context::contract`].
     pub(crate) contract: FpContract,
+    /// How a file a `.incbin` names is read. See [`Context::read`].
+    read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are
@@ -270,8 +298,8 @@ pub(crate) struct Unit<'a> {
 
 // The debug is by hand and short: a translation unit is not something anybody wants printed as
 // a `{:?}`, and the module has a printer of its own for when they do.
-impl std::fmt::Debug for Unit<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Unit<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Unit")
             .field("module", &self.module.counts())
             .field("diagnostics", &self.diagnostics.len())
@@ -305,6 +333,7 @@ impl Unit<'_> {
 
     /// Every declaration the file made, in the order it made them.
     fn run(&mut self) {
+        self.file_asms();
         self.find_aliased();
         for index in 0..self.tast.top_level().len() {
             let decl = self.tast.top_level()[index];
@@ -319,6 +348,79 @@ impl Unit<'_> {
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
+    }
+
+    /// The `asm` written at file scope, read into the globals they define.
+    ///
+    /// Ahead of the declarations rather than among them. A block usually names more than one
+    /// thing and means them to be next to each other, the object writer lays globals out in the
+    /// order the module holds them, and adding a block's globals together is what makes them a
+    /// run. A declaration of one of those names below the block then finds a definition already
+    /// there and leaves it alone, which is the division the program wrote: the template says what
+    /// the bytes are and the C declaration says what they are to be read as.
+    fn file_asms(&mut self) {
+        for index in 0..self.tast.file_asms().len() {
+            let asm = self.tast.file_asms()[index];
+            let template = self.spelled(asm.template);
+            let pieces = match directives::assemble(&template, &mut *self.read) {
+                Ok(pieces) => pieces,
+                Err(directives::Failed::Unsupported(what)) => {
+                    self.unsupported(&format!("{what} in an `asm` at file scope"), asm.span);
+                    continue;
+                }
+                Err(directives::Failed::Missing(name, why)) => {
+                    let message = format!("cannot open '{name}' for reading: {why}");
+                    self.diagnostics.push(Diagnostic::error(message, asm.span).with_code("E0702"));
+                    continue;
+                }
+            };
+            for piece in pieces {
+                self.piece(piece);
+            }
+        }
+    }
+
+    /// One global an `asm` at file scope defined.
+    fn piece(&mut self, piece: directives::Piece) {
+        let symbol = self.names.intern(&piece.name);
+        let mut global = Global::new(symbol, piece.size, piece.align.max(1));
+        global.linkage = piece.linkage;
+        global.visibility = piece.visibility;
+        let bss = matches!(piece.section, directives::Section::Bss);
+        match piece.section {
+            // Which of the sections the object writer has an answer of its own for. Asking for
+            // `.rodata` by name would produce a second section with that spelling and with the
+            // flags of a writable one, so what is said here is what the global is instead.
+            directives::Section::ReadOnly => global.constant = true,
+            directives::Section::Data | directives::Section::Bss => {}
+            directives::Section::Named(name) => global.section = Some(self.names.intern(&name)),
+            // Refused where the template was read, since what goes in that section is
+            // instructions and there is nothing here that makes one.
+            directives::Section::Text => return,
+        }
+        let mut data = Vec::with_capacity(piece.items.len());
+        if piece.items.is_empty() && bss {
+            // A label at the end of the zero filled section, which has nothing under it and
+            // still has to land there rather than in the section of written bytes. An image of
+            // no zeros is what says so, since being all zeros is how a global asks for that
+            // section and an empty image asks for nothing.
+            data.push(Datum::Zero(0));
+        }
+        for item in piece.items {
+            data.push(match item {
+                directives::Item::Bytes(bytes) => Datum::Bytes(self.module.push_bytes(&bytes)),
+                directives::Item::Int { width, value } => {
+                    let ty = Type::int(u32::from(width) * 8);
+                    Datum::Scalar {
+                        ty,
+                        value: self.module.add_imm(Imm::int(i128::from(value), ty)),
+                    }
+                }
+                directives::Item::Zero(bytes) => Datum::Zero(bytes),
+            });
+        }
+        global.init = Some(self.module.push_data(&data));
+        self.place_global(global);
     }
 
     /// Which symbols the file gives a second name to, before anything is emitted.

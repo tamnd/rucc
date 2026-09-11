@@ -31,6 +31,7 @@ mod abi;
 mod aliasing;
 mod bits;
 mod body;
+mod directives;
 mod reach;
 mod repr;
 mod restrict;

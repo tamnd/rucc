@@ -303,6 +303,13 @@ const fn visibility(visibility: ir::Visibility) -> Visibility {
 /// address is not a number a link knows when everything it links may be moved. So the question
 /// asked of a constant variable is whether its image holds an address, and one that does goes in
 /// the section that is writable for exactly as long as the loader needs it to be.
+///
+/// A variable with no image at all is not zero filled, it is empty, and the two differ. An `asm`
+/// at file scope writes one whenever it puts a label at the end of what it just wrote, and what
+/// that label means is the address after those bytes, so it belongs in the section those bytes
+/// went into. Sending it to the section of zeros instead would move it away from the run it was
+/// written to mark the end of, and the distance a program reads off it would be a different
+/// distance.
 fn place(
     module: &Module,
     names: &Interner,
@@ -317,7 +324,7 @@ fn place(
     if global.linkage == Linkage::Common {
         return Place::Merged;
     }
-    if pieces.iter().all(|piece| matches!(piece, Piece::Zero(_))) {
+    if !pieces.is_empty() && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_))) {
         return Place::Zero;
     }
     if global.constant {

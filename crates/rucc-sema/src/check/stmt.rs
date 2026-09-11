@@ -1032,7 +1032,7 @@ impl Checker<'_> {
     }
 
     /// One of the strings of an assembly statement, copied into the typed tree.
-    fn asm_string(&mut self, id: ast::StrId, span: Span) -> StrId {
+    pub(in crate::check) fn asm_string(&mut self, id: ast::StrId, span: Span) -> StrId {
         let literal = self.ast[id].clone();
         self.asm_narrow(&literal, span);
         self.tast.add_string(literal)

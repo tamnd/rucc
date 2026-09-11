@@ -296,6 +296,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 | EmitKind::Object
                 | EmitKind::Executable
                 | EmitKind::SafetySummary => {
+                    // What a `.incbin` in an `asm` at file scope names is read through the same
+                    // file system the sources came through, and from where the compiler was run
+                    // rather than from beside the source, because that is where an assembler
+                    // looks for it.
+                    let mut read = |named: &str| {
+                        fs.read(Path::new(named))
+                            .map(|bytes| bytes.as_slice().to_vec())
+                            .map_err(|why| why.to_string())
+                    };
                     let mut lowered = rucc_lower::lower(
                         name,
                         rucc_lower::Context {
@@ -326,6 +335,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Contract::On => FpContract::On,
                                 Contract::Fast => FpContract::Fast,
                             },
+                            read: &mut read,
                         },
                     );
                     // The walk reports what it cannot build, and what it did build is printed
@@ -5822,6 +5832,93 @@ block2:
                 result.messages.iter().any(|m| m.contains(expected)),
                 "{expected}\n{:?}",
                 result.messages
+            );
+        }
+    }
+
+    /// An `asm` at file scope whose template is directives is the whole of what the incbin
+    /// header, an alias table and a hand written jump table each write, and what it says is a
+    /// section holding named bytes. So it becomes the globals it names, in the order it names
+    /// them, which is what `spec/11-asm-objects-debug.md` section 11.2 asks for.
+    #[test]
+    fn an_asm_at_file_scope_that_is_directives_becomes_the_objects_it_defines() {
+        let text = ir(concat!(
+            "__asm__(\n",
+            "  \".section .rodata\\n\"\n",
+            "  \".globl first\\n\"\n",
+            "  \".balign 8\\n\"\n",
+            "  \"first:\\n\"\n",
+            "  \".long 1\\n\"\n",
+            "  \".long 2\\n\"\n",
+            "  \".globl last\\n\"\n",
+            "  \"last:\\n\"\n",
+            "  \".quad last - first\\n\");\n",
+            "extern const int first[];\n",
+            "extern const long last;\n",
+        ));
+        assert!(text.contains("global @first : bytes 8 = { i32 1, i32 2 }, align 8"), "{text}");
+        assert!(text.contains("global @last : i64 = 8"), "{text}");
+    }
+
+    /// The distance between two labels is what the incbin header hands a program as the size of
+    /// the data, so a declaration of one of the names has to find the definition the template
+    /// made rather than turn it back into something the linker is asked for.
+    #[test]
+    fn a_name_an_asm_at_file_scope_defined_is_not_undone_by_a_declaration_of_it() {
+        let text = ir(concat!(
+            "__asm__(\".data\\n.globl counter\\ncounter:\\n.long 7\\n\");\n",
+            "extern int counter;\n",
+            "int read(void) { return counter; }\n",
+        ));
+        assert!(text.contains("global @counter : i32 = 7"), "{text}");
+    }
+
+    /// `.incbin` is the one directive that reads something, and what it reads comes through the
+    /// same file system the sources did.
+    #[test]
+    fn an_incbin_at_file_scope_is_the_bytes_of_the_file_it_names() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let mut fs = MemoryFileSystem::new();
+        fs.insert(
+            "/main.c",
+            b"__asm__(\".data\\n.globl blob\\nblob:\\n.incbin \\\"seed\\\"\\n\");\n".to_vec(),
+        );
+        fs.insert("seed", b"hi".to_vec());
+        let result = compile(&opts, "/main.c", &fs);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("global @blob : bytes 2 = { bytes \"hi\" }"), "{text}");
+    }
+
+    /// A file that is not there is the mistake a build makes when it runs the compiler from the
+    /// wrong directory, and it is worth saying which file rather than saying the template failed.
+    #[test]
+    fn an_incbin_naming_a_file_that_is_not_there_says_which_file() {
+        let messages = errors("__asm__(\".data\\nb:\\n.incbin \\\"nowhere\\\"\\n\");\n");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("cannot open 'nowhere' for reading") && m.contains("E0702")),
+            "{messages:?}"
+        );
+    }
+
+    /// The line drawn is the same one the `asm` inside a function draws: directives are read and
+    /// an instruction waits for an assembler. Refusing by name is what makes the wait visible.
+    #[test]
+    fn an_instruction_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
+        for source in [
+            "__asm__(\".text\\n.globl f\\nf:\\n  ret\\n\");\n",
+            "__asm__(\".data\\n.set alias, 4\\n\");\n",
+        ] {
+            let messages = errors(source);
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("not supported yet")
+                        && m.contains("in an `asm` at file scope")),
+                "{source}\n{messages:?}"
             );
         }
     }
