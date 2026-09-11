@@ -50,6 +50,7 @@ Rules:
 - **Fetches are verified.** Every downloaded artifact has a hash pinned in the rucc release, checked before use, and a mismatch is a hard failure with no override flag.
 - **Fetches are opt-in and visible.** `rucc` never downloads during an ordinary compile without saying so. `rucc --fetch <tuple>` is the explicit command, `--offline` forbids it entirely, and CI is expected to use `--offline` with a pre-populated cache.
 - **Concurrent-safe.** Parallel builds invoke rucc many times at once; cache population uses atomic rename into place, never in-place mutation.
+- **We verify and install, and we do not transport.** rucc has no HTTP client and no TLS stack in it. The bytes are moved by a program the machine already has, and everything that decides whether the result is correct is ours. §13.8 is the whole of that decision.
 
 The stub generator being deterministic is what makes all of this simple: there is no invalidation logic to get wrong, because nothing in the cache can be stale in a way that matters.
 
@@ -90,3 +91,19 @@ This is bootstrappability discipline applied to the sysroot: the claim "this hea
 ## 13.7 What this rules out
 
 Signing and notarization of produced binaries: not ours. A package index or dependency resolution: document 08.7. Per-target release packages: §13.1. Anything that requires network access during an ordinary compile: §13.2.
+
+## 13.8 Who transports the bytes
+
+§13.2 says a fetch is verified and opt-in without saying what does the fetching, and that is a dependency question rather than a design one, so it is settled here before any of the mechanism is written. Three answers were available. An HTTP client with a TLS stack behind the dependency wall of `spec/18-package-layout.md` section 18.3. Running `curl`, or PowerShell on Windows, which is no dependency at all and is accused of failing on a machine that has neither. Or fetching is not ours in any form and the documented path is the producer in `tamnd/rucc-cross`, which is where it lives today for the reason document 08.7 gives.
+
+**The decision: rucc verifies and installs, and rucc does not transport.** A TLS stack is the largest thing anybody would propose putting behind section 18.3's wall, it would be the first entry in that table whose reason is not a file format, and it would be running inside the process that compiles other people's code. Nothing about moving a file needs to be in that process. Everything about deciding whether the file is the right one does, and that is the half we keep.
+
+So `rucc --fetch <tuple>` runs a downloader the machine already has, in a fixed order, with the URL rucc pinned: `curl`, then `wget`, then `powershell -Command Invoke-WebRequest`. It writes into a temporary path inside the cache, never over anything. Then rucc computes the sha256 of what arrived with its own code and compares it against the hash pinned in this release, and a mismatch deletes the file and fails with no flag to continue past it. The transport being somebody else's program is exactly the reason the check cannot be.
+
+The division of trust is worth stating because it looks like a weakness and is not. The downloader authenticates the connection and we authenticate the bytes. A pinned hash is what the correctness of the result rests on, and it rests on it whether the connection was trustworthy or not, which is the same reason §13.2 forbids an override flag. What we lose by not owning the transport is a better error message when a proxy is misconfigured. What we would gain by owning it is nothing the hash does not already give us.
+
+Then the archive is unpacked with the platform's `tar`, which every host we support has, including Windows since 1803. The hash was checked over the archive before anything was unpacked, so what the unpacker does is bounded by a file we have already identified. The manifest is written afterwards by walking the tree on disk rather than by copying what the archive said, so a digest is a statement about the files that are there. Only then is the result renamed into `sysroots/<tuple>`, which is the atomic rename §13.2 asks for, and it is atomic because the temporary path and the destination are in one cache directory by construction.
+
+A machine with no downloader at all is the objection to the second answer and it gets an answer rather than a failure. The error names the URL, the sha256 and the exact path to put the file at, and `rucc --fetch <tuple>` run again picks a file up from that path and carries on from the verification step. A person who can reach the artifact from another machine can finish the job with a copy, and nothing in that path is different from the downloaded one after the first step.
+
+An ordinary compile fetches nothing, with no flag and no exception. `--fetch` is the only code path that can run a downloader, `--offline` refuses even that, and a compile that is missing a sysroot says what to run rather than running it. The third answer's premise is kept whole by that: the default is still that rucc is a compiler which does not touch the network, and building a sysroot from source is still the producer in `tamnd/rucc-cross` rather than something this binary learns to do.

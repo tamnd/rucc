@@ -84,6 +84,7 @@ Not open questions, but recorded so that revisiting them is a decision rather th
 | DWARF on Windows, no PDB | 07.4 | a user population that needs Visual Studio debugging, which is not our population |
 | sanitizer runtimes are tier 1 only | 10.7 | the runtime cost per target falling, which it will not |
 | no third-party sysroot content | 02.5, 08.7 | nothing. This is the boundary that keeps us from becoming a distribution |
+| no HTTP client and no TLS stack in rucc; a fetch is transported by a downloader the machine has and verified by us | 13.8 | a host we support that has no downloader and cannot be given a file by hand, which is not a machine anybody cross compiles on |
 
 ## The shape of this list
 
