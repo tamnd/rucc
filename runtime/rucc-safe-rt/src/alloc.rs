@@ -44,6 +44,7 @@ use crate::fail::Judgement;
 use crate::heap::Arena;
 use crate::layout::Class;
 use crate::plane::{GRANULE, Lifetime, SLOT};
+use crate::types::{self, Side, Types};
 
 /// How much address space the heap is given.
 ///
@@ -74,13 +75,40 @@ pub const fn shadow(len: usize) -> usize {
     len / GRANULE * SLOT
 }
 
+/// How much type plane a region of `len` bytes needs, which is one slot per granule.
+///
+/// A different granule from the one above, eight bytes against sixteen, for the reason
+/// `crate::types` gives: the unit of a distinct type on a sixty four bit target is eight bytes, so
+/// a sixteen byte granule holds two of them and most of a program's structures disagree in every
+/// granule they have. Two granules in one file costs a second shift constant and nothing else.
+#[must_use]
+pub const fn typing(len: usize) -> usize {
+    len / types::GRANULE * types::SLOT
+}
+
+/// How much side table a region of `len` bytes gets, for the granules whose bytes disagree.
+///
+/// One entry for every eight granules. That is a bound on what can be watched rather than a
+/// reservation per granule, and the number comes from the census in
+/// `spec/safe-memory/05-representation.md` section 5.2.5: 12.6 percent of SQLite's declarations
+/// are heterogeneous at this granule, so one in eight is that measurement rounded the safe way.
+///
+/// It costs half a byte of address space per byte of region, which puts the plane at one byte per
+/// byte against section 5.2.3's budget of 1.25. A program that goes past it does not get a wrong
+/// answer, it gets granules recorded as untyped, and `crate::types` says why that is the only
+/// direction available here.
+#[must_use]
+pub const fn siding(len: usize) -> usize {
+    len / types::GRANULE / 8 * types::ENTRY
+}
+
 /// What a region's length is rounded up to.
 ///
 /// A page, so that a length is a length the kernel would have rounded to anyway. What the
 /// arithmetic actually needs is smaller and is worth writing down: the length has to be a whole
-/// number of granules for the shadow to cover it exactly, and the shadow has to be a whole number
-/// of granules for the region that follows it to be granule aligned, which together is a multiple
-/// of thirty two. A machine with larger pages maps a little more than this asks for and nothing
+/// number of granules for each shadow to cover it exactly, and the three shadows together have to
+/// be a whole number of granules for the region that follows them to be granule aligned, which
+/// together is a multiple of thirty two. A machine with larger pages maps a little more than this asks for and nothing
 /// reads past what was asked for, so the rounding is a floor rather than an assumption.
 const PAGE: usize = 1 << 12;
 
@@ -200,6 +228,13 @@ impl Heap {
 pub struct Region {
     /// The lifetime plane over the region.
     pub plane: Lifetime,
+    /// The type plane over the same region, with its side table.
+    ///
+    /// Every watched region has one, including an adopted one, so that a check never has to ask
+    /// whether the plane it is about to read is there. A region whose type plane could not be
+    /// mapped is not watched at all, which is the state every address outside the heap is in and
+    /// is a gap rather than a wrong answer.
+    pub types: Types<'static>,
     /// The lowest address in the region.
     pub base: usize,
     /// One past the highest.
@@ -244,6 +279,8 @@ pub const REGIONS: usize = 8;
 struct Slot {
     /// The bias its plane's arithmetic is built on.
     origin: AtomicUsize,
+    /// The bias the type plane's arithmetic is built on.
+    typing: AtomicUsize,
     /// The lowest address it covers.
     base: AtomicUsize,
     /// One past the highest.
@@ -257,6 +294,7 @@ impl Slot {
     const fn empty() -> Self {
         Self {
             origin: AtomicUsize::new(0),
+            typing: AtomicUsize::new(0),
             base: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
             class: AtomicU32::new(0),
@@ -266,6 +304,14 @@ impl Slot {
 
 /// Every region the monitor watches, in the order they were published.
 static SPACE: [Slot; REGIONS] = [const { Slot::empty() }; REGIONS];
+
+/// The side table of each region's type plane, in the same order.
+///
+/// Beside the table rather than in it because a [`Side`] holds a bump counter and is therefore not
+/// `Copy`, while a [`Region`] is handed back by value to every check. A region's side table is the
+/// one at its own index, so nothing has to be looked up: the index is what [`covering`] is already
+/// walking.
+static SIDES: [Side; REGIONS] = [const { Side::new() }; REGIONS];
 
 /// How many of the slots have been filled in.
 ///
@@ -282,12 +328,39 @@ static FILLED: AtomicUsize = AtomicUsize::new(0);
 /// heap's lock is taken on a path that publishes a region itself.
 static SPACING: AtomicBool = AtomicBool::new(false);
 
+/// Everything the table holds about one region, so that publishing it is one argument.
+///
+/// A struct rather than seven parameters because four of the seven are addresses of the same type
+/// and a call site that swapped two of them would compile and then read the wrong plane.
+pub(crate) struct Watch {
+    /// The bias the lifetime plane's arithmetic is built on.
+    pub origin: usize,
+    /// The bias the type plane's arithmetic is built on.
+    pub typing: usize,
+    /// Where the type plane's side table starts.
+    pub side: usize,
+    /// How many entries that table holds.
+    pub room: u32,
+    /// The lowest address the region covers.
+    pub base: usize,
+    /// One past the highest.
+    pub end: usize,
+    /// Document 04's storage class, as the allocator that owns the region described it.
+    pub class: u32,
+}
+
 /// Adds a region to the table, and says whether there was room.
 ///
 /// False is a program with more than [`REGIONS`] arenas. Nothing here refuses anything over it:
 /// the region is simply not watched, which is the same state every non heap address is already in
 /// and is not a wrong answer about memory.
-pub(crate) fn publish(origin: usize, base: usize, end: usize, class: u32) -> bool {
+///
+/// # Safety
+///
+/// `watch.side` names `watch.room * types::ENTRY` writable bytes that are never handed back, and
+/// both planes' biases name shadow that covers every granule between `watch.base` and `watch.end`
+/// and is never handed back either.
+pub(crate) unsafe fn publish(watch: Watch) -> bool {
     while SPACING.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
     {
         core::hint::spin_loop();
@@ -295,7 +368,15 @@ pub(crate) fn publish(origin: usize, base: usize, end: usize, class: u32) -> boo
     let at = FILLED.load(Ordering::Relaxed);
     let room = at < REGIONS;
     if room {
+        let Watch { origin, typing, side, room: entries, base, end, class } = watch;
+        // Before the count grows, like the stores below, and for the same reason: a reader that
+        // has acquired the count reads a side table that is already pointed at its mapping.
+        //
+        // SAFETY: the caller says the mapping is there and outlives the program, and this slot's
+        // table has handed out nothing, because a slot is filled once and never emptied.
+        unsafe { SIDES[at].map(side, entries) };
         SPACE[at].origin.store(origin, Ordering::Relaxed);
+        SPACE[at].typing.store(typing, Ordering::Relaxed);
         SPACE[at].base.store(base, Ordering::Relaxed);
         SPACE[at].end.store(end, Ordering::Relaxed);
         SPACE[at].class.store(class, Ordering::Relaxed);
@@ -320,14 +401,23 @@ pub(crate) fn publish(origin: usize, base: usize, end: usize, class: u32) -> boo
 #[must_use]
 pub fn covering(addr: usize) -> Option<Region> {
     let filled = FILLED.load(Ordering::Acquire);
-    for slot in &SPACE[..filled] {
+    for (at, slot) in SPACE[..filled].iter().enumerate() {
         let base = slot.base.load(Ordering::Relaxed);
         let end = slot.end.load(Ordering::Relaxed);
         if addr >= base && addr < end {
             // SAFETY: a published region is mapped for as long as the program runs, along with the
-            // shadow the origin names, so the plane covers every address between the two above.
+            // shadow each origin names, so both planes cover every address between the two above.
             let plane = unsafe { Lifetime::new(slot.origin.load(Ordering::Relaxed)) };
-            return Some(Region { plane, base, end, class: slot.class.load(Ordering::Relaxed) });
+            // SAFETY: as above, and the side table at this index was mapped before the count
+            // that got us here grew.
+            let types = unsafe { Types::new(slot.typing.load(Ordering::Relaxed), &SIDES[at]) };
+            return Some(Region {
+                plane,
+                types,
+                base,
+                end,
+                class: slot.class.load(Ordering::Relaxed),
+            });
         }
     }
     None
@@ -350,11 +440,17 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
         .any(|slot| lo < slot.end.load(Ordering::Relaxed) && slot.base.load(Ordering::Relaxed) < hi)
 }
 
-/// Maps the shadow and the region as one reservation, and builds the arena over it.
+/// Maps the shadows and the region as one reservation, and builds the arena over it.
 ///
-/// The shadow comes first so that the region's base is the higher of the two, which makes the
-/// bias `shadow - region / GRANULE * SLOT` and makes it a subtraction that a reader can check.
-/// The bias may still wrap, and [`Lifetime`] says so and does its arithmetic modularly.
+/// The shadows come first so that the region's base is the highest of the four spans, which makes
+/// each bias `shadow - region / granule * slot` and makes it a subtraction that a reader can
+/// check. A bias may still wrap, and [`Lifetime`] says so and does its arithmetic modularly.
+///
+/// The order is the lifetime plane, the type plane, the type plane's side table, and then the
+/// region. That is half a byte per byte for each of the first three against the region's one, so
+/// the reservation is two and a half times what the program can allocate out of it. It is address
+/// space rather than memory: the mapping is anonymous, and a plane a program never touches never
+/// costs it a page.
 ///
 /// Called for the first allocation and again whenever every arena is out of room, so a program
 /// that needs eight gibibytes gets them a gibibyte at a time and a program that needs a kilobyte
@@ -367,9 +463,13 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
 fn reserve(want: usize) -> Option<Arena> {
     let len = want.checked_next_multiple_of(PAGE)?;
     let under = shadow(len);
-    let base = map(under.checked_add(len)?)?;
-    let region = base + under;
+    let typed = typing(len);
+    let sided = siding(len);
+    let planes = under.checked_add(typed)?.checked_add(sided)?;
+    let base = map(planes.checked_add(len)?)?;
+    let region = base + planes;
     let origin = base.wrapping_sub(region / GRANULE * SLOT);
+    let typing = (base + under).wrapping_sub(region / types::GRANULE * types::SLOT);
     // Published before the arena is handed back, so that the first instance the arena creates is
     // already visible to a check by the time anything could hold a pointer to it.
     //
@@ -378,7 +478,19 @@ fn reserve(want: usize) -> Option<Arena> {
     // because there is no arena to hand back: an arena nothing watches is storage that every check
     // passes, which is worse than the null this returns. Nothing was touched, so what is lost is
     // address space and no pages.
-    if !publish(origin, region, region + len, Class::Allocated as u32) {
+    let watch = Watch {
+        origin,
+        typing,
+        side: base + under + typed,
+        room: (sided / types::ENTRY) as u32,
+        base: region,
+        end: region + len,
+        class: Class::Allocated as u32,
+    };
+    // SAFETY: the mapping above is writable and is never handed back, the side table is the span
+    // between the type plane and the region and holds exactly the entries named here, and both
+    // biases were solved from the same `region` the bounds are written in.
+    if !unsafe { publish(watch) } {
         return None;
     }
     // SAFETY: the mapping is readable, writable, private and anonymous, so it is zero filled and
@@ -432,8 +544,30 @@ pub(crate) fn map(len: usize) -> Option<usize> {
 pub fn alloc(size: usize) -> *mut c_void {
     match HEAP.allocate(size) {
         0 => core::ptr::null_mut(),
-        payload => payload as *mut c_void,
+        payload => {
+            untype(payload, Arena::sized(size));
+            payload as *mut c_void
+        }
     }
+}
+
+/// The other half of judgement J4: a fresh instance has no effective type.
+///
+/// C says allocated storage has no declared type and takes its type from the first store, so the
+/// plane has to forget what the previous occupant of these bytes was. Without this a block handed
+/// out again would still say what it said last time, and the first honest read of it would be
+/// reported as type confusion, which is the false positive that would make the plane unusable.
+///
+/// It is the whole block rather than the request. The bytes between the request and the end of the
+/// block are the allocator's rounding, they share granules with the request, and leaving them
+/// saying what they said before would turn an overflow inside a block into a type report instead of
+/// the bounds report it is.
+fn untype(payload: usize, block: usize) {
+    let Some(region) = covering(payload) else { return };
+    let len = block.min(region.end - payload);
+    // SAFETY: the range starts inside the region and is clipped to it, so the type plane covers
+    // every granule of it.
+    unsafe { region.types.set(payload, len, types::UNTYPED) }
 }
 
 /// `free`: judgement J6, and then judgement J5.

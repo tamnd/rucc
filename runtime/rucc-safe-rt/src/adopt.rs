@@ -49,6 +49,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::alloc;
 use crate::fail::Judgement;
 use crate::plane::{self, Counter, GRANULE, SLOT, Version};
+use crate::types;
 
 /// The versions the instances of every adopted region are numbered from.
 ///
@@ -93,8 +94,30 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
     if hi <= lo || alloc::overlaps(lo, hi) {
         return false;
     }
-    let Some(shadow) = alloc::map((hi - lo) / GRANULE * SLOT) else { return false };
-    alloc::publish(shadow.wrapping_sub(lo / GRANULE * SLOT), lo, hi, class)
+    // Both planes and the side table in one mapping, in the order `alloc::reserve` puts them, so
+    // that an adopted region is watched exactly as closely as one this crate reserved itself. A
+    // region that cannot have all three is not taken on at all, which is the same answer the three
+    // refusals above give and leaves the storage where it was.
+    let len = hi - lo;
+    let under = alloc::shadow(len);
+    let typed = alloc::typing(len);
+    let sided = alloc::siding(len);
+    let Some(planes) = under.checked_add(typed).and_then(|at| at.checked_add(sided)) else {
+        return false;
+    };
+    let Some(shadow) = alloc::map(planes) else { return false };
+    let watch = alloc::Watch {
+        origin: shadow.wrapping_sub(lo / GRANULE * SLOT),
+        typing: (shadow + under).wrapping_sub(lo / types::GRANULE * types::SLOT),
+        side: shadow + under + typed,
+        room: (sided / types::ENTRY) as u32,
+        base: lo,
+        end: hi,
+        class,
+    };
+    // SAFETY: the mapping is writable and is never handed back, its three spans are laid out by
+    // the arithmetic just above, and both biases were solved from the same `lo` the bounds carry.
+    unsafe { alloc::publish(watch) }
 }
 
 /// Judgement J4: `[base, base + size)` of an adopted region is a fresh instance.
@@ -143,6 +166,12 @@ pub unsafe fn split(base: *mut c_void, size: usize, flags: u32) {
     // SAFETY: `lo` is granule aligned by construction, the range is inside the region the plane was
     // built over, and the version is one the counter has not returned before.
     unsafe { region.plane.begin(lo, len, plane::begun(VERSIONS.next())) };
+    // The other half of the same judgement. Allocated storage has no declared type and takes its
+    // type from the first store, so whatever the previous occupant of these bytes was is forgotten
+    // here, exactly as it is for storage this crate's own allocator hands out.
+    //
+    // SAFETY: the same range, which the type plane covers for the same reason.
+    unsafe { region.types.set(lo, len, types::UNTYPED) };
 }
 
 /// Judgement J5: the instance at `base` is over and its storage goes back to the region.

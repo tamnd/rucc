@@ -48,9 +48,11 @@
 //! 09 section 9.1's type plane, which is what a byte was last stored through, in the shape document
 //! 05 section 5.2.3 measured: one slot per eight bytes, and a side entry for a granule whose bytes
 //! disagree. Four of document 03's type classes and one of its spatial classes are that plane
-//! answering a question. Nothing calls into it yet, because the store that makes the judgement and
-//! the access that asks are the compiler's half of the same milestone, and the init and epoch
-//! planes are not here at all.
+//! answering a question. It is mapped over every watched region beside the lifetime plane, an
+//! instance forgets its bytes' types when it begins, and [`check`] has judgement J3 and the two
+//! judgements that record it. What is missing is the compiler's half, the store that makes the
+//! judgement and the access that asks the question, so nothing calls any of it yet. The init and
+//! epoch planes are not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates

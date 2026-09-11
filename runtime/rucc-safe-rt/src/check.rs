@@ -1,4 +1,4 @@
-//! The three checks generated code calls, what each of them decides, and the one question it asks.
+//! The four checks generated code calls, what each of them decides, and the one question it asks.
 //!
 //! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3 and 6.3.1, and section 7.4 of
 //! document 07 for [`extent`], which is not a check and is here because it reads the same plane
@@ -21,8 +21,11 @@
 //!
 //! # What these can see, and what they cannot
 //!
-//! The lifetime plane, and nothing else. A version covers one granule of sixteen bytes, so what
-//! these decide is decided per granule.
+//! The lifetime plane and the type plane. A version covers one granule of sixteen bytes, so the
+//! three checks that read the lifetime plane decide per granule. The type plane's granule is eight
+//! bytes and it is per byte inside a granule whose bytes disagree, so [`typed`] decides per byte,
+//! which it has to: a structure with a `char` field in it disagrees within a granule and an access
+//! to the field beside it must not be refused for that.
 //!
 //! That is enough for the bugs the plane was built for. A read through a pointer to a freed
 //! instance is refused, because the granule the free left behind is marked as given back and stays
@@ -59,6 +62,7 @@ use core::ffi::c_void;
 use crate::alloc::{self, Region};
 use crate::fail::Descriptor;
 use crate::plane::{self, Version};
+use crate::types::{self, TypeId};
 
 /// Judgement J1, the bounds half: an access of `size` bytes at `addr` stays in one instance.
 ///
@@ -187,6 +191,89 @@ pub unsafe fn deriv(
     // it the result landed.
     // SAFETY: as in `bounds`.
     unsafe { crate::fail::report_from(descriptor, Some(derived), Some(base)) }
+}
+
+/// Judgement J3: the bytes this access is about to read agree with the type it is reading them as.
+///
+/// The effective type rule of C 6.5, asked of the plane `crate::types` holds. What it catches is
+/// reading a `struct A` back as a `struct B`, reading a word assembled out of the bytes of two
+/// pointers as a pointer, and reading through a pointer the program obtained by casting one
+/// unrelated type to another. What it passes is everything C permits, which is a byte nothing has
+/// stored through, anything either side of a character type, and the types agreeing.
+///
+/// An access that runs past the end of the region is asked about only as far as the region goes.
+/// The bytes past it are somebody else's or nobody's, there is no plane over them, and the access
+/// straddling out at all is already [`bounds`]'s refusal rather than a second one from here.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`]. `ty` is a plane vocabulary entry and is not an address.
+pub unsafe fn typed(addr: *const c_void, size: usize, ty: TypeId, descriptor: *const Descriptor) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    // SAFETY: the range is clipped to the region, whose type plane covers every granule of it.
+    if !unsafe { region.types.allows(addr, clipped(&region, addr, size), ty) } {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
+/// The judgement a store makes: the bytes it wrote were stored through a `ty`.
+///
+/// Not a check. It refuses nothing and reports nothing, it records the fact [`typed`] later asks
+/// about, and a store to an address no plane covers records nothing at all.
+///
+/// # Safety
+///
+/// `addr` is whatever the program computed and is never read through. `ty` is a plane vocabulary
+/// entry and is not an address.
+pub unsafe fn judge(addr: *const c_void, size: usize, ty: TypeId) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    // SAFETY: as in `typed`.
+    unsafe { region.types.set(addr, clipped(&region, addr, size), ty) }
+}
+
+/// The judgement a copy makes: the bytes at `dst` now say whatever the bytes at `src` say.
+///
+/// C 6.5 says a copy through `memcpy` or through a character array carries the source's effective
+/// type, so this is what a wrapper in [`crate::wrap`] calls once it knows how much was copied, and
+/// it is what keeps the punning idiom the standard permits from being reported.
+///
+/// Two ranges in one region is the case worth having and is what this is written for. A copy whose
+/// ends are in different regions, or whose source is outside every region, records the destination
+/// as untyped instead of walking a region table per byte. That is the same thinning as running out
+/// of side entries and for the same reason: it is a lost check rather than a wrong answer, and the
+/// alternative is a lookup per byte on the path every `memcpy` in the program goes down.
+///
+/// # Safety
+///
+/// Neither address is read through. They may overlap, and the answer is the same either way.
+pub unsafe fn carry(dst: *const c_void, src: *const c_void, len: usize) {
+    let (dst, src) = (dst as usize, src as usize);
+    let Some(region) = alloc::covering(dst) else { return };
+    let len = clipped(&region, dst, len);
+    if region.holds(src) && region.holds(src.wrapping_add(len.saturating_sub(1))) {
+        // SAFETY: both ranges are inside the region, whose type plane covers every granule of it.
+        unsafe { region.types.copy(dst, src, len) }
+        return;
+    }
+    // SAFETY: as above, for the destination alone.
+    unsafe { region.types.set(dst, len, types::UNTYPED) }
+}
+
+/// How many of the `size` bytes from `addr` on are inside the region, so a plane walk stays inside
+/// the plane.
+///
+/// `addr` is in the region, which every caller has established, so this is never zero for an
+/// access of at least one byte.
+const fn clipped(region: &Region, addr: usize, size: usize) -> usize {
+    let room = region.end - addr;
+    if size < room { size } else { room }
 }
 
 /// How many of the `want` bytes from `addr` on belong to whoever owns `addr`.
@@ -335,7 +422,7 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The five names generated code is compiled against.
+/// The eight names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -405,6 +492,44 @@ pub mod exports {
     pub extern "C" fn __rucc_extent_back(addr: *const c_void, want: usize) -> usize {
         super::extent_back(addr, want)
     }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_check_bounds`]. `ty` is a plane vocabulary entry and is not an address.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_type(
+        addr: *const c_void,
+        size: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::typed(addr, size, ty, descriptor) };
+    }
+
+    /// # Safety
+    ///
+    /// `addr` is whatever the program computed and is never read through, and `ty` is a plane
+    /// vocabulary entry. No descriptor, because a judgement decides nothing and so has nothing to
+    /// report.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_type(addr: *const c_void, size: usize, ty: u32) {
+        // SAFETY: as above.
+        unsafe { super::judge(addr, size, ty) };
+    }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_type`], for both addresses. Neither is read through and they may overlap.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_type_copy(
+        dst: *const c_void,
+        src: *const c_void,
+        len: usize,
+    ) {
+        // SAFETY: as above.
+        unsafe { super::carry(dst, src, len) };
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +576,28 @@ mod tests {
         unsafe { super::deriv(base, derived, stride, &raw const ROW) }
     }
 
+    /// The type check, the same way.
+    fn typed(addr: *const c_void, size: usize, ty: TypeId) {
+        // SAFETY: as above.
+        unsafe { super::typed(addr, size, ty, &raw const ROW) }
+    }
+
+    /// The judgement a store makes, which takes no descriptor and refuses nothing.
+    fn judge(addr: *const c_void, size: usize, ty: TypeId) {
+        // SAFETY: the address is one an instance in the test owns and is never read through.
+        unsafe { super::judge(addr, size, ty) }
+    }
+
+    /// The judgement a copy makes.
+    fn carry(dst: *const c_void, src: *const c_void, len: usize) {
+        // SAFETY: as above, for both.
+        unsafe { super::carry(dst, src, len) }
+    }
+
+    /// Two types out of the compiler's universe, in the spelling the plane gives them.
+    const A: TypeId = types::interned(0);
+    const B: TypeId = types::interned(1);
+
     /// Runs one check and says whether it refused, without the panic reaching the harness.
     ///
     /// The hook is swapped so that a refusal a test is asking for does not print a backtrace and
@@ -466,6 +613,123 @@ mod tests {
     /// The address `offset` bytes into an instance, as the checks take it.
     fn at(ptr: *mut c_void, offset: usize) -> *const c_void {
         ptr.cast::<u8>().wrapping_add(offset).cast()
+    }
+
+    #[test]
+    fn reading_bytes_back_as_the_type_they_were_stored_through_is_allowed() {
+        let _turn = turn();
+        // The case that has to be silent, which is nearly every access in a program that is doing
+        // nothing wrong, and the one a type checker nobody deploys gets wrong.
+        let ptr = alloc(64);
+        judge(at(ptr, 0), 32, A);
+        assert!(!refused(|| typed(at(ptr, 0), 32, A)));
+        assert!(!refused(|| typed(at(ptr, 8), 8, A)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_block_handed_out_again_says_nothing_about_its_bytes() {
+        let _turn = turn();
+        // The other half of judgement J4. Allocated storage has no declared type, so what the
+        // previous occupant of a block stored through is forgotten when the block is handed out
+        // again. Leaving it would report the new owner's first honest read as type confusion,
+        // which is the false positive that would make the plane unusable.
+        let first = alloc(64);
+        judge(at(first, 0), 64, A);
+        // SAFETY: `first` is a live instance.
+        unsafe { dealloc(first) };
+
+        let second = alloc(64);
+        assert_eq!(second, first, "the test is about a block that came back");
+        assert!(!refused(|| typed(at(second, 0), 64, B)));
+        // SAFETY: as above.
+        unsafe { dealloc(second) };
+    }
+
+    #[test]
+    fn reading_bytes_back_as_a_different_type_is_refused() {
+        let _turn = turn();
+        // Judgement J3, and the class the plane exists for.
+        let ptr = alloc(64);
+        judge(at(ptr, 0), 32, A);
+        assert!(refused(|| typed(at(ptr, 0), 32, B)));
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn bytes_nothing_has_stored_through_read_as_anything() {
+        let _turn = turn();
+        // A fresh instance says nothing about its bytes, so the first access decides, which is
+        // C's rule for storage with no declared type and is what keeps the plane quiet at a
+        // boundary with code this compiler did not build.
+        let ptr = alloc(64);
+        assert!(!refused(|| typed(at(ptr, 0), 8, A)));
+        assert!(!refused(|| typed(at(ptr, 0), 8, B)));
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_character_access_reads_anything_and_a_character_store_is_read_as_anything() {
+        let _turn = turn();
+        // Both halves of C 6.5's character rule, which between them are what makes an open coded
+        // copy loop legal and therefore what a checker has to not report.
+        let ptr = alloc(64);
+        judge(at(ptr, 0), 8, A);
+        assert!(!refused(|| typed(at(ptr, 0), 8, types::CHARACTER)));
+        judge(at(ptr, 3), 1, types::CHARACTER);
+        assert!(!refused(|| typed(at(ptr, 0), 8, A)), "one character byte does not refuse it");
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_carries_the_types_it_copied_and_the_destination_is_read_as_those() {
+        let _turn = turn();
+        // The `memcpy` rule, which is what makes punning through a copy legal where C says it is
+        // and is also what catches a `struct A` copied over a `struct B` and read back as a `B`.
+        let ptr = alloc(128);
+        judge(at(ptr, 0), 32, A);
+        judge(at(ptr, 64), 32, B);
+        assert!(!refused(|| typed(at(ptr, 64), 32, B)));
+
+        carry(at(ptr, 64), at(ptr, 0), 32);
+
+        assert!(refused(|| typed(at(ptr, 64), 32, B)), "the bytes are an A now");
+        assert!(!refused(|| typed(at(ptr, 64), 32, A)));
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_out_of_somewhere_no_plane_covers_leaves_the_destination_saying_nothing() {
+        let _turn = turn();
+        // A lost check rather than a wrong answer, which is the direction every thinning in this
+        // plane goes. The source here is a local, which no region holds.
+        let ptr = alloc(64);
+        judge(at(ptr, 0), 32, A);
+        let outside = 0u64;
+
+        carry(at(ptr, 0), (&raw const outside).cast(), 8);
+
+        assert!(!refused(|| typed(at(ptr, 0), 8, A)));
+        assert!(!refused(|| typed(at(ptr, 0), 8, B)));
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn an_address_no_region_covers_is_passed_and_records_nothing() {
+        let _turn = turn();
+        // A local, a global, or another allocator's memory. There is no plane over it, so there
+        // is nothing to ask and nothing to record, and reporting on it would be a false positive
+        // against a program doing nothing wrong.
+        let outside = 0u64;
+        let addr: *const c_void = (&raw const outside).cast();
+        judge(addr, 8, A);
+        assert!(!refused(|| typed(addr, 8, B)));
     }
 
     #[test]
