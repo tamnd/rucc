@@ -72,6 +72,13 @@
 //! refused on this plane's account, and that waits on section 9.3's padding mode. The epoch plane
 //! is not here at all.
 //!
+//! [`restrict`] is section 9.6, which is the one judgement that is not about a single access: a
+//! block that declares `restrict` pointers promises that no object modified through one of them is
+//! reached through another, and deciding that means comparing an access against the ones the same
+//! block already made. It keeps a small scope in that block's own stack, the way [`frame`] keeps a
+//! call frame, and it is J8. Nothing reaches it yet either: the front end works out which pointer
+//! an access went through, and the pass that turns that into a call is the compiler's half.
+//!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
 //! through a name other than those four is a hole of the same kind, and a program that frees one of
@@ -111,7 +118,11 @@ pub mod posture;
 pub mod recover;
 pub mod report;
 #[cfg(unix)]
+pub mod restrict;
+#[cfg(unix)]
 pub mod syscall;
+#[cfg(unix)]
+pub mod tls;
 pub mod types;
 #[cfg(unix)]
 pub mod wrap;

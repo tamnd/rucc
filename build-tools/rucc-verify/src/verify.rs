@@ -245,12 +245,27 @@ fn agreement(
 /// to fall back to.
 pub const BOUNDED_WIDTHS: [u32; 2] = [4, 8];
 
+/// How long a rule that already carries a written reason gets at its real width, in seconds.
+///
+/// Ten, against the five minutes every other rule gets. Such a rule is asked at its real width at
+/// all because a solver that has got better since somebody signed the reason ought to take the
+/// rule off the list, and that is worth finding out on every run. It is not worth the whole
+/// budget: the answer is a shrug by construction, and five minutes of waiting for it is five
+/// minutes on every build and on every run a person does by hand before a commit. The whole gate
+/// over the whole tree is seventy two seconds as it stands, where it was a hundred and forty four
+/// when a shrug cost ninety, and it would be six minutes at five minutes a shrug. One rule is the
+/// whole of that difference. What the short look costs is that rule staying on a list it could
+/// have left, which is a list somebody reads rather than anything the compiler is built from.
+const SIGNED_OFF: u32 = 10;
+
 /// Ask about every rule.
 ///
 /// A rule that the solver settles at its own width is discharged and that is the end of it. A
 /// rule it gives up on is asked again at [`BOUNDED_WIDTHS`], but only if the rule carries a
 /// written reason for taking narrow widths as enough, because a bounded proof is a judgement
-/// somebody makes and not a fallback a tool takes on its own.
+/// somebody makes and not a fallback a tool takes on its own. A rule carrying such a reason gets
+/// ten seconds at its real width rather than the whole budget, because what it is being asked
+/// there is whether the reason has stopped being true.
 ///
 /// # Errors
 ///
@@ -266,7 +281,13 @@ pub fn verify(
 
     for rule in rules {
         let width = rule_width(&rule.pattern);
-        match ask(path, rule, model, solver, width) {
+        // A rule with a reason written on it is expected to come back a shrug here, so it is
+        // given a look rather than the budget. Everything else gets the whole of it.
+        let full = match rule.bounded {
+            None => solver.clone(),
+            Some(_) => solver.clone().within(SIGNED_OFF.min(solver.seconds())),
+        };
+        match ask(path, rule, model, &full, width) {
             Err(error) => errors.push(error),
             Ok(Answer::Unsat) => report.verdicts.push(Verdict::Discharged),
             Ok(Answer::Sat(found)) => report.verdicts.push(Verdict::Refuted(found)),

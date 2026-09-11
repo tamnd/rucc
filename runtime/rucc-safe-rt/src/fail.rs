@@ -34,6 +34,8 @@ pub enum Judgement {
     Free = 6,
     /// J7: an access to a range whose ownership was transferred away.
     Transfer = 7,
+    /// J8: two accesses in one block reaching one byte through two `restrict` pointers of it.
+    Restrict = 8,
 }
 
 impl Judgement {
@@ -52,6 +54,7 @@ impl Judgement {
             5 => Some(Self::End),
             6 => Some(Self::Free),
             7 => Some(Self::Transfer),
+            8 => Some(Self::Restrict),
             _ => None,
         }
     }
@@ -70,6 +73,7 @@ impl Judgement {
             Self::End => "a storage instance ending that was not live",
             Self::Free => "a free of something that was not allocated, or not by that allocator",
             Self::Transfer => "an access to a range whose ownership was transferred away",
+            Self::Restrict => "one byte reached through two restrict pointers of one block",
         }
     }
 }
@@ -269,5 +273,8 @@ mod tests {
         // nobody could look up.
         assert_eq!(Judgement::Access as u8, 1);
         assert_eq!(Judgement::Transfer as u8, 7);
+        assert_eq!(Judgement::Restrict as u8, 8);
+        assert_eq!(Judgement::of(8), Some(Judgement::Restrict));
+        assert_eq!(Judgement::of(9), None);
     }
 }

@@ -61,15 +61,28 @@
 //! reader rather than the first is what makes this the set's question too, since a write after the
 //! first reader and before the second is a write the one at a time version would never have seen.
 //!
-//! An address whose displacement is not settled. A local's place in the frame and an argument's
-//! place in the caller's is a distance from the stack pointer, and there is no frame until the
-//! allocator has finished, so [`crate::lower`] leaves those instructions with a zero in the
-//! displacement and [`crate::finish`] writes the number in later against a list of which
-//! instruction is which. Folding one of them away would leave that number being written into an
-//! instruction nothing runs, and the fold itself would have composed a displacement that was not
-//! there yet. So the caller says which instructions those are and this leaves them alone. What it
-//! costs is the fold on a local whose address is taken, which is worth having and is not worth
-//! having at the price of `finish` and this pass sharing a secret.
+//! # The addresses into the frame
+//!
+//! A local's place in the frame and an argument's place in the caller's area is a distance from the
+//! stack pointer, and there is no frame until the allocator has finished, so [`crate::lower`]
+//! leaves those instructions with a zero in the displacement and [`crate::finish`] writes the
+//! number in later against a list of which instruction is which.
+//!
+//! This used to refuse them for that reason, and refusing was expensive: it is the shape of every
+//! access to a local that has to go through its address, and of every argument that arrives in the
+//! caller's area. What it takes to fold one is that the entry moves. The instruction the list names
+//! goes away and the ones that took the
+//! address arrive, so [`Pending`] rewrites the list as the fold is applied, and `finish` adds the
+//! frame's offset to the displacement rather than assigning it, because the reader brought a
+//! displacement of its own and the field it is reading is some way past where the object starts.
+//! tamnd/rucc#784.
+//!
+//! What they do not get is the whole of the set rule above. An address into the frame is off the
+//! stack pointer and a memory operand based on the stack pointer needs an index byte on this
+//! machine whether or not anything is indexed, so a reader that takes one grows by more than a
+//! reader that takes an address in an ordinary register does. Past three of them the bytes the
+//! readers put on are more than the whole `lea` was, which is the same arithmetic as the symbol
+//! above and comes out at a different number. `FRAME_READERS` below has the measurement.
 //!
 //! # Where it runs
 //!
@@ -78,16 +91,89 @@
 //! arithmetic and would be reading a register file where the reader's base may have been reused
 //! for something else in between.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, Role};
 
+/// The addresses [`crate::finish`] has still to write a displacement into.
+///
+/// Two lists, because the frame holds two areas this pass runs before the layout of: a local's
+/// address is an offset into this function's own objects and a stack argument's is an offset into
+/// the caller's area. What they have in common is the shape, a `lea` off the stack pointer with the
+/// displacement left at zero, and what this type is for is that folding one of those away has to
+/// move the entry rather than lose it.
+///
+/// This used to be a set of instructions the pass refused to touch, and refusing was expensive.
+/// Every access to a local through its address was a `lea` and then a memory instruction reading
+/// through the register it wrote, which is one instruction more than it needs, on the shape any
+/// function whose locals have their address taken is full of. tamnd/rucc#784.
+#[derive(Debug)]
+pub struct Pending<'a> {
+    /// Which instruction carries the address of which of this function's stack objects.
+    pub addresses: &'a mut Vec<(mir::Inst, usize)>,
+    /// Which instruction reads which of the arguments the caller passed on the stack.
+    pub arguments: &'a mut Vec<(mir::Inst, u32)>,
+}
+
+impl Pending<'_> {
+    /// Moves an entry from an address that has gone to the instructions that took it.
+    ///
+    /// One entry becomes as many as there were readers, because an address every reader has room
+    /// for is handed to all of them, and each of those now carries a displacement of its own that
+    /// the frame layout has still to be added to.
+    ///
+    /// An address on either list reads the stack pointer and nothing else, so it never reads a
+    /// register another one of them wrote, which is what makes it impossible for a reader to end up
+    /// on a list twice and be given two offsets.
+    fn moved(&mut self, from: mir::Inst, into: &[mir::Inst]) {
+        move_entries(self.addresses, from, into);
+        move_entries(self.arguments, from, into);
+    }
+
+    /// Whether this instruction is one of the two lists, which is how many readers it may go to.
+    fn holds(&self, inst: mir::Inst) -> bool {
+        let named = self.addresses.iter().map(|&(at, _)| at);
+        named.chain(self.arguments.iter().map(|&(at, _)| at)).any(|at| at == inst)
+    }
+}
+
+/// How many readers an address into the frame may be handed to.
+///
+/// There is a limit at all for the same reason a symbol has one, in the list above. An address into
+/// the frame is off the stack pointer, and a memory operand whose base is the stack pointer needs
+/// an index byte on this machine whether or not anything is indexed, so every reader that takes one
+/// grows by that byte and by the displacement while the `lea` is saved once. Reading through a
+/// register the `lea` wrote is three or four bytes and reading the same place off the stack pointer
+/// is five or eight, against the five or eight the `lea` itself costs, so the readers are ahead of
+/// it while there are few of them and behind it once there are enough.
+///
+/// Three is where they turn, measured. Over the 1838 corpus programs that come out of both
+/// compilers at `-O2`, one reader is 757 bytes better than folding none of them, two is 806, three
+/// is 868, four is 848 and five is 520. Handing them to every reader with room, which is what every
+/// other address gets, is 528 bytes worse than folding none: 97 programs larger by 1117 bytes
+/// against 100 smaller by 589. Up to three, only two programs anywhere in the corpus are larger at
+/// all, by two bytes each.
+///
+/// 690 of the 868 are the ten `long-double` programs, which is the shape this is about at its
+/// plainest. A `long double` argument arrives in the caller's area and the `fld` that reads it is
+/// its only reader, so the address goes and the read costs nothing more than it did.
+const FRAME_READERS: usize = 3;
+
+/// The half of [`Pending::moved`] that does not care what the entry says.
+fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: &[mir::Inst]) {
+    let Some(at) = list.iter().position(|&(inst, _)| inst == from) else { return };
+    let (_, what) = list[at];
+    list.splice(at..=at, into.iter().map(|&inst| (inst, what)));
+}
+
 /// Folds every address computation that one memory operand reads, and gives back how many.
 ///
-/// `waiting` is the instructions whose displacement [`crate::finish`] has still to write, which
-/// are the ones this must not touch.
+/// `pending` is the addresses [`crate::finish`] has still to write a displacement into, and folding
+/// one moves its entry to the instruction that took it. The displacement composed in by the fold
+/// stays where it is and the frame's offset is added to it later, which is why that write is an
+/// addition rather than an assignment.
 ///
 /// Run after lowering and before allocation. Running it twice can find more than running it once.
 /// Folding a `lea` into a second `lea` leaves that second one foldable in turn, and the walk below
@@ -98,7 +184,7 @@ pub fn addresses(
     func: &mut mir::Func,
     insts: &FrameInsts,
     names: &mut Interner,
-    waiting: &HashSet<mir::Inst>,
+    pending: &mut Pending<'_>,
 ) -> usize {
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
     let reads = reads(func);
@@ -117,6 +203,8 @@ pub fn addresses(
                     func[folding.into].mem = Some(mem);
                     folded += 1;
                 }
+                let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
+                pending.moved(ready.from, &took);
                 func.remove_inst(ready.from);
                 // Anything still open that was going to fold into the instruction just removed is
                 // holding a plan for an instruction that is not there any more. That is a chain
@@ -127,9 +215,12 @@ pub fn addresses(
             for written in written(func, inst) {
                 open.retain(|reg, held| *reg != written && !touches(func, held.from, written));
             }
-            if func[inst].opcode == lea && !waiting.contains(&inst) {
+            if func[inst].opcode == lea {
+                let room = if pending.holds(inst) { FRAME_READERS } else { usize::MAX };
                 match folding_def(func, &reads, inst) {
-                    Some((reg, wanted)) if wanted == 1 || fits_every_reader(func, inst) => {
+                    Some((reg, wanted))
+                        if wanted <= room && (wanted == 1 || fits_every_reader(func, inst)) =>
+                    {
                         open.insert(reg, Open { from: inst, wanted, folds: Vec::new() });
                     }
                     _ => {}
@@ -357,6 +448,20 @@ mod tests {
         (names, func, block)
     }
 
+    /// The pass, run over a function with nothing owed a frame offset, which is most of these.
+    ///
+    /// The lists are still there because the pass rewrites them, and a test that is about what it
+    /// wrote in them builds its own rather than calling this.
+    fn folds(func: &mut mir::Func, names: &mut Interner) -> usize {
+        let (mut locals, mut arguments) = (Vec::new(), Vec::new());
+        addresses(
+            func,
+            &FRAME,
+            names,
+            &mut Pending { addresses: &mut locals, arguments: &mut arguments },
+        )
+    }
+
     /// The opcode of that name on this target.
     fn op(names: &mut Interner, name: &str) -> mir::Opcode {
         mir::Opcode::new(names.intern(&format!("{}{name}", FRAME.prefix)))
@@ -406,7 +511,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(folds(&mut func, &mut names), 1);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
@@ -436,7 +541,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(8))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(folds(&mut func, &mut names), 1);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1);
@@ -466,7 +571,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(folds(&mut func, &mut names), 1);
 
         let inst = func.insts(block).next().expect("the store is still there");
         let regs: Vec<mir::Reg> = func[func[inst].operands].iter().map(|op| op.reg).collect();
@@ -496,7 +601,7 @@ mod tests {
                 .finish();
         }
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 3);
+        assert_eq!(folds(&mut func, &mut names), 3);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 3, "the address is still worked out on its own: {left:?}");
@@ -530,7 +635,7 @@ mod tests {
             func.build(block, load).def(value, GPR).mem(mem).finish();
         }
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 4);
     }
 
@@ -560,7 +665,7 @@ mod tests {
                 .finish();
         }
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 2);
+        assert_eq!(folds(&mut func, &mut names), 2);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 2, "the address is gone and both loads carry it: {left:?}");
@@ -591,7 +696,7 @@ mod tests {
                 .finish();
         }
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
     }
 
@@ -619,7 +724,7 @@ mod tests {
         }
         *func.succs_mut(block) = vec![mir::BlockCall::to(next)];
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 
@@ -650,7 +755,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(4))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 4);
     }
 
@@ -677,7 +782,7 @@ mod tests {
             .finish();
         func.build(block, add).def(sum, GPR).uses(address, GPR).finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
     }
 
@@ -700,7 +805,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 
@@ -736,10 +841,10 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(outer, GPR)).plus(8))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(folds(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block).len(), 3, "the inner address is still there");
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 2);
+        assert_eq!(folds(&mut func, &mut names), 2);
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 2, "the outer address is still there: {left:?}");
         let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
@@ -769,7 +874,7 @@ mod tests {
             )
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 
@@ -793,7 +898,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(1))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 
@@ -818,7 +923,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
     }
 
@@ -843,7 +948,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
     }
 
     /// A chain of two, which is what an address of a field of an element of an array comes out as.
@@ -875,7 +980,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(field, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 2);
+        assert_eq!(folds(&mut func, &mut names), 2);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "one of the two addresses is still its own instruction");
@@ -902,7 +1007,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(12))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        assert_eq!(folds(&mut func, &mut names), 1);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1);
@@ -911,10 +1016,11 @@ mod tests {
     }
 
     /// An address into the frame, which reads as an address of nothing until `finish` writes the
-    /// distance in. Folding it would compose a displacement that is not there yet and would leave
-    /// `finish` writing the real one into an instruction nothing runs.
+    /// distance in. It folds like any other and the entry moves to the instruction that took it, so
+    /// the distance is still written into something that runs, and into the reader's own
+    /// displacement rather than over it.
     #[test]
-    fn an_address_whose_displacement_is_still_to_be_written_is_left_where_it_is() {
+    fn an_address_whose_displacement_is_still_to_be_written_folds_and_takes_its_entry_with_it() {
         let (mut names, mut func, block) = empty();
         let sp = mir::Reg::physical(RDI);
         let address = func.new_vreg(GPR);
@@ -928,16 +1034,70 @@ mod tests {
             .finish();
         func.build(block, load)
             .def(value, GPR)
-            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(8))
             .finish();
 
-        let waiting = HashSet::from([local]);
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &waiting), 0);
-        assert_eq!(shape(&func, &names, block).len(), 2);
+        let (mut locals, mut arguments) = (vec![(local, 3)], Vec::new());
+        let mut pending = Pending { addresses: &mut locals, arguments: &mut arguments };
+        assert_eq!(addresses(&mut func, &FRAME, &mut names, &mut pending), 1);
 
-        // And the same function with nothing waiting, so that what the test pins is the list and
-        // not some other thing about the pair.
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 1);
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
+        assert_eq!(left[0].1.disp, 8, "the field's offset is what finish adds the frame's to");
+        let reader = func.insts(block).next().expect("the load is still there");
+        assert_eq!(locals, vec![(reader, 3)], "the offset is owed to whoever took the address");
+    }
+
+    /// One address into the frame read at that many offsets, which is a structure written field by
+    /// field. Gives back how many folded, which instructions are in the block afterwards, and what
+    /// the caller is still owed an offset into.
+    fn a_frame_address(readers: u32) -> (usize, Vec<mir::Inst>, Vec<(mir::Inst, u32)>) {
+        let (mut names, mut func, block) = empty();
+        let sp = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let local = func
+            .build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(sp, GPR)))
+            .finish();
+        for at in 0..readers {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(address, GPR))
+                        .plus(i32::try_from(at).unwrap_or(0) * 4),
+                )
+                .finish();
+        }
+
+        let (mut locals, mut arguments) = (Vec::new(), vec![(local, 7)]);
+        let mut pending = Pending { addresses: &mut locals, arguments: &mut arguments };
+        let folded = addresses(&mut func, &FRAME, &mut names, &mut pending);
+        assert!(locals.is_empty(), "an argument is owed off the other list");
+        (folded, func.insts(block).collect(), arguments)
+    }
+
+    /// One entry on the list becomes one per reader, since each of them now carries a displacement
+    /// the frame's offset has to be added to and there is no instruction left to add it to instead.
+    #[test]
+    fn an_address_into_the_frame_that_three_readers_take_is_owed_to_all_of_them() {
+        let (folded, left, owed) = a_frame_address(3);
+        assert_eq!(folded, 3);
+        assert_eq!(left.len(), 3, "the address is not its own instruction any more");
+        assert_eq!(owed, vec![(left[0], 7), (left[1], 7), (left[2], 7)]);
+    }
+
+    /// And the reader after that is one too many, so none of them takes it. What each of them would
+    /// put on is more than what the whole address instruction costs, which is [`FRAME_READERS`].
+    #[test]
+    fn an_address_into_the_frame_a_fourth_reader_wants_is_left_where_it_is() {
+        let (folded, left, owed) = a_frame_address(4);
+        assert_eq!(folded, 0);
+        assert_eq!(left.len(), 5, "the address and its four readers");
+        assert_eq!(owed, vec![(left[0], 7)], "the offset is still owed to the address itself");
     }
 
     /// An instruction that is not the target's address instruction, writing a register a load
@@ -960,7 +1120,7 @@ mod tests {
             .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
             .finish();
 
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &HashSet::new()), 0);
+        assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 }

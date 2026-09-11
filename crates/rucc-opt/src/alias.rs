@@ -74,9 +74,11 @@
 //! it. It is there for the type plane, which has no layer 4, and it costs this layer nothing but a
 //! disambiguation between a union member and an unrelated object of a different scalar type.
 //!
-//! Layer 5 is not. No access carries a `restrict` clique, because nothing in lowering works out
-//! which pointers a qualified parameter's derivations came from. The layer is here, it is tested,
-//! and it answers correctly for the accesses that do carry one, which today is none of them.
+//! Layer 5 is fed for the accesses that go through a `restrict` parameter, which is where the
+//! qualifier is nearly always written and which the front end works out. A `restrict`
+//! pointer declared inside a block does not carry one yet, which is tamnd/rucc#970, and neither
+//! does an access through a pointer that came out of memory, which is not a question about names
+//! and never will be.
 
 use std::collections::HashSet;
 

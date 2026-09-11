@@ -90,11 +90,15 @@ This judgement is the sanctioned downgrade in the definition of section 4.1, and
 
 **J7, Transfer.** `transfer(p, n, to)` moves a range out of the monitor's authority and back: `to ∈ {device, uninstrumented, kernel}`. While transferred, `state = device_owned` and J1 refuses every access, which is document 03's T8. On return the type and init planes over the range are set conservatively (`no-type`, initialized) unless the caller supplies better. This is the one judgement that has no analogue in any existing tool and it is the one that makes the Linux DMA API's ownership contract checkable.
 
+**J8, Restrict.** For a block that declares `restrict` qualified pointers, no byte modified through one of them is reached through another of them in that block. Unlike J1 through J7 this is not decidable at one operation: it is a relation between two accesses, and the monitor decides it by comparing an access against what the block's other pointers have already reached. Document 09 section 9.6 is the mechanism, and section 4.6 below says why it is numbered apart from J1 rather than folded into it.
+
 ## 4.5 The soundness statement
 
 What document 14 has to establish, stated so it can be attacked.
 
 > **Claim.** For every execution of a Tier D-instrumented program, and every memory operation executed by instrumented code and not within a declared exemption region, if the operation violates J1 through J7 then the monitor reports it at that operation, and if the monitor reports it then the operation violates J1 through J7.
+
+J8 is deliberately outside the claim. It is a property of a pair of accesses rather than of an operation, so "reports it at that operation" does not name anything, and what document 09 section 9.6 checks is the range disjointness the optimizer acts on rather than the standard's per-object wording. Section 9.6 states its own claim.
 
 Two directions, and they are established differently.
 
@@ -112,7 +116,7 @@ The claim is deliberately not "the program is memory safe." It is "the monitor i
 
 **Object lifetime within a storage instance.** C++ placement `new`, and C's rule that an object's lifetime within allocated storage begins at first store, are not modelled. A storage instance's lifetime is the model's unit. This costs us nothing in C and would cost a great deal in C++, which the parent's document 00 puts out of scope anyway.
 
-**The `restrict` contract**, which is checked (Y8) but is not part of J1. It is a separate judgement over pairs of accesses within a scope and it is specified in document 09 section 9.6, because unlike J1 it is not decidable per-access.
+**The `restrict` contract**, which is checked (Y8) but is not part of J1. It is J8, a separate judgement over pairs of accesses within a scope, and it is specified in document 09 section 9.6, because unlike J1 it is not decidable per-access.
 
 **Alignment beyond the access's requirement.** Over-alignment is not tracked.
 

@@ -14,9 +14,12 @@
 //! required and which is the reason a `Vec` used as a stack shows up here instead of an
 //! iterator chain.
 
+use std::borrow::Cow;
+
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{BytePos, Diagnostic, SourceMap, Span};
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
+use rucc_session::PrefixMap;
 
 use crate::hide::{HideSet, HideSets};
 use crate::include::{UNKNOWN, base_name, quoted};
@@ -49,17 +52,31 @@ pub struct Expander {
     /// macro promises to be unique over and the scope a header that builds a name out of it
     /// relies on.
     counter: u32,
+    /// What `__FILE__` and `__BASE_FILE__` are rewritten by, which is `-fmacro-prefix-map=`.
+    ///
+    /// Here rather than on the source map because it is not a fact about where anything is: a
+    /// diagnostic still names the real file, a line marker still writes the real name, and this
+    /// changes only what the program is told when it asks. That is gcc's division and it is the
+    /// useful one, since the person reading an error is at the machine the file is on and the
+    /// string in the binary is going somewhere else.
+    prefix_map: PrefixMap,
 }
 
 impl Expander {
-    /// A fresh expander.
+    /// A fresh expander, whose `__FILE__` is the name the file was found under.
     pub fn new() -> Expander {
         Expander {
             hides: HideSets::new(),
             traces: Traces::new(),
             diagnostics: Vec::new(),
             counter: 0,
+            prefix_map: PrefixMap::new(),
         }
+    }
+
+    /// The same, with `__FILE__` rewritten by `map`.
+    pub fn with_prefix_map(map: PrefixMap) -> Expander {
+        Expander { prefix_map: map, ..Expander::new() }
     }
 
     /// Everything reported so far.
@@ -117,6 +134,7 @@ impl Expander {
             interner,
             sources,
             counter: &mut self.counter,
+            prefix_map: &self.prefix_map,
             steps: 0,
         };
         run.expand(tokens)
@@ -144,6 +162,8 @@ struct Run<'a> {
     va_opt: Symbol,
     /// The translation unit's `__COUNTER__`, borrowed so that it survives this expansion.
     counter: &'a mut u32,
+    /// What `__FILE__` is rewritten by. See [`Expander::prefix_map`].
+    prefix_map: &'a PrefixMap,
     steps: usize,
 }
 
@@ -237,9 +257,13 @@ impl<'a> Run<'a> {
     fn builtin_value(&mut self, which: Builtin, tok: Tok) -> Tok {
         let at = tok.report_span().lo;
         let (kind, text) = match which {
-            Builtin::File => (PpTokenKind::StringLit, quoted(self.name_of(at))),
+            Builtin::File => (PpTokenKind::StringLit, quoted(&self.mapped(self.name_of(at)))),
+            // The unmapped name, because a mapping rewrites the front of a path and this is the
+            // part of it after the last separator. gcc leaves this macro alone for that reason
+            // and so does this: a build asking for a name with no directories in it has already
+            // got what a prefix map is for.
             Builtin::FileName => (PpTokenKind::StringLit, quoted(base_name(self.name_of(at)))),
-            Builtin::BaseFile => (PpTokenKind::StringLit, quoted(self.base_file(at))),
+            Builtin::BaseFile => (PpTokenKind::StringLit, quoted(&self.mapped(self.base_file(at)))),
             Builtin::Line => (PpTokenKind::Number, self.line_of(at).to_string()),
             Builtin::IncludeLevel => {
                 (PpTokenKind::Number, self.sources.include_stack(at).len().to_string())
@@ -273,6 +297,15 @@ impl<'a> Run<'a> {
     /// generated one they have never seen.
     fn name_of(&self, at: BytePos) -> &str {
         self.sources.presumed(at).map_or(UNKNOWN, |loc| loc.name)
+    }
+
+    /// That name as the program is to be told it, which is with `-fmacro-prefix-map=` applied.
+    ///
+    /// Separate from [`Run::name_of`] rather than folded into it, because the two answers are
+    /// wanted in different places: this one goes into the binary and the other goes to the person
+    /// at the machine the file is on.
+    fn mapped<'n>(&self, name: &'n str) -> Cow<'n, str> {
+        self.prefix_map.apply(name)
     }
 
     /// The line `at` is on, counting from one, and presented rather than real for the same

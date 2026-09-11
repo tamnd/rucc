@@ -203,10 +203,16 @@ pub fn finish(
     // Before anything is written, because these are instructions the lowering already put in the
     // function and every one of them is somewhere the prologue is about to go in front of, which
     // is what makes an offset from the stack pointer the right thing to write into them.
+    //
+    // Added rather than assigned. The instruction named here is the `lea` the lowering wrote, or
+    // whatever [`crate::fold`] folded that `lea` into, and a reader that took it brought a
+    // displacement of its own: the address of a local is where the object starts and reading a
+    // field of it is some way past that. Assigning would throw the field offset away and read the
+    // front of the object every time.
     for &(inst, local) in &stack.addresses {
         let at = frame.local(local).expect("a local the frame was worked out from");
         let mem = func[inst].mem.expect("the address of a local is an address");
-        func[mem].disp = at;
+        func[mem].disp += at;
     }
 
     // The same, one area further up, and through the frame pointer when that is what reaches it.
@@ -215,7 +221,7 @@ pub fn finish(
     let incoming = frame.incoming();
     for &(inst, up) in &stack.arguments {
         let mem = func[inst].mem.expect("an argument read out of memory is read from an address");
-        func[mem].disp = incoming.at + offset(up);
+        func[mem].disp += incoming.at + offset(up);
         if incoming.through_frame_pointer {
             // The base register is an operand of the instruction and the addressing mode holds
             // where in the operand vector it is, so the register is changed there and not here.
