@@ -30,13 +30,17 @@
 //!
 //! # What is refused
 //!
-//! A call needing more than sixty four bits, which is E0694. Two ways to get there: an operand of
-//! `__int128`, or a mix of a sixty four bit unsigned type with a signed one, which needs sixty
-//! five bits to represent both. gcc handles the second by being cleverer about the mixed case
-//! rather than by widening. That cleverness is worth having and is not worth blocking the common
-//! case on, so for now the call gets a message that says what it needed rather than a wrong
-//! answer. Nothing in SQLite, or in anything else measured, is written that way: the three types
-//! agree in almost every real call.
+//! A call needing more than a hundred and twenty eight bits, which is E0694. There is one way to
+//! get there now: a mix of a hundred and twenty eight bit unsigned type with a signed one, which
+//! needs a hundred and twenty nine bits to represent both. gcc handles that by being cleverer
+//! about the mixed case rather than by widening. That cleverness is worth having and is not worth
+//! blocking the common case on, so for now the call gets a message that says what it needed rather
+//! than a wrong answer. Nothing in SQLite, or in anything else measured, is written that way: the
+//! three types agree in almost every real call.
+//!
+//! The same mix one width down used to be refused too, and is not any more, because there is now a
+//! width above it to do the arithmetic at. An `unsigned long long` against a `long long` needs
+//! sixty five bits and gets a hundred and twenty eight of them.
 //!
 //! # Why the arguments are not promoted
 //!
@@ -58,8 +62,13 @@ const FAMILY: &[(&str, OverflowOp)] = &[
     ("__builtin_mul_overflow", OverflowOp::Mul),
 ];
 
-/// The widest type the arithmetic can be done at, because it is the widest the IR legalizes.
-const LIMIT: u32 = 64;
+/// The widest type the arithmetic can be done at, because it is the widest the back end splits.
+///
+/// `rucc_codegen::wide` turns a value this wide into the two registers it travels in, and the
+/// overflow checks are rewritten into ordinary arithmetic before that pass runs, so a check at this
+/// width arrives there as adds, multiplies and comparisons it already knows how to split. There is
+/// nothing above it, which is why a call needing more still gets a message.
+const LIMIT: u32 = 128;
 
 /// Which of the three a name is, if it is one of them.
 pub(in crate::check) fn operation(spelled: &str) -> Option<OverflowOp> {
@@ -78,9 +87,12 @@ fn common(shapes: [IntegerInfo; 3]) -> Option<IntegerInfo> {
         .max()
         .unwrap_or(0);
     // Rounded up to a width the IR does arithmetic at. Below thirty two there is nothing to gain
-    // by being narrow, since every operand was going to be widened into a register anyway.
+    // by being narrow, since every operand was going to be widened into a register anyway, and
+    // above it the only two widths there are to round to are the two the rest of this is about.
     let width = if width <= 32 {
         32
+    } else if width <= 64 {
+        64
     } else if width <= LIMIT {
         LIMIT
     } else {
@@ -139,14 +151,16 @@ impl Checker<'_> {
 
     /// A standard integer type of the given shape.
     ///
-    /// Only two widths ever reach this, and both have a standard type on every target this
-    /// compiler has, so there is no case where a `_BitInt` would have to be made up.
+    /// Only three widths ever reach this, and all three have a type of their own on every target
+    /// this compiler has, so there is no case where a `_BitInt` would have to be made up.
     fn widest(&mut self, shape: IntegerInfo) -> TypeId {
         let kind = match (shape.signed, shape.width) {
             (true, 32) => IntKind::Int,
             (false, 32) => IntKind::UInt,
-            (true, _) => IntKind::LongLong,
-            (false, _) => IntKind::ULongLong,
+            (true, 64) => IntKind::LongLong,
+            (false, 64) => IntKind::ULongLong,
+            (true, _) => IntKind::Int128,
+            (false, _) => IntKind::UInt128,
         };
         self.types.int(kind)
     }
@@ -189,7 +203,7 @@ mod tests {
     #[test]
     fn one_signed_type_anywhere_makes_the_arithmetic_signed() {
         let operand = [shape(true, 32), shape(false, 32), shape(false, 32)];
-        assert_eq!(common(operand), Some(shape(true, LIMIT)));
+        assert_eq!(common(operand), Some(shape(true, 64)));
         let destination = [shape(false, 16), shape(false, 16), shape(true, 16)];
         assert_eq!(common(destination), Some(shape(true, 32)));
     }
@@ -199,7 +213,7 @@ mod tests {
     #[test]
     fn an_unsigned_type_costs_a_bit_once_the_arithmetic_is_signed() {
         let just_over = [shape(false, 32), shape(true, 8), shape(true, 8)];
-        assert_eq!(common(just_over), Some(shape(true, LIMIT)));
+        assert_eq!(common(just_over), Some(shape(true, 64)));
         let still_under = [shape(false, 31), shape(true, 8), shape(true, 8)];
         assert_eq!(common(still_under), Some(shape(true, 32)));
     }
@@ -213,22 +227,35 @@ mod tests {
         assert_eq!(common(narrow), Some(shape(true, 32)));
     }
 
-    /// The two ways past sixty four bits, both of which are refused rather than got wrong.
+    /// A signed operand next to the widest unsigned type there is has nowhere left to go.
+    ///
+    /// The one way past the limit now. The unsigned type costs a bit once the arithmetic is signed,
+    /// and there is no width above a hundred and twenty eight to spend it in, so the call is refused
+    /// rather than got wrong.
     #[test]
-    fn a_call_needing_more_than_sixty_four_bits_has_no_common_type() {
-        let wide = [shape(true, 128), shape(true, 32), shape(true, 32)];
-        assert_eq!(common(wide), None);
+    fn a_call_needing_more_than_the_widest_type_has_no_common_type() {
         let mixed = [shape(false, LIMIT), shape(true, 32), shape(true, LIMIT)];
         assert_eq!(common(mixed), None);
     }
 
-    /// The same three unsigned sixty four bit types, which is the case above without the signed
-    /// operand, and which is fine. Written next to it because the difference between the two is
-    /// the whole of the rule.
+    /// The same three unsigned types, which is the case above without the signed operand, and which
+    /// is fine. Written next to it because the difference between the two is the whole of the rule.
     #[test]
     fn the_same_widths_unsigned_throughout_are_not_refused() {
         let wide = [shape(false, LIMIT), shape(false, LIMIT), shape(false, LIMIT)];
         assert_eq!(common(wide), Some(shape(false, LIMIT)));
+    }
+
+    /// A wide operand is done at its own width now, rather than being refused for having one.
+    ///
+    /// The three widths the arithmetic happens at, each reached from below: a signed operand and
+    /// two unsigned ones of the width below it, which costs the bit that pushes it up.
+    #[test]
+    fn a_wide_operand_is_done_at_its_own_width() {
+        let wide = [shape(true, 128), shape(true, 32), shape(true, 32)];
+        assert_eq!(common(wide), Some(shape(true, 128)));
+        let pushed = [shape(false, 64), shape(true, 8), shape(true, 8)];
+        assert_eq!(common(pushed), Some(shape(true, 128)));
     }
 
     /// A name outside the family asks for nothing, including the neighbouring builtins that are

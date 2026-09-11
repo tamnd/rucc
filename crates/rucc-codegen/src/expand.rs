@@ -785,7 +785,7 @@ enum Checked {
 fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut HashMap<Value, Value>) {
     let ty = produced(func, inst);
     let [a, b] = func[func[inst].args] else { return };
-    if !countable(ty) {
+    if !checkable(ty) {
         return;
     }
     let (value, bit) = match checked {
@@ -954,6 +954,17 @@ fn countable(ty: Type) -> bool {
         && ty.bits() >= 8
         && ty.bits() <= 64
         && ty.bits().is_power_of_two()
+}
+
+/// The same for an overflow check, which reaches one width further up than the bit counts do.
+///
+/// The arithmetic a check becomes is adds, subtracts, multiplies, shifts and comparisons, and
+/// `crate::wide` splits every one of those into the two registers a value that wide travels in. So
+/// the checks run before that pass and it finishes the job, where the bit counts run after it and
+/// have nothing above sixty four bits to finish. The halving argument the function above makes
+/// holds here for the same reason it holds one width down.
+fn checkable(ty: Type) -> bool {
+    countable(ty) || (ty.is_int() && ty.is_scalar() && ty.bits() == 128)
 }
 
 /// Rounds up the bytes every variable length array asks for, so that the stack pointer stays where
@@ -2239,7 +2250,7 @@ mod tests {
             Opcode::SMulOverflow,
         ];
         for op in all {
-            for width in [8u32, 16, 32, 64] {
+            for width in [8u32, 16, 32, 64, 128] {
                 let (mut names, mut func) = checking(op, width);
                 overflows(&mut func);
                 let module = Module::new(names.intern("c.c"), &target());
@@ -2257,6 +2268,22 @@ mod tests {
         let (mut names, mut func) = checking(Opcode::UMulOverflow, 24);
         overflows(&mut func);
         assert!(printed(&func, &mut names).contains("umul_overflow"), "left as it was");
+    }
+
+    /// A check at the width no register holds is rewritten here and split into halves after.
+    ///
+    /// This pass runs above `crate::wide` for exactly this, because an overflow check is the one
+    /// instruction whose result is two things and that pass has no answer for one. What it leaves
+    /// behind is arithmetic and a comparison, which are both things the splitting understands, so
+    /// the check reaches the machine as instructions the machine has.
+    #[test]
+    fn a_check_at_the_width_no_register_holds_is_rewritten_here() {
+        let (mut names, mut func) = checking(Opcode::UAddOverflow, 128);
+        overflows(&mut func);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uadd_overflow"), "the check is gone: {text}");
+        assert!(text.contains(" = add "), "into the arithmetic it is: {text}");
+        assert!(text.contains("icmp ult"), "and the test that says it wrapped: {text}");
     }
 
     /// Nothing else is touched, for the same reason the other passes have that test.
