@@ -97,7 +97,7 @@ pub struct Edit {
 }
 
 /// Where an edit goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum At {
     /// In front of an instruction, which is where a value it reads is put where it wants it.
     Before(Inst),
