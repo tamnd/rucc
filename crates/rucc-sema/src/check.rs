@@ -100,6 +100,9 @@ pub struct Context<'a> {
     pub builtins: bool,
     /// The names `-fno-builtin-<name>` took away one at a time, without the prefix.
     pub no_builtin: &'a [String],
+    /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
+    /// integer type that holds it, which is `-fshort-enums`.
+    pub short_enums: bool,
 }
 
 impl<'a> Context<'a> {
@@ -117,6 +120,7 @@ impl<'a> Context<'a> {
             error_limit: DEFAULT_ERROR_LIMIT,
             builtins: true,
             no_builtin: &[],
+            short_enums: false,
         }
     }
 

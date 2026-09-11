@@ -1065,6 +1065,24 @@ pub struct Options {
     /// lets the optimizer read a loop counter as a number rather than as a number that may turn
     /// round.
     pub wrapping: Wrapping,
+    /// What a plain `char` is, from `-fsigned-char` and `-funsigned-char`, with nothing meaning
+    /// the answer the target's ABI gives.
+    ///
+    /// Plain `char` is a third type either way, distinct from both `signed char` and
+    /// `unsigned char` in every place a type is compared, and this says which of the two it has
+    /// the range of. Changing it changes the ABI, so it is a decision about the whole program
+    /// rather than about one file, and `__CHAR_UNSIGNED__` is defined when the answer is unsigned
+    /// so that a header can see what was decided.
+    pub char_signed: Option<bool>,
+    /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
+    /// integer type that holds its enumerators, from `-fshort-enums`.
+    ///
+    /// The default is `int` or wider, which is what C says and what every psABI in the table
+    /// expects. This makes it `char` or wider instead, so `enum { A }` is one byte, and that
+    /// changes the size and the alignment of anything holding one. It is here because a great deal
+    /// of embedded C and every ARM EABI object is built with it, and mixing the two answers in one
+    /// program is a silent disagreement about layout rather than a link error.
+    pub short_enums: bool,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1292,6 +1310,8 @@ impl Options {
             hook: Hook::default(),
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
+            char_signed: None,
+            short_enums: false,
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,
@@ -1373,8 +1393,15 @@ pub struct Session {
 
 impl Session {
     /// A session for `opts`.
+    ///
+    /// The command line's answer about plain `char` is put into the target here rather than
+    /// carried beside it, because every place that asks what a `char` is asks the target, and two
+    /// answers to one question is how a front end ends up disagreeing with its own back end.
     pub fn new(opts: Options) -> Self {
-        let target = TargetInfo::new(opts.target);
+        let mut target = TargetInfo::new(opts.target);
+        if let Some(signed) = opts.char_signed {
+            target.char_is_signed = signed;
+        }
         Self {
             opts,
             target,
