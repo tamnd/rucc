@@ -57,7 +57,13 @@
 //! built with `-fsafety`, and the type plane is a thing this runtime both keeps and decides on. The
 //! union punning of C 6.5.2.3 is answered too: an access through a member of a union names the
 //! character type, so a store through one member leaves bytes every later read of them agrees with.
-//! The init and epoch planes are not here at all.
+//!
+//! [`init`] is section 9.2's init plane, a bit for every byte of storage, which is document 03's Y6
+//! and the kernel infoleak with it. The bit means uninitialized rather than initialized, so a byte
+//! nobody has said anything about counts as written and a gap in instrumentation loses a check
+//! rather than inventing a refusal, which is the inversion of MSan that section 9.2 argues for and
+//! the reason this one could be shipped. Nothing maps it beside a region yet and no generated code
+//! reaches it. The epoch plane is not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
@@ -90,6 +96,7 @@ pub mod fail;
 #[cfg(unix)]
 pub mod frame;
 pub mod heap;
+pub mod init;
 pub mod layout;
 pub mod plane;
 pub mod posture;
