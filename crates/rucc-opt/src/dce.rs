@@ -15,12 +15,22 @@
 //!
 //! # How it decides
 //!
-//! An instruction goes when it is not a terminator, when [`Opcode::has_effects`] says no, and when
-//! every value it produces is used by nothing. All three are needed and the second is where the
-//! argument lives: `has_effects` is the conservative predicate, so a load, an allocation, a call
-//! and a `va_arg` all stay whatever their results do. That is stricter than it has to be, since a
-//! non-volatile load of a dead value is safe to remove and so is an allocation nothing addresses,
-//! but both of those want memory analysis to say so honestly and this pass predates it.
+//! An instruction goes when it is not a terminator, when every value it produces is used by
+//! nothing, and when it does not happen for a reason of its own. [`Opcode::has_effects`] is the
+//! predicate for the last of those and it answers one question for two different things: it means
+//! both that an instruction writes memory or does something the program can observe, and that it
+//! reads memory. An allocation, a call and a `va_arg` are the first and stay. A plain load is only
+//! the second, and it goes.
+//!
+//! Removing a dead load needs no memory analysis, which is why it does not wait for one. It cannot
+//! change what any byte holds, it cannot change what another load sees, and nothing after it can
+//! tell that it did not happen. The only thing it changes is whether the program faults on an
+//! address it was never going to use the bytes of, and that is what a compiler is for. What does
+//! stay is a load the program asked to happen, which is a `volatile` one, and a load other threads
+//! can see the order of, which is an atomic one at any strength.
+//!
+//! An allocation nothing addresses is still removable and still here, and that one does want a
+//! memory analysis, because whether anything addresses it is the question.
 //!
 //! # Why it is a worklist
 //!
@@ -46,7 +56,7 @@
 //! it is control flow work rather than value work. It belongs with the branch folding that creates
 //! most of it.
 
-use rucc_ir::{Block, Def, Func, Inst, Opcode};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, MemOrder, Opcode};
 
 use crate::uses::{count, operands};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -59,10 +69,10 @@ const NO_FUEL: &str = "dead instruction kept, the pass ran out of fuel";
 
 /// Recorded once for a function that has an instruction this pass is not allowed to look at.
 ///
-/// The honest miss of this pass, and the one worth reading. `has_effects` is conservative, so a
-/// load of a value nothing reads and an allocation nothing addresses both stay, and both of them
-/// are removable once there is a memory analysis to say so. A function with none of these is a
-/// function where this pass found everything there was.
+/// The honest miss of this pass, and the one worth reading. A store nothing can read again, an
+/// allocation nothing addresses and a call that returns nothing and does nothing are all removable
+/// once there is a memory analysis to say so, and all of them stay. A function with none of these
+/// is a function where this pass found everything there was.
 const NEEDS_MEMORY_ANALYSIS: &str =
     "instruction with effects left alone, removing it needs a memory analysis";
 
@@ -157,6 +167,21 @@ enum Verdict {
     Effects,
 }
 
+/// Whether this instruction only reads memory, so that not doing it is something nothing can tell.
+///
+/// A plain load and nothing else. A `volatile` load is an access the program asked for by name and
+/// happens whether or not anybody wanted the value. An atomic load is part of an order other
+/// threads can see, at every strength and not only at the fence-like ones, and there is no reason
+/// to argue about the weak end of that until something is waiting on the answer.
+fn reads_only(func: &Func, inst: Inst) -> bool {
+    let data = &func[inst];
+    if data.opcode != Opcode::Load || data.flags.contains(Flags::VOLATILE) {
+        return false;
+    }
+    let Extra::Mem(mem) = data.extra else { return false };
+    func[mem].order == MemOrder::NotAtomic
+}
+
 /// What to do with this instruction.
 fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
     let data = &func[inst];
@@ -169,7 +194,7 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
     if !data.results().all(|value| uses[value.index()] == 0) {
         return Verdict::Used;
     }
-    if data.opcode.has_effects() {
+    if data.opcode.has_effects() && !reads_only(func, inst) {
         return Verdict::Effects;
     }
     debug_assert!(
@@ -196,6 +221,11 @@ mod tests {
         let mut func = Func::new(name, Signature::new().with_returns(&[Type::int(32)]));
         let block = func.create_block();
         (names, func, block)
+    }
+
+    /// A four byte access of that strength, with nothing else said about it.
+    fn plain(order: MemOrder) -> MemInfo {
+        MemInfo { size: 4, align: 4, owns: 4, order, tbaa: None, restrict: Restrict::NONE }
     }
 
     /// How many instructions are left in a block.
@@ -294,6 +324,66 @@ mod tests {
         // is the one this pass reports as a miss. That count is the honest size of what a memory
         // analysis would buy, per function, without anybody having to guess at it.
         assert_eq!(stats.count(Kind::Missed, super::NEEDS_MEMORY_ANALYSIS), 1);
+    }
+
+    /// A plain load nothing reads goes, which is the one thing here that does not wait for a
+    /// memory analysis. Removing it cannot change what any byte holds or what another load sees.
+    #[test]
+    fn a_load_nothing_reads_goes_away() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let address = build.iconst(Type::int(64), 0);
+        let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
+        build.load(Type::int(32), address, plain(MemOrder::NotAtomic), Flags::NONE);
+        let kept = build.iconst(Type::int(32), 1);
+        build.ret(&[kept]);
+        let stats =
+            Dce.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+        assert!(stats.changed());
+        // The load, then the cast and the constant that only it read, so what is left is the
+        // constant the return reads and the return.
+        assert_eq!(left(&func, block), 2);
+        assert_eq!(stats.count(Kind::Missed, super::NEEDS_MEMORY_ANALYSIS), 0);
+    }
+
+    /// A `volatile` load stays. It is an access the program asked for by name, and it happens
+    /// whether or not anybody wanted the value it produced.
+    #[test]
+    fn a_volatile_load_nothing_reads_stays() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let address = build.iconst(Type::int(64), 0);
+        let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
+        build.load(Type::int(32), address, plain(MemOrder::NotAtomic), Flags::VOLATILE);
+        let kept = build.iconst(Type::int(32), 1);
+        build.ret(&[kept]);
+        let stats =
+            Dce.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+        assert!(!stats.changed());
+        assert_eq!(left(&func, block), 5);
+        assert_eq!(stats.count(Kind::Missed, super::NEEDS_MEMORY_ANALYSIS), 1);
+    }
+
+    /// An atomic load stays at every strength, because what it is part of is an order other
+    /// threads can see rather than the value it hands back.
+    #[test]
+    fn an_atomic_load_nothing_reads_stays_however_weak_it_is() {
+        for order in [MemOrder::Relaxed, MemOrder::Acquire, MemOrder::SeqCst] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let address = build.iconst(Type::int(64), 0);
+            let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
+            build.load(Type::int(32), address, plain(order), Flags::NONE);
+            let kept = build.iconst(Type::int(32), 1);
+            build.ret(&[kept]);
+            let stats = Dce.run(
+                &mut func,
+                &mut crate::machine::fixtures::analyses(),
+                &mut Fuel::unlimited(),
+            );
+            assert!(!stats.changed(), "{order:?}");
+            assert_eq!(left(&func, block), 5, "{order:?}");
+        }
     }
 
     #[test]
