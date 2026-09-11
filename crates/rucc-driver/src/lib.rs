@@ -179,7 +179,8 @@ options:
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
-  -fPIC -fpic -fPIE -fpie, -fno-common, -f[no-]strict-aliasing, -pipe   what it does anyway
+  -fPIC -fpic -fPIE -fpie, -fno-common, -pipe   what it does anyway
+  -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
@@ -665,6 +666,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // is correct without it, only slower. And `-O2` implies it, so a build that spells it
             // out is a build that would stop on a compiler that refused it, for no gain at all.
             "-fstrict-aliasing" | "-fno-strict-aliasing" => {}
+            // The same shape of answer for the same reason, and the flag the kernel writes beside
+            // the one above it.
+            //
+            // Nothing here concludes that a pointer is not null from the fact that it was
+            // dereferenced. There is no such conclusion to draw from, because no pass records one:
+            // a load says where it read and nothing else, and a comparison against null is an
+            // ordinary comparison of two values the optimizer has no fact about. So a function
+            // that reads through a pointer and then tests it keeps the test, which is what the
+            // kernel wants and what `-fno-delete-null-pointer-checks` asks for, and what gcc has
+            // to be asked for because it draws the conclusion by default.
+            //
+            // `-fdelete-null-pointer-checks` is the request to draw it, and it goes the way
+            // `-fstrict-aliasing` does: assuming less than was asked for costs speed and not
+            // correctness, and `-O2` implies it, so refusing it would stop builds for nothing.
+            "-fdelete-null-pointer-checks" | "-fno-delete-null-pointer-checks" => {}
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
@@ -2012,6 +2028,8 @@ mod tests {
             "-fno-common",
             "-fstrict-aliasing",
             "-fno-strict-aliasing",
+            "-fdelete-null-pointer-checks",
+            "-fno-delete-null-pointer-checks",
             "-pipe",
             "-fdiagnostics-color",
             "-fno-diagnostics-color",
@@ -3247,7 +3265,10 @@ mod tests {
         // undefined, which is three spellings of two questions and which a kernel build and a great
         // deal of code written before the standard settled both pass. The one it went up by last is
         // the other answer to the first of those questions, which could not share the line because
-        // what it asks for is the opposite of what the flags on that line ask for.
-        assert!(USAGE.lines().count() < 55, "usage text has grown past one screen");
+        // what it asks for is the opposite of what the flags on that line ask for. The one it went
+        // up by last is the split of the line that lists what this compiler does anyway into that
+        // and what it assumes anyway, which are two different claims that were sharing a line until
+        // the second of them got a second flag and the line stopped fitting.
+        assert!(USAGE.lines().count() < 56, "usage text has grown past one screen");
     }
 }
