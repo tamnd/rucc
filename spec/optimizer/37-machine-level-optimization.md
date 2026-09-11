@@ -66,10 +66,13 @@ above saw it. Reason two is genuine. Reason three is genuine.
 But the *magnitude* is not the same, and the reason is document 36.3's. GCC re-runs the full
 optimizer at RTL partly because RTL is not in SSA form, so each pass rebuilds its own dataflow, and
 partly because expansion is a tree walker that generates locally and leaves obvious redundancy for
-somebody else. rucc's selector matches over a DAG that has already been through the e-graph, its
-addressing modes are folded by rules rather than by a later pass, and its MIR is in SSA. **So rucc
-does not need a second copy of the middle end below selection. It needs a small number of genuinely
-machine-level passes, and this document's job is to name them.**
+somebody else. rucc's selector matches over a DAG that has already been through the e-graph, and its
+MIR is in SSA, so a pass below selection reads the dataflow the form already carries rather than
+rebuilding it. The addressing modes are the exception and section 37.4 has the detail: they are
+folded by a pass after selection rather than by the rules, because a rule matches one term and an
+address and the instruction reading it are each at the root of their own. **So rucc does not need a
+second copy of the middle end below selection. It needs a small number of genuinely machine-level
+passes, and this document's job is to name them.**
 
 ## 37.2 RTL SSA, which is GCC agreeing
 
