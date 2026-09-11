@@ -71,7 +71,7 @@ Three more of document 13.5's measurements land here, all of which can invalidat
 
 - **PICO+CHOP composition** (document 17 question 3): discharge rate with each source alone and together. Done, and the answer is that they do not compose. The sources hardly overlap in which checks they discharge and the combination is worth nothing on the clock, because the loop passes have already taken the checks that were costing anything.
 - **Call-frame elision rate** (document 17 question 4).
-- **Register pressure**: spill/fill delta on the pointer-heavy benchmarks.
+- **Register pressure**: spill/fill delta on the pointer-heavy benchmarks. Done, and it is not the pointer-heavy ones. 71 percent of the spilling the monitor adds is the loop split's guard on an array loop, tracked on #893.
 
 **Exit:** Tier E under 2x geomean on the parent's document 16 benchmark set plus document 12.4's pointer-heavy additions, reported per benchmark with worst case and discharge rate; the three measurements recorded; and the differential check accounting of document 14.3 running nightly with zero divergences.
 
