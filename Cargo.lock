@@ -302,6 +302,7 @@ version = "0.10.19"
 dependencies = [
  "rucc-base",
  "rucc-ir",
+ "rucc-session",
  "rucc-target",
 ]
 
