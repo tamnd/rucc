@@ -154,7 +154,7 @@ pub use frequency::Frequencies;
 pub use frontier::{ControlDependence, Frontiers};
 pub use fuel::Fuel;
 pub use gate::Gates;
-pub use live::{LiveHere, Liveness};
+pub use live::{Change, LiveHere, Liveness};
 pub use loops::{Exit, LoopId, Loops};
 pub use machine::Machine;
 // `memssa::Counts` is deliberately not re-exported either, for the same reason: [`alias::Counts`]

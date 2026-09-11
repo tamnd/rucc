@@ -62,14 +62,24 @@ impl Set {
         }
     }
 
-    fn insert(&mut self, value: Value) {
+    /// Puts it in, and answers whether it was not already there.
+    fn insert(&mut self, value: Value) -> bool {
         let at = value.index();
-        self.words[at / 64] |= 1 << (at % 64);
+        let word = &mut self.words[at / 64];
+        let bit = 1 << (at % 64);
+        let had = *word & bit != 0;
+        *word |= bit;
+        !had
     }
 
-    fn remove(&mut self, value: Value) {
+    /// Takes it out, and answers whether it was there.
+    fn remove(&mut self, value: Value) -> bool {
         let at = value.index();
-        self.words[at / 64] &= !(1 << (at % 64));
+        let word = &mut self.words[at / 64];
+        let bit = 1 << (at % 64);
+        let had = *word & bit != 0;
+        *word &= !bit;
+        had
     }
 
     /// Adds everything in the other, and answers whether that changed anything.
@@ -129,7 +139,7 @@ impl Liveness {
                     out.union_with(&live_in[successor.index()]);
                 }
                 let mut set = out.clone();
-                walk(func, block, &mut set, |_, _| {});
+                walk(func, block, &mut set, |_, _, _| {});
                 for &param in &func[block].params {
                     set.remove(param);
                 }
@@ -183,8 +193,33 @@ impl Liveness {
     /// instruction's operands and not its results.
     pub fn through(&self, func: &Func, block: Block, mut at: impl FnMut(Inst, &LiveHere<'_>)) {
         let mut set = self.live_out[block.index()].clone();
-        walk(func, block, &mut set, |inst, set| at(inst, &LiveHere { set }));
+        walk(func, block, &mut set, |inst, set, _| at(inst, &LiveHere { set }));
     }
+
+    /// The same walk, reporting what each instruction changes rather than what is live.
+    ///
+    /// [`Liveness::through`] hands out the whole set at every instruction, and a caller that only
+    /// wants to count what is in it pays the size of the set per instruction. In a function of a
+    /// hundred and ninety thousand instructions the set is thousands of values wide and that is
+    /// quadratic. What actually changes at an instruction is its results and its operands, so a
+    /// caller keeping a running count can be handed those instead and stay linear.
+    /// tamnd/rucc#1015.
+    pub fn changes(&self, func: &Func, block: Block, mut at: impl FnMut(Inst, &Change)) {
+        let mut set = self.live_out[block.index()].clone();
+        walk(func, block, &mut set, |inst, _, change| at(inst, change));
+    }
+}
+
+/// What one instruction does to the live set, seen walking the block backwards.
+///
+/// Both lists hold each value once, because they record the bits that moved rather than the names
+/// the instruction wrote: a value an instruction names twice is one bit and arrives once.
+#[derive(Debug, Default)]
+pub struct Change {
+    /// Values the instruction defines, which are live after it and not before it.
+    pub gone: Vec<Value>,
+    /// Values it names, which are live before it and were not after it.
+    pub arrived: Vec<Value>,
 }
 
 /// What is live at one point inside a block.
@@ -227,23 +262,32 @@ impl LiveHere<'_> {
 /// The order matters and is the reason this is one function rather than two loops at each caller.
 /// The results go out before the operands come in, so an instruction whose operand is also its
 /// result leaves the value live, which is what a use before a redefinition means.
-fn walk(func: &Func, block: Block, set: &mut Set, mut at: impl FnMut(Inst, &Set)) {
+fn walk(func: &Func, block: Block, set: &mut Set, mut at: impl FnMut(Inst, &Set, &Change)) {
+    let mut change = Change::default();
     for this in func.insts_backwards(block) {
+        change.gone.clear();
+        change.arrived.clear();
         let data = &func[this];
         for result in data.results() {
-            set.remove(result);
+            if set.remove(result) {
+                change.gone.push(result);
+            }
         }
         for &arg in &func[data.args] {
-            set.insert(arg);
+            if set.insert(arg) {
+                change.arrived.push(arg);
+            }
         }
         // A branch's arguments are used by the branch, in the block holding it, which is the whole
         // reason block parameters are easier to be right about than phi nodes.
         for call in func.successors(this) {
             for &arg in &func[call.args] {
-                set.insert(arg);
+                if set.insert(arg) {
+                    change.arrived.push(arg);
+                }
             }
         }
-        at(this, set);
+        at(this, set, &change);
     }
 }
 

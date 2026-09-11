@@ -117,9 +117,18 @@ impl Pressure {
                 }
             }
             most_in[at] = here;
-            live.through(func, block, |_, at_inst| {
-                let mut counted = [0; Class::COUNT];
-                for value in at_inst.iter() {
+            // The count is carried along rather than taken again at each instruction. What an
+            // instruction changes is its results and its operands, and reading the whole set to
+            // count it instead is the size of the set per instruction, which on a large function
+            // is quadratic and was almost all of an optimized compile of one. tamnd/rucc#1015.
+            let mut counted = here;
+            live.changes(func, block, |_, change| {
+                for &value in &change.gone {
+                    if let Some(class) = class_of(func[value].ty) {
+                        counted[class.index()] -= 1;
+                    }
+                }
+                for &value in &change.arrived {
                     if let Some(class) = class_of(func[value].ty) {
                         counted[class.index()] += 1;
                     }
