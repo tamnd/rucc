@@ -103,9 +103,10 @@ pub fn write(
     // not a file a linker accepts.
     let mut symbols = std::collections::BTreeMap::new();
     // Where each function ended up, in the order they were written, so that a relocation inside
-    // one goes into the section that one is in. The same list as `text.funcs` and in the same
-    // order, so the two are walked together below.
-    let mut split = Vec::with_capacity(text.funcs.len());
+    // one goes into the section that one is in and one that points at the start of one can be
+    // written against that section. The same list as `text.funcs` and in the same order, so the
+    // two are walked together below.
+    let mut split: Vec<(object::write::SectionId, u64)> = Vec::with_capacity(text.funcs.len());
     // Which text section each record of where a patcher's room is belongs to, in the order the
     // records were added, which is the order their headers come out in. See `link`.
     let mut ordered: Vec<String> = Vec::new();
@@ -181,7 +182,7 @@ pub fn write(
         });
         see(&mut obj, id, func.binding, func.visibility);
         symbols.insert(func.name.clone(), id);
-        split.push(section);
+        split.push((section, at));
     }
 
     // Where each variable's image landed in the section it went into, kept because a relocation in
@@ -239,11 +240,10 @@ pub fn write(
         symbols.insert(alias.name.clone(), id);
     }
 
-    let wanted = text
-        .relocs
-        .iter()
-        .chain(text.unwind.relocs.iter())
-        .chain(data.objects.iter().flat_map(|object| &object.relocs));
+    // Not the unwind table's, which name functions this file defines and are written against the
+    // section rather than against the name. A record for anything else is refused below, so a name
+    // added here for one would be a name nothing goes on to use.
+    let wanted = text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs));
     for reloc in wanted {
         if symbols.contains_key(&reloc.symbol) {
             continue;
@@ -278,7 +278,7 @@ pub fn write(
             // From the start of the section rather than from the symbol, and the two are not the
             // same byte in a function with room in front of its label.
             let base = func.start - func.patch.map_or(0, |patch| patch.before);
-            (split[after - 1], (reloc.at - base) as u64)
+            (split[after - 1].0, (reloc.at - base) as u64)
         } else {
             (whole, reloc.at as u64)
         };
@@ -294,7 +294,39 @@ pub fn write(
         let frames = obj.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
         obj.append_section_data(frames, &text.unwind.bytes, 8);
         for reloc in &text.unwind.relocs {
-            add(&mut obj, frames, reloc.at as u64, reloc, &symbols)?;
+            // Against the section the function is in rather than against the function's own name,
+            // which is the same reason the record of a patcher's room is written that way and one
+            // more besides. The section is the only one of the two that is settled here: a global
+            // name is answered at load time by whichever object defines it first, so a distance
+            // measured to one is not a distance the linker can work out, and it says so and stops.
+            // The effect was that nothing this compiler wrote could go into a shared library at
+            // all, because every function has a record and every record pointed at a name.
+            //
+            // A function defined elsewhere has no record here, so the lookup failing means the
+            // record is for something that is not a function in this file, and that is a bug
+            // rather than a shape to handle: the writer says what it was given rather than
+            // guessing.
+            let found = text.funcs.iter().position(|func| func.name == reloc.symbol);
+            let Some((section, at)) = found.map(|i| split[i]) else {
+                let why =
+                    format!("'{}' has an unwind record and is not a function here", reloc.symbol);
+                return Err(Error::Refused { why });
+            };
+            let symbol = obj.section_symbol(section);
+            let r_type = r_type(reloc.kind).ok_or_else(|| Error::Refused {
+                why: format!("no relocation is {:?}", reloc.kind),
+            })?;
+            let record = Relocation {
+                offset: reloc.at as u64,
+                symbol,
+                // Where the function starts inside its section, since the section symbol is where
+                // the section starts and the two are the same byte only for the first function in
+                // one.
+                addend: reloc.addend + at as i64,
+                flags: RelocationFlags::Elf { r_type },
+            };
+            obj.add_relocation(frames, record)
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
         }
     }
     for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
@@ -954,10 +986,89 @@ mod tests {
         let bytes =
             write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let mut found = points_at(&file);
+        found.sort_unstable();
+        assert_eq!(found, [(32, ".text".to_owned(), 0), (48, ".text".to_owned(), 16)]);
+    }
+
+    /// What each record in the unwind table points at: where it is, the section it reaches, and
+    /// how far into that section the function it is about begins.
+    fn points_at(file: &object::File<'_>) -> Vec<(u64, String, i64)> {
         let frames = file.section_by_name(".eh_frame").expect("the table");
-        let mut at = frames.relocations().map(|(offset, _)| offset).collect::<Vec<_>>();
-        at.sort_unstable();
-        assert_eq!(at, [32, 48]);
+        frames
+            .relocations()
+            .map(|(offset, reloc)| {
+                let object::RelocationTarget::Symbol(index) = reloc.target() else {
+                    panic!("a record points at something that is not a symbol");
+                };
+                let symbol = file.symbol_by_index(index).expect("a symbol that is in the table");
+                assert_eq!(symbol.kind(), SymbolKind::Section, "a record names a section");
+                let section = symbol.section_index().expect("a section symbol is in one");
+                let name = file.section_by_index(section).expect("a readable section");
+                (offset, name.name().expect("a named section").to_owned(), reloc.addend())
+            })
+            .collect()
+    }
+
+    /// A record points at the section its function is in rather than at the function's name.
+    ///
+    /// Written for tamnd/rucc#1004, which was that nothing this compiler wrote could go into a
+    /// shared library. A global name is answered at load time by whichever object defines it
+    /// first, so the distance from a record to one of them is not a distance a static linker can
+    /// work out, and `ld` says so and stops with advice to recompile with the flag that was
+    /// already on the command line. A section is settled by then, which is why gcc measures to a
+    /// local label and why this measures to the section.
+    ///
+    /// Both ways of splitting the text, because the offset is the part that differs: one section
+    /// holding everything makes it the function's place in the whole text, and a section per
+    /// function makes it whatever room a patcher was promised in front of the label.
+    #[test]
+    fn a_record_reaches_its_function_through_the_section_it_is_in() {
+        let mut text = two();
+        text.unwind.bytes = vec![0; 64];
+        for (at, name) in [(32usize, "f"), (48usize, "g")] {
+            text.unwind.relocs.push(Reloc {
+                at,
+                symbol: name.to_owned(),
+                kind: Reference::Data,
+                addend: 0,
+            });
+        }
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let mut whole = points_at(&file);
+        whole.sort_unstable();
+        assert_eq!(whole, [(32, ".text".to_owned(), 0), (48, ".text".to_owned(), 16)]);
+
+        let sections =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
+        let bytes = write(&text, &Data::default(), &[], &target(), sections).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let mut split = points_at(&file);
+        split.sort_unstable();
+        assert_eq!(split, [(32, ".text.f".to_owned(), 0), (48, ".text.g".to_owned(), 0)]);
+    }
+
+    /// A record about a name this file does not define is refused rather than written.
+    ///
+    /// There is no such file today: the table is built beside the text out of the functions that
+    /// were just compiled. It is refused rather than left to the linker because the alternative is
+    /// the shape that was just fixed, a record measured to a name, and the writer saying what it
+    /// was given is how that stays fixed.
+    #[test]
+    fn a_record_about_something_this_file_does_not_define_is_refused() {
+        let mut text = calling("puts");
+        text.unwind.bytes = vec![0; 64];
+        text.unwind.relocs.push(Reloc {
+            at: 32,
+            symbol: "puts".to_owned(),
+            kind: Reference::Data,
+            addend: 0,
+        });
+        let why = write(&text, &Data::default(), &[], &target(), Output::default())
+            .expect_err("a record about a name from somewhere else");
+        assert!(why.to_string().contains("puts"), "{why}");
     }
 
     /// The name of the section that symbol is defined in.
