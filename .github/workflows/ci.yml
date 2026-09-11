@@ -475,11 +475,15 @@ jobs:
           path: compat/results/
           if-no-files-found: ignore
 
-  # A single required check, so branch protection does not have to list every job above.
+  # A single required check, so branch protection does not have to list every job above. It is the
+  # only check the main ruleset requires, which means a job missing from this list runs, reports and
+  # blocks nothing, and three of them were missing: the stub reader, the safety suite and the
+  # elimination accounting. So the list is every job in the file, and a job added above has to be
+  # added here in the same commit, because the alternative is a red tick nobody has to look at.
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, implib, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, safety, accounting, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
