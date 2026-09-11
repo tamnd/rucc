@@ -30,7 +30,7 @@ The compiler emits calls to helper routines the ISA cannot do in one instruction
 
 **Binary128 is the largest single piece.** Full IEEE quad-precision arithmetic in software, add, multiply, divide, square root, conversions, comparisons, for four architectures where `long double` is binary128. It is a known quantity (compiler-rt and libgcc both have it, and the algorithms are textbook) and it is a few thousand lines that must be *correct*, testable against a reference by exhaustive testing on reduced formats and random testing on the full one.
 
-**How it is built.** `rucc-builtins` is C compiled by rucc itself for each target, per parent document 12. That is a bootstrapping property worth keeping: it means every target's runtime is evidence that the target's codegen works, and a target whose builtins do not build is a target that is not ready. The archives are built at rucc's release time for every tier-1 and tier-2 target and shipped, because building them on demand puts a compile in the middle of every user's first link.
+**How it is built.** `rucc-builtins` is C compiled by rucc itself for each target, per parent document 12, which said Rust until tamnd/rucc#912 settled the two documents against each other and section 12.8 records why the answer is this one. That is a bootstrapping property worth keeping: it means every target's runtime is evidence that the target's codegen works, and a target whose builtins do not build is a target that is not ready. The archives are built at rucc's release time for every tier-1 and tier-2 target and shipped, because building them on demand puts a compile in the middle of every user's first link.
 
 ## 10.3 Start files
 

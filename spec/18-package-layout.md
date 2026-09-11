@@ -48,7 +48,7 @@ rucc/
 │   ├── rucc-targets/           the target table as a command line tool; CI and bring-up only
 │   └── rucc-verify/            SMT verification of the rule set; CI only
 ├── runtime/
-│   ├── rucc-builtins/          #![no_std], compiled *for the target*, not for the host
+│   ├── rucc-builtins/          #![no_std]; the reference the shipped C archive is tested against, per 12.8
 │   └── rucc-safe-rt/           #![no_std], the safety monitor's target-side runtime
 └── tests/
 ```
