@@ -1,20 +1,131 @@
 target    aarch64-windows-gnu
 format    coff
-emulation none
+emulation arm64pe
 loader    none
 sysroot   <cache>/sysroots/aarch64-windows-gnu
 
 [static]
-  refused: there is no cross link line for aarch64-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  arm64pe
+  --sysroot=<cache>/sysroots/aarch64-windows-gnu
+  --subsystem
+  console
+  -static
+  --dynamicbase
+  --nxcompat
+  --high-entropy-va
+  --no-insert-timestamp
+  <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/aarch64-windows-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/librucc_builtins.a
 
 [static-pie]
-  refused: there is no cross link line for aarch64-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  arm64pe
+  --sysroot=<cache>/sysroots/aarch64-windows-gnu
+  --subsystem
+  console
+  -static
+  --dynamicbase
+  --nxcompat
+  --high-entropy-va
+  --no-insert-timestamp
+  <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/aarch64-windows-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/librucc_builtins.a
 
 [dynamic]
-  refused: there is no cross link line for aarch64-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  arm64pe
+  --sysroot=<cache>/sysroots/aarch64-windows-gnu
+  --subsystem
+  console
+  --dynamicbase
+  --nxcompat
+  --high-entropy-va
+  --no-insert-timestamp
+  <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/aarch64-windows-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/librucc_builtins.a
 
 [dynamic-no-pie]
-  refused: there is no cross link line for aarch64-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  arm64pe
+  --sysroot=<cache>/sysroots/aarch64-windows-gnu
+  --subsystem
+  console
+  --dynamicbase
+  --nxcompat
+  --high-entropy-va
+  --no-insert-timestamp
+  <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
+  -L<cache>/sysroots/aarch64-windows-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/librucc_builtins.a
 
 [shared]
-  refused: there is no cross link line for aarch64-windows-gnu yet, because its object format is coff and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  arm64pe
+  --sysroot=<cache>/sysroots/aarch64-windows-gnu
+  -shared
+  --dynamicbase
+  --nxcompat
+  --high-entropy-va
+  --no-insert-timestamp
+  <cache>/sysroots/aarch64-windows-gnu/lib/dllcrt2.o
+  -L<cache>/sysroots/aarch64-windows-gnu/lib
+  main.o
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingw32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmoldname.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmingwex.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libmsvcrt.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libadvapi32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libshell32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libuser32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/libkernel32.a
+  <cache>/sysroots/aarch64-windows-gnu/lib/librucc_builtins.a

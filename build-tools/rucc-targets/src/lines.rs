@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rucc_sysroot::argv::{Invocation, Item, argv, emulation};
+use rucc_sysroot::argv::{Invocation, Item, argv, emulation, pe_machine};
 use rucc_sysroot::link::loader;
 use rucc_sysroot::{LinkMode, Sysroot};
 use rucc_tuple::{TARGETS, TargetTuple};
@@ -116,7 +116,10 @@ fn render(target: TargetTuple) -> String {
 
     let _ = writeln!(out, "target    {}", target.to_canonical_string());
     let _ = writeln!(out, "format    {}", target.object_format().as_str());
-    let _ = writeln!(out, "emulation {}", emulation(target).unwrap_or("none"));
+    // The machine flag under one name for both formats, because what the row records is what goes
+    // after `-m` and a reader comparing two targets wants them in the same place.
+    let machine = emulation(target).or_else(|| pe_machine(target)).unwrap_or("none");
+    let _ = writeln!(out, "emulation {machine}");
     let _ = writeln!(out, "loader    {}", loader(target).unwrap_or("none"));
     let _ = writeln!(out, "sysroot   {}", sysroot.root().display());
 
