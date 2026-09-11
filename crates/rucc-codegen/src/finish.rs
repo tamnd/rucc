@@ -60,6 +60,8 @@
 //! `spec/10-backend.md` section 10.8 as it applies to the one pass that would otherwise be full
 //! of `x64.` by hand.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg};
 use rucc_regalloc::Allocation;
@@ -248,7 +250,7 @@ pub fn finish(
     let base = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
     let mut writer = Writer { func, conv, insts, names, base, ahead: None };
 
-    let mut cursors: Vec<(At, Inst)> = Vec::new();
+    let mut cursors: HashMap<At, Inst> = HashMap::new();
     for edit in &allocation.edits {
         let inst = writer.mov(edit, frame);
         writer.put(&mut cursors, edit.at, inst);
@@ -861,10 +863,10 @@ impl Writer<'_> {
     ///
     /// The edits at one place are in the order they have to be made in, so each one goes behind
     /// the last, and the first of them is what the place itself means.
-    fn put(&mut self, cursors: &mut Vec<(At, Inst)>, at: At, inst: Inst) {
-        if let Some(cursor) = cursors.iter_mut().find(|(place, _)| *place == at) {
-            self.func.insert_after(cursor.1, inst);
-            cursor.1 = inst;
+    fn put(&mut self, cursors: &mut HashMap<At, Inst>, at: At, inst: Inst) {
+        if let Some(cursor) = cursors.get_mut(&at) {
+            self.func.insert_after(*cursor, inst);
+            *cursor = inst;
             return;
         }
         match at {
@@ -878,7 +880,7 @@ impl Writer<'_> {
             // its own that have to be made before the edge's are.
             At::EndOf(block) => self.func.append_inst(block, inst),
         }
-        cursors.push((at, inst));
+        cursors.insert(at, inst);
     }
 
     /// Where a spill slot is, from the stack pointer in the body of the function.
