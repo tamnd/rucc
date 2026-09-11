@@ -362,6 +362,10 @@ fn mode(opts: &LinkOptions) -> LinkMode {
 /// [`rucc_sysroot::argv`] is written over. There is deliberately no decision here: a second place
 /// that decided what goes on a cross link line would be a second place to get it wrong, and the
 /// recorded lines under `tests/link-lines` would stop describing what this compiler does.
+///
+/// The exception is our own runtime, and it is an exception because `librucc_builtins.a` is the one
+/// file on the line that is ours rather than the target's. [`our_runtime`] is that question, asked
+/// here because this is the side of the wall that is allowed to look at the machine.
 fn cross_line(
     target: Triple,
     opts: &LinkOptions,
@@ -389,6 +393,7 @@ fn cross_line(
         })
         .collect();
     let output = PathBuf::from(output);
+    let elsewhere = our_runtime(target, opts, sysroot);
     let invocation = argv::Invocation {
         inputs: &inputs,
         output: Some(&output),
@@ -398,6 +403,10 @@ fn cross_line(
         no_startfiles: !opts.wants_startfiles(),
         no_defaultlibs: !opts.wants_defaultlibs(),
         no_builtins_lib: opts.no_builtins_lib,
+        builtins: match &elsewhere {
+            Some(path) => argv::Builtins::At(path),
+            None => argv::Builtins::Nowhere,
+        },
         export_dynamic: opts.export_dynamic,
         strip: opts.strip,
     };
@@ -434,6 +443,25 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+/// Our own runtime for this target, wherever it is, or nothing if it was not built for it.
+///
+/// Three places and the order is the same order a `-B` prefix has everywhere else: what the user
+/// named, then the sysroot, then beside the compiler. The sysroot is in the middle because a
+/// distribution we shipped puts the archive for the target in it, and beside the compiler is last
+/// because that is the build tree, which is the case for whoever is working on the compiler rather
+/// than using it.
+///
+/// The sysroot's library directory is passed to [`builtins_archive`] as one more prefix rather than
+/// being looked at here, so that there is one list of places a runtime can be and one function that
+/// walks it. Nothing is an answer: `spec/cross-compile/10-runtime.md` section 10.2 has the archives
+/// built for every tier 1 and tier 2 target at release time, and until that exists most machines
+/// have none for most targets, and the programs that reach none of those routines link anyway.
+fn our_runtime(target: Triple, opts: &LinkOptions, sysroot: &Sysroot) -> Option<PathBuf> {
+    let mut places = opts.prefixes.clone();
+    places.push(sysroot.lib());
+    builtins_archive(target, &places)
 }
 
 /// The linker to use, looked for where a linker is.
@@ -1258,15 +1286,59 @@ mod tests {
         }
     }
 
+    /// A directory with a runtime archive in it, which is what a machine that has built one for the
+    /// target looks like. The name rather than the contents, because what is being tested is which
+    /// file the line names and a linker is never run here.
+    fn a_runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rucc-runtime-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
+        dir
+    }
+
     #[test]
     fn a_freestanding_target_links_against_our_runtime_instead_of_being_refused() {
-        let args = line(foreign(), &cached(), &one("a.o"), "a.out").expect("a line");
-        assert!(args.iter().any(|a| a.ends_with("librucc_builtins.a")), "{args:?}");
+        let built = a_runtime_dir("freestanding");
+        let opts = LinkOptions { prefixes: vec![built.clone()], ..cached() };
+        let args = line(foreign(), &opts, &one("a.o"), "a.out").expect("a line");
+        // The path it was found at, not the one in the sysroot, because our runtime is ours and a
+        // `-B` prefix is how somebody says where theirs is.
+        assert!(args.contains(&built.join("librucc_builtins.a").display().to_string()), "{args:?}");
         // No libc, because there is not one, and no start file either: what runs before `main` on a
         // freestanding target comes from whatever is being built.
         assert!(!args.iter().any(|a| a.ends_with("libc.a")), "{args:?}");
         assert!(!args.contains(&"-lc".to_owned()), "{args:?}");
         assert!(!args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+    }
+
+    #[test]
+    fn a_runtime_nobody_has_built_for_the_target_is_left_off_rather_than_named() {
+        // What every machine looks like today, because nothing builds the archive for a target yet.
+        // A line that named it would be a link that cannot run at all, and what it would say is that
+        // a file is missing rather than that a routine is, so the link happens and a program that
+        // reaches one of those routines hears about that one by name.
+        let target = Triple::new(Arch::Aarch64, Os::Linux, Env::Musl);
+        let sysroot = a_sysroot(target);
+        let args = cross_line(target, &cached(), &one("a.o"), "a.out", &sysroot).expect("a line");
+        assert!(!args.iter().any(|a| a.ends_with("librucc_builtins.a")), "{args:?}");
+        // And the rest of the line is the rest of the line.
+        assert!(args.iter().any(|a| a.ends_with("libc.a")), "{args:?}");
+        assert!(args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+    }
+
+    #[test]
+    fn a_runtime_in_the_sysroot_is_the_one_a_cross_link_uses() {
+        // The case a distribution we shipped produces, and the reason the sysroot is a place the
+        // lookup walks rather than the only place: the archive for a target belongs with the libc
+        // for that target, and the build tree's copy is for whoever is working on the compiler.
+        let target = Triple::new(Arch::Riscv64, Os::Linux, Env::Musl);
+        let root = std::env::temp_dir().join(format!("rucc-sysroot-{}", std::process::id()));
+        let lib = root.join("lib");
+        fs::create_dir_all(&lib).expect("a temporary sysroot");
+        fs::write(lib.join("librucc_builtins.a"), b"not really an archive").expect("the archive");
+        let sysroot = Sysroot::at(root, target.tuple());
+        let args = cross_line(target, &cached(), &one("a.o"), "a.out", &sysroot).expect("a line");
+        assert!(args.contains(&lib.join("librucc_builtins.a").display().to_string()), "{args:?}");
     }
 
     /// And with nothing to find sysroots in it is refused, which is what it was before this.

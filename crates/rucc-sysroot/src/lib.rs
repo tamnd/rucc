@@ -82,7 +82,7 @@ pub mod link;
 pub mod manifest;
 pub mod search;
 
-pub use argv::{Invocation, Item, Unsupported};
+pub use argv::{Builtins, Invocation, Item, Unsupported};
 pub use layout::Sysroot;
 pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError};
