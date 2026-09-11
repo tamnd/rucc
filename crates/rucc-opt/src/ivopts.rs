@@ -75,12 +75,11 @@
 //! countdown is a candidate the search will not choose, because the cost table has no price for a
 //! comparison against zero and so nothing in the model knows what a countdown buys. That is #751.
 //!
-//! # It is not in any pipeline
+//! # Where it runs
 //!
-//! Section 28.6 puts ivopts last among the loop passes and after unrolling, and it is not there
-//! yet: the numbers it decides on are worth checking against #701's survey of what GCC 16 chooses
-//! over the same corpus before a build depends on them. What reaches it is `-fenable-ivopts`,
-//! with `-fopt-info-all` to see what it decided.
+//! Section 28.6 puts ivopts last among the loop passes and after unrolling, and that is where it
+//! is, at `-O2` and `-O3`, since #921. `-fopt-info-all` is how to see what it decided about a
+//! particular loop, and `-fno-ivopts` turns it off.
 //!
 //! # What a use is
 //!
