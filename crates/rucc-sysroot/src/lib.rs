@@ -96,7 +96,7 @@ pub mod search;
 pub use argv::{Invocation, Item, Unsupported};
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
-pub use manifest::{Input, Licence, Manifest, ManifestError};
+pub use manifest::{Input, Licence, Manifest, ManifestError, Provenance};
 pub use search::{Entry, Options, Origin, include_paths};
 
 #[doc(inline)]
