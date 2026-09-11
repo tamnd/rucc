@@ -614,7 +614,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
-    use crate::{Plane, Subobject, insert};
+    use crate::{Plane, Promise, Subobject, insert};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -644,7 +644,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
         let mut module = Module::new(names.intern("read.c"), &target());
         module.add_func(func);
         module
@@ -675,7 +675,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
         let mut module = Module::new(names.intern("read.c"), &target());
         module.add_func(func);
         module
@@ -715,7 +715,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Memcpy) }, &[]);
         b.ret(&[]);
 
-        insert(&mut func, &planeless(names).0, 8, Subobject::Off);
+        insert(&mut func, &planeless(names).0, 8, Subobject::Off, Promise::Off);
         let mut module = Module::new(names.intern("move.c"), &target());
         module.add_func(func);
         module
@@ -751,7 +751,7 @@ mod tests {
         b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
         b.ret(&[]);
 
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
         module.add_func(func);
         module
     }
@@ -792,7 +792,7 @@ mod tests {
         let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
         b.ret(&[loaded]);
 
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
         module.add_func(func);
         module
     }
@@ -1180,7 +1180,7 @@ mod tests {
         let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
         b.ret(&[moved]);
         let (plane, numbers) = planeless(&mut names);
-        insert(&mut func, &plane, 8, Subobject::Off);
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off);
 
         let mut table = Vec::new();
         calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);

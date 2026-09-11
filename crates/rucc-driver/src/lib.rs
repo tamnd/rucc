@@ -189,6 +189,7 @@ options:
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
   -f[no-]safety-subobject   a write has to stay inside the member it names
+  -f[no-]safety-restrict    two restrict pointers of one block may not meet
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
@@ -981,6 +982,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let form = &arg["-fsafety-subobject=".len()..];
                 return Err(err(format!(
                     "`{form}` is not a form of -fsafety-subobject. The flag takes no value, and                      the strict form of section 9.4 is tamnd/rucc#967"
+                )));
+            }
+            // Row Y8, from section 9.6 of document 09. A bare flag with no value, for the reason
+            // the one above has none: there is one form of this check and a spelling that suggested
+            // otherwise would be promising something. Before `-fno-` is looked at below, the same
+            // way.
+            "-fsafety-restrict" => opts.promise = rucc_session::Promise::Blocks,
+            "-fno-safety-restrict" => opts.promise = rucc_session::Promise::Off,
+            _ if arg.starts_with("-fsafety-restrict=") => {
+                let form = &arg["-fsafety-restrict=".len()..];
+                return Err(err(format!(
+                    "`{form}` is not a form of -fsafety-restrict. The flag takes no value."
                 )));
             }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
@@ -2358,6 +2371,30 @@ mod tests {
     }
 
     #[test]
+    fn whether_two_restrict_pointers_may_meet_is_read_off_the_command_line() {
+        // Off by default, because the record a block keeps is the union of what each pointer
+        // reached, so two pointers striding through one array without landing on the same byte are
+        // reported and by the letter of the standard those are different objects. Row Y8 is a build
+        // deciding it would rather know.
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.promise, rucc_session::Promise::Off);
+
+        let (opts, _) = compile(&["-fsafety=detect", "-fsafety-restrict", "a.c"]);
+        assert_eq!(opts.promise, rucc_session::Promise::Blocks);
+
+        let (opts, _) = compile(&["-fsafety-restrict", "-fno-safety-restrict", "a.c"]);
+        assert_eq!(opts.promise, rucc_session::Promise::Off);
+
+        // The tier is still a tier, which is the thing worth pinning about a pair of names where
+        // one is the front of the other.
+        let (opts, _) = compile(&["-fsafety-restrict", "a.c"]);
+        assert_eq!(opts.safety, rucc_session::Safety::Off);
+
+        let e = parse_args(&args(&["-fsafety-restrict=blocks", "a.c"])).unwrap_err();
+        assert!(e.message.contains("takes no value"), "{}", e.message);
+    }
+
+    #[test]
     fn print_pipeline_answers_with_the_passes_the_level_asked_for() {
         let a = parse_args(&args(&["--print-pipeline", "-O2"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
@@ -3713,7 +3750,10 @@ mod tests {
         // different directories, and which a person chasing a reproducible build comes here
         // looking for by name. The one it went up by last is how the debug sections are compressed
         // and whether they go in a file of their own, which are two questions about the shape of
-        // the debug output, where the line above them is about how much of it there is.
-        assert!(USAGE.lines().count() < 63, "usage text has grown past one screen");
+        // the debug output, where the line above them is about how much of it there is. The one it
+        // went up by last is the `restrict` contract, which is a setting for the same reason the
+        // flag that keeps a write inside its member is and which is the check a person who has been
+        // bitten by a vectorizer comes here looking for.
+        assert!(USAGE.lines().count() < 64, "usage text has grown past one screen");
     }
 }

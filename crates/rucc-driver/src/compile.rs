@@ -523,7 +523,7 @@ fn instrument(
     if !opts.safety.instruments() {
         return Ok(Instrumented::default());
     }
-    let checks = rucc_safety::run(module, opts.subobject);
+    let checks = rucc_safety::run(module, opts.subobject, opts.promise);
     // Before the optimizer rather than beside the check lowering, which is what
     // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the

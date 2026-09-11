@@ -128,6 +128,12 @@ pub struct Summary {
     /// anything at all and that is a question about every read. `crate::filled` is where the
     /// difference from `effective_type` is argued.
     pub initialization: Class,
+    /// Restrict checks, judgement J8, which is document 03's Y8 asked of the block an access is in.
+    ///
+    /// Zero unless the build asked for them with `-fsafety-restrict`, and even then far fewer than
+    /// `bounds`, because the only accesses that ask are the ones the front end traced back to a
+    /// `restrict` declaration. `crate::promise` is where that is argued.
+    pub restrict: Class,
     /// Accesses that got no check at all, because the pointer they go through is not a value the
     /// insertion pass can take the capability of. A hole rather than a discharge, which is why it
     /// is not folded into either number above.
@@ -175,6 +181,7 @@ impl Summary {
         out.push_str(&format!("    \"derivation\": {},\n", class(self.derivation)));
         out.push_str(&format!("    \"type\": {},\n", class(self.effective_type)));
         out.push_str(&format!("    \"init\": {},\n", class(self.initialization)));
+        out.push_str(&format!("    \"restrict\": {},\n", class(self.restrict)));
         out.push_str(&format!("    \"unchecked\": {}\n", self.unchecked));
         out.push_str("  },\n");
         out.push_str("  \"trust\": {\n");
@@ -234,6 +241,7 @@ pub fn summarize(
         derivation: Class { emitted: emitted.derived, remaining: 0 },
         effective_type: Class { emitted: emitted.asked, remaining: 0 },
         initialization: Class { emitted: emitted.filled, remaining: 0 },
+        restrict: Class { emitted: emitted.promised, remaining: 0 },
         unchecked: emitted.skipped,
         interposed,
         rows: INTERPOSED.len(),
@@ -267,6 +275,9 @@ pub fn summarize(
                 Opcode::CheckDeriv => summary.derivation.remaining += 1,
                 Opcode::CheckType => summary.effective_type.remaining += 1,
                 Opcode::CheckInit => summary.initialization.remaining += 1,
+                Opcode::CheckRestrictRead | Opcode::CheckRestrictWrite => {
+                    summary.restrict.remaining += 1;
+                }
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
@@ -334,6 +345,10 @@ pub fn summarize(
 ///
 /// A function with none of them never reads the frame its callers set up, which is the whole
 /// condition document 05 section 5.3 puts on dropping it.
+///
+/// The `restrict` checks are not among them, because what one reads is the scope its own block
+/// opened rather than a capability somebody handed over. A function whose only checks are those
+/// still wants no frame.
 fn checks_left(func: &rucc_ir::Func) -> usize {
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -447,7 +462,13 @@ mod tests {
         // The function reads and never stores, so it records nothing and the plane it is
         // instrumented against is one with no types in it.
         let mut elsewhere = Module::new(names.intern("reader.c"), &target());
-        insert(&mut func, &crate::Plane::build(&mut elsewhere), 8, crate::Subobject::Off);
+        insert(
+            &mut func,
+            &crate::Plane::build(&mut elsewhere),
+            8,
+            crate::Subobject::Off,
+            crate::Promise::Off,
+        );
         func
     }
 
@@ -513,6 +534,7 @@ mod tests {
             derivation: Class { emitted: 3, remaining: 3 },
             effective_type: Class { emitted: 7, remaining: 7 },
             initialization: Class { emitted: 9, remaining: 8 },
+            restrict: Class { emitted: 4, remaining: 4 },
             unchecked: 1,
             interposed: 2,
             rows: 27,
