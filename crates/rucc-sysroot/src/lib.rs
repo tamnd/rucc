@@ -53,10 +53,11 @@
 //! # What is not in here
 //!
 //! Nothing fetches. Downloading musl, verifying it and unpacking it is
-//! `spec/cross-compile/13-distribution.md`, and it needs a cache, a provenance record and a network
-//! policy that this crate deliberately has no opinion about. What this crate settles is where the
-//! result goes and how it is searched, which is the part that has to be decided before anything is
-//! worth downloading.
+//! `spec/cross-compile/13-distribution.md`, and the network policy it needs is that document's
+//! section 13.8: the bytes are moved by a downloader the machine already has, and the hash check,
+//! the manifest and the rename into place are ours. None of those three is in this crate either.
+//! What this crate settles is where the result goes and how it is searched, which is the part that
+//! has to be decided before anything is worth downloading.
 //!
 //! ```
 //! use rucc_sysroot::{Sysroot, LinkLine, LinkMode, argv};
