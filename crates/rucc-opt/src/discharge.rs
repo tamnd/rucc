@@ -342,12 +342,94 @@ const NO_EXTENT_OTHER: &str =
     "derivation check left alone, nothing here says how big the object its pointers are in is";
 
 /// The pass. It holds nothing, because everything it works out is about one function.
+/// Which of the places a fact comes from a run of this pass may ask.
+///
+/// Everything is asked normally and there is one pass in the pipeline. The others are here for the
+/// measurement `spec/safe-memory/13-performance.md` section 13.5 asks for and
+/// `spec/safe-memory/17-open-questions.md` question 3 is: how much each source discharges on its
+/// own, and how much the same sources discharge together. A number for a source on its own cannot
+/// be read off the remarks of a full run, because the rules are asked in an order and whichever one
+/// answers first is the one the remark names, so the second source to be asked about a check two of
+/// them could answer looks like it answered nothing.
+///
+/// The four are document 07 section 7.2's four, with the caveat the measurement found: the ranges
+/// are not a fourth kind of fact but a way of asking the other three about a subscript instead of
+/// about an address written out in the program.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Sources {
+    /// How big an object is, read off whatever made it. A global's extent comes from
+    /// `crate::extents`, a local's from its `alloca`, an allocation's from the call `crate::heap`
+    /// marked. Section 7.2's first source.
+    objects: bool,
+    /// What a check that has already run established, carried down the dominator tree. Section 7.3,
+    /// and the one the literature calls redundant check elimination.
+    dominance: bool,
+    /// What every caller of this function guarantees about what it was handed, from
+    /// `crate::params`. Section 7.5.
+    summaries: bool,
+    /// The value ranges and the recurrences, which widen the one address a check names into the
+    /// range of addresses a walk can reach so that the other three can be asked about a subscript.
+    /// Section 7.4, and the half of the PICO result this pass holds. The other half is
+    /// [`crate::hoist`] and [`crate::split`], which are passes of their own and have flags of their
+    /// own.
+    ranges: bool,
+}
+
+impl Sources {
+    /// Every one of them, which is what the pipeline runs.
+    pub const ALL: Self = Self { objects: true, dominance: true, summaries: true, ranges: true };
+    /// What an object says about itself and nothing else.
+    pub const OBJECTS: Self =
+        Self { objects: true, dominance: false, summaries: false, ranges: false };
+    /// What an earlier check established and nothing else.
+    pub const DOMINANCE: Self =
+        Self { objects: false, dominance: true, summaries: false, ranges: false };
+    /// What every caller guarantees and nothing else.
+    pub const SUMMARIES: Self =
+        Self { objects: false, dominance: false, summaries: true, ranges: false };
+    /// Every fact, asked only about addresses written out in the program.
+    pub const NARROW: Self =
+        Self { objects: true, dominance: true, summaries: true, ranges: false };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Discharge;
+pub struct Discharge {
+    /// What `-f<name>` and `-fno-<name>` reach this run by.
+    name: &'static str,
+    /// Which places it may take a fact from. See [`Sources`].
+    sources: Sources,
+}
+
+/// The pass the pipeline runs, which asks everything.
+pub static DISCHARGE: Discharge = Discharge { name: "discharge", sources: Sources::ALL };
+
+/// The same pass asking an object how big it is and nothing else.
+pub static OBJECTS: Discharge = Discharge { name: "discharge-objects", sources: Sources::OBJECTS };
+
+/// The same pass asking what an earlier check established and nothing else.
+pub static DOMINANCE: Discharge =
+    Discharge { name: "discharge-dominance", sources: Sources::DOMINANCE };
+
+/// The same pass asking what every caller guarantees and nothing else.
+pub static SUMMARIES: Discharge =
+    Discharge { name: "discharge-summaries", sources: Sources::SUMMARIES };
+
+/// The same pass asking every fact, about addresses written out in the program only.
+pub static NARROW: Discharge = Discharge { name: "discharge-narrow", sources: Sources::NARROW };
+
+/// The same pass asking everything, under a name of its own.
+///
+/// [`DISCHARGE`] already asks everything, so this looks like a duplicate and is not. A pass the level
+/// did not choose goes on the end of the pipeline, so a run of `-fno-discharge -fdischarge-objects`
+/// asks its question in a different place from where the shipped pass asks it, and the two numbers
+/// are not comparable. This one is turned on the same way as the others and lands in the same place,
+/// so the sum of the parts and the whole are measured under one arrangement. What it costs against
+/// [`DISCHARGE`] is what the position is worth, which is a number the measurement wants anyway.
+pub static EVERY: Discharge = Discharge { name: "discharge-every", sources: Sources::ALL };
 
 impl Pass for Discharge {
     fn name(&self) -> &'static str {
-        "discharge"
+        self.name
     }
 
     fn describe(&self) -> &'static str {
@@ -369,8 +451,9 @@ impl Pass for Discharge {
         // neither pays for no copy of it. The ranges want it when there is a walk the constant
         // reader gives up on, and the allocation rule wants it to find where the program has tested
         // what an allocator gave it.
-        let walks = walks_by_a_value(func);
-        let cfg = (walks || heap::allocates(func)).then(|| an.cfg(func).clone());
+        let walks = self.sources.ranges && walks_by_a_value(func);
+        let cfg = (walks || (self.sources.objects && heap::allocates(func)))
+            .then(|| an.cfg(func).clone());
         let mut ranges = cfg.as_ref().filter(|_| walks).map(|cfg| Ranges::new(&*func, cfg, &dom));
 
         // One answer per allocation rather than one per check, because a function that reads twenty
@@ -412,17 +495,23 @@ impl Pass for Discharge {
                         // call `crate::heap` marked. All four are asked of the same rule as every
                         // other fact. The reach of a walk the constant reader could not finish is
                         // asked last, because it is the only one that costs an analysis to answer.
-                        let why = if func[inst].flags.contains(Flags::STATIC) {
+                        let why = if self.sources.objects
+                            && func[inst].flags.contains(Flags::STATIC)
+                        {
                             Some(REMOVED_STATIC)
-                        } else if func[inst].flags.contains(Flags::HANDED) {
+                        } else if self.sources.summaries && func[inst].flags.contains(Flags::HANDED)
+                        {
                             Some(REMOVED_HANDED)
-                        } else if declared(func, asked.base)
-                            .is_some_and(|local| covers(&local, &asked))
+                        } else if self.sources.objects
+                            && declared(func, asked.base)
+                                .is_some_and(|local| covers(&local, &asked))
                         {
                             Some(REMOVED_LOCAL)
-                        } else if allocated(func, cfg.as_ref(), &mut checked, block, &[&asked]) {
+                        } else if self.sources.objects
+                            && allocated(func, cfg.as_ref(), &mut checked, block, &[&asked])
+                        {
                             Some(REMOVED_MADE)
-                        } else if scope.bounds.covers(&asked) {
+                        } else if self.sources.dominance && scope.bounds.covers(&asked) {
                             Some(REMOVED)
                         } else {
                             // The same four sources in the same order, asked of the range of
@@ -431,19 +520,22 @@ impl Pass for Discharge {
                             // reading it again would say the same thing, so what is left is the
                             // local, the allocation and what the walk carries.
                             reach(func, ranges.as_mut(), &asked, inst).and_then(|wide| {
-                                if declared(func, wide.base)
-                                    .is_some_and(|local| reaches(&local, &wide))
+                                if self.sources.objects
+                                    && declared(func, wide.base)
+                                        .is_some_and(|local| reaches(&local, &wide))
                                 {
                                     Some(REMOVED_RANGE)
-                                } else if allocated_around(
-                                    func,
-                                    cfg.as_ref(),
-                                    &mut checked,
-                                    block,
-                                    &[&wide],
-                                ) {
+                                } else if self.sources.objects
+                                    && allocated_around(
+                                        func,
+                                        cfg.as_ref(),
+                                        &mut checked,
+                                        block,
+                                        &[&wide],
+                                    )
+                                {
                                     Some(REMOVED_MADE)
-                                } else if scope.bounds.reaches(&wide) {
+                                } else if self.sources.dominance && scope.bounds.reaches(&wide) {
                                     Some(REMOVED_RANGE)
                                 } else {
                                     None
@@ -488,16 +580,20 @@ impl Pass for Discharge {
                         // being alive is written into the IR as `meta_end` and not read off the
                         // shape of the source, so a function with one in it is a function this
                         // does not claim anything about.
-                        let why = if func[inst].flags.contains(Flags::STATIC) {
+                        let why = if self.sources.objects
+                            && func[inst].flags.contains(Flags::STATIC)
+                        {
                             Some(REMOVED_LIVE_STATIC)
-                        } else if func[inst].flags.contains(Flags::HANDED) {
+                        } else if self.sources.summaries && func[inst].flags.contains(Flags::HANDED)
+                        {
                             Some(REMOVED_LIVE_HANDED)
-                        } else if !ends
+                        } else if self.sources.objects
+                            && !ends
                             && declared(func, asked.base)
                                 .is_some_and(|local| covers(&local, &asked))
                         {
                             Some(REMOVED_LIVE_LOCAL)
-                        } else if scope.alive.covers(&asked) {
+                        } else if self.sources.dominance && scope.alive.covers(&asked) {
                             Some(REMOVED_LIVE)
                         } else {
                             // A lifetime fact and not a bounds one, because what is being asked
@@ -507,10 +603,11 @@ impl Pass for Discharge {
                             // the one it actually uses.
                             reach(func, ranges.as_mut(), &asked, inst)
                                 .filter(|wide| {
-                                    (!ends
+                                    (self.sources.objects
+                                        && !ends
                                         && declared(func, wide.base)
                                             .is_some_and(|local| reaches(&local, wide)))
-                                        || scope.alive.reaches(wide)
+                                        || (self.sources.dominance && scope.alive.reaches(wide))
                                 })
                                 .map(|_| REMOVED_LIVE_RANGE)
                         };
@@ -536,23 +633,24 @@ impl Pass for Discharge {
                     Opcode::CheckDeriv => {
                         let narrow = derives(func, inst);
                         let why = narrow.and_then(|(from, to)| {
-                            if func[inst].flags.contains(Flags::STATIC) {
+                            if self.sources.objects && func[inst].flags.contains(Flags::STATIC) {
                                 Some(REMOVED_DERIV_STATIC)
-                            } else if func[inst].flags.contains(Flags::HANDED) {
+                            } else if self.sources.summaries
+                                && func[inst].flags.contains(Flags::HANDED)
+                            {
                                 Some(REMOVED_DERIV_HANDED)
-                            } else if declared(func, from.base)
-                                .is_some_and(|local| covers(&local, &from) && covers(&local, &to))
+                            } else if self.sources.objects
+                                && declared(func, from.base).is_some_and(|local| {
+                                    covers(&local, &from) && covers(&local, &to)
+                                })
                             {
                                 Some(REMOVED_DERIV_LOCAL)
-                            } else if allocated(
-                                func,
-                                cfg.as_ref(),
-                                &mut checked,
-                                block,
-                                &[&from, &to],
-                            ) {
+                            } else if self.sources.objects
+                                && allocated(func, cfg.as_ref(), &mut checked, block, &[&from, &to])
+                            {
                                 Some(REMOVED_DERIV_MADE)
-                            } else if scope.bounds.holds_both(&from, &to) {
+                            } else if self.sources.dominance && scope.bounds.holds_both(&from, &to)
+                            {
                                 Some(REMOVED_DERIV)
                             } else {
                                 None
@@ -567,19 +665,25 @@ impl Pass for Discharge {
                         // say nothing about it being the same something.
                         let why = why.or_else(|| {
                             spread(func, ranges.as_mut(), inst, inst).and_then(|(near, far)| {
-                                if declared(func, near.base).is_some_and(|local| {
-                                    reaches(&local, &near) && reaches(&local, &far)
-                                }) {
+                                if self.sources.objects
+                                    && declared(func, near.base).is_some_and(|local| {
+                                        reaches(&local, &near) && reaches(&local, &far)
+                                    })
+                                {
                                     Some(REMOVED_DERIV_RANGE)
-                                } else if allocated_around(
-                                    func,
-                                    cfg.as_ref(),
-                                    &mut checked,
-                                    block,
-                                    &[&near, &far],
-                                ) {
+                                } else if self.sources.objects
+                                    && allocated_around(
+                                        func,
+                                        cfg.as_ref(),
+                                        &mut checked,
+                                        block,
+                                        &[&near, &far],
+                                    )
+                                {
                                     Some(REMOVED_DERIV_MADE)
-                                } else if scope.bounds.reaches_both(&near, &far) {
+                                } else if self.sources.dominance
+                                    && scope.bounds.reaches_both(&near, &far)
+                                {
                                     Some(REMOVED_DERIV_RANGE)
                                 } else {
                                     None
@@ -1310,9 +1414,9 @@ mod tests {
         MemInfo, MemOrder, Opcode, Restrict, Signature, Type, Value,
     };
 
-    use super::{Discharge, Fact};
+    use super::{DISCHARGE, Fact};
     use crate::stats::Kind;
-    use crate::{Fuel, Pass};
+    use crate::{Fuel, Pass, pass};
 
     /// A function taking a pointer, with one block, ready to have accesses put in it.
     fn blank() -> (Interner, Func, Block, Value) {
@@ -1410,7 +1514,87 @@ mod tests {
     }
 
     fn run(func: &mut Func) -> crate::Stats {
-        Discharge.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+        DISCHARGE.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// The same, with one of the measurement's variants rather than the pass the pipeline runs.
+    fn run_with(pass: &super::Discharge, func: &mut Func) -> crate::Stats {
+        pass.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    #[test]
+    fn a_run_that_may_only_ask_an_object_leaves_what_dominance_would_have_taken() {
+        // Two checks of the same bytes on a pointer that came from outside. Nothing here says how
+        // big the object is, so the only thing that could answer the second one is the first one
+        // having run, and a run that may not ask that has to keep both.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 4);
+        check(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run_with(&super::OBJECTS, &mut func);
+        assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 0);
+    }
+
+    #[test]
+    fn a_run_that_may_only_ask_dominance_takes_the_second_check_of_the_same_bytes() {
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 4);
+        check(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run_with(&super::DOMINANCE, &mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+    }
+
+    #[test]
+    fn a_run_that_may_only_ask_dominance_leaves_a_check_inside_a_local() {
+        // The other way round. One check, nothing in front of it, and the bytes are inside an
+        // `alloca` whose size is written on it. Only the object can answer that one.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        check(&mut build, slot, 4);
+        build.ret(&[]);
+        let stats = run_with(&super::DOMINANCE, &mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 0);
+        assert_eq!(
+            run_with(&super::OBJECTS, &mut func).count(Kind::Optimized, super::REMOVED_LOCAL),
+            1
+        );
+    }
+
+    #[test]
+    fn the_measurement_variants_answer_to_names_of_their_own() {
+        // A run that cannot be reached by a flag is a run nobody can measure with.
+        let names: Vec<&str> = [
+            &DISCHARGE,
+            &super::OBJECTS,
+            &super::DOMINANCE,
+            &super::SUMMARIES,
+            &super::NARROW,
+            &super::EVERY,
+        ]
+        .iter()
+        .map(|pass| pass.name())
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "discharge",
+                "discharge-objects",
+                "discharge-dominance",
+                "discharge-summaries",
+                "discharge-narrow",
+                "discharge-every"
+            ]
+        );
+        for name in names {
+            assert!(pass::find(name).is_some(), "`{name}` is not in the pass list");
+        }
     }
 
     #[test]
@@ -1616,7 +1800,7 @@ mod tests {
         check(&mut build, pointer, 4);
         build.ret(&[]);
         let mut fuel = Fuel::of(1);
-        let stats = Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
+        let stats = DISCHARGE.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
@@ -1743,7 +1927,7 @@ mod tests {
         access(&mut build, pointer, 4);
         build.ret(&[]);
         let mut fuel = Fuel::of(1);
-        let stats = Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
+        let stats = DISCHARGE.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(checks(&func), 1);
         assert_eq!(lives(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
@@ -2531,7 +2715,7 @@ mod tests {
         build.ret(&[]);
         marked(&mut func);
         let stats =
-            Discharge.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
+            DISCHARGE.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
         assert_eq!(checks(&func) + lives(&func), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_LIVE), 1);
     }
