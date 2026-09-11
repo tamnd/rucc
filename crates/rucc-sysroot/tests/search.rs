@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rucc_sysroot::{Options, Origin, Sysroot, include_paths};
+use rucc_sysroot::{Kernel, Options, Origin, Sysroot, include_paths};
 use rucc_tuple::{TARGETS, TargetEntry, TargetTuple};
 
 /// The target with this spelling.
@@ -27,6 +27,7 @@ fn the_four_steps_come_out_in_the_order_the_rule_states_them() {
     let host = target("x86_64-linux-gnu");
     let user = [path("/project/include"), path("/project/vendor")];
     let bundled = Sysroot::in_cache(Path::new("/cache"), host);
+    let kernel = Kernel::for_target(Path::new("/cache"), host).expect("a Linux target has one");
 
     let found = include_paths(
         host,
@@ -35,6 +36,7 @@ fn the_four_steps_come_out_in_the_order_the_rule_states_them() {
             user: &user,
             resources: Some(Path::new("/opt/rucc")),
             bundled: Some(&bundled),
+            kernel: Some(&kernel),
             host_include: &[path("/usr/include")],
             ..Options::default()
         },
@@ -45,16 +47,30 @@ fn the_four_steps_come_out_in_the_order_the_rule_states_them() {
     let origins: Vec<Origin> = found.iter().map(|entry| entry.origin).collect();
     assert_eq!(
         origins,
-        [Origin::User, Origin::User, Origin::Compiler, Origin::Bundled, Origin::Bundled]
+        [
+            Origin::User,
+            Origin::User,
+            Origin::Compiler,
+            Origin::Bundled,
+            Origin::Bundled,
+            Origin::Kernel,
+            Origin::Kernel,
+        ]
     );
     assert_eq!(found[0].path, path("/project/include"));
     assert_eq!(found[1].path, path("/project/vendor"));
     assert_eq!(found[2].path, path("/opt/rucc/include"));
 
-    // The bundled tree is two directories, architecture specific first, because a `bits/` header
-    // that exists for x86-64 has to beat the generic one of the same name.
-    assert_eq!(found[3].path, path("/cache/sysroots/x86_64-linux-gnu/include/x86_64"));
+    // Step 3 is four directories for a Linux target, in the order `zig cc -E -v` prints. The libc's
+    // per architecture tree first, because a `bits/` header that exists for the x86 family has to
+    // beat the generic one of the same name, and glibc's directory is named after the family.
+    assert_eq!(found[3].path, path("/cache/sysroots/x86_64-linux-gnu/include/x86"));
     assert_eq!(found[4].path, path("/cache/sysroots/x86_64-linux-gnu/include/generic"));
+
+    // Then the kernel's, which are shared between targets and so sit beside the sysroots rather
+    // than inside one.
+    assert_eq!(found[5].path, path("/cache/kernel-headers/x86"));
+    assert_eq!(found[6].path, path("/cache/kernel-headers/generic"));
 
     // And nothing from the host, even though the target is the host, because a bundled tree was
     // available and step 3 takes the first source that has one.
@@ -211,4 +227,93 @@ fn the_answer_does_not_depend_on_which_host_is_asking() {
     let from_linux = include_paths(cross, Some(target("x86_64-linux-gnu")), &options);
     let from_mac = include_paths(cross, Some(target("aarch64-macos")), &options);
     assert_eq!(from_linux, from_mac);
+}
+
+#[test]
+fn the_kernel_headers_come_after_the_libcs_and_not_before() {
+    // Both trees have a `sys/` and the libc's is the one a program asking for `<sys/types.h>`
+    // means. The kernel's own names, `asm/` and `linux/`, are not in a libc at all, so putting the
+    // kernel last costs nothing and putting it first would shadow a header.
+    let target = target("aarch64-linux-musl");
+    let bundled = Sysroot::in_cache(Path::new("/cache"), target);
+    let kernel = Kernel::for_target(Path::new("/cache"), target).expect("a Linux target has one");
+
+    let found = include_paths(
+        target,
+        None,
+        &Options { bundled: Some(&bundled), kernel: Some(&kernel), ..Options::default() },
+    );
+    let libc_last =
+        found.iter().rposition(|entry| entry.origin == Origin::Bundled).expect("a libc");
+    let kernel_first =
+        found.iter().position(|entry| entry.origin == Origin::Kernel).expect("a kernel");
+    assert!(libc_last < kernel_first);
+}
+
+#[test]
+fn a_sysroot_the_user_named_does_not_get_our_kernel_headers_underneath_it() {
+    // Section 8.5 replaces step 3 with the tree the user named rather than composing with it. A
+    // buildroot or Yocto tree has its own `linux/` from its own kernel version, and mixing two
+    // kernels' headers in one search path is how a structure gets one field from each.
+    let target = target("x86_64-linux-gnu");
+    let bundled = Sysroot::in_cache(Path::new("/cache"), target);
+    let kernel = Kernel::for_target(Path::new("/cache"), target).expect("a Linux target has one");
+    let named = [path("/opt/buildroot/usr/include")];
+
+    let found = include_paths(
+        target,
+        None,
+        &Options {
+            sysroot: &named,
+            bundled: Some(&bundled),
+            kernel: Some(&kernel),
+            ..Options::default()
+        },
+    );
+    assert_eq!(found.len(), 1);
+    assert!(!found.iter().any(|entry| entry.origin == Origin::Kernel));
+}
+
+#[test]
+fn nostdinc_removes_the_kernel_headers_with_the_rest_of_step_three() {
+    // A program compiled with `-nostdinc` is naming every system directory itself, and a `linux/`
+    // it did not name is as much of a surprise as a `stdio.h` it did not name.
+    let target = target("x86_64-linux-gnu");
+    let bundled = Sysroot::in_cache(Path::new("/cache"), target);
+    let kernel = Kernel::for_target(Path::new("/cache"), target).expect("a Linux target has one");
+
+    let found = include_paths(
+        target,
+        None,
+        &Options {
+            resources: Some(Path::new("/opt/rucc")),
+            bundled: Some(&bundled),
+            kernel: Some(&kernel),
+            no_std_inc: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(found.len(), 1, "only the compiler's own headers survive");
+    assert_eq!(found[0].origin, Origin::Compiler);
+}
+
+#[test]
+fn a_target_without_a_kernel_tree_searches_the_two_directories_it_always_did() {
+    // The field is an `Option` and the driver fills it from `Kernel::for_target`, so a Windows or a
+    // freestanding target passes `None` and step 3 is the libc's two directories. Asserted here as
+    // well as in the layout tests, because the absence has to hold in the list and not only in the
+    // function that decides it.
+    for tuple in ["x86_64-pc-windows-gnu", "armv7m-none-eabi"] {
+        let target = target(tuple);
+        let bundled = Sysroot::in_cache(Path::new("/cache"), target);
+        assert!(Kernel::for_target(Path::new("/cache"), target).is_none());
+
+        let found = include_paths(
+            target,
+            None,
+            &Options { bundled: Some(&bundled), kernel: None, ..Options::default() },
+        );
+        assert_eq!(found.len(), 2, "{tuple} searches more than the libc's two");
+        assert!(found.iter().all(|entry| entry.origin == Origin::Bundled));
+    }
 }

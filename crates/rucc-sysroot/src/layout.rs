@@ -18,6 +18,13 @@
 //! holds the files that differ by architecture and is searched first, and
 //! [`Sysroot::generic_include`] holds the copy that every architecture shares.
 //!
+//! A Linux target searches four directories and not two, because the kernel's headers are a second
+//! pair with the same split and a different owner. They are [`Kernel`], their root is the cache
+//! rather than a sysroot, and the order is the libc's two and then the kernel's two, which is the
+//! order `zig cc -E -v` prints for a glibc target. `linux/` and `asm/` are nine megabytes of files
+//! that are the same for every target, so one tree is shared and only `asm/` is copied per
+//! architecture.
+//!
 //! # Why the root is a function of the tuple
 //!
 //! `spec/cross-compile/02-the-goal.md` claim 5 asks for byte identical output from different hosts.
@@ -30,9 +37,10 @@
 //! carries the whole ten field model, so `x86_64-linux-gnu` and `x86_64-linux-gnu.2.28` are
 //! different directories, which is the point of `env_version` being in the tuple at all.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rucc_tuple::{Arch, DataModel, Env, Os, TargetTuple};
+use rucc_tuple::{Arch, DataModel, Env, Os, TargetTuple, Version};
 
 /// One target's sysroot: where its headers are, where its link inputs are, and where the record
 /// of what they are is.
@@ -109,7 +117,12 @@ impl Sysroot {
         self.root.join("include").join("generic")
     }
 
-    /// Both include directories, in search order, most specific first.
+    /// The libc's include directories, in search order, most specific first.
+    ///
+    /// Two rather than four. A Linux target also needs the kernel's own headers, which are
+    /// [`Kernel`] and are not under this root, because they are the same files for every target
+    /// that shares an architecture and carrying a copy of them per tuple is nine megabytes times
+    /// the size of the table.
     #[must_use]
     pub fn includes(&self) -> Vec<PathBuf> {
         vec![self.arch_include(), self.generic_include()]
@@ -136,15 +149,33 @@ impl Sysroot {
     /// Not the architecture component of the canonical tuple, which carries a baseline the headers
     /// do not care about: `armv7a-linux-musleabihf` and `armv5te-linux-musleabi` read the same
     /// `arm` directory, because a header does not know which instructions the chip has. 32-bit x86
-    /// is `i386` in every libc's source tree whatever the tuple spells it.
+    /// is `i386` in musl's source tree whatever the tuple spells it.
     ///
-    /// The data model is here because an ILP32 ABI on a 64-bit architecture cannot read the LP64
-    /// tree. Every type in the headers that carries a pointer or a `long` is a different size, so
-    /// it gets its own directory, and `x86_64-linux-gnux32` is the row in the table that proves it.
-    /// Any future ILP32-on-64 row gets a suffixed name from the same rule rather than quietly
-    /// reading the LP64 headers, which is the failure this method is arranged to make impossible.
+    /// # Why the libc is part of the answer
+    ///
+    /// The two libcs do not split their headers at the same place, and the name has to follow the
+    /// libc rather than a scheme of ours, because the producer installs what the libc's own build
+    /// system installs and the compiler has to look where that put it.
+    ///
+    /// musl splits per architecture and per ABI, which is what `arch/` in its source tree is, so
+    /// `x86_64`, `i386` and `x32` are three directories. glibc splits per architecture family and
+    /// handles the rest inside the files: one `x86` directory serves i386, x86-64 and x32, and 22
+    /// of the 31 files in its `bits/` branch on `__x86_64__`, `__ILP32__` or `__WORDSIZE` to do it,
+    /// starting with `bits/wordsize.h`. Checked against Zig 0.16, which ships twelve glibc
+    /// directories named after families and seventeen musl directories named after architectures.
+    ///
+    /// # The rule this is here to enforce
+    ///
+    /// An ILP32 ABI on a 64-bit architecture cannot read the LP64 headers. Every type that carries
+    /// a pointer or a `long` is a different size, and `x86_64-linux-gnux32` is the row that proves
+    /// it. For musl that is a separate directory, which is what the suffix below is. For glibc it
+    /// is a branch inside glibc's own files, so the directory is shared and the thing that checks
+    /// it is section 8.4's structural equivalence corpus rather than a path.
     #[must_use]
     pub fn header_arch(&self) -> &'static str {
+        if self.target.env() == Env::Gnu {
+            return self.header_family();
+        }
         let narrow = self.target.data_model() == DataModel::Ilp32On64;
         match (self.target.arch(), narrow) {
             // x32 is what everyone calls it, including musl and glibc, so it does not get the
@@ -167,6 +198,132 @@ impl Sysroot {
             (Arch::Wasm32, _) => "wasm32",
         }
     }
+
+    /// The architecture family, which is how glibc names its per architecture header directory.
+    ///
+    /// The data model is not in it, on purpose, for the reason [`Sysroot::header_arch`] gives: the
+    /// family's files carry the branch themselves. `s390x` and `loongarch` are spelled the way
+    /// glibc's own `sysdeps` tree spells them, which is not the same shortening for both.
+    fn header_family(&self) -> &'static str {
+        match self.target.arch() {
+            Arch::X86_64 | Arch::X86 => "x86",
+            // Arm64EC is a Windows ABI and never has glibc headers. It answers with the family it
+            // belongs to rather than with a word that is not a directory anywhere.
+            Arch::Aarch64 | Arch::Arm64Ec => "aarch64",
+            Arch::Arm => "arm",
+            Arch::Riscv64 | Arch::Riscv32 => "riscv",
+            Arch::S390x => "s390x",
+            Arch::PowerPc64 => "powerpc",
+            Arch::LoongArch64 => "loongarch",
+            // There is no glibc for wasm. The arm of the match exists because the type is closed
+            // and a wildcard here would quietly name a directory for a future architecture.
+            Arch::Wasm32 => "wasm32",
+        }
+    }
+}
+
+/// The kernel's own headers, which are not the libc's and are shared by every target that can read
+/// them.
+///
+/// `linux/` and `asm/` are the system call interface rather than the C library, and a sysroot
+/// without them does not compile 31 of glibc's installed headers or 3 of musl's, `sys/quota.h` and
+/// `net/ethernet.h` among them. So they are part of what section 8.2 calls a sysroot even though no
+/// libc produced them.
+///
+/// # Why they are not under [`Sysroot`]
+///
+/// One tree serves every libc and every architecture except `asm/`, which is per architecture and
+/// small. Copying the shared part into each tuple's sysroot would be nine megabytes times the
+/// number of Linux rows in the table, for files that are identical in every copy. So the root is
+/// the cache directory rather than a sysroot, and a sysroot that was produced with it records the
+/// version in its manifest.
+///
+/// # Why the version is not in the path
+///
+/// The driver has to be able to compute this path before it reads anything, and a version in the
+/// path would mean asking the cache what it has before being able to ask where it is. It is the
+/// same decision [`Sysroot::in_cache`] makes about the libc version, where the tuple carries the
+/// version only because `env_version` is part of the target's identity, and the same gap: a cache
+/// populated by one release and read by the next gets whatever is there.
+/// `spec/cross-compile/13-distribution.md` section 13.2 owns that, because the answer is the
+/// content hash in the cache layout and it belongs to both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kernel {
+    arch: &'static str,
+    root: PathBuf,
+}
+
+impl Kernel {
+    /// The kernel headers in this cache directory for this target, when the target has any.
+    ///
+    /// [`None`] for everything that is not Linux with a libc we produce a tree for. Windows, the
+    /// BSDs and Darwin have their own system headers and no `linux/` at all, freestanding has no
+    /// system call interface by definition, and Android is Linux but bionic carries its own
+    /// scrubbed copy of the uapi headers, which is a different tree from this one and not a subset
+    /// of it.
+    #[must_use]
+    pub fn for_target(cache: &Path, target: TargetTuple) -> Option<Kernel> {
+        if target.os() != Os::Linux || !matches!(target.env(), Env::Gnu | Env::Musl) {
+            return None;
+        }
+        let arch = kernel_arch(target.arch())?;
+        Some(Kernel { arch, root: cache.join("kernel-headers") })
+    }
+
+    /// The directory both of these are under.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `asm/`, which is the part of the interface that is per architecture.
+    ///
+    /// Named after the kernel's own architecture directory and not after ours or the libc's, which
+    /// is a third spelling of the same machine and the reason this is a method rather than a format
+    /// string at the call site.
+    #[must_use]
+    pub fn arch_include(&self) -> PathBuf {
+        self.root.join(self.arch)
+    }
+
+    /// `linux/`, `asm-generic/` and the rest, which are the same files for every architecture.
+    #[must_use]
+    pub fn generic_include(&self) -> PathBuf {
+        self.root.join("generic")
+    }
+
+    /// Both directories, in search order, most specific first.
+    #[must_use]
+    pub fn includes(&self) -> Vec<PathBuf> {
+        vec![self.arch_include(), self.generic_include()]
+    }
+
+    /// The kernel's name for this architecture.
+    #[must_use]
+    pub const fn arch(&self) -> &'static str {
+        self.arch
+    }
+}
+
+/// What `make headers_install ARCH=` takes, which is a third naming of the machine.
+///
+/// `arm64` rather than `aarch64` and `s390` rather than `s390x`, because those are the directories
+/// under `arch/` in the kernel's source tree, and the 31-bit s390 port leaving did not rename the
+/// one that stayed. One directory serves both widths of x86, of riscv and of powerpc, the same way
+/// glibc's family does and for the same reason: the uapi headers branch on the compiler's macros.
+///
+/// [`None`] for an architecture the kernel does not have, which is wasm.
+const fn kernel_arch(arch: Arch) -> Option<&'static str> {
+    match arch {
+        Arch::X86_64 | Arch::X86 => Some("x86"),
+        Arch::Aarch64 | Arch::Arm64Ec => Some("arm64"),
+        Arch::Arm => Some("arm"),
+        Arch::Riscv64 | Arch::Riscv32 => Some("riscv"),
+        Arch::S390x => Some("s390"),
+        Arch::PowerPc64 => Some("powerpc"),
+        Arch::LoongArch64 => Some("loongarch"),
+        Arch::Wasm32 => None,
+    }
 }
 
 /// Whether we can produce a sysroot for this target without the user fetching anything.
@@ -182,3 +339,84 @@ impl Sysroot {
 pub fn can_be_bundled(target: TargetTuple) -> bool {
     !matches!(target.os(), Os::MacOs | Os::IOs) && target.env() != Env::Msvc
 }
+
+/// The glibc our bundled header tree is derived from.
+///
+/// A fact about the tree and not a choice. `sysroots/manifest` in `tamnd/rucc-cross` pins the glibc
+/// source by version and hash, the tree is produced from that source, and this is that version. It
+/// moves when the pin moves and the two are checked against each other by the producer.
+pub const BUNDLED_GLIBC: Version = Version::new(2, 44);
+
+/// The `__GLIBC_MINOR__` a target gets when it is compiled against the bundled glibc tree.
+///
+/// Design: `spec/cross-compile/08-sysroots.md` section 8.3.
+///
+/// One tree serves every glibc release, with the differences written inside the files as
+/// `#if __GLIBC_MINOR__ >= n`, so the release is the part of it the target supplies. That is Zig's
+/// patch to the same tree and the same macro, which is where the spelling comes from: `features.h`
+/// keeps `__GLIBC__` at 2 and leaves the minor to the compiler, and `__GLIBC_PREREQ` reads both.
+///
+/// [`None`] for anything that is not glibc, because there is no such macro on musl or mingw and
+/// defining one would have every probe for it answer yes on a libc that does not have it.
+///
+/// The version is the one the tuple asked for, which is the point of `env_version` being in the
+/// tuple, and [`BUNDLED_GLIBC`] when it asked for nothing. Asking for an older release is how a
+/// program is kept off symbols and declarations the target's libc does not have, and it is honest
+/// only as far as the text goes: the declarations are guarded by the macro and the structure
+/// layouts in the same files are one release's. Issue #926's last box is where that is finished and
+/// it is the same direction as the compat symbol gap of #920, too permissive rather than wrong
+/// about what it does say.
+///
+/// # Errors
+///
+/// A release newer than the tree, which is the one direction that cannot be approximated. Every
+/// `__GLIBC_PREREQ` in the program would answer yes and the declarations behind them would not be
+/// there, so the failure would be a missing declaration at best and a missing symbol at link time
+/// at worst. Both versions are in the error, because the two things a person can do about it are
+/// pin a release the tree has and name a sysroot that has the one they asked for, and neither is a
+/// choice they can make without being told which release the tree is.
+pub fn bundled_glibc_minor(target: TargetTuple) -> Result<Option<u32>, GlibcSkew> {
+    if target.os() != Os::Linux || target.env() != Env::Gnu {
+        return Ok(None);
+    }
+    let Some(asked) = target.env_version() else {
+        return Ok(Some(BUNDLED_GLIBC.minor_part().unwrap_or(0)));
+    };
+    // A glibc version is two components and a tuple will hold one or three, so a request this
+    // cannot read as a glibc release is a request for the tree's own version rather than an error:
+    // `gnu.2` is somebody naming the libc and not pinning it.
+    let Some(minor) = asked.minor_part() else {
+        return Ok(Some(BUNDLED_GLIBC.minor_part().unwrap_or(0)));
+    };
+    if asked.major_part() != BUNDLED_GLIBC.major_part()
+        || minor > BUNDLED_GLIBC.minor_part().unwrap_or(0)
+    {
+        return Err(GlibcSkew { asked, tree: BUNDLED_GLIBC });
+    }
+    Ok(Some(minor))
+}
+
+/// A glibc release the bundled tree cannot serve, and the release the tree is.
+///
+/// A type rather than a pair, because the two versions read the same way round in the message as
+/// they do here and a caller that swapped them would produce a diagnostic exactly as wrong as it is
+/// convincing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlibcSkew {
+    /// What the target asked for.
+    pub asked: Version,
+    /// What the bundled tree is, which is [`BUNDLED_GLIBC`].
+    pub tree: Version,
+}
+
+impl fmt::Display for GlibcSkew {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the target asked for glibc {}, and the bundled headers are glibc {}",
+            self.asked, self.tree
+        )
+    }
+}
+
+impl std::error::Error for GlibcSkew {}

@@ -120,6 +120,12 @@ pub struct Predef {
     pub pic: Pic,
     /// `__DATE__` and `__TIME__`.
     pub timestamp: Timestamp,
+    /// The glibc release the headers are, as the minor number alone, when they are ours.
+    ///
+    /// `__GLIBC_MINOR__` and nothing else: `__GLIBC__` is 2 in the tree itself, which is how Zig's
+    /// own patched `features.h` has it, and a version the compiler supplied and a version the
+    /// header supplied would be two answers to one question.
+    pub glibc_minor: Option<u32>,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines.
@@ -138,6 +144,7 @@ impl Predef {
             hosted: true,
             pic: Pic::Executable,
             timestamp: Timestamp::now(),
+            glibc_minor: None,
             defines: Vec::new(),
             undefines: Vec::new(),
         }
@@ -160,6 +167,7 @@ impl Predef {
             hosted: opts.hosted,
             pic: opts.pic,
             timestamp: Timestamp::now(),
+            glibc_minor: opts.glibc_minor,
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
         }
@@ -505,6 +513,20 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     match triple.env {
         Env::Musl => d.flag("__musl__"),
         Env::Gnu | Env::None | Env::Msvc => {}
+    }
+    // The version of the libc's headers, and only when they are the tree we bundle. One tree serves
+    // every glibc release with the differences written as `#if __GLIBC_MINOR__ >= n` inside the
+    // files, so the release is the part of it the target supplies and the compiler is what supplies
+    // it. Zig patches the same macro into the same tree the same way, which is where the spelling
+    // comes from rather than from a scheme of ours: `__GLIBC_PREREQ` reads it and so does every
+    // autoconf probe ever written.
+    //
+    // The condition is the whole of it and it is not here. A host glibc defines this macro in its
+    // own `features.h` and so does a tree the user named, and a second definition with a different
+    // value is a warning on every compilation, so the driver decides and this writes down what it
+    // decided.
+    if let Some(minor) = opts.glibc_minor {
+        d.set("__GLIBC_MINOR__", &minor.to_string());
     }
     // LP64 is the model everywhere except Windows, and a great deal of code tests for it
     // rather than testing pointer and long widths separately.

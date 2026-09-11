@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rucc_sysroot::{Options, Sysroot, include_paths};
+use rucc_sysroot::{Kernel, Options, Sysroot, include_paths};
 use rucc_target::{Env, Os, Triple};
 
 /// What the machine says about itself, and what the command line said over the top of it.
@@ -167,18 +167,26 @@ pub fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// A sysroot that is not on the disk yet is still named. The list is not filtered for existence the
 /// way [`system_dirs`] filters the machine's, because the answer to `rucc --target=... -v` on a
 /// machine where the tree has not been built should be the path it would be at rather than silence.
+///
+/// `kernel` is [`crate::link::cross_kernel`], and on a Linux target it adds two more directories
+/// after the libc's. They are the kernel's `asm/` for the architecture and its shared `linux/` and
+/// `asm-generic/`, they are not under any sysroot because every target sharing an architecture reads
+/// the same files, and they come last for the reason section 8.5 gives: both trees have a `sys/` and
+/// the libc's is the one a program means.
 #[must_use]
 pub fn header_dirs(
     target: Triple,
     sysroot: Option<&Path>,
     bundled: Option<&Sysroot>,
+    kernel: Option<&Kernel>,
 ) -> Vec<PathBuf> {
     // Once, because asking can mean running `xcrun`. The answer goes to whichever of the two
     // fields the command line put it in: with a `--sysroot` these are the directories under the
     // tree the user named, and without one they are the machine's own.
     let dirs = system_dirs(target, sysroot);
     let (named, host) = if sysroot.is_some() { (dirs, Vec::new()) } else { (Vec::new(), dirs) };
-    let options = Options { sysroot: &named, bundled, host_include: &host, ..Options::default() };
+    let options =
+        Options { sysroot: &named, bundled, kernel, host_include: &host, ..Options::default() };
     include_paths(target.tuple(), Triple::host().map(Triple::tuple), &options)
         .into_iter()
         .map(|entry| entry.path)

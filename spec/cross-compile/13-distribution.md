@@ -9,14 +9,21 @@
 | `rucc` itself, all targets | **≤ 25 MB** | the compiler; every backend; the target table |
 | compiler headers | ~200 KB | 9 headers plus intrinsics |
 | libc descriptions (glibc abilist blob, musl, mingw defs) | ~1 MB | compressed, all architectures, all versions |
-| glibc header tree (generic + per-arch) | ~8 MB | document 08.3's merge is what makes this possible |
+| glibc header tree (shared + per-family) | 5.3 MB | measured: 411 shared files and 77 per family in 453 copies, seven families for nine ABIs, 677 KB gzipped |
 | musl headers, per arch | ~2 MB total | |
+| Linux uapi headers (shared + per-arch `asm/`) | 11.4 MB | measured: 970 shared files and 333 per architecture copies over seven architectures, 2.1 MB gzipped; document 08.3's third tree |
 | mingw-w64 headers + runtime archives | ~15 MB | the largest single bundled item |
 | start files, all targets | ~1 MB | small objects |
 | `librucc_builtins.a`, all tier-1/2 targets | ~10 MB | |
-| **base distribution** | **≤ 60 MB uncompressed, ≤ 25 MB compressed** | |
+| **base distribution** | **≤ 75 MB uncompressed, ≤ 30 MB compressed** | |
 | linker (on demand) | 15 to 40 MB | document 11.2: separate, not in the binary |
 | Darwin SDK, MSVC SDK | **not distributed** | §13.4 |
+
+**Where the total came from, and why it moved twice.** The kernel header row was missing from the first version of this table, and adding it showed that the rows already summed to 62 MB against a stated base of 60, so the total was restated rather than nudged. Then the two header rows stopped being estimates. Both trees are produced by `tamnd/rucc-cross`, `bin/kernel-headers` and `bin/glibc-headers`, so the numbers in them are what our own output weighs rather than what zig's copy of it does, and that moved the kernel row up from 10.5 MB to 11.4 MB and the glibc row down from 8 MB to 5.3 MB. The rows come to 70.9 MB and the base stays 75, with the slack being the difference between a measurement and a budget.
+
+What the two measurements are made of. The kernel tree is 970 headers every architecture installs identically, 9.1 MB, plus 333 per architecture copies over seven architectures, 2.2 MB, and 1.8 MB and 258 KB of that under `gzip -9`. The glibc tree is 411 shared headers, 3.1 MB, plus 77 files that differ between families in 453 copies, 2.2 MB, and seven families serve the nine glibc ABIs in the target table because the types a program gets are decided by the size of a pointer and a long rather than by the instruction set. Both records are in that repository, both trees are produced on two host architectures in its nightly run and required to come out byte for byte identical, and the glibc tree is also checked by reassembling each ABI's install from the shared tree plus its family's.
+
+The kernel row is in the base rather than in §13.2's cache because no Linux target compiles a program that calls `ioctl` without it, and a payload every Linux row needs before anything works is not on demand in any useful sense. 31 of glibc's installed headers and 3 of musl's reach into it, so it is not an extra for programs that make system calls directly either.
 
 The base is a target, published per release, and a regression against it is a release-blocking item in the same way a benchmark regression is. If the compiler alone exceeds 25 MB the size argument against LLVM has been lost on our own terms and document 16 should record it.
 
@@ -49,7 +56,7 @@ The stub generator being deterministic is what makes all of this simple: there i
 
 Bundle what is expensive to generate and needed on the first compile: headers, start files, builtins archives. Generate what is cheap and combinatorial: stub shared objects (per tuple per libc version, bundling the cross product is what would blow the budget), import libraries from `.def` files, and the toolchain directory of document 12.6.
 
-That split is exactly why the budget in §13.1 closes. The glibc cross product of eight architectures times a dozen supported versions is unbundlable; the abilist blob that generates it is one megabyte.
+That split is exactly why the budget in §13.1 closes. The glibc cross product of nine ABIs times a dozen supported versions is unbundlable; the abilist blob that generates it is one megabyte.
 
 ## 13.4 The two walls
 

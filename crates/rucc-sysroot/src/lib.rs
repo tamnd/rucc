@@ -22,6 +22,17 @@
 //! go, and where the record of what they are goes. Its root is a function of a cache directory and
 //! the tuple, which is what makes the tuple a cache key.
 //!
+//! [`Kernel`] is the other half of a Linux target's headers. `linux/` and `asm/` are the system
+//! call interface rather than the C library, 31 of glibc's installed headers and 3 of musl's
+//! include one of them, and they are the same files for every target that shares an architecture.
+//! So they sit in the cache rather than in a sysroot and a Linux target searches four directories.
+//!
+//! [`bundled_glibc_minor`] is the version half of the same tree. One tree serves every glibc
+//! release, with the differences inside the files as `#if __GLIBC_MINOR__ >= n`, so the release is
+//! what the target supplies and the compiler defines the macro. It answers [`None`] for every libc
+//! that has no such macro and an error for a release newer than the tree, which is the one direction
+//! that cannot be approximated.
+//!
 //! [`include_paths`] is section 8.5 as an ordered list, with each entry saying which of the four
 //! steps put it there. [`LinkLine`] is the start files, the libraries and the end files, in the
 //! order a linker needs them, for either libc.
@@ -83,7 +94,7 @@ pub mod manifest;
 pub mod search;
 
 pub use argv::{Invocation, Item, Unsupported};
-pub use layout::Sysroot;
+pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError};
 pub use search::{Entry, Options, Origin, include_paths};
