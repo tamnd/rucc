@@ -96,6 +96,8 @@ pub const INTERPOSED: &[&str] = &[
     "pthread_rwlock_tryrdlock",
     "pthread_rwlock_trywrlock",
     "pthread_rwlock_unlock",
+    "pthread_create",
+    "pthread_join",
 ];
 
 /// Points every direct call to an interposed function at its wrapper, and says how many it moved.
