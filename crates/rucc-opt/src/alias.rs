@@ -69,7 +69,10 @@
 //! than on the order the walk met it, which is what section 8.2 asks for so that document 35's LTO
 //! does not silently gain disambiguations when two modules are merged. The tree is one level deep:
 //! `char` is the root and every other scalar hangs under it, so a struct member is not yet
-//! separated from the struct it is in.
+//! separated from the struct it is in. A member of a union carries the root rather than the node
+//! for its own type, which this layer would not have needed, since layer 4 runs first and settles
+//! it. It is there for the type plane, which has no layer 4, and it costs this layer nothing but a
+//! disambiguation between a union member and an unrelated object of a different scalar type.
 //!
 //! Layer 5 is not. No access carries a `restrict` clique, because nothing in lowering works out
 //! which pointers a qualified parameter's derivations came from. The layer is here, it is tested,

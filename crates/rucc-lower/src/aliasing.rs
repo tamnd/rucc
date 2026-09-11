@@ -44,6 +44,20 @@
 //! carry, and putting the struct itself at the root is the conservative answer C requires anyway
 //! for a type that contains a character type somewhere in it.
 //!
+//! # What a member of a union gets
+//!
+//! The root, and `crate::body` is where that is decided rather than here, because the type of the
+//! member says nothing about what it is a member of. Every member of a union starts at the same
+//! byte, so an access to one of them is an access to bytes another member may have been written
+//! through, and C 6.5.2.3 permits reading them back that way. The root is the node that conflicts
+//! with everything, which is the answer that keeps the punning working.
+//!
+//! Layer 3 would have been right without it, because layer 4 settles two accesses to one object on
+//! their offsets before the types are looked at. The type plane of `spec/safe-memory` has no layer
+//! 4 to run first: what it holds is a number per byte of the program's own memory, and a store
+//! through one member followed by a read through another is exactly the shape a check against it
+//! would refuse. So the answer is given once, on the access, and both readers get the same one.
+//!
 //! # Why the name is the identity
 //!
 //! A node is found by a canonical spelling of the type and never by the order the walk met it.
@@ -109,7 +123,7 @@ impl Tree {
     }
 
     /// The root, built on first use.
-    fn root(&mut self, module: &mut Module, names: &mut Interner) -> Meta {
+    pub(crate) fn root(&mut self, module: &mut Module, names: &mut Interner) -> Meta {
         match self.root {
             Some(root) => root,
             None => {

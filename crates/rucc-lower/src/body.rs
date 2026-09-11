@@ -39,7 +39,7 @@ use rucc_sema::{
     Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
-use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types, VlaId, pointee};
+use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, Types, VlaId, pointee};
 
 use crate::abi::{self, Plan, Travel};
 use crate::bits::{Piece, Run};
@@ -308,6 +308,21 @@ struct Place {
     at: Where,
     /// Its C type, which is what says how wide the access is and how aligned.
     ty: TypeId,
+    /// Whether it is a member of a union, or a member of something that is.
+    ///
+    /// The one thing about a place that its type does not say. Every member of a union starts at
+    /// the same byte, so an access to one of them is an access to bytes that some other member may
+    /// have been written through, and C 6.5.2.3 permits reading them back that way. What that means
+    /// for an access through it is [`Body::info_of`].
+    punned: bool,
+}
+
+impl Place {
+    /// A place that is not a member of a union, which is every place but the ones [`Body::member`]
+    /// builds out of one.
+    const fn new(at: Where, ty: TypeId) -> Self {
+        Self { at, ty, punned: false }
+    }
 }
 
 /// The three kinds of place there are.
@@ -1007,15 +1022,49 @@ impl<'u> Body<'_, 'u> {
     /// does not goes without. The copies are the ones that go without: a `memcpy` is bytes moving
     /// and the bytes have a type at each end rather than one in the middle.
     fn access(&mut self, ty: TypeId) -> MemInfo {
+        MemInfo { tbaa: self.unit.alias_node(ty), ..self.shape(ty) }
+    }
+
+    /// Everything about an access except which type it goes through.
+    ///
+    /// Split out so that a caller which has already decided what the access names does not build
+    /// the node for the type it would otherwise have named. A node nothing points at is an entry
+    /// every later reader of the metadata table carries around for nothing.
+    fn shape(&self, ty: TypeId) -> MemInfo {
         MemInfo {
             // Zero, because a load takes its width from the type it produces and a store from
             // the value it writes. The field is for the copies, which have no such type.
             size: 0,
             align: repr::align_of(self.types(), self.target(), ty),
             order: MemOrder::NotAtomic,
-            tbaa: self.unit.alias_node(ty),
+            tbaa: None,
             restrict: Restrict::NONE,
         }
+    }
+
+    /// The same for a place, which knows the one thing about an access its type does not.
+    ///
+    /// A member of a union names bytes that another member may have been written through, and
+    /// C 6.5.2.3 permits reading them back that way, so an access to one of them carries the root
+    /// of the aliasing tree rather than the node for the member's own type. The root is the node
+    /// that conflicts with everything, which is the conservative answer layer 3 of the alias
+    /// analysis needs and the one the type plane needs too.
+    ///
+    /// The optimizer would have been right without this, because layer 4 settles two accesses to
+    /// one object on their offsets before the types are looked at. The type plane has no layer 4:
+    /// it is a byte and a number, the number travels into a program's memory, and a store through
+    /// one member followed by a read through another is exactly the shape a check against it would
+    /// refuse. So the front end says so once, here, and both readers get the same answer.
+    ///
+    /// What it does not cover is a member reached through a pointer taken earlier, since
+    /// `float *q = &u.f` is a place with no union in sight by the time it is read through. That is
+    /// the residual hole in the punning story and it wants the pointer's own provenance rather than
+    /// the name of the access.
+    fn info_of(&mut self, place: Place) -> MemInfo {
+        if !place.punned {
+            return self.access(place.ty);
+        }
+        MemInfo { tbaa: self.unit.alias_root(), ..self.shape(place.ty) }
     }
 
     /// The flags an access to that type carries.
@@ -1992,8 +2041,8 @@ impl<'u> Body<'_, 'u> {
         let span = tast.decl_span(decl);
         let entries = tast[init].to_vec();
         let place = match self.vars.get(&decl).copied() {
-            Some(Local::Value(var)) => Place { at: Where::Var(var), ty },
-            Some(Local::Slot(slot)) => Place { at: Where::Addr(slot), ty },
+            Some(Local::Value(var)) => Place::new(Where::Var(var), ty),
+            Some(Local::Slot(slot)) => Place::new(Where::Addr(slot), ty),
             None => return,
         };
 
@@ -2132,37 +2181,37 @@ impl<'u> Body<'_, 'u> {
         let ty = tast[expr].ty;
         match tast[expr].kind {
             ExprKind::Decl(decl) => match self.vars.get(&decl).copied() {
-                Some(Local::Value(var)) => Place { at: Where::Var(var), ty },
-                Some(Local::Slot(slot)) => Place { at: Where::Addr(slot), ty },
+                Some(Local::Value(var)) => Place::new(Where::Var(var), ty),
+                Some(Local::Slot(slot)) => Place::new(Where::Addr(slot), ty),
                 None if tast[decl].duration == StorageDuration::Automatic => {
                     // A variable length array whose declaration the walk has not reached, which
                     // a `goto` over it can arrange. The object does not exist yet, so there is
                     // no address to answer with.
                     self.unsupported("a variable length array used before its declaration", span);
                     let addr = self.poison(Type::PTR, span);
-                    Place { at: Where::Addr(addr), ty }
+                    Place::new(Where::Addr(addr), ty)
                 }
                 None => {
                     // Not a local, so it is an object with a name the linker knows: a global,
                     // a `static` in some function, or a function.
                     let symbol = self.unit.symbol_of(decl);
                     let addr = self.global_addr(symbol, span);
-                    Place { at: Where::Addr(addr), ty }
+                    Place::new(Where::Addr(addr), ty)
                 }
             },
             ExprKind::Str(id) => {
                 let symbol = self.unit.string(id);
                 let addr = self.global_addr(symbol, span);
-                Place { at: Where::Addr(addr), ty }
+                Place::new(Where::Addr(addr), ty)
             }
             ExprKind::Unary { op: UnaryOp::Deref, operand } => {
                 let addr = self.value(operand);
-                Place { at: Where::Addr(addr), ty }
+                Place::new(Where::Addr(addr), ty)
             }
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
                 let addr = self.element(base, index, ty, span);
-                Place { at: Where::Addr(addr), ty }
+                Place::new(Where::Addr(addr), ty)
             }
             // An aggregate is read by address rather than by value, so the conversion that
             // reads one is the identity and the place under it is the answer.
@@ -2176,7 +2225,7 @@ impl<'u> Body<'_, 'u> {
                 let align = repr::align_of(self.types(), self.target(), ty);
                 let at = self.scratch(size, align, span);
                 self.call_into(callee, args, Some(at), span);
-                Place { at: Where::Addr(at), ty }
+                Place::new(Where::Addr(at), ty)
             }
             ExprKind::CompoundLiteral(decl) => self.literal(decl, ty),
             // `(struct S)s`, gcc's cast of a record to its own type, which does nothing at all.
@@ -2201,7 +2250,7 @@ impl<'u> Body<'_, 'u> {
                     }
                 };
                 self.close(span);
-                Place { at, ty }
+                Place::new(at, ty)
             }
             ExprKind::Cond { cond, then, otherwise } => {
                 self.conditional_place(cond, then, otherwise, ty, span)
@@ -2211,9 +2260,7 @@ impl<'u> Body<'_, 'u> {
             // whatever wanted the object reads it where it is, which is the assignment that
             // copies it into a variable or the call that loads it into the registers it travels
             // in.
-            ExprKind::VaArg { list } => {
-                Place { at: Where::Addr(self.va_object(list, ty, span)), ty }
-            }
+            ExprKind::VaArg { list } => Place::new(Where::Addr(self.va_object(list, ty, span)), ty),
             // `d = e = a[0] = c` where each of the four is a structure. What an assignment is
             // worth is the value it stored, and the value of an object is the object, so the
             // answer is the place it wrote to rather than a copy of it. That makes a chain of
@@ -2237,14 +2284,14 @@ impl<'u> Body<'_, 'u> {
                 let align = repr::align_of(self.types(), self.target(), ty);
                 let at = self.scratch(size, align, span);
                 self.vector_into(at, expr, ty, span);
-                Place { at: Where::Addr(at), ty }
+                Place::new(Where::Addr(at), ty)
             }
             _ => {
                 // Which is now asked in three places rather than one: an assignment writes
                 // through it, and an aggregate passed or returned by value is read through it.
                 self.unsupported("this as an object to read or write", span);
                 let addr = self.poison(Type::PTR, span);
-                Place { at: Where::Addr(addr), ty }
+                Place::new(Where::Addr(addr), ty)
             }
         }
     }
@@ -2376,7 +2423,7 @@ impl<'u> Body<'_, 'u> {
                     self.memcpy(at, source, size, align, span);
                 } else {
                     let value = self.value(operand);
-                    self.write(Place { at: Where::Addr(at), ty: from }, value, span);
+                    self.write(Place::new(Where::Addr(at), from), value, span);
                 }
             }
             _ => self.unsupported("this vector expression", span),
@@ -2549,7 +2596,7 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Place {
         let at = self.offset(addr, index * stride, span);
-        Place { at: Where::Addr(at), ty: lane }
+        Place::new(Where::Addr(at), lane)
     }
 
     /// One lane of the vector at `addr`, read.
@@ -2573,11 +2620,11 @@ impl<'u> Body<'_, 'u> {
         match self.vars.get(&decl).copied() {
             Some(Local::Value(var)) => {
                 self.init(decl);
-                Place { at: Where::Var(var), ty }
+                Place::new(Where::Var(var), ty)
             }
             Some(Local::Slot(slot)) => {
                 self.init(decl);
-                Place { at: Where::Addr(slot), ty }
+                Place::new(Where::Addr(slot), ty)
             }
             None => {
                 // One with static storage, which is a global and was written at the module
@@ -2585,7 +2632,7 @@ impl<'u> Body<'_, 'u> {
                 let span = self.tast().decl_span(decl);
                 let symbol = self.unit.symbol_of(decl);
                 let addr = self.global_addr(symbol, span);
-                Place { at: Where::Addr(addr), ty }
+                Place::new(Where::Addr(addr), ty)
             }
         }
     }
@@ -2596,10 +2643,18 @@ impl<'u> Body<'_, 'u> {
         let addr = self.address_of(place, span);
         let record = self.types().canonical(self.tast()[base].ty);
         let TypeKind::Record(id) = self.types().kind(record) else {
-            return Place { at: Where::Addr(addr), ty };
+            return Place { punned: place.punned, ..Place::new(Where::Addr(addr), ty) };
         };
-        let Some(member) = self.types().record_info(id).fields.get(field as usize).copied() else {
-            return Place { at: Where::Addr(addr), ty };
+        let (kind, found) = {
+            let info = self.types().record_info(id);
+            (info.kind, info.fields.get(field as usize).copied())
+        };
+        // A member of something that is punned is punned too. `u.s.x` names bytes that another
+        // member of `u` may have been written through, and how deep in the nesting the name went
+        // does not change which bytes they are.
+        let punned = place.punned || kind == RecordKind::Union;
+        let Some(member) = found else {
+            return Place { punned, ..Place::new(Where::Addr(addr), ty) };
         };
         let byte = member.offset;
         if let Some(width) = member.bits {
@@ -2610,10 +2665,10 @@ impl<'u> Body<'_, 'u> {
             let base = repr::align_of(self.types(), self.target(), record);
             let addr = self.offset(addr, byte, span);
             let run = Run::at(base, byte, member.bit, width);
-            return Place { at: Where::Bits(addr, run), ty };
+            return Place { punned, ..Place::new(Where::Bits(addr, run), ty) };
         }
         let addr = self.offset(addr, byte, span);
-        Place { at: Where::Addr(addr), ty }
+        Place { punned, ..Place::new(Where::Addr(addr), ty) }
     }
 
     /// `base[index]`, where the base is already a pointer to the element type.
@@ -2738,7 +2793,7 @@ impl<'u> Body<'_, 'u> {
                 Some(self.ssa.read(self.func, var, block, ty))
             }
             Where::Addr(addr) => {
-                let mut info = self.access(place.ty);
+                let mut info = self.info_of(place);
                 let flags = self.flags(place.ty);
                 if !ordered {
                     return Some(self.build(span).load(ty, addr, info, flags));
@@ -2763,7 +2818,7 @@ impl<'u> Body<'_, 'u> {
                 None
             }
             Where::Addr(addr) => {
-                let mut info = self.access(place.ty);
+                let mut info = self.info_of(place);
                 let flags = self.flags(place.ty);
                 if ordered {
                     info.order = MemOrder::SeqCst;
@@ -3009,7 +3064,7 @@ impl<'u> Body<'_, 'u> {
                 // object, so that is a load of the target type where the object is.
                 if rucc_types::is_vector(self.types(), from) {
                     let at = self.vector_addr(operand, span);
-                    return self.read(Place { at: Where::Addr(at), ty }, span);
+                    return self.read(Place::new(Where::Addr(at), ty), span);
                 }
                 let value = self.eval(operand)?;
                 Some(self.coerce(value, from, ty, span))
@@ -3334,7 +3389,7 @@ impl<'u> Body<'_, 'u> {
     /// The place `*p` names.
     fn place_of_deref(&mut self, operand: ExprId, ty: TypeId) -> Place {
         let addr = self.value(operand);
-        Place { at: Where::Addr(addr), ty }
+        Place::new(Where::Addr(addr), ty)
     }
 
     /// `++x`, `--x`, `x++` and `x--`, which are one read, one add and one write.
@@ -4018,7 +4073,7 @@ impl<'u> Body<'_, 'u> {
         } else {
             Some(self.build(span).icmp(IntPred::Ne, back, exact))
         };
-        let _ = self.write(Place { at: Where::Addr(addr), ty: written }, kept, span);
+        let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
         match lost {
             Some(lost) => self.build(span).binary(Opcode::Or, wrapped, lost, Flags::NONE),
             None => wrapped,
@@ -4394,7 +4449,7 @@ impl<'u> Body<'_, 'u> {
             Some((var, join)) => self.ssa.read(self.func, var, join, Type::PTR),
             None => self.poison(Type::PTR, span),
         };
-        Place { at: Where::Addr(addr), ty }
+        Place::new(Where::Addr(addr), ty)
     }
 
     /// The shape both conditionals have: the condition, each arm in a block of its own, and a

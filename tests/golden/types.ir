@@ -70,5 +70,13 @@ block0(%0: ptr, %1: i32, %2: ptr, %3: ptr):
     return %41
 }
 
+func @pun(i32) -> f32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4, tbaa !0
+    %2 = load.f32 %1, align 4, tbaa !0
+    return %2
+}
+
 !0 = tbaa "char", offset 0
 !1 = tbaa "int", parent !0, offset 0
