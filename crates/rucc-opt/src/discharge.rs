@@ -475,16 +475,15 @@ impl Pass for Discharge {
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         let Some(entry) = func.entry() else { return stats };
-        let dom = an.dominators(func).clone();
+        let dom = an.dominators(func);
 
         // The graph is built for two reasons and neither is the common one, so a function with
         // neither pays for no copy of it. The ranges want it when there is a walk the constant
         // reader gives up on, and the allocation rule wants it to find where the program has tested
         // what an allocator gave it.
         let walks = self.sources.ranges && walks_by_a_value(func);
-        let cfg = (walks || (self.sources.objects && heap::allocates(func)))
-            .then(|| an.cfg(func).clone());
-        let mut ranges = cfg.as_ref().filter(|_| walks).map(|cfg| Ranges::new(&*func, cfg, &dom));
+        let cfg = (walks || (self.sources.objects && heap::allocates(func))).then(|| an.cfg(func));
+        let mut ranges = cfg.filter(|_| walks).map(|cfg| Ranges::new(&*func, cfg, dom));
 
         // One answer per allocation rather than one per check, because a function that reads twenty
         // fields of the same object asks the same question about the same pointer twenty times.
@@ -538,7 +537,7 @@ impl Pass for Discharge {
                         {
                             Some(REMOVED_LOCAL)
                         } else if self.sources.objects
-                            && allocated(func, cfg.as_ref(), &mut checked, block, &[&asked])
+                            && allocated(func, cfg, &mut checked, block, &[&asked])
                         {
                             Some(REMOVED_MADE)
                         } else if self.sources.dominance && scope.bounds.covers(&asked) {
@@ -556,13 +555,7 @@ impl Pass for Discharge {
                                 {
                                     Some(REMOVED_RANGE)
                                 } else if self.sources.objects
-                                    && allocated_around(
-                                        func,
-                                        cfg.as_ref(),
-                                        &mut checked,
-                                        block,
-                                        &[&wide],
-                                    )
+                                    && allocated_around(func, cfg, &mut checked, block, &[&wide])
                                 {
                                     Some(REMOVED_MADE)
                                 } else if self.sources.dominance && scope.bounds.reaches(&wide) {
@@ -686,7 +679,7 @@ impl Pass for Discharge {
                             {
                                 Some(REMOVED_DERIV_LOCAL)
                             } else if self.sources.objects
-                                && allocated(func, cfg.as_ref(), &mut checked, block, &[&from, &to])
+                                && allocated(func, cfg, &mut checked, block, &[&from, &to])
                             {
                                 Some(REMOVED_DERIV_MADE)
                             } else if self.sources.dominance && scope.bounds.holds_both(&from, &to)
@@ -714,7 +707,7 @@ impl Pass for Discharge {
                                 } else if self.sources.objects
                                     && allocated_around(
                                         func,
-                                        cfg.as_ref(),
+                                        cfg,
                                         &mut checked,
                                         block,
                                         &[&near, &far],

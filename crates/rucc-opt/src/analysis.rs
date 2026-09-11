@@ -32,6 +32,8 @@
 //! turn the loop inside out in M4 and run every pass over one function before moving to the next,
 //! and the day that lands the map goes away and one of these lives on the stack of the loop.
 
+use std::cell::OnceCell;
+
 use rucc_ir::Func;
 
 use crate::machine::Machine;
@@ -165,18 +167,25 @@ impl Preserved {
 ///
 /// Empty to start with. Nothing here is computed by existing, which matters because most
 /// functions are walked by a pass that wants none of it.
+///
+/// Each answer is behind a [`OnceCell`] rather than an [`Option`] so that asking for one takes a
+/// shared borrow of the cache instead of an exclusive one. With an exclusive borrow a pass that
+/// wanted two answers at the same time could not have them, because the second call would end the
+/// borrow the first handed out, and the way every pass here got round that was to copy what it
+/// asked for. A copy of the graph or the loop forest is the size of the function, and a pass that
+/// makes one edit at a time was making one per edit. tamnd/rucc#1045.
 #[derive(Clone, Debug)]
 pub struct Analyses {
     machine: Machine,
-    cfg: Option<Cfg>,
-    doms: Option<Dominators>,
-    post: Option<PostDominators>,
-    loops: Option<Loops>,
-    frontiers: Option<Frontiers>,
-    control: Option<ControlDependence>,
-    frequencies: Option<Frequencies>,
-    live: Option<Liveness>,
-    pressure: Option<Pressure>,
+    cfg: OnceCell<Cfg>,
+    doms: OnceCell<Dominators>,
+    post: OnceCell<PostDominators>,
+    loops: OnceCell<Loops>,
+    frontiers: OnceCell<Frontiers>,
+    control: OnceCell<ControlDependence>,
+    frequencies: OnceCell<Frequencies>,
+    live: OnceCell<Liveness>,
+    pressure: OnceCell<Pressure>,
 }
 
 impl Analyses {
@@ -190,15 +199,15 @@ impl Analyses {
     pub fn new(machine: Machine) -> Self {
         Self {
             machine,
-            cfg: None,
-            doms: None,
-            post: None,
-            loops: None,
-            frontiers: None,
-            control: None,
-            frequencies: None,
-            live: None,
-            pressure: None,
+            cfg: OnceCell::new(),
+            doms: OnceCell::new(),
+            post: OnceCell::new(),
+            loops: OnceCell::new(),
+            frontiers: OnceCell::new(),
+            control: OnceCell::new(),
+            frequencies: OnceCell::new(),
+            live: OnceCell::new(),
+            pressure: OnceCell::new(),
         }
     }
 
@@ -212,19 +221,18 @@ impl Analyses {
     }
 
     /// The control flow graph, computed if it is not already here.
-    pub fn cfg(&mut self, func: &Func) -> &Cfg {
-        self.cfg.get_or_insert_with(|| Cfg::new(func))
+    pub fn cfg(&self, func: &Func) -> &Cfg {
+        self.cfg.get_or_init(|| Cfg::new(func))
     }
 
     /// The dominator tree, computed if it is not already here.
     ///
     /// The graph comes out of the cache as well, so a caller that wants both pays for it once.
-    /// Each of these is written against the field rather than through the method above it,
-    /// because two fields of one structure can be borrowed at the same time and two calls that
-    /// each take all of `self` cannot.
-    pub fn dominators(&mut self, func: &Func) -> &Dominators {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        self.doms.get_or_insert_with(|| Dominators::new(cfg))
+    /// Asking for it through the method above rather than reaching into the field is allowed here
+    /// because the two are different cells, and a cell being filled in only refuses a second ask
+    /// for itself.
+    pub fn dominators(&self, func: &Func) -> &Dominators {
+        self.doms.get_or_init(|| Dominators::new(self.cfg(func)))
     }
 
     /// The post-dominator tree, computed if it is not already here.
@@ -233,49 +241,18 @@ impl Analyses {
     ///
     /// Panics through [`PostDominators::new`], on a function with a block that control reaches
     /// and that has no path to any exit even after the fake edges have been added.
-    pub fn post_dominators(&mut self, func: &Func) -> &PostDominators {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        self.post.get_or_insert_with(|| PostDominators::new(cfg))
+    pub fn post_dominators(&self, func: &Func) -> &PostDominators {
+        self.post.get_or_init(|| PostDominators::new(self.cfg(func)))
     }
 
     /// The loop forest, computed if it is not already here.
-    pub fn loops(&mut self, func: &Func) -> &Loops {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
-        self.loops.get_or_insert_with(|| Loops::new(cfg, doms))
-    }
-
-    /// The graph, the dominator tree and the loop forest at once, computed if they are not here.
-    ///
-    /// A pass that wants all three cannot ask three times and keep the answers, because each call
-    /// takes all of `self` and the second would end the borrow the first handed out. The way round
-    /// that was to clone all three, which copies three structures the size of the function every
-    /// time somebody wants to look at a loop. These come out of disjoint fields, so one call can
-    /// hand out all three and nothing is copied. tamnd/rucc#1015.
-    pub fn forest(&mut self, func: &Func) -> (&Cfg, &Dominators, &Loops) {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
-        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
-        (cfg, doms, loops)
-    }
-
-    /// The dominator tree, the frontiers and the loop forest at once, for the same reason.
-    ///
-    /// A second combination rather than a longer first one, because [`Analyses::forest`]'s caller
-    /// does not want the frontiers and computing them for it would be paying to avoid a copy.
-    pub fn closure(&mut self, func: &Func) -> (&Dominators, &Frontiers, &Loops) {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
-        let fronts: &Frontiers = self.frontiers.get_or_insert_with(|| Frontiers::new(cfg, doms));
-        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
-        (doms, fronts, loops)
+    pub fn loops(&self, func: &Func) -> &Loops {
+        self.loops.get_or_init(|| Loops::new(self.cfg(func), self.dominators(func)))
     }
 
     /// The dominance frontier of every block, computed if it is not already here.
-    pub fn frontiers(&mut self, func: &Func) -> &Frontiers {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
-        self.frontiers.get_or_insert_with(|| Frontiers::new(cfg, doms))
+    pub fn frontiers(&self, func: &Func) -> &Frontiers {
+        self.frontiers.get_or_init(|| Frontiers::new(self.cfg(func), self.dominators(func)))
     }
 
     /// Which branches decide whether each block runs, computed if it is not already here.
@@ -283,10 +260,9 @@ impl Analyses {
     /// # Panics
     ///
     /// Panics through [`PostDominators::new`], for the reason above it.
-    pub fn control_dependence(&mut self, func: &Func) -> &ControlDependence {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let post: &PostDominators = self.post.get_or_insert_with(|| PostDominators::new(cfg));
-        self.control.get_or_insert_with(|| ControlDependence::new(cfg, post))
+    pub fn control_dependence(&self, func: &Func) -> &ControlDependence {
+        self.control
+            .get_or_init(|| ControlDependence::new(self.cfg(func), self.post_dominators(func)))
     }
 
     /// How often each block runs and which way each branch goes, computed if it is not here.
@@ -297,18 +273,15 @@ impl Analyses {
     /// about a call that never returns and a call to something cold, still fire on what the IR
     /// says: the front end puts an unreachable after a call that does not come back. A module
     /// pass that wants the rest of the answer builds its own with [`Callees::of_module`].
-    pub fn frequencies(&mut self, func: &Func) -> &Frequencies {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let doms: &Dominators = self.doms.get_or_insert_with(|| Dominators::new(cfg));
-        let loops: &Loops = self.loops.get_or_insert_with(|| Loops::new(cfg, doms));
-        self.frequencies
-            .get_or_insert_with(|| Frequencies::of(func, cfg, loops, &Callees::nothing()))
+    pub fn frequencies(&self, func: &Func) -> &Frequencies {
+        self.frequencies.get_or_init(|| {
+            Frequencies::of(func, self.cfg(func), self.loops(func), &Callees::nothing())
+        })
     }
 
     /// What is live at the edges of every block, computed if it is not here.
-    pub fn live(&mut self, func: &Func) -> &Liveness {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        self.live.get_or_insert_with(|| Liveness::of(func, cfg))
+    pub fn live(&self, func: &Func) -> &Liveness {
+        self.live.get_or_init(|| Liveness::of(func, self.cfg(func)))
     }
 
     /// How many registers of each class the function needs where, computed if it is not here.
@@ -317,10 +290,8 @@ impl Analyses {
     /// them because four passes computing their own liveness is four chances for the numbers to
     /// disagree, and two passes making opposite decisions off different counts of the same thing
     /// is the failure that is hardest to see afterwards.
-    pub fn pressure(&mut self, func: &Func) -> &Pressure {
-        let cfg: &Cfg = self.cfg.get_or_insert_with(|| Cfg::new(func));
-        let live: &Liveness = self.live.get_or_insert_with(|| Liveness::of(func, cfg));
-        self.pressure.get_or_insert_with(|| Pressure::of(func, cfg, live))
+    pub fn pressure(&self, func: &Func) -> &Pressure {
+        self.pressure.get_or_init(|| Pressure::of(func, self.cfg(func), self.live(func)))
     }
 
     /// Whether this one is here without computing it.
@@ -331,15 +302,15 @@ impl Analyses {
     #[must_use]
     pub fn holds(&self, analysis: Analysis) -> bool {
         match analysis {
-            Analysis::Cfg => self.cfg.is_some(),
-            Analysis::Dominators => self.doms.is_some(),
-            Analysis::PostDominators => self.post.is_some(),
-            Analysis::Loops => self.loops.is_some(),
-            Analysis::Frontiers => self.frontiers.is_some(),
-            Analysis::ControlDependence => self.control.is_some(),
-            Analysis::Frequencies => self.frequencies.is_some(),
-            Analysis::Liveness => self.live.is_some(),
-            Analysis::Pressure => self.pressure.is_some(),
+            Analysis::Cfg => self.cfg.get().is_some(),
+            Analysis::Dominators => self.doms.get().is_some(),
+            Analysis::PostDominators => self.post.get().is_some(),
+            Analysis::Loops => self.loops.get().is_some(),
+            Analysis::Frontiers => self.frontiers.get().is_some(),
+            Analysis::ControlDependence => self.control.get().is_some(),
+            Analysis::Frequencies => self.frequencies.get().is_some(),
+            Analysis::Liveness => self.live.get().is_some(),
+            Analysis::Pressure => self.pressure.get().is_some(),
         }
     }
 
@@ -406,15 +377,33 @@ impl Analyses {
     /// Forgets one analysis and nothing else.
     fn drop(&mut self, analysis: Analysis) {
         match analysis {
-            Analysis::Cfg => self.cfg = None,
-            Analysis::Dominators => self.doms = None,
-            Analysis::PostDominators => self.post = None,
-            Analysis::Loops => self.loops = None,
-            Analysis::Frontiers => self.frontiers = None,
-            Analysis::ControlDependence => self.control = None,
-            Analysis::Frequencies => self.frequencies = None,
-            Analysis::Liveness => self.live = None,
-            Analysis::Pressure => self.pressure = None,
+            Analysis::Cfg => {
+                self.cfg.take();
+            }
+            Analysis::Dominators => {
+                self.doms.take();
+            }
+            Analysis::PostDominators => {
+                self.post.take();
+            }
+            Analysis::Loops => {
+                self.loops.take();
+            }
+            Analysis::Frontiers => {
+                self.frontiers.take();
+            }
+            Analysis::ControlDependence => {
+                self.control.take();
+            }
+            Analysis::Frequencies => {
+                self.frequencies.take();
+            }
+            Analysis::Liveness => {
+                self.live.take();
+            }
+            Analysis::Pressure => {
+                self.pressure.take();
+            }
         }
     }
 
@@ -441,29 +430,29 @@ impl Analyses {
         let mut lied = Vec::new();
         for analysis in wanted {
             let same = match analysis {
-                Analysis::Cfg => self.cfg.as_ref() == Some(&cfg),
-                Analysis::Dominators => self.doms.as_ref() == Some(&Dominators::new(&cfg)),
-                Analysis::PostDominators => self.post.as_ref() == Some(&PostDominators::new(&cfg)),
+                Analysis::Cfg => self.cfg.get() == Some(&cfg),
+                Analysis::Dominators => self.doms.get() == Some(&Dominators::new(&cfg)),
+                Analysis::PostDominators => self.post.get() == Some(&PostDominators::new(&cfg)),
                 Analysis::Loops => {
-                    self.loops.as_ref() == Some(&Loops::new(&cfg, &Dominators::new(&cfg)))
+                    self.loops.get() == Some(&Loops::new(&cfg, &Dominators::new(&cfg)))
                 }
                 Analysis::Frontiers => {
-                    self.frontiers.as_ref() == Some(&Frontiers::new(&cfg, &Dominators::new(&cfg)))
+                    self.frontiers.get() == Some(&Frontiers::new(&cfg, &Dominators::new(&cfg)))
                 }
                 Analysis::ControlDependence => {
-                    self.control.as_ref()
+                    self.control.get()
                         == Some(&ControlDependence::new(&cfg, &PostDominators::new(&cfg)))
                 }
                 Analysis::Frequencies => {
                     let doms = Dominators::new(&cfg);
                     let loops = Loops::new(&cfg, &doms);
                     let now = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
-                    self.frequencies.as_ref() == Some(&now)
+                    self.frequencies.get() == Some(&now)
                 }
-                Analysis::Liveness => self.live.as_ref() == Some(&Liveness::of(func, &cfg)),
+                Analysis::Liveness => self.live.get() == Some(&Liveness::of(func, &cfg)),
                 Analysis::Pressure => {
                     let live = Liveness::of(func, &cfg);
-                    self.pressure.as_ref() == Some(&Pressure::of(func, &cfg, &live))
+                    self.pressure.get() == Some(&Pressure::of(func, &cfg, &live))
                 }
             };
             if !same {
@@ -527,7 +516,7 @@ mod tests {
 
     #[test]
     fn nothing_is_computed_until_it_is_asked_for() {
-        let mut an = crate::machine::fixtures::analyses();
+        let an = crate::machine::fixtures::analyses();
         for &analysis in Analysis::EVERY {
             assert!(!an.holds(analysis));
         }
@@ -544,7 +533,7 @@ mod tests {
     #[test]
     fn asking_twice_gives_the_same_answer_and_the_second_one_is_free() {
         let func = func();
-        let mut an = crate::machine::fixtures::analyses();
+        let an = crate::machine::fixtures::analyses();
         let first = an.cfg(&func).clone();
         let second = an.cfg(&func);
         assert_eq!(&first, second);
@@ -553,7 +542,7 @@ mod tests {
     #[test]
     fn the_loop_forest_pulls_in_what_it_is_built_out_of() {
         let func = func();
-        let mut an = crate::machine::fixtures::analyses();
+        let an = crate::machine::fixtures::analyses();
         an.loops(&func);
         assert!(an.holds(Analysis::Cfg));
         assert!(an.holds(Analysis::Dominators));

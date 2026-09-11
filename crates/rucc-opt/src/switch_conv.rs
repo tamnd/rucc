@@ -128,7 +128,7 @@ impl Pass for SwitchConv {
         if func.entry().is_none() {
             return stats;
         }
-        let cfg = an.cfg(func).clone();
+        let cfg = an.cfg(func);
         let found: Vec<Inst> = func
             .blocks()
             .filter_map(|block| func.terminator(block))
@@ -137,7 +137,7 @@ impl Pass for SwitchConv {
 
         let mut plans = Vec::new();
         for inst in found {
-            match plan(func, &cfg, inst) {
+            match plan(func, cfg, inst) {
                 Ok(plan) => plans.push(plan),
                 Err(why) => stats.missed(why),
             }

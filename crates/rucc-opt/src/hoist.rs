@@ -194,9 +194,9 @@ impl Pass for Hoist {
         if func.entry().is_none() {
             return stats;
         }
-        let cfg = an.cfg(func).clone();
-        let doms = an.dominators(func).clone();
-        let loops = an.loops(func).clone();
+        let cfg = an.cfg(func);
+        let doms = an.dominators(func);
+        let loops = an.loops(func);
         if loops.count() == 0 {
             return stats;
         }
@@ -207,23 +207,13 @@ impl Pass for Hoist {
         // plan mentions an instruction another plan removes.
         let mut plans = Vec::new();
         {
-            let mut scev = Scev::new(func, &cfg, &loops);
+            let mut scev = Scev::new(func, cfg, loops);
             // Beside the evolution rather than instead of it. What the counter does each time round
             // is scalar evolution's answer and how large the value it stops at can be is the
             // ranges' answer, and a counter as wide as the arithmetic needs both.
-            let mut ranges = Ranges::new(func, &cfg, &doms);
+            let mut ranges = Ranges::new(func, cfg, doms);
             for id in loops.all() {
-                sweep(
-                    func,
-                    &cfg,
-                    &doms,
-                    &loops,
-                    &mut scev,
-                    &mut ranges,
-                    id,
-                    &mut plans,
-                    &mut stats,
-                );
+                sweep(func, cfg, doms, loops, &mut scev, &mut ranges, id, &mut plans, &mut stats);
             }
         }
 

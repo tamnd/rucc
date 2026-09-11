@@ -341,8 +341,8 @@ impl Pass for Split {
         if func.entry().is_none() {
             return stats;
         }
-        let cfg = an.cfg(func).clone();
-        let loops = an.loops(func).clone();
+        let cfg = an.cfg(func);
+        let loops = an.loops(func);
         if loops.count() == 0 {
             return stats;
         }
@@ -350,7 +350,7 @@ impl Pass for Split {
         // Worked out first and applied afterwards, because scalar evolution reads the function and
         // the transformation writes it. No two plans share a block, which `planned` sees to, so
         // applying one leaves every other one's blocks where they were.
-        let mut plans = planned(func, &cfg, &loops, &mut stats);
+        let mut plans = planned(func, cfg, loops, &mut stats);
 
         // Closed form put back where it is missing, before anything is copied. The repair adds a
         // block parameter and rewrites uses, so it moves no edge and creates no block, which is why
@@ -358,12 +358,12 @@ impl Pass for Split {
         // which value a use inside another loop names, and a plan is a list of values, so a repair
         // means the plans are worked out again rather than trusted. The stats go with them, or the
         // first round's reasons would be counted twice.
-        let dom = an.dominators(func).clone();
-        let fronts = an.frontiers(func).clone();
-        let repairs = repaired(func, &dom, &fronts, &loops, &plans, fuel);
+        let dom = an.dominators(func);
+        let fronts = an.frontiers(func);
+        let repairs = repaired(func, dom, fronts, loops, &plans, fuel);
         if repairs.made > 0 {
             stats = Stats::new();
-            plans = planned(func, &cfg, &loops, &mut stats);
+            plans = planned(func, cfg, loops, &mut stats);
             for _ in 0..repairs.worked {
                 stats.optimized(CLOSED_HERE);
             }

@@ -76,7 +76,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 const PREHEADER: &str = "preheader made for a loop whose header several blocks outside it reach";
 const LATCH: &str = "back edges to one header routed through one latch";
@@ -229,14 +229,23 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
 /// meeting is already there to be edited.
 fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
-        let (dom, fronts, loops) = an.closure(func);
+        let (dom, fronts, loops) = (an.dominators(func), an.frontiers(func), an.loops(func));
         let Some(job) = leak(func, dom, fronts, loops) else { return true };
         if !fuel.take() {
             return false;
         }
         close(func, dom, loops, &job);
         stats.optimized(CLOSED);
-        an.clear();
+        // Every edge is where it was. A parameter appeared on some blocks and the edges into them
+        // hand over one more value, which is a change to what the blocks say and not to which
+        // block reaches which, so the graph, both trees, the frontiers and the forest all still
+        // describe this function and the next round reads them again instead of building them
+        // again. What is live where did change, since the value now arrives by name. So did the
+        // frequencies, because a branch on a value this renamed is a branch the predictors read
+        // differently. The clear that used to be here was a walk of the whole function per leak,
+        // on top of the one the repair itself does. tamnd/rucc#1045.
+        let kept = Preserved::ALL.without(Analysis::Liveness).without(Analysis::Frequencies);
+        an.settle(func, kept, false);
     }
 }
 
@@ -451,9 +460,9 @@ fn wanted(
     an: &mut Analyses,
     mut ask: impl FnMut(&Loops, &Cfg, LoopId) -> Option<(Block, Vec<Block>)>,
 ) -> Option<(Block, Vec<Block>)> {
-    let cfg = an.cfg(func).clone();
-    let loops = an.loops(func).clone();
-    loops.all().find_map(|id| ask(&loops, &cfg, id))
+    let cfg = an.cfg(func);
+    let loops = an.loops(func);
+    loops.all().find_map(|id| ask(loops, cfg, id))
 }
 
 /// Makes one edit and throws the analyses away, so the next question is asked of the graph as it is.

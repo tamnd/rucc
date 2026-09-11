@@ -147,8 +147,9 @@ impl Pass for HeaderCopy {
             let copy = apply(func, &job);
             stats.optimized(COPIED);
             an.clear();
-            settle(func, an, copy, &mut stats);
-            an.clear();
+            if settle(func, an, copy, &mut stats) {
+                an.clear();
+            }
         }
         if stats.changed() {
             // Section 6.5 leaves the stranded blocks to whoever stranded them, and a loop whose
@@ -193,7 +194,7 @@ impl HeaderCopy {
         stats: &mut Stats,
         say: bool,
     ) -> Option<Job> {
-        let (cfg, dom, loops) = an.forest(func);
+        let (cfg, dom, loops) = (an.cfg(func), an.dominators(func), an.loops(func));
         let mut found = None;
         for id in loops.all() {
             let header = loops.header(id);
@@ -466,23 +467,30 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
 /// known to run at least once, which is what document 07.5's trip count wanted. One that never
 /// holds leaves the loop unreachable, and taking it out is [`crate::simplify_cfg::sweep`]'s job
 /// rather than this one's.
-fn settle(func: &mut Func, an: &mut Analyses, copy: Block, stats: &mut Stats) {
-    let Some(term) = func.terminator(copy) else { return };
+///
+/// Answers whether it moved an edge, which the caller needs because the analyses it just built to
+/// ask the ranges are the ones the next round wants and they are only stale if this took a branch
+/// out. The ranges settle the test on a minority of the loops here and the graph is the size of
+/// the function, so the rounds where nothing happens used to pay for a rebuild that changed
+/// nothing. tamnd/rucc#1045.
+fn settle(func: &mut Func, an: &mut Analyses, copy: Block, stats: &mut Stats) -> bool {
+    let Some(term) = func.terminator(copy) else { return false };
     let cond = func[func[term].args][0];
     let answer = {
-        let cfg = an.cfg(func).clone();
-        let dom = an.dominators(func).clone();
-        let mut ranges = Ranges::new(func, &cfg, &dom);
+        let cfg = an.cfg(func);
+        let dom = an.dominators(func);
+        let mut ranges = Ranges::new(func, cfg, dom);
         prune::settled(func, &mut ranges, copy, cond)
     };
     let Some(taken) = answer else {
         stats.missed(UNDECIDED);
-        return;
+        return false;
     };
     let calls: Vec<BlockCall> = func.successors(term).collect();
     let call = if taken { calls[0] } else { calls[1] };
     simplify_cfg::jump_to(func, term, call);
     stats.optimized(if taken { ENTERED } else { SKIPPED });
+    true
 }
 
 #[cfg(test)]
