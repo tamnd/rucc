@@ -62,8 +62,13 @@
 //! and the kernel infoleak with it. The bit means uninitialized rather than initialized, so a byte
 //! nobody has said anything about counts as written and a gap in instrumentation loses a check
 //! rather than inventing a refusal, which is the inversion of MSan that section 9.2 argues for and
-//! the reason this one could be shipped. Nothing maps it beside a region yet and no generated code
-//! reaches it. The epoch plane is not here at all.
+//! the reason this one could be shipped. It is mapped over every watched region beside the other
+//! two, an instance forgets its bytes when it begins, `calloc` says it wrote what it zeroed and
+//! `realloc` carries the answers of the bytes it moved, and [`check`] has the question a read asks
+//! along with the two judgements that record what it asks about. What is missing is the caller: no
+//! generated code reaches `__rucc_check_init`, `__rucc_meta_init` or `__rucc_meta_init_copy` yet,
+//! because which range a store names is section 9.3's padding rule and that is the compiler's half
+//! of the same milestone. The epoch plane is not here at all.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates

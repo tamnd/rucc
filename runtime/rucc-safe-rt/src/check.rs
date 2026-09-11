@@ -1,4 +1,4 @@
-//! The four checks generated code calls, what each of them decides, and the one question it asks.
+//! The five checks generated code calls, what each of them decides, and the one question it asks.
 //!
 //! Design: `spec/safe-memory/06-instrumentation.md` sections 6.3 and 6.3.1, and section 7.4 of
 //! document 07 for [`extent`], which is not a check and is here because it reads the same plane
@@ -21,11 +21,12 @@
 //!
 //! # What these can see, and what they cannot
 //!
-//! The lifetime plane and the type plane. A version covers one granule of sixteen bytes, so the
-//! three checks that read the lifetime plane decide per granule. The type plane's granule is eight
-//! bytes and it is per byte inside a granule whose bytes disagree, so [`typed`] decides per byte,
-//! which it has to: a structure with a `char` field in it disagrees within a granule and an access
-//! to the field beside it must not be refused for that.
+//! All three planes. A version covers one granule of sixteen bytes, so the three checks that read
+//! the lifetime plane decide per granule. The type plane's granule is eight bytes and it is per
+//! byte inside a granule whose bytes disagree, so [`typed`] decides per byte, which it has to: a
+//! structure with a `char` field in it disagrees within a granule and an access to the field beside
+//! it must not be refused for that. The init plane has no granule at all and [`filled`] decides per
+//! byte everywhere, which is what a question about a structure's padding needs.
 //!
 //! That is enough for the bugs the plane was built for. A read through a pointer to a freed
 //! instance is refused, because the granule the free left behind is marked as given back and stays
@@ -266,6 +267,81 @@ pub unsafe fn carry(dst: *const c_void, src: *const c_void, len: usize) {
     unsafe { region.types.set(dst, len, types::UNTYPED) }
 }
 
+/// Judgement J1, the init half: every byte this access is about to read has been written.
+///
+/// Document 03's Y6, and the kernel infoleak of CWE-200 with it. What it catches is a read of a
+/// member the program never filled, a read of a structure's padding, and a buffer handed to `write`
+/// or to a socket with bytes in it nothing ever stored. What it passes is everything a byte nobody
+/// has said anything about would be, which is the inversion `crate::init` argues for: an
+/// instance beginning is the only thing that makes a byte unwritten, so uninstrumented code writing
+/// storage this crate watches loses a check rather than inventing a refusal.
+///
+/// Clipped to the region for the reason [`typed`] is, and the refusal is the same judgement for the
+/// reason [`crate::init::Init::allows`] gives: J1's own wording is about an access the planes did
+/// not permit, and this is one of the planes.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`].
+pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    // SAFETY: the range is clipped to the region, whose init plane covers every byte of it.
+    if !unsafe { region.init.allows(addr, clipped(&region, addr, size)) } {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
+/// The judgement a store makes: the bytes it wrote hold what it wrote.
+///
+/// Not a check, the same way [`judge`] is not. Which range a store that writes a whole object names
+/// is section 9.3's padding rule and is the compiler's decision rather than this crate's, and
+/// `crate::init` says why it has to be: a member by member fill leaves the padding alone and a
+/// whole object store does not, and the only difference between the two by the time they arrive
+/// here is the length.
+///
+/// # Safety
+///
+/// `addr` is whatever the program computed and is never read through.
+pub unsafe fn wrote(addr: *const c_void, size: usize) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    // SAFETY: as in `filled`.
+    unsafe { region.init.set(addr, clipped(&region, addr, size)) }
+}
+
+/// The judgement a copy makes: the bytes at `dst` were written wherever the bytes at `src` were.
+///
+/// Which is what makes an infoleak visible rather than what hides it. A structure filled member by
+/// member and then copied whole carries its padding along with it, so the bytes that would leave
+/// the program are still the bytes nothing wrote and the read at the boundary is the one refused.
+///
+/// A copy whose ends are in different regions, or whose source is outside every region, marks the
+/// destination as written. That is the permissive direction, which is the one this plane thins in,
+/// and it is the same trade [`carry`] makes for the same reason: the alternative is a region lookup
+/// per byte on the path every `memcpy` in the program goes down.
+///
+/// # Safety
+///
+/// Neither address is read through. They may overlap, and the answer is the same either way.
+pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
+    let (dst, src) = (dst as usize, src as usize);
+    let Some(region) = alloc::covering(dst) else { return };
+    let len = clipped(&region, dst, len);
+    if region.holds(src) && region.holds(src.wrapping_add(len.saturating_sub(1))) {
+        // SAFETY: both ranges are inside the region, whose init plane covers every byte of it.
+        unsafe { region.init.copy(dst, src, len) }
+        return;
+    }
+    // SAFETY: as above, for the destination alone.
+    unsafe { region.init.set(dst, len) }
+}
+
 /// How many of the `size` bytes from `addr` on are inside the region, so a plane walk stays inside
 /// the plane.
 ///
@@ -422,7 +498,7 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
-/// The eight names generated code is compiled against.
+/// The eleven names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -530,6 +606,42 @@ pub mod exports {
         // SAFETY: as above.
         unsafe { super::carry(dst, src, len) };
     }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_check_bounds`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_init(
+        addr: *const c_void,
+        size: usize,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::filled(addr, size, descriptor) };
+    }
+
+    /// # Safety
+    ///
+    /// `addr` is whatever the program computed and is never read through. No descriptor, for the
+    /// reason [`__rucc_meta_type`] has none.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_init(addr: *const c_void, size: usize) {
+        // SAFETY: as above.
+        unsafe { super::wrote(addr, size) };
+    }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_init`], for both addresses. Neither is read through and they may overlap.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_meta_init_copy(
+        dst: *const c_void,
+        src: *const c_void,
+        len: usize,
+    ) {
+        // SAFETY: as above.
+        unsafe { super::spread(dst, src, len) };
+    }
 }
 
 #[cfg(test)]
@@ -592,6 +704,24 @@ mod tests {
     fn carry(dst: *const c_void, src: *const c_void, len: usize) {
         // SAFETY: as above, for both.
         unsafe { super::carry(dst, src, len) }
+    }
+
+    /// The init check, with the descriptor argument filled in.
+    fn filled(addr: *const c_void, size: usize) {
+        // SAFETY: as in `bounds`.
+        unsafe { super::filled(addr, size, &raw const ROW) }
+    }
+
+    /// The judgement a store makes about what it wrote.
+    fn wrote(addr: *const c_void, size: usize) {
+        // SAFETY: the address is one an instance in the test owns and is never read through.
+        unsafe { super::wrote(addr, size) }
+    }
+
+    /// The judgement a copy makes about what it moved.
+    fn spread(dst: *const c_void, src: *const c_void, len: usize) {
+        // SAFETY: as above, for both.
+        unsafe { super::spread(dst, src, len) }
     }
 
     /// Two types out of the compiler's universe, in the spelling the plane gives them.
@@ -718,6 +848,107 @@ mod tests {
         assert!(!refused(|| typed(at(ptr, 0), 8, B)));
         // SAFETY: as above.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn reading_a_byte_of_a_fresh_instance_before_anything_wrote_it_is_refused() {
+        let _turn = turn();
+        // Document 03's Y6, which is the class this plane exists for. The bytes hold whatever the
+        // previous occupant of the block left, and a program that reads one of them is reading a
+        // value it never stored.
+        let ptr = alloc(64);
+        assert!(refused(|| filled(at(ptr, 0), 8)));
+
+        wrote(at(ptr, 0), 8);
+
+        assert!(!refused(|| filled(at(ptr, 0), 8)));
+        assert!(refused(|| filled(at(ptr, 8), 8)), "the bytes past the store were not written");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_read_that_straddles_a_byte_nothing_wrote_is_refused() {
+        let _turn = turn();
+        // The plane is per byte everywhere, which is what a question about a structure's padding
+        // needs: two members filled and the two bytes between them not is the ordinary shape of a
+        // member by member fill rather than a corner case.
+        let ptr = alloc(64);
+        wrote(at(ptr, 0), 2);
+        wrote(at(ptr, 4), 4);
+
+        assert!(!refused(|| filled(at(ptr, 0), 2)));
+        assert!(!refused(|| filled(at(ptr, 4), 4)));
+        assert!(refused(|| filled(at(ptr, 0), 8)), "the padding between them was read");
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_block_handed_out_again_has_written_none_of_its_bytes() {
+        let _turn = turn();
+        // The other half of judgement J4, which is the only thing in the design that makes a byte
+        // unwritten. A block that came back still holds the last owner's data, and the plane
+        // saying so is what turns the next read of it into the report it should be.
+        let first = alloc(64);
+        wrote(at(first, 0), 64);
+        assert!(!refused(|| filled(at(first, 0), 64)));
+        // SAFETY: `first` is a live instance.
+        unsafe { dealloc(first) };
+
+        let second = alloc(64);
+        assert_eq!(second, first, "the test is about a block that came back");
+        assert!(refused(|| filled(at(second, 0), 8)));
+        // SAFETY: as above.
+        unsafe { dealloc(second) };
+    }
+
+    #[test]
+    fn a_copy_carries_the_padding_the_source_never_filled() {
+        let _turn = turn();
+        // The infoleak, written out. A structure filled member by member and copied whole into a
+        // buffer that was fully written has to make the destination's padding unreadable again,
+        // because those are the bytes that would leave the program.
+        let ptr = alloc(128);
+        wrote(at(ptr, 0), 2);
+        wrote(at(ptr, 4), 4);
+        wrote(at(ptr, 64), 8);
+        assert!(!refused(|| filled(at(ptr, 64), 8)));
+
+        spread(at(ptr, 64), at(ptr, 0), 8);
+
+        assert!(!refused(|| filled(at(ptr, 64), 2)));
+        assert!(refused(|| filled(at(ptr, 64), 8)), "the padding did not come across");
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_out_of_somewhere_no_plane_covers_leaves_the_destination_written() {
+        let _turn = turn();
+        // The permissive direction, which is the one every thinning in this plane goes in. The
+        // source is a local, no region holds it, and the bytes it wrote are bytes the program did
+        // store even though nothing here watched it happen.
+        let ptr = alloc(64);
+        let outside = 0u64;
+
+        spread(at(ptr, 0), (&raw const outside).cast(), 8);
+
+        assert!(!refused(|| filled(at(ptr, 0), 8)));
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_read_of_storage_no_region_covers_is_passed() {
+        let _turn = turn();
+        // A local is uninitialized in exactly the way this plane is about and there is no plane
+        // over it to say so. Refusing here would need a plane over every frame, which is what a
+        // later milestone is for, and inventing an answer would be a report about a program this
+        // build cannot see.
+        let local = 0u64;
+
+        assert!(!refused(|| filled((&raw const local).cast(), 8)));
     }
 
     #[test]

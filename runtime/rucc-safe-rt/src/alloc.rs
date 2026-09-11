@@ -42,6 +42,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fail::Judgement;
 use crate::heap::Arena;
+use crate::init::Init;
 use crate::layout::Class;
 use crate::plane::{GRANULE, Lifetime, SLOT};
 use crate::types::{self, Side, Types};
@@ -102,14 +103,25 @@ pub const fn siding(len: usize) -> usize {
     len / types::GRANULE / 8 * types::ENTRY
 }
 
+/// How much init plane a region of `len` bytes needs, which is one bit per byte.
+///
+/// An eighth, which is the cheapest of the four spans and the only one that is exact. There is no
+/// granule to compress here and nothing to round: a byte is the unit C asks the question about, so
+/// the plane answers per byte and `crate::init` says why that is affordable.
+#[must_use]
+pub const fn initing(len: usize) -> usize {
+    crate::init::shadow(len)
+}
+
 /// What a region's length is rounded up to.
 ///
 /// A page, so that a length is a length the kernel would have rounded to anyway. What the
 /// arithmetic actually needs is smaller and is worth writing down: the length has to be a whole
-/// number of granules for each shadow to cover it exactly, and the three shadows together have to
+/// number of granules for each shadow to cover it exactly, and the four shadows together have to
 /// be a whole number of granules for the region that follows them to be granule aligned, which
-/// together is a multiple of thirty two. A machine with larger pages maps a little more than this asks for and nothing
-/// reads past what was asked for, so the rounding is a floor rather than an assumption.
+/// together is a multiple of a hundred and twenty eight. A machine with larger pages maps a little
+/// more than this asks for and nothing reads past what was asked for, so the rounding is a floor
+/// rather than an assumption.
 const PAGE: usize = 1 << 12;
 
 /// How much region one instance of `n` bytes needs, or nothing if it does not fit in a `usize`.
@@ -235,6 +247,13 @@ pub struct Region {
     /// mapped is not watched at all, which is the state every address outside the heap is in and
     /// is a gap rather than a wrong answer.
     pub types: Types<'static>,
+    /// The init plane over the same region, a bit for every byte of it.
+    ///
+    /// Mapped for every watched region for the reason the type plane is, and it costs less: an
+    /// eighth of the region rather than a byte per byte. A region whose init plane could not be
+    /// mapped is not watched at all, which keeps every check's question answerable without asking
+    /// first whether there is a plane to ask.
+    pub init: Init,
     /// The lowest address in the region.
     pub base: usize,
     /// One past the highest.
@@ -281,6 +300,8 @@ struct Slot {
     origin: AtomicUsize,
     /// The bias the type plane's arithmetic is built on.
     typing: AtomicUsize,
+    /// The bias the init plane's arithmetic is built on.
+    initing: AtomicUsize,
     /// The lowest address it covers.
     base: AtomicUsize,
     /// One past the highest.
@@ -295,6 +316,7 @@ impl Slot {
         Self {
             origin: AtomicUsize::new(0),
             typing: AtomicUsize::new(0),
+            initing: AtomicUsize::new(0),
             base: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
             class: AtomicU32::new(0),
@@ -330,13 +352,15 @@ static SPACING: AtomicBool = AtomicBool::new(false);
 
 /// Everything the table holds about one region, so that publishing it is one argument.
 ///
-/// A struct rather than seven parameters because four of the seven are addresses of the same type
+/// A struct rather than eight parameters because five of the eight are addresses of the same type
 /// and a call site that swapped two of them would compile and then read the wrong plane.
 pub(crate) struct Watch {
     /// The bias the lifetime plane's arithmetic is built on.
     pub origin: usize,
     /// The bias the type plane's arithmetic is built on.
     pub typing: usize,
+    /// The bias the init plane's arithmetic is built on.
+    pub initing: usize,
     /// Where the type plane's side table starts.
     pub side: usize,
     /// How many entries that table holds.
@@ -358,8 +382,8 @@ pub(crate) struct Watch {
 /// # Safety
 ///
 /// `watch.side` names `watch.room * types::ENTRY` writable bytes that are never handed back, and
-/// both planes' biases name shadow that covers every granule between `watch.base` and `watch.end`
-/// and is never handed back either.
+/// all three planes' biases name shadow that covers every byte between `watch.base` and
+/// `watch.end` and is never handed back either.
 pub(crate) unsafe fn publish(watch: Watch) -> bool {
     while SPACING.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
     {
@@ -368,7 +392,7 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
     let at = FILLED.load(Ordering::Relaxed);
     let room = at < REGIONS;
     if room {
-        let Watch { origin, typing, side, room: entries, base, end, class } = watch;
+        let Watch { origin, typing, initing, side, room: entries, base, end, class } = watch;
         // Before the count grows, like the stores below, and for the same reason: a reader that
         // has acquired the count reads a side table that is already pointed at its mapping.
         //
@@ -377,10 +401,11 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
         unsafe { SIDES[at].map(side, entries) };
         SPACE[at].origin.store(origin, Ordering::Relaxed);
         SPACE[at].typing.store(typing, Ordering::Relaxed);
+        SPACE[at].initing.store(initing, Ordering::Relaxed);
         SPACE[at].base.store(base, Ordering::Relaxed);
         SPACE[at].end.store(end, Ordering::Relaxed);
         SPACE[at].class.store(class, Ordering::Relaxed);
-        // The release that publishes the three stores above, and the reason a reader may load them
+        // The release that publishes the stores above, and the reason a reader may load them
         // relaxed once it has acquired this.
         FILLED.store(at + 1, Ordering::Release);
     }
@@ -406,14 +431,18 @@ pub fn covering(addr: usize) -> Option<Region> {
         let end = slot.end.load(Ordering::Relaxed);
         if addr >= base && addr < end {
             // SAFETY: a published region is mapped for as long as the program runs, along with the
-            // shadow each origin names, so both planes cover every address between the two above.
+            // shadow each origin names, so all three planes cover every address between the two
+            // above.
             let plane = unsafe { Lifetime::new(slot.origin.load(Ordering::Relaxed)) };
             // SAFETY: as above, and the side table at this index was mapped before the count
             // that got us here grew.
             let types = unsafe { Types::new(slot.typing.load(Ordering::Relaxed), &SIDES[at]) };
+            // SAFETY: as above.
+            let init = unsafe { Init::new(slot.initing.load(Ordering::Relaxed)) };
             return Some(Region {
                 plane,
                 types,
+                init,
                 base,
                 end,
                 class: slot.class.load(Ordering::Relaxed),
@@ -442,15 +471,15 @@ pub(crate) fn overlaps(lo: usize, hi: usize) -> bool {
 
 /// Maps the shadows and the region as one reservation, and builds the arena over it.
 ///
-/// The shadows come first so that the region's base is the highest of the four spans, which makes
+/// The shadows come first so that the region's base is the highest of the five spans, which makes
 /// each bias `shadow - region / granule * slot` and makes it a subtraction that a reader can
 /// check. A bias may still wrap, and [`Lifetime`] says so and does its arithmetic modularly.
 ///
-/// The order is the lifetime plane, the type plane, the type plane's side table, and then the
-/// region. That is half a byte per byte for each of the first three against the region's one, so
-/// the reservation is two and a half times what the program can allocate out of it. It is address
-/// space rather than memory: the mapping is anonymous, and a plane a program never touches never
-/// costs it a page.
+/// The order is the lifetime plane, the type plane, the type plane's side table, the init plane,
+/// and then the region. That is a quarter of a byte per byte for the first, half for each of the
+/// next two and an eighth for the last, so the reservation is a little under two and a half times
+/// what the program can allocate out of it. It is address space rather than memory: the mapping is
+/// anonymous, and a plane a program never touches never costs it a page.
 ///
 /// Called for the first allocation and again whenever every arena is out of room, so a program
 /// that needs eight gibibytes gets them a gibibyte at a time and a program that needs a kilobyte
@@ -465,11 +494,13 @@ fn reserve(want: usize) -> Option<Arena> {
     let under = shadow(len);
     let typed = typing(len);
     let sided = siding(len);
-    let planes = under.checked_add(typed)?.checked_add(sided)?;
+    let inited = initing(len);
+    let planes = under.checked_add(typed)?.checked_add(sided)?.checked_add(inited)?;
     let base = map(planes.checked_add(len)?)?;
     let region = base + planes;
     let origin = base.wrapping_sub(region / GRANULE * SLOT);
     let typing = (base + under).wrapping_sub(region / types::GRANULE * types::SLOT);
+    let initing = (base + under + typed + sided).wrapping_sub(region / crate::init::SPAN);
     // Published before the arena is handed back, so that the first instance the arena creates is
     // already visible to a check by the time anything could hold a pointer to it.
     //
@@ -481,6 +512,7 @@ fn reserve(want: usize) -> Option<Arena> {
     let watch = Watch {
         origin,
         typing,
+        initing,
         side: base + under + typed,
         room: (sided / types::ENTRY) as u32,
         base: region,
@@ -488,8 +520,8 @@ fn reserve(want: usize) -> Option<Arena> {
         class: Class::Allocated as u32,
     };
     // SAFETY: the mapping above is writable and is never handed back, the side table is the span
-    // between the type plane and the region and holds exactly the entries named here, and both
-    // biases were solved from the same `region` the bounds are written in.
+    // between the type plane and the init plane and holds exactly the entries named here, and all
+    // three biases were solved from the same `region` the bounds are written in.
     if !unsafe { publish(watch) } {
         return None;
     }
@@ -545,29 +577,63 @@ pub fn alloc(size: usize) -> *mut c_void {
     match HEAP.allocate(size) {
         0 => core::ptr::null_mut(),
         payload => {
-            untype(payload, Arena::sized(size));
+            begun(payload, Arena::sized(size));
             payload as *mut c_void
         }
     }
 }
 
-/// The other half of judgement J4: a fresh instance has no effective type.
+/// The other half of judgement J4: a fresh instance has no effective type and nothing has written
+/// it.
 ///
-/// C says allocated storage has no declared type and takes its type from the first store, so the
-/// plane has to forget what the previous occupant of these bytes was. Without this a block handed
+/// Two planes and one region lookup, because the two facts are the same fact said twice. C says
+/// allocated storage has no declared type and takes its type from the first store, so the type
+/// plane has to forget what the previous occupant of these bytes was: without that a block handed
 /// out again would still say what it said last time, and the first honest read of it would be
-/// reported as type confusion, which is the false positive that would make the plane unusable.
+/// reported as type confusion, which is the false positive that would make the plane unusable. The
+/// init plane says the same thing from the other side. The bytes hold whatever the previous
+/// occupant left, so a read of one before the program has stored anything there is document 03's
+/// Y6, and an instance beginning is the only moment anything knows a range has become storage.
 ///
 /// It is the whole block rather than the request. The bytes between the request and the end of the
 /// block are the allocator's rounding, they share granules with the request, and leaving them
 /// saying what they said before would turn an overflow inside a block into a type report instead of
 /// the bounds report it is.
-fn untype(payload: usize, block: usize) {
+fn begun(payload: usize, block: usize) {
     let Some(region) = covering(payload) else { return };
     let len = block.min(region.end - payload);
     // SAFETY: the range starts inside the region and is clipped to it, so the type plane covers
     // every granule of it.
     unsafe { region.types.set(payload, len, types::UNTYPED) }
+    // SAFETY: the same range, which the init plane covers for the same reason.
+    unsafe { region.init.forget(payload, len) }
+}
+
+/// What a fill or a copy the allocator itself performed leaves behind: those bytes hold what it
+/// wrote.
+///
+/// The allocator writes the program's storage in two places, and both of them are writes the
+/// program is entitled to read back. `calloc` zeroes what was asked for and `realloc` carries the
+/// old contents across, and without this the init plane would have just called both of those ranges
+/// unwritten and refused the read the program was about to make.
+///
+/// `src` is where the bytes came from when they came from somewhere, which is `realloc`, and the
+/// answer travels with them: a structure whose padding the program never filled is still a
+/// structure whose padding nothing filled after it has moved. A source in another region is marked
+/// as written rather than looked up, which is the same thinning `crate::check::carry` does for the
+/// type plane and is a lost check rather than a wrong answer.
+fn wrote(payload: usize, src: Option<usize>, len: usize) {
+    let Some(region) = covering(payload) else { return };
+    let len = len.min(region.end - payload);
+    if let Some(src) = src {
+        if region.holds(src) && region.holds(src.wrapping_add(len.saturating_sub(1))) {
+            // SAFETY: both ranges are inside the region, whose init plane covers every byte of it.
+            unsafe { region.init.copy(payload, src, len) };
+            return;
+        }
+    }
+    // SAFETY: the range starts inside the region and is clipped to it.
+    unsafe { region.init.set(payload, len) }
 }
 
 /// `free`: judgement J6, and then judgement J5.
@@ -631,6 +697,9 @@ pub fn alloc_zeroed(count: usize, size: usize) -> *mut c_void {
         // SAFETY: the arena just handed out an instance of at least `bytes` bytes at this address
         // and nothing else has a pointer to it yet.
         unsafe { core::ptr::write_bytes(payload as *mut u8, 0, bytes) };
+        // The zeroing is a store, and the whole point of `calloc` is that the program may read it
+        // back. The rounding past the request is left as the fresh storage it is.
+        wrote(payload as usize, None, bytes);
     }
     payload
 }
@@ -672,6 +741,9 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     // SAFETY: both are live instances of this arena, of at least `old` and `size` bytes, and they
     // do not overlap because the fresh one is not the old one.
     unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, fresh as *mut u8, old.min(size)) };
+    // The copy carries the old instance's answers, which is read before the old instance is ended
+    // rather than after, since ending it is what makes those bytes somebody else's to hand out.
+    wrote(fresh as usize, Some(payload), old.min(size));
     // SAFETY: as above, and the copy is done with it.
     unsafe { dealloc(ptr) };
     fresh
@@ -798,6 +870,13 @@ mod tests {
             unsafe { arena.version(ptr as usize) }
         })
         .expect("the address came out of an arena of ours")
+    }
+
+    /// Whether the init plane says every byte of a run of an instance has been written.
+    fn written(ptr: *mut c_void, offset: usize, len: usize) -> bool {
+        let region = covering(ptr as usize).expect("the address came out of a region of ours");
+        // SAFETY: the run is inside an instance this arena handed out, so the plane covers it.
+        unsafe { region.init.allows(ptr as usize + offset, len) }
     }
 
     #[test]
@@ -930,6 +1009,64 @@ mod tests {
         let gone = unsafe { realloc(ptr, 0) };
         assert!(gone.is_null());
         assert_ne!(version(ptr), held, "the instance is still live after a resize to nothing");
+    }
+
+    #[test]
+    fn a_fresh_instance_says_nothing_has_written_its_bytes() {
+        let _turn = turn();
+        // The other half of judgement J4, and the reason the init plane is mapped here rather than
+        // left to the compiler. A block handed out again holds what the last owner wrote, so a
+        // read of one of those bytes before this owner has stored anything is document 03's Y6,
+        // and an instance beginning is the only moment anything knows a range became storage.
+        let ptr = alloc(64);
+        assert!(!written(ptr, 0, 64));
+
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        let again = alloc(64);
+        assert_eq!(again, ptr, "the free list did not hand the address back");
+        assert!(!written(again, 0, 64), "a reused block came back saying it had been written");
+        // SAFETY: `again` is a live instance.
+        unsafe { dealloc(again) };
+    }
+
+    #[test]
+    fn calloc_says_it_wrote_what_it_zeroed_and_no_more() {
+        let _turn = turn();
+        // The zeroing is a store the program is entitled to read back, and without the judgement
+        // beside it the first read of a `calloc` would be refused on a program doing nothing
+        // wrong. The rounding past the request is not part of that bargain: it stays the fresh
+        // storage it is, so a write that overruns the request is still something a plane can see.
+        let ptr = alloc_zeroed(8, 8);
+        assert!(!ptr.is_null());
+        assert!(written(ptr, 0, 64));
+
+        // SAFETY: `ptr` came out of this allocator and is live.
+        let room = unsafe { usable(ptr) };
+        assert!(room >= 64);
+        if room > 64 {
+            assert!(!written(ptr, 64, room - 64), "the allocator's rounding was called written");
+        }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn realloc_carries_the_answers_of_the_bytes_it_moved() {
+        let _turn = turn();
+        // A resize is two instances, so the fresh one starts with nothing written and the bytes
+        // the copy brought across have to arrive saying what they said where they came from.
+        // Otherwise every program that grows a buffer is refused on the first read after it grew.
+        let old = alloc_zeroed(8, 8);
+        assert!(written(old, 0, 64));
+
+        // SAFETY: `old` is a live instance of this allocator.
+        let new = unsafe { realloc(old, 256) };
+        assert!(!new.is_null());
+        assert!(written(new, 0, 64), "the copy lost what the bytes it read said");
+        assert!(!written(new, 64, 192), "the storage the growth added was called written");
+        // SAFETY: `new` is a live instance.
+        unsafe { dealloc(new) };
     }
 
     #[test]

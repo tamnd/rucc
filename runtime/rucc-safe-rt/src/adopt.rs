@@ -48,6 +48,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::alloc;
 use crate::fail::Judgement;
+use crate::init;
 use crate::plane::{self, Counter, GRANULE, SLOT, Version};
 use crate::types;
 
@@ -94,29 +95,36 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
     if hi <= lo || alloc::overlaps(lo, hi) {
         return false;
     }
-    // Both planes and the side table in one mapping, in the order `alloc::reserve` puts them, so
-    // that an adopted region is watched exactly as closely as one this crate reserved itself. A
-    // region that cannot have all three is not taken on at all, which is the same answer the three
+    // All three planes and the side table in one mapping, in the order `alloc::reserve` puts them,
+    // so that an adopted region is watched exactly as closely as one this crate reserved itself. A
+    // region that cannot have all four is not taken on at all, which is the same answer the three
     // refusals above give and leaves the storage where it was.
     let len = hi - lo;
     let under = alloc::shadow(len);
     let typed = alloc::typing(len);
     let sided = alloc::siding(len);
-    let Some(planes) = under.checked_add(typed).and_then(|at| at.checked_add(sided)) else {
+    let inited = alloc::initing(len);
+    let Some(planes) = under
+        .checked_add(typed)
+        .and_then(|at| at.checked_add(sided))
+        .and_then(|at| at.checked_add(inited))
+    else {
         return false;
     };
     let Some(shadow) = alloc::map(planes) else { return false };
     let watch = alloc::Watch {
         origin: shadow.wrapping_sub(lo / GRANULE * SLOT),
         typing: (shadow + under).wrapping_sub(lo / types::GRANULE * types::SLOT),
+        initing: (shadow + under + typed + sided).wrapping_sub(lo / init::SPAN),
         side: shadow + under + typed,
         room: (sided / types::ENTRY) as u32,
         base: lo,
         end: hi,
         class,
     };
-    // SAFETY: the mapping is writable and is never handed back, its three spans are laid out by
-    // the arithmetic just above, and both biases were solved from the same `lo` the bounds carry.
+    // SAFETY: the mapping is writable and is never handed back, its four spans are laid out by
+    // the arithmetic just above, and all three biases were solved from the same `lo` the bounds
+    // carry.
     unsafe { alloc::publish(watch) }
 }
 
@@ -172,6 +180,12 @@ pub unsafe fn split(base: *mut c_void, size: usize, flags: u32) {
     //
     // SAFETY: the same range, which the type plane covers for the same reason.
     unsafe { region.types.set(lo, len, types::UNTYPED) };
+    // And the same again for the init plane. The bytes hold whatever the previous occupant left
+    // behind, so a read of one before this instance has stored anything there is document 03's Y6,
+    // and this is the moment the monitor knows the range has become storage.
+    //
+    // SAFETY: as above.
+    unsafe { region.init.forget(lo, len) };
 }
 
 /// Judgement J5: the instance at `base` is over and its storage goes back to the region.
