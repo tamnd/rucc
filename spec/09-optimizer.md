@@ -128,6 +128,10 @@ What consumes them: inlining (hot call sites get a much larger budget), block la
 
 A sampling-based mode using `perf` data, in the AutoFDO style, is post-1.0 and recorded in document 19.
 
+None of this exists yet, and the flags arrived ahead of it. Section 4.7 of document 04 says where the line fell and why: the half of the family that asks to read a profile is taken and recorded on the session, and the half that asks to write one is refused by name, because ignoring the first gives a correct program that is slower than it could have been and ignoring the second means the counts are never gathered at all. `Options::profile_data` is where the answer waits, and this section is what will read it.
+
+One thing has to be settled before that happens, and it is the same kind of question `-flto=thin` is two sections up. The counters described above have to be written somewhere and read back from somewhere, and the two answers are a format of this compiler's own and gcc's `.gcda`. The second is the only one that lets a project train with gcc and build with this compiler, or the other way round, which is what a distribution comparing two compilers on one package actually does; the first is less work and cannot be checked against anything. Whichever it is, `-fprofile-dir=` and `-fprofile-abs-path` already say where the files go and under what name, so the decision is about the bytes in them rather than about the flags.
+
 ## 9.10 The pass manager, and the rules for passes
 
 The pass manager is deliberately boring: a fixed, printed sequence per level, with analyses computed on demand and invalidated by a declared dependency set per pass. No adaptive pass ordering, no pass scheduling heuristics. Predictability is worth more than the last percent, and document 03's determinism rule requires it.

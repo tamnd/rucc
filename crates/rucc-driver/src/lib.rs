@@ -201,6 +201,7 @@ options:
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu|zstd] -gno-split-dwarf   compress debug sections, one file not two
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
+  -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
@@ -990,6 +991,91 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `spec/09-optimizer.md` has this driver doing that work itself and never loading a
             // plugin into anybody, so neither answer is a question it has to hold.
             "-fuse-linker-plugin" | "-fno-use-linker-plugin" => {}
+            // Reading a profile back. Taken for the reason the family above it is: nothing here
+            // reads one, so a build that asks gets the program it would have got anyway, and gcc
+            // itself produces a byte for byte identical object from `-fprofile-use` when there are
+            // no counts beside the file. The path is recorded for the pass that will read it. The
+            // warning gcc prints when it looked and found nothing is deliberately not copied,
+            // because nothing here looks, and a warning about a file that was never opened would
+            // fire on the builds that have a perfectly good profile as well as on the ones that
+            // do not.
+            "-fprofile-use" => opts.profile_data.requested = true,
+            "-fno-profile-use" => opts.profile_data.requested = false,
+            _ if arg.starts_with("-fprofile-use=") => {
+                opts.profile_data.path = Some(arg["-fprofile-use=".len()..].to_string());
+                opts.profile_data.requested = true;
+            }
+            _ if arg.starts_with("-fprofile-dir=") => {
+                opts.profile_data.dir = Some(arg["-fprofile-dir=".len()..].to_string());
+            }
+            "-fprofile-abs-path" => opts.profile_data.absolute = true,
+            "-fno-profile-abs-path" => opts.profile_data.absolute = false,
+            "-fprofile-correction" => opts.profile_data.correction = true,
+            "-fno-profile-correction" => opts.profile_data.correction = false,
+            "-fprofile-partial-training" => opts.profile_data.partial_training = true,
+            "-fno-profile-partial-training" => opts.profile_data.partial_training = false,
+            // Writing the counts rather than reading them, which is refused rather than taken and
+            // is the same line `-gsplit-dwarf` falls on the far side of. Ignoring these means a
+            // file a build declared as an output never appears: the instrumented program writes a
+            // `.gcda` as it exits and `-ftest-coverage` writes a `.gcno` beside the object, and a
+            // two stage build that got neither would go on to optimize against no counts at all
+            // and report coverage of nothing, with nothing along the way saying so. The objects
+            // say the rest: gcc's `-fprofile-generate` object holds 375 bytes of code where a
+            // plain one holds 71, and 296 bytes of counters that a plain one does not have, so
+            // this is a flag that changes the output rather than a hint about speed.
+            "-fprofile-arcs"
+            | "--coverage"
+            | "-fcondition-coverage"
+            | "-fpath-coverage"
+            | "-fprofile-generate" => {
+                return Err(err(format!(
+                    "{arg}: this compiler does not instrument for profiling, and a build that \
+                     expects the counts a run of the instrumented program writes would optimize \
+                     against nothing on its second pass, see spec/04-driver-and-cli.md"
+                )));
+            }
+            _ if arg.starts_with("-fprofile-generate=") => {
+                return Err(err(format!(
+                    "{arg}: this compiler does not instrument for profiling, and a build that \
+                     expects the counts a run of the instrumented program writes would optimize \
+                     against nothing on its second pass, see spec/04-driver-and-cli.md"
+                )));
+            }
+            "-ftest-coverage" => {
+                return Err(err(format!(
+                    "{arg}: this compiler writes no `.gcno` file beside the object, and a build \
+                     that expects one would wait for a file that never arrives, see \
+                     spec/04-driver-and-cli.md"
+                )));
+            }
+            // The rest of the family describes instrumentation that is refused above, so what is
+            // left to do with them is check them and drop them. They are checked because a
+            // misspelling in a distribution's flags is worth finding here rather than on the day
+            // the instrumentation lands, and dropped because there is nothing for an answer about
+            // how a counter is written to be an answer about.
+            _ if arg.starts_with("-fprofile-update=") => {
+                let how = &arg["-fprofile-update=".len()..];
+                if !matches!(how, "single" | "atomic" | "prefer-atomic") {
+                    return Err(err(format!(
+                        "`{how}` is not a profile update method, which is single, atomic or \
+                         prefer-atomic"
+                    )));
+                }
+            }
+            _ if arg.starts_with("-fprofile-reproducible=") => {
+                let how = &arg["-fprofile-reproducible=".len()..];
+                if !matches!(how, "serial" | "parallel-runs" | "multithreaded") {
+                    return Err(err(format!(
+                        "`{how}` is not a profile reproducibility method, which is serial, \
+                         parallel-runs or multithreaded"
+                    )));
+                }
+            }
+            "-fprofile-values" | "-fno-profile-values" | "-fprofile-info-section" => {}
+            "-fno-test-coverage" | "-fno-profile-arcs" | "-fno-profile-generate" => {}
+            _ if arg.starts_with("-fprofile-filter-files=")
+                || arg.starts_with("-fprofile-exclude-files=")
+                || arg.starts_with("-fprofile-note=") => {}
             // What every name gets when nothing in the source said, which the attribute in the
             // source overrides rather than the other way round. Before the optimizer's `-f`
             // family below for the reason the tier below it is.
@@ -3724,6 +3810,95 @@ mod tests {
         }
     }
 
+    /// The profile family, which is the only one here that splits down the middle.
+    ///
+    /// Reading a profile is taken and writing one is refused, and the line between them is the one
+    /// section 4.1 draws: ignoring a request to read the counts gives a correct program that is
+    /// slower than it could have been, and ignoring a request to write them means a file the build
+    /// declared as an output never appears.
+    #[test]
+    fn reading_a_profile_is_taken_and_writing_one_is_refused() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.profile_data.requested, "nothing asks unless the command line does");
+        assert_eq!(opts.profile_data.path, None);
+
+        let (opts, _) = compile(&["-fprofile-use", "-c", "a.c"]);
+        assert!(opts.profile_data.requested);
+        assert_eq!(opts.profile_data.path, None, "beside the object, the way gcc looks");
+
+        let (opts, _) = compile(&["-fprofile-use=/counts", "-c", "a.c"]);
+        assert!(opts.profile_data.requested, "naming a path asks for it too");
+        assert_eq!(opts.profile_data.path.as_deref(), Some("/counts"));
+
+        // The last of the two directions wins, the same as every other pair of `-f` spellings.
+        assert!(
+            !compile(&["-fprofile-use", "-fno-profile-use", "-c", "a.c"]).0.profile_data.requested
+        );
+        assert!(
+            compile(&["-fno-profile-use", "-fprofile-use", "-c", "a.c"]).0.profile_data.requested
+        );
+
+        // The rest of the reading half, which is where the files are and three answers about what
+        // to make of what is in them.
+        let (opts, _) = compile(&[
+            "-fprofile-dir=/build/profiles",
+            "-fprofile-abs-path",
+            "-fprofile-correction",
+            "-fprofile-partial-training",
+            "-c",
+            "a.c",
+        ]);
+        assert_eq!(opts.profile_data.dir.as_deref(), Some("/build/profiles"));
+        assert!(opts.profile_data.absolute);
+        assert!(opts.profile_data.correction);
+        assert!(opts.profile_data.partial_training);
+
+        // Writing one, which is refused by name. The first four instrument the program and the
+        // last writes a file beside the object, and a build that got neither and no message would
+        // go on to optimize against counts that were never gathered.
+        for writing in [
+            "-fprofile-generate",
+            "-fprofile-generate=/build/profiles",
+            "-fprofile-arcs",
+            "--coverage",
+            "-fcondition-coverage",
+            "-fpath-coverage",
+        ] {
+            let failed = refused(&[writing, "-c", "a.c"]);
+            assert!(failed.contains("instrument"), "{writing}: {failed}");
+        }
+        assert!(refused(&["-ftest-coverage", "-c", "a.c"]).contains(".gcno"), "it names the file");
+
+        // The negative spellings of the refused half are what already happens, so they are taken.
+        for taken in ["-fno-profile-generate", "-fno-profile-arcs", "-fno-test-coverage"] {
+            let (opts, _) = compile(&[taken, "-c", "a.c"]);
+            assert!(!opts.profile_data.requested, "{taken} asks for nothing");
+        }
+
+        // And the flags that describe the instrumentation that is refused above, which are checked
+        // and dropped. Checked because a typo is worth finding here rather than on the day the
+        // instrumentation lands.
+        for taken in [
+            "-fprofile-update=single",
+            "-fprofile-update=atomic",
+            "-fprofile-update=prefer-atomic",
+            "-fprofile-reproducible=serial",
+            "-fprofile-reproducible=parallel-runs",
+            "-fprofile-reproducible=multithreaded",
+            "-fprofile-values",
+            "-fno-profile-values",
+            "-fprofile-info-section",
+            "-fprofile-filter-files=a.c",
+            "-fprofile-exclude-files=b.c",
+            "-fprofile-note=a.gcno",
+        ] {
+            let (opts, _) = compile(&[taken, "-c", "a.c"]);
+            assert!(!opts.profile_data.requested, "{taken} says nothing about reading one");
+        }
+        assert!(refused(&["-fprofile-update=none", "-c", "a.c"]).contains("update method"));
+        assert!(refused(&["-fprofile-reproducible=any", "-c", "a.c"]).contains("reproducibility"));
+    }
+
     #[test]
     fn the_levels_gcc_spells_differently_are_the_levels_they_mean() {
         assert_eq!(compile(&["-O", "-c", "a.c"]).0.opt_level, OptLevel::O1);
@@ -4132,7 +4307,9 @@ mod tests {
         // one is the root all of them are under. The one it went up by last is what is inside that
         // root and where each of it came from, which is a question about a whole tree rather than
         // about a path and which is long enough on its own that it could not have shared a line with
-        // anything.
-        assert!(USAGE.lines().count() < 67, "usage text has grown past one screen");
+        // anything. The one it went up by last is the profile family, which splits down the middle
+        // where no other family here does, so the line has to name the half that is taken and the
+        // half that is refused or it would be read as taking both.
+        assert!(USAGE.lines().count() < 68, "usage text has grown past one screen");
     }
 }
