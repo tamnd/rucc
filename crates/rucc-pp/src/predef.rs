@@ -311,7 +311,26 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     d.flag("__STDC_UTF_32__");
     d.flag("__STDC_IEC_559__");
     d.flag("__STDC_IEC_559_COMPLEX__");
-    d.set_if(opts.std == Std::C23, "__STDC_IEC_60559_BFP__", "202311L");
+    // TS 18661-1's date, in every dialect, which is gcc 16's answer rather than the standard's.
+    // C23 folded that document into Annex F and gave the macro a date of its own, so 202311L is
+    // the value C23 asks for, and writing it is what a reading of the standard alone produces.
+    // It also breaks every translation unit that reaches glibc. `<stdc-predef.h>` is included
+    // ahead of the first line of the file and defines this name as 201404L whenever
+    // `__GCC_IEC_559` is positive, which it is here, so a different value is a redefinition with
+    // a different body and that is a diagnostic on a line the program never wrote. The cost is
+    // not only noise: sqlite's configure runs its feature tests through autosetup's `cctest
+    // -nooutput 1`, which reads any output at all as a failed test, and the readline completion
+    // test failed for no other reason than this warning.
+    d.set("__STDC_IEC_60559_BFP__", "201404L");
+    // The same date for the complex half, which is the other name `<stdc-predef.h>` writes and
+    // which was missing here. Withholding it looked like the careful answer and was not one, for
+    // two reasons. `__STDC_NO_COMPLEX__` is defined, so there is no complex arithmetic for the
+    // claim to be about and a program that reads one of these has already been told there is
+    // none. And the library makes the claim anyway: the `#else` in `<stdc-predef.h>` is reached
+    // by a compiler that says nothing about its intent, and it presumes an older compiler that
+    // meant yes. Saying nothing therefore does not withhold anything, it only makes the value
+    // arrive from somewhere else.
+    d.set("__STDC_IEC_60559_COMPLEX__", "201404L");
     d.set("__STDC_ISO_10646__", "201706L");
     // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
     // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
@@ -1031,11 +1050,15 @@ const fn characteristics(format: Format) -> &'static Characteristics {
 /// so gcc defines nothing for it and neither does this.
 fn floats(d: &mut Defs, target: &TargetInfo) {
     d.set("__FLT_RADIX__", "2");
-    // Real arithmetic follows IEC 60559 in every format on every target here, which is what
-    // the value two says. Not `__GCC_IEC_559_COMPLEX`, which is the same claim about complex
-    // arithmetic and would not be true: multiplication and division of complex values are not
-    // lowered yet, and Annex G is mostly about what those two do with an infinity.
+    // Real arithmetic follows IEC 60559 in every format on every target here, which is what the
+    // value two says. The complex one beside it says the same about complex arithmetic, and gcc
+    // gives both the value two on every target this compiler has. These two are read rather than
+    // tested: glibc's `<stdc-predef.h>` asks what the compiler intended and writes the
+    // `__STDC_IEC_559` family from the answer, and a compiler that says nothing is presumed to
+    // have meant yes. So the choice is not between claiming and not claiming, it is between
+    // saying so and having it said for us.
     d.set("__GCC_IEC_559", "2");
+    d.set("__GCC_IEC_559_COMPLEX", "2");
     // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
     // and RISC-V floating units all do. The other two names are the same answer asked under the
     // rules of C99 and of TS 18661-3, which are the same rules for a target with no excess
@@ -1287,6 +1310,7 @@ mod tests {
             "#define __REGISTER_PREFIX__ ",
             "#define __FINITE_MATH_ONLY__ 0",
             "#define __GCC_IEC_559 2",
+            "#define __GCC_IEC_559_COMPLEX 2",
             "#define __GCC_CONSTRUCTIVE_SIZE 64",
             "#define __GCC_DESTRUCTIVE_SIZE 64",
             "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1",
@@ -1301,9 +1325,6 @@ mod tests {
         ] {
             assert!(has(&linux, line), "{line}");
         }
-        // The complex half of the IEC 60559 claim is not made, because complex multiplication
-        // and division are not lowered and Annex G is mostly about what those two do.
-        assert!(!linux.contains("__GCC_IEC_559_COMPLEX"));
         // The five that are the processor's rather than the compiler's stay on the processor.
         let arm = set_for("aarch64-unknown-linux-gnu");
         for name in ["__ATOMIC_HLE_ACQUIRE", "__FXSR__", "__MMX_WITH_SSE__", "__code_model_small__"]
@@ -1480,6 +1501,25 @@ mod tests {
         for older in [Std::C17, Std::C11, Std::C99, Std::C89] {
             opts.std = older;
             assert!(!built_in(&target, &opts).contains("__CHAR8_TYPE__"), "{older:?}");
+        }
+    }
+
+    /// glibc's `<stdc-predef.h>` is read before the first line of every translation unit and
+    /// writes `#define __STDC_IEC_60559_BFP__ 201404L` whenever `__GCC_IEC_559` is positive.
+    /// Any other value here is a redefinition with a different body, which is a warning the
+    /// program did not ask for and which a configure script reads as a failed feature test.
+    #[test]
+    fn the_ieee_annex_macro_carries_the_value_glibcs_own_header_writes() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let mut opts = Predef::new();
+        for std in [Std::C23, Std::C17, Std::C11, Std::C99, Std::C89] {
+            opts.std = std;
+            let set = built_in(&target, &opts);
+            assert!(has(&set, "#define __STDC_IEC_60559_BFP__ 201404L"), "{std:?}");
+            assert!(has(&set, "#define __STDC_IEC_60559_COMPLEX__ 201404L"), "{std:?}");
+            // The two the library reads to decide whether to write the four above itself.
+            assert!(has(&set, "#define __GCC_IEC_559 2"), "{std:?}");
+            assert!(has(&set, "#define __GCC_IEC_559_COMPLEX 2"), "{std:?}");
         }
     }
 
