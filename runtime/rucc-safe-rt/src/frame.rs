@@ -36,15 +36,12 @@
 //!
 //! The spec costs this at one thread local access per call, and that is what generated code will
 //! eventually do: the frame is a thread local symbol and reaching it is an add to the thread
-//! pointer. What is here is a call to a function that does the access, because the attribute that
-//! gives a `#![no_std]` Rust crate a thread local of its own is not stable, and because until the
-//! compiler emits the access there is nothing to be faster than. The shape of the frame is the part
-//! that has to be right now, since it is an ABI and the two halves have to agree about it.
-
-use core::ffi::c_void;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+//! pointer. What is here is a call to a function that does the access, for the reason
+//! [`crate::tls`] gives. The shape of the frame is the part that has to be right now, since it is
+//! an ABI and the two halves have to agree about it.
 
 use crate::layout::Cap;
+use crate::tls::Slot;
 
 /// How many arguments a frame carries capabilities for.
 ///
@@ -106,29 +103,17 @@ impl Frame {
     }
 }
 
-/// What the platform calls a `pthread_key_t`.
-///
-/// The one place this module is not the same everywhere. Apple's is an `unsigned long` and
-/// everybody else's is an `unsigned int`, and getting it wrong means `pthread_key_create` writing
-/// eight bytes into four.
-#[cfg(target_vendor = "apple")]
-type Key = core::ffi::c_ulong;
-/// See the Apple arm above.
-#[cfg(not(target_vendor = "apple"))]
-type Key = core::ffi::c_uint;
-
 /// Where this thread's innermost published frame is.
 ///
-/// `pthread_getspecific` rather than a thread local variable, for the reason the module comment
-/// gives. The value is a `*mut Frame` that points into the publishing function's own stack frame,
-/// which is why taking one unlinks it: the storage stops being a frame the moment that function
-/// returns.
+/// A thread local slot rather than a variable, for the reason the module comment gives. The value
+/// is a `*mut Frame` that points into the publishing function's own stack frame, which is why
+/// taking one unlinks it: the storage stops being a frame the moment that function returns.
+static FRAMES: Slot = Slot::new();
+
+/// This thread's innermost published frame, or null.
 #[must_use]
 pub fn current() -> *mut Frame {
-    let Some(key) = key() else { return core::ptr::null_mut() };
-    // SAFETY: the key was made by `pthread_key_create` and never deleted, and the only values ever
-    // stored under it are the frame pointers below.
-    unsafe { pthread_getspecific(key) }.cast()
+    FRAMES.get().cast()
 }
 
 /// Makes `frame` the one the next instrumented callee will read.
@@ -142,7 +127,6 @@ pub fn current() -> *mut Frame {
 /// nothing else publishes it in the meantime. In practice it is a local of the calling function,
 /// which is exactly as long lived as that.
 pub unsafe fn publish(frame: *mut Frame) {
-    let Some(key) = key() else { return };
     if frame.is_null() {
         return;
     }
@@ -151,8 +135,9 @@ pub unsafe fn publish(frame: *mut Frame) {
         (*frame).magic = MAGIC;
         (*frame).outer = current();
     }
-    // SAFETY: as in `current`, and the pointer stored is the caller's own frame.
-    unsafe { pthread_setspecific(key, frame.cast()) };
+    // SAFETY: the caller says the frame outlives the call it is published for, which is every read
+    // of it.
+    unsafe { FRAMES.set(frame.cast()) };
 }
 
 /// The frame this call was given, if it was given one, and unlinks it either way.
@@ -202,60 +187,9 @@ pub fn clear() {
 
 /// The store behind [`clear`] and [`restore_to`].
 fn restore(frame: *mut Frame) {
-    let Some(key) = key() else { return };
-    // SAFETY: as in `current`.
-    unsafe { pthread_setspecific(key, frame.cast()) };
-}
-
-/// The key the frame pointer is stored under, made once for the program.
-///
-/// `None` when the key could not be made, which is a process that has run out of them. Everything
-/// above degrades to no frame, so the program keeps running with every argument recovered, which is
-/// the weaker answer rather than the wrong one.
-fn key() -> Option<Key> {
-    /// Not made yet.
-    const COLD: u32 = 0;
-    /// Being made by another thread right now.
-    const MAKING: u32 = 1;
-    /// Made, and `KEY` holds it.
-    const MADE: u32 = 2;
-    /// Could not be made, and asking again would not help.
-    const FAILED: u32 = 3;
-
-    static STATE: AtomicU32 = AtomicU32::new(COLD);
-    static KEY: AtomicUsize = AtomicUsize::new(0);
-
-    loop {
-        match STATE.load(Ordering::Acquire) {
-            MADE => return Some(KEY.load(Ordering::Relaxed) as Key),
-            FAILED => return None,
-            MAKING => core::hint::spin_loop(),
-            _ => {
-                if STATE
-                    .compare_exchange(COLD, MAKING, Ordering::Acquire, Ordering::Relaxed)
-                    .is_err()
-                {
-                    continue;
-                }
-                let mut made: Key = 0;
-                // SAFETY: the pointer is to a local this call fills in, and no destructor is
-                // wanted: the frame points into a stack that is going away with the thread.
-                let failed = unsafe { pthread_key_create(&raw mut made, core::ptr::null_mut()) };
-                if failed == 0 {
-                    KEY.store(made as usize, Ordering::Relaxed);
-                    STATE.store(MADE, Ordering::Release);
-                } else {
-                    STATE.store(FAILED, Ordering::Release);
-                }
-            }
-        }
-    }
-}
-
-unsafe extern "C" {
-    fn pthread_key_create(key: *mut Key, dtor: *mut c_void) -> i32;
-    fn pthread_getspecific(key: Key) -> *mut c_void;
-    fn pthread_setspecific(key: Key, value: *const c_void) -> i32;
+    // SAFETY: null says there is no frame, and a frame this is called with is the caller's to keep
+    // alive, which is what `restore_to` asks of them.
+    unsafe { FRAMES.set(frame.cast()) };
 }
 
 /// The names generated code is compiled against.
@@ -377,7 +311,7 @@ mod tests {
         stale.argc = 2;
         stale.args[0] = cap(4096, 2);
         // SAFETY: the local outlives the read below.
-        unsafe { pthread_setspecific(key().expect("a key"), (&raw mut stale).cast()) };
+        unsafe { FRAMES.set((&raw mut stale).cast()) };
         assert!(take().is_none());
         clear();
     }
