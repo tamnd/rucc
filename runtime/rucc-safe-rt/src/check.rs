@@ -139,6 +139,19 @@ pub unsafe fn bounds(
 /// address that has since been given to somebody else, and that is caught by S2 the moment a
 /// capability carries a version.
 ///
+/// When the freeing was another thread's and nothing orders it against this access, the report says
+/// so and names both of them. That is document 03's C4, the use after free a race produced rather
+/// than one thread's own mistake, and the two are worth telling apart: a single threaded use after
+/// free is a lifetime the author got wrong, and this one is a lifetime that was right on both
+/// threads and wrong between them, which is a different thing to go and fix. The stamp comes from
+/// the epoch plane, which `crate::alloc::over` fills with the freeing thread's stamp as the
+/// instance ends, and it is read here rather than compared in the allocator because the second half
+/// of the pair is the accessing thread and the allocator has not met it.
+///
+/// A free this thread is ordered against reports the way it always did. That covers the ordinary
+/// case, where the same thread freed and then read, and it also covers a free another thread made
+/// behind a lock this one then took, which is a program with one bug in it rather than two.
+///
 /// # Panics
 ///
 /// As [`bounds`].
@@ -149,10 +162,19 @@ pub unsafe fn bounds(
 pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
-    if !plane::owned(owner(&region, addr)) {
-        // SAFETY: as in `bounds`.
-        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    if plane::owned(owner(&region, addr)) {
+        return;
     }
+    let mine = crate::epoch::here();
+    // SAFETY: the address is inside the region, whose epoch plane covers every byte of it.
+    let found = unsafe { region.epochs.read(addr) };
+    if mine != crate::epoch::NONE && crate::epoch::unordered(found, mine) {
+        // SAFETY: as in `bounds`, and neither stamp is an address.
+        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
+        return;
+    }
+    // SAFETY: as in `bounds`.
+    unsafe { crate::fail::report(descriptor, Some(addr)) }
 }
 
 /// Judgement J2: a pointer computed from another pointer did not leave the object it came from.
@@ -446,6 +468,11 @@ pub unsafe fn stamped(addr: *const c_void, size: usize) {
 /// The thinning is the same one `stamped` makes from the recording side and it goes the same way:
 /// such a thread is not watched rather than reported on.
 ///
+/// Storage nobody owns passes, the way a base that owns nothing passes in [`deriv`]. The bytes are
+/// freed or were never handed out, [`live`] is the judgement that says so, and since a free now
+/// leaves the freeing thread's stamp behind this would otherwise find it and report the same bug a
+/// second time under a different number. What [`live`] does with that stamp is document 03's C4.
+///
 /// # Panics
 ///
 /// As [`bounds`].
@@ -456,6 +483,9 @@ pub unsafe fn stamped(addr: *const c_void, size: usize) {
 pub unsafe fn raced(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
+    if !plane::owned(owner(&region, addr)) {
+        return;
+    }
     let mine = crate::epoch::here();
     if mine == crate::epoch::NONE {
         return;
@@ -464,7 +494,7 @@ pub unsafe fn raced(addr: *const c_void, size: usize, descriptor: *const Descrip
     let found = unsafe { region.epochs.stranger(addr, clipped(&region, addr, size), mine) };
     if found != crate::epoch::NONE {
         // SAFETY: as in `bounds`, and neither stamp is an address.
-        unsafe { crate::fail::report_race(descriptor, addr, found, mine) }
+        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
     }
 }
 
@@ -958,10 +988,9 @@ mod tests {
     #[test]
     fn a_store_records_which_thread_wrote_it_and_a_fresh_instance_remembers_nobody() {
         let _turn = turn();
-        // The whole of what the epoch plane does today. Nothing reads it yet, so what this is
-        // about is the plane being kept: a store lands in it, the granules the store did not touch
-        // stay empty, and an instance beginning forgets whoever wrote these bytes when they were
-        // somebody else's, which is the report the next occupant would otherwise be in.
+        // The recording half on its own: a store lands in the plane, the granules the store did
+        // not touch stay empty, and an instance beginning forgets whoever wrote these bytes when
+        // they were somebody else's, which is the report the next occupant would otherwise be in.
         let ptr = alloc(64);
         assert_eq!(stamp_at(at(ptr, 0)), crate::epoch::NONE, "nobody has written it");
 
@@ -1035,6 +1064,39 @@ mod tests {
         assert!(!refused(|| raced(at(second, 0), 8)));
         // SAFETY: as above.
         unsafe { dealloc(second) };
+    }
+
+    #[test]
+    fn a_free_leaves_the_freeing_thread_over_the_bytes_it_ended() {
+        let _turn = turn();
+        // The recording half of document 03's C4. The lifetime plane says the storage is over and
+        // cannot say whose doing that was, so the epoch plane carries the answer, and it is what a
+        // later access from another thread is compared against.
+        let ptr = alloc(64);
+        let before = crate::epoch::clock(crate::epoch::here());
+        // SAFETY: the address `alloc` handed back, which is what `free` takes.
+        unsafe { dealloc(ptr) };
+
+        let left = stamp_at(at(ptr, 0));
+        assert_eq!(crate::epoch::thread(left), crate::epoch::thread(crate::epoch::here()));
+        assert!(crate::epoch::clock(left) > before, "a free counts a step like any other store");
+        assert_eq!(stamp_at(at(ptr, 56)), left, "the whole block, not the first word of it");
+    }
+
+    #[test]
+    fn storage_nobody_owns_is_a_lifetime_question_rather_than_a_race_one() {
+        let _turn = turn();
+        // One bug gets one report. A free now leaves a stamp behind, so a stranger's stamp over
+        // dead storage is something the race check would find, and it steps aside because the
+        // liveness check is already going to say the same thing under the number it belongs to.
+        let ptr = alloc(64);
+        // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+        let ahead = crate::epoch::clock(crate::epoch::here()) + 1;
+        written_by(at(ptr, 0), crate::epoch::stamp(somebody_else(), ahead));
+
+        assert!(!refused(|| raced(at(ptr, 0), 8)), "not this judgement's to report");
+        assert!(refused(|| live(at(ptr, 0))), "and the one it is left to still reports it");
     }
 
     #[test]

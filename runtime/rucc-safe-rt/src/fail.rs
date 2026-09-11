@@ -205,12 +205,16 @@ pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, ba
     judge(&row, &crate::report::Facts { site: None, addr, base, witness: None }, id);
 }
 
-/// The same, and says which other thread's write the access raced with.
+/// The same, and says which other thread the access ran against.
 ///
-/// Only judgement J9 has a second thread, and only J9 calls this. It is separate from [`report`]
-/// for the reason [`report_from`] is: a race report's whole content is the pair, an address on its
-/// own says which word and not who else touched it, and a caller holding the other thread's stamp
-/// should have to say so rather than dropping it.
+/// Two judgements have a second thread and both of them call this. J9 is a word another thread
+/// wrote, and J1 is storage another thread freed, which is document 03's C4. It is separate from
+/// [`report`] for the reason [`report_from`] is: what makes either report worth reading is the
+/// pair, an address on its own says which byte and not who else touched it, and a caller holding
+/// the other thread's stamp should have to say so rather than dropping it.
+///
+/// Which judgement it is comes from the descriptor, as everywhere else. This function does not
+/// assume J9 just because it is the one that named the plane first.
 ///
 /// # Panics
 ///
@@ -219,7 +223,7 @@ pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, ba
 /// # Safety
 ///
 /// As [`report`]. The address is not read through and neither stamp is one.
-pub unsafe fn report_race(
+pub unsafe fn report_witness(
     descriptor: *const Descriptor,
     addr: usize,
     found: crate::epoch::Stamp,
@@ -227,7 +231,7 @@ pub unsafe fn report_race(
 ) {
     // A null descriptor reads as one that says nothing, for the reason `report_from` gives.
     let row = if descriptor.is_null() {
-        Descriptor { judgement: Judgement::Race as u8, class: 0, size: 0, pc: 0 }
+        Descriptor { judgement: 0, class: 0, size: 0, pc: 0 }
     } else {
         // SAFETY: the caller says this is the address of a descriptor the compiler emitted.
         unsafe { descriptor.read() }

@@ -82,9 +82,14 @@
 //! apart from J1 for the reason J8 is numbered apart: it is a relation between two operations rather
 //! than a property of one. It covers C2 and C3, which are the same comparison looked at from the
 //! load side and the store side, and it names both threads in the report, because an address on its
-//! own says which word raced and not who else was in it. C1, the torn store, is the one class left,
-//! and it waits on the aux slot, since what it compares is a pointer word's stamp against the stamp
-//! its capability was written at and there is nowhere yet for the second of those to live.
+//! own says which word raced and not who else was in it. C4 is answered from the same plane without
+//! a check of its own: [`alloc`] stamps an instance's bytes with the freeing thread as it ends, so
+//! the use after free [`check`] already refuses can say whether the free was another thread's and
+//! whether anything ordered it against the access, which is the difference between a lifetime one
+//! author got wrong and a lifetime two threads got wrong between them. C1, the torn store, is the
+//! one class left, and it waits on the aux slot, since what it compares is a pointer word's stamp
+//! against the stamp its capability was written at and there is nowhere yet for the second of those
+//! to live.
 //!
 //! The compiler's half is what is missing. No generated code calls `__rucc_meta_epoch` or
 //! `__rucc_check_race`, so a program's plane is empty unless the C library wrappers filled it, and
