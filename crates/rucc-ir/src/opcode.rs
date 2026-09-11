@@ -292,6 +292,17 @@ pub enum Opcode {
     /// makes a structure filled member by member and then copied whole still have padding nothing
     /// wrote, which is the infoleak the plane is for.
     MetaInitCopy,
+    /// This thread wrote a range, at whatever step of its own counting it has reached.
+    ///
+    /// The epoch plane's only write, from `spec/safe-memory/09-type-init-and-races.md` section 9.5.
+    /// Two operands like the other plane writes, and the range is a pointer shaped slot rather than
+    /// whatever the access covered: the plane holds one stamp per eight bytes because that is what
+    /// a pointer comes in, and a granule two threads share is one holding no pointer.
+    ///
+    /// It carries no thread and no count. Which thread is running and how far it has counted are
+    /// both facts about the moment the program reaches this, so the runtime reads them and nothing
+    /// here could name them.
+    MetaEpoch,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
     MetaTransfer,
     /// A declared exemption starts here, with the reason it was declared.
@@ -495,6 +506,7 @@ impl Opcode {
             Self::MetaTypeCopy => "meta_type_copy",
             Self::MetaInit => "meta_init",
             Self::MetaInitCopy => "meta_init_copy",
+            Self::MetaEpoch => "meta_epoch",
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
             Self::SafeRegionEnd => "safe_region_end",
@@ -785,6 +797,7 @@ impl Opcode {
             | Self::MetaTypeCopy
             | Self::MetaInit
             | Self::MetaInitCopy
+            | Self::MetaEpoch
             | Self::MetaTransfer
             | Self::SafeRegionBegin
             | Self::SafeRegionEnd
@@ -1020,6 +1033,7 @@ static ALL: &[Opcode] = &[
     Opcode::MetaTypeCopy,
     Opcode::MetaInit,
     Opcode::MetaInitCopy,
+    Opcode::MetaEpoch,
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
     Opcode::SafeRegionEnd,

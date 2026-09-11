@@ -159,12 +159,13 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
         Opcode::CheckInit,
         "`rucc_safety::lower`, the same call over the init plane, carrying no type",
     ),
-    // The four plane writes the same pass emits, which become calls the same way. A judgement
+    // The five plane writes the same pass emits, which become calls the same way. A judgement
     // decides nothing, so none of the calls carries a descriptor row.
     (Opcode::MetaType, "`rucc_safety::lower`, into the call that records what a store stored"),
     (Opcode::MetaTypeCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
     (Opcode::MetaInit, "`rucc_safety::lower`, into the call that says a store wrote a range"),
     (Opcode::MetaInitCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
+    (Opcode::MetaEpoch, "`rucc_safety::lower`, into the call that says which thread stored"),
     // The `restrict` contract, which is judgement J8 and is the one check that records as well as
     // asks. What it records goes in a slot the block owns, and the two markers are what open and
     // close that slot, so all four are calls to the runtime the same way.
@@ -222,7 +223,7 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The twelve the safety pass does emit are on
+    // back end can be handed that reaches one. The thirteen the safety pass does emit are on
     // `ELSEWHERE`.
     (
         Opcode::CapLoad,

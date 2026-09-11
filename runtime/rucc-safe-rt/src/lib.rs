@@ -91,9 +91,10 @@
 //! against the stamp its capability was written at and there is nowhere yet for the second of those
 //! to live.
 //!
-//! The compiler's half is what is missing. No generated code calls `__rucc_meta_epoch` or
-//! `__rucc_check_race`, so a program's plane is empty unless the C library wrappers filled it, and
-//! the ordering that is not a call at all, which is the atomics, has to come from the compiler too.
+//! The compiler's half is half in. `-fsafety-races` puts a `__rucc_meta_epoch` after every store of
+//! a pointer, so a program built with it fills its own plane instead of leaving it to the C library
+//! wrappers. Nothing calls `__rucc_check_race` yet, so nothing reads the plane at an access, and the
+//! ordering that is not a call at all, which is the atomics, still has to come from the compiler.
 //! That last one is a gate rather than a gap. This is the only plane in the crate where missing
 //! instrumentation costs a false report rather than a missed one, because two threads an edge
 //! nobody saw really did join look exactly like two threads nothing joined.

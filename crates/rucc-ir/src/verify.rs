@@ -1593,6 +1593,7 @@ impl<'a> Verifier<'a> {
             | Opcode::MetaEnd
             | Opcode::MetaType
             | Opcode::MetaInit
+            | Opcode::MetaEpoch
             | Opcode::MetaTransfer => {
                 if self.takes(opcode, arity, 2) {
                     self.pointer(opcode, arg(0), 0);

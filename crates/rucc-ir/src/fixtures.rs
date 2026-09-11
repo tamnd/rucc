@@ -143,6 +143,7 @@ block0(%0: ptr, %1: i64):
     meta_begin %0, %1, class allocated
     meta_type %0, %1, tbaa !2
     meta_init %0, %1
+    meta_epoch %0, %1
     meta_transfer %0, %1, to device
     meta_end %0, %1
     meta_type_copy %0, %9, %1

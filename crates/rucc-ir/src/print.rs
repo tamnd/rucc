@@ -1007,6 +1007,7 @@ mod tests {
         plane(Opcode::MetaBegin, Extra::Class(StorageClass::Allocated));
         plane(Opcode::MetaType, Extra::Node(character));
         plane(Opcode::MetaInit, Extra::None);
+        plane(Opcode::MetaEpoch, Extra::None);
         plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
         plane(Opcode::MetaEnd, Extra::None);
 
