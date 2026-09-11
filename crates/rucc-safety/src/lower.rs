@@ -139,6 +139,8 @@ fn calls(
             Opcode::CheckType => typed(func, names, word, numbers, table, inst),
             Opcode::MetaType => judgement(func, names, word, numbers, inst),
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
+            Opcode::MetaInit => written(func, names, word, inst),
+            Opcode::MetaInitCopy => carried(func, names, word, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             _ => {}
@@ -310,6 +312,30 @@ fn carriage(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
     let bytes = fitted(func, inst, length, word);
     let params = &[Type::PTR, Type::PTR, word];
     call(func, names, inst, "__rucc_meta_type_copy", params, &[], &[to, from, bytes]);
+}
+
+/// `meta_init` becomes `__rucc_meta_init(pointer, size)`.
+///
+/// No descriptor, for the reason [`judgement`] has none, and no type either. The init plane holds
+/// one bit per byte and the bit says whether anything was ever stored there, so a range is the whole
+/// of what a store has to say about it and there is nothing else to pass.
+fn written(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [pointer, length] = func[func[inst].args] else { return };
+    let bytes = fitted(func, inst, length, word);
+    let params = &[Type::PTR, word];
+    call(func, names, inst, "__rucc_meta_init", params, &[], &[pointer, bytes]);
+}
+
+/// `meta_init_copy` becomes `__rucc_meta_init_copy(destination, source, length)`.
+///
+/// The same shape as [`carriage`] and for the same reason: a copy writes no values of its own, so
+/// whether a destination byte holds anything is whether the byte it came from did, and the plane
+/// over the source is the only place that is written down.
+fn carried(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [to, from, length] = func[func[inst].args] else { return };
+    let bytes = fitted(func, inst, length, word);
+    let params = &[Type::PTR, Type::PTR, word];
+    call(func, names, inst, "__rucc_meta_init_copy", params, &[], &[to, from, bytes]);
 }
 
 /// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
@@ -539,6 +565,40 @@ mod tests {
         module
     }
 
+    /// A module with one function that stores through its parameter, with the plane writes in.
+    ///
+    /// The plane is this module's rather than [`planeless`]'s, because the store records into it
+    /// and a judgement naming an entry another module holds is a judgement [`judgement`] leaves
+    /// alone.
+    fn stored(names: &mut Interner) -> Module {
+        let mut module = Module::new(names.intern("write.c"), &target());
+        let plane = Plane::build(&mut module);
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        insert(&mut func, &plane);
+        module.add_func(func);
+        module
+    }
+
     /// A module with one function that reads through its parameter as an `int`, checks in.
     ///
     /// The aliasing node is built by hand rather than by the front end, since this crate cannot
@@ -642,10 +702,34 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_becomes_the_call_that_moves_the_types_across() {
-        // Three operands and no descriptor. A plane write refuses nothing, and what the copied
-        // bytes are is not a thing the compiler knows, so there is no type number either: the
-        // runtime reads the entries over the source and writes them over the destination.
+    fn a_store_becomes_the_calls_that_record_what_it_wrote() {
+        // Two operands and no descriptor for the init plane's call, against three for the type
+        // plane's. A type number is the one thing the two writes do not have in common: what a
+        // store stored through is a thing the compiler has to name, and that it stored at all is
+        // not.
+        let mut names = Interner::new();
+        let mut module = stored(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 2);
+
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(
+            printed.contains("call @__rucc_meta_type(%0, %5, %6) : (ptr, i64, i32)\n"),
+            "{printed}"
+        );
+        assert!(printed.contains("call @__rucc_meta_init(%0, %7) : (ptr, i64)\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_becomes_the_calls_that_move_the_planes_across() {
+        // Three operands each and no descriptor. A plane write refuses nothing, and neither what
+        // the copied bytes are nor whether anything ever wrote them is a thing the compiler knows,
+        // so there is no type number and no length beyond the range: both calls read the entries
+        // over the source and write them over the destination.
         let mut names = Interner::new();
         let mut module = copied(&mut names);
         assert_eq!(lower(&mut module, &mut names), 0);
@@ -658,6 +742,8 @@ mod tests {
              memcpy %0, %1, size 24, align 8\n    \
              %2 = iconst.i64 24\n    \
              call @__rucc_meta_type_copy(%0, %1, %2) : (ptr, ptr, i64)\n    \
+             %3 = iconst.i64 24\n    \
+             call @__rucc_meta_init_copy(%0, %1, %3) : (ptr, ptr, i64)\n    \
              return\n\
              }\n"
         );

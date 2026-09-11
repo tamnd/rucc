@@ -268,6 +268,14 @@ pub enum Opcode {
     MetaTypeCopy,
     /// The bytes of a range are now initialized.
     MetaInit,
+    /// The bytes of a range are now initialized wherever the range they were copied from was.
+    ///
+    /// Three operands, for the reason [`Opcode::MetaTypeCopy`] has three. A copy does not write
+    /// values of its own, so whether a destination byte holds anything is whether the byte it came
+    /// from did, and the only place that is written down is the plane over the source. That is what
+    /// makes a structure filled member by member and then copied whole still have padding nothing
+    /// wrote, which is the infoleak the plane is for.
+    MetaInitCopy,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
     MetaTransfer,
     /// A declared exemption starts here, with the reason it was declared.
@@ -452,6 +460,7 @@ impl Opcode {
             Self::MetaType => "meta_type",
             Self::MetaTypeCopy => "meta_type_copy",
             Self::MetaInit => "meta_init",
+            Self::MetaInitCopy => "meta_init_copy",
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
             Self::SafeRegionEnd => "safe_region_end",
@@ -737,6 +746,7 @@ impl Opcode {
             | Self::MetaType
             | Self::MetaTypeCopy
             | Self::MetaInit
+            | Self::MetaInitCopy
             | Self::MetaTransfer
             | Self::SafeRegionBegin
             | Self::SafeRegionEnd => Some(0),
@@ -961,6 +971,7 @@ static ALL: &[Opcode] = &[
     Opcode::MetaType,
     Opcode::MetaTypeCopy,
     Opcode::MetaInit,
+    Opcode::MetaInitCopy,
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
     Opcode::SafeRegionEnd,
