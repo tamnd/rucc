@@ -14,21 +14,21 @@ global @both : bytes 4 = { zero 4 }, align 4, linkage(external)
 func @put(i32), linkage(external) {
 block0(%0: i32):
     %1 = global_addr @g
-    atomic_store %0 -> %1, align 4, seq_cst
+    atomic_store %0 -> %1, align 4, seq_cst, tbaa !1
     return
 }
 
 func @get() -> i32, linkage(external) {
 block0:
     %0 = global_addr @g
-    %1 = atomic_load.i32 %0, align 4, seq_cst
+    %1 = atomic_load.i32 %0, align 4, seq_cst, tbaa !1
     return %1
 }
 
 func @add(i32), linkage(external) {
 block0(%0: i32):
     %1 = global_addr @g
-    %2 = atomic_rmw.i32 add %1, %0, align 4, seq_cst
+    %2 = atomic_rmw.i32 add %1, %0, align 4, seq_cst, tbaa !1
     %3 = add %2, %0
     return
 }
@@ -37,7 +37,7 @@ func @narrow(i32), linkage(external) {
 block0(%0: i32):
     %1 = global_addr @c
     %2 = trunc.i8 %0
-    %3 = atomic_rmw.i8 add %1, %2, align 1, seq_cst
+    %3 = atomic_rmw.i8 add %1, %2, align 1, seq_cst, tbaa !0
     %4 = add %3, %2
     return
 }
@@ -45,13 +45,13 @@ block0(%0: i32):
 func @bits(i32), linkage(external) {
 block0(%0: i32):
     %1 = global_addr @g
-    %2 = atomic_rmw.i32 and %1, %0, align 4, seq_cst
+    %2 = atomic_rmw.i32 and %1, %0, align 4, seq_cst, tbaa !1
     %3 = and %2, %0
     %4 = global_addr @g
-    %5 = atomic_rmw.i32 or %4, %0, align 4, seq_cst
+    %5 = atomic_rmw.i32 or %4, %0, align 4, seq_cst, tbaa !1
     %6 = or %5, %0
     %7 = global_addr @g
-    %8 = atomic_rmw.i32 xor %7, %0, align 4, seq_cst
+    %8 = atomic_rmw.i32 xor %7, %0, align 4, seq_cst, tbaa !1
     %9 = xor %8, %0
     return
 }
@@ -59,12 +59,12 @@ block0(%0: i32):
 func @multiply(i32), linkage(external) {
 block0(%0: i32):
     %1 = global_addr @g
-    %2 = atomic_load.i32 %1, align 4, seq_cst
+    %2 = atomic_load.i32 %1, align 4, seq_cst, tbaa !1
     jump block1(%2)
 
 block1(%3: i32):
     %4 = mul.nsw %3, %0
-    %5, %6 = cmpxchg.(i32, i1) %1, %3, %4, align 4, seq_cst
+    %5, %6 = cmpxchg.(i32, i1) %1, %3, %4, align 4, seq_cst, tbaa !1
     br_if %6, block2, block1(%5)
 
 block2:
@@ -74,14 +74,14 @@ block2:
 func @grow(f64), linkage(external) {
 block0(%0: f64):
     %1 = global_addr @d
-    %2 = atomic_load.i64 %1, align 8, seq_cst
+    %2 = atomic_load.i64 %1, align 8, seq_cst, tbaa !2
     jump block1(%2)
 
 block1(%3: i64):
     %4 = bitcast.f64 %3
     %5 = fadd %4, %0
     %6 = bitcast.i64 %5
-    %7, %8 = cmpxchg.(i64, i1) %1, %3, %6, align 8, seq_cst
+    %7, %8 = cmpxchg.(i64, i1) %1, %3, %6, align 8, seq_cst, tbaa !2
     br_if %8, block2, block1(%7)
 
 block2:
@@ -92,19 +92,19 @@ func @steps() -> i32, linkage(external) {
 block0:
     %0 = global_addr @g
     %1 = iconst.i32 1
-    %2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst
+    %2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst, tbaa !1
     %3 = add %2, %1
     %4 = global_addr @g
     %5 = iconst.i32 1
-    %6 = atomic_rmw.i32 add %4, %5, align 4, seq_cst
+    %6 = atomic_rmw.i32 add %4, %5, align 4, seq_cst, tbaa !1
     %7 = add %6, %5
     %8 = global_addr @g
     %9 = iconst.i32 1
-    %10 = atomic_rmw.i32 sub %8, %9, align 4, seq_cst
+    %10 = atomic_rmw.i32 sub %8, %9, align 4, seq_cst, tbaa !1
     %11 = sub %10, %9
     %12 = global_addr @g
     %13 = iconst.i32 1
-    %14 = atomic_rmw.i32 sub %12, %13, align 4, seq_cst
+    %14 = atomic_rmw.i32 sub %12, %13, align 4, seq_cst, tbaa !1
     %15 = sub %14, %13
     %16 = add.nsw %2, %7
     return %16
@@ -114,13 +114,13 @@ func @walk(), linkage(external) {
 block0:
     %0 = global_addr @p
     %1 = global_addr @room
-    atomic_store %1 -> %0, align 8, seq_cst
+    atomic_store %1 -> %0, align 8, seq_cst, tbaa !3
     %2 = global_addr @p
     %3 = iconst.i32 3
     %4 = sext.i64 %3
     %5 = iconst.i64 4
     %6 = mul.nsw %4, %5
-    %7 = atomic_rmw.i64 add %2, %6, align 8, seq_cst
+    %7 = atomic_rmw.i64 add %2, %6, align 8, seq_cst, tbaa !3
     %8 = add %7, %6
     %9 = inttoptr.ptr %7
     %10 = inttoptr.ptr %8
@@ -128,7 +128,7 @@ block0:
     %12 = iconst.i64 1
     %13 = iconst.i64 4
     %14 = mul.nsw %12, %13
-    %15 = atomic_rmw.i64 add %11, %14, align 8, seq_cst
+    %15 = atomic_rmw.i64 add %11, %14, align 8, seq_cst, tbaa !3
     %16 = add %15, %14
     %17 = inttoptr.ptr %15
     %18 = inttoptr.ptr %16
@@ -140,15 +140,15 @@ block0(%0: ptr):
     %1 = iconst.i64 4
     %2 = ptr_add %0, %1
     %3 = iconst.i32 5
-    atomic_store %3 -> %2, align 4, seq_cst
+    atomic_store %3 -> %2, align 4, seq_cst, tbaa !1
     %4 = iconst.i64 4
     %5 = ptr_add %0, %4
     %6 = iconst.i32 2
-    %7 = atomic_rmw.i32 add %5, %6, align 4, seq_cst
+    %7 = atomic_rmw.i32 add %5, %6, align 4, seq_cst, tbaa !1
     %8 = add %7, %6
     %9 = iconst.i64 4
     %10 = ptr_add %0, %9
-    %11 = atomic_load.i32 %10, align 4, seq_cst
+    %11 = atomic_load.i32 %10, align 4, seq_cst, tbaa !1
     return %11
 }
 
@@ -160,21 +160,21 @@ block0(%0: i32):
     %4 = mul.nsw %2, %3
     %5 = ptr_add %1, %4
     %6 = iconst.i32 1
-    atomic_store %6 -> %5, align 4, seq_cst
+    atomic_store %6 -> %5, align 4, seq_cst, tbaa !1
     %7 = global_addr @table
     %8 = sext.i64 %0
     %9 = iconst.i64 4
     %10 = mul.nsw %8, %9
     %11 = ptr_add %7, %10
     %12 = iconst.i32 2
-    %13 = atomic_rmw.i32 add %11, %12, align 4, seq_cst
+    %13 = atomic_rmw.i32 add %11, %12, align 4, seq_cst, tbaa !1
     %14 = add %13, %12
     %15 = global_addr @table
     %16 = sext.i64 %0
     %17 = iconst.i64 4
     %18 = mul.nsw %16, %17
     %19 = ptr_add %15, %18
-    %20 = atomic_load.i32 %19, align 4, seq_cst
+    %20 = atomic_load.i32 %19, align 4, seq_cst, tbaa !1
     return %20
 }
 
@@ -182,10 +182,10 @@ func @mixed(), linkage(external) {
 block0:
     %0 = global_addr @both
     %1 = iconst.i32 1
-    atomic_store.volatile %1 -> %0, align 4, seq_cst
+    atomic_store.volatile %1 -> %0, align 4, seq_cst, tbaa !1
     %2 = global_addr @both
     %3 = iconst.i32 2
-    %4 = atomic_rmw.i32.volatile add %2, %3, align 4, seq_cst
+    %4 = atomic_rmw.i32.volatile add %2, %3, align 4, seq_cst, tbaa !1
     %5 = add %4, %3
     return
 }
@@ -194,9 +194,14 @@ func @local(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = alloca, size 4, align 4
     %2 = iconst.i32 0
-    store %2 -> %1, align 4
-    %3 = atomic_rmw.i32 add %1, %0, align 4, seq_cst
+    store %2 -> %1, align 4, tbaa !1
+    %3 = atomic_rmw.i32 add %1, %0, align 4, seq_cst, tbaa !1
     %4 = add %3, %0
-    %5 = atomic_load.i32 %1, align 4, seq_cst
+    %5 = atomic_load.i32 %1, align 4, seq_cst, tbaa !1
     return %5
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+!2 = tbaa "double", parent !0, offset 0
+!3 = tbaa "pointer", parent !0, offset 0

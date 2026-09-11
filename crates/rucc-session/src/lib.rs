@@ -1083,6 +1083,14 @@ pub struct Options {
     /// of embedded C and every ARM EABI object is built with it, and mixing the two answers in one
     /// program is a silent disagreement about layout rather than a link error.
     pub short_enums: bool,
+    /// Whether an access names the type it goes through, from `-fstrict-aliasing` and
+    /// `-fno-strict-aliasing`.
+    ///
+    /// On, which is gcc's answer at every level above `-O0` and is what C 6.5 paragraph 7 already
+    /// says. Clearing it makes the front end leave the type off every load and every store, and an
+    /// access with no type on it is one the alias analysis has no type based reason to separate
+    /// from any other, which is what the flag asks for.
+    pub strict_aliasing: bool,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
     /// Whether a warning is raised at all, which is `-w` turned around.
@@ -1312,6 +1320,7 @@ impl Options {
             wrapping: Wrapping::NONE,
             char_signed: None,
             short_enums: false,
+            strict_aliasing: true,
             warnings_are_errors: false,
             warnings: true,
             error_limit: 20,

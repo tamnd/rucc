@@ -28,6 +28,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-lower/0.10.19")]
 
 mod abi;
+mod aliasing;
 mod bits;
 mod body;
 mod reach;

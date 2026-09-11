@@ -53,10 +53,13 @@ block0:
     %7 = iconst.i64 8
     %8 = mul.nsw %6, %7
     %9 = ptr_add %4, %8
-    %10 = load %9, align 8
+    %10 = load %9, align 8, tbaa !1
     %11 = call_indirect %10() : () -> i32
     %12 = add.nsw %3, %11
     %13 = call @reaches_deeper() : () -> i32
     %14 = add.nsw %12, %13
     return %14
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "pointer", parent !0, offset 0

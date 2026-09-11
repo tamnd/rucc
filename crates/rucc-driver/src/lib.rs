@@ -666,20 +666,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      variable a definition in one file and declare it extern in the others",
                 ));
             }
-            // Both directions of this one are taken, which is the exception to the rule above, and
-            // the reason is which way being wrong costs something.
+            // Both directions of this one are recorded, and what they decide is whether lowering
+            // names the type each access goes through. Turning it off is the front end leaving the
+            // name off rather than a pass being told to ignore one it can see, which is one
+            // condition in one place, and it is the reading that survives link time optimization:
+            // a unit built with the flag off keeps its own answer when its bodies end up in a
+            // module beside bodies that were not.
             //
-            // Nothing here derives anything from the type an object is accessed through. The IR has
-            // somewhere to put a type based aliasing node and lowering fills it with nothing on
-            // every access, so no pass has one to read and the alias analysis falls back to what it
-            // can see. That makes `-fno-strict-aliasing` a description, the way `-fPIC` is.
-            //
-            // `-fstrict-aliasing` is a request to assume more than that, and this compiler assumes
-            // less. Answering a request for a weaker guarantee by giving a stronger one is safe in
-            // a way the `-fno-pic` case is not: every program that is correct under the assumption
-            // is correct without it, only slower. And `-O2` implies it, so a build that spells it
-            // out is a build that would stop on a compiler that refused it, for no gain at all.
-            "-fstrict-aliasing" | "-fno-strict-aliasing" => {}
+            // Nothing in the pipeline reads those names yet. Layer 3 of the alias analysis does
+            // and is tested, and no pass at any level asks the alias analysis anything today, so
+            // no program compiles differently for having passed this. The flag is wired anyway,
+            // because the change that makes a pass ask is not the change anybody will remember to
+            // wire it in, and a flag that is taken and dropped once the names mean something is
+            // the miscompilation `spec/04-driver-and-cli.md` section 4.1 warns about in as many
+            // words.
+            "-fstrict-aliasing" => opts.strict_aliasing = true,
+            "-fno-strict-aliasing" => opts.strict_aliasing = false,
             // The same shape of answer for the same reason, and the flag the kernel writes beside
             // the one above it.
             //

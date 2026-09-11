@@ -7,11 +7,11 @@ func @constant_sizes() -> i64, linkage(external) {
 block0:
     %0 = alloca, size 8, align 4
     %1 = iconst.i32 0
-    store %1 -> %0, align 4
+    store %1 -> %0, align 4, tbaa !1
     %2 = iconst.i64 4
     %3 = ptr_add %0, %2
     %4 = iconst.i32 0
-    store %4 -> %3, align 4
+    store %4 -> %3, align 4, tbaa !1
     %5 = iconst.i64 4
     %6 = iconst.i64 8
     %7 = add %5, %6
@@ -61,3 +61,6 @@ block0(%0: f64, %1: ptr):
     %11 = add.nsw %5, %10
     return %11
 }
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0

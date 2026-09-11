@@ -1000,15 +1000,20 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// How an object of that type is accessed: how wide and how aligned.
-    fn access(&self, ty: TypeId) -> MemInfo {
+    /// How an object of that type is accessed: how wide, how aligned, and through what type.
+    ///
+    /// The type is the node layer 3 of the alias analysis walks, and it is the one place a load or
+    /// a store gets one, so every access that goes through a C type gets it and every access that
+    /// does not goes without. The copies are the ones that go without: a `memcpy` is bytes moving
+    /// and the bytes have a type at each end rather than one in the middle.
+    fn access(&mut self, ty: TypeId) -> MemInfo {
         MemInfo {
             // Zero, because a load takes its width from the type it produces and a store from
             // the value it writes. The field is for the copies, which have no such type.
             size: 0,
             align: repr::align_of(self.types(), self.target(), ty),
             order: MemOrder::NotAtomic,
-            tbaa: None,
+            tbaa: self.unit.alias_node(ty),
             restrict: Restrict::NONE,
         }
     }
