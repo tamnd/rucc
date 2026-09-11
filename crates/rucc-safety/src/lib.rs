@@ -34,13 +34,13 @@
 //! which are what `spec/safe-memory/10-boundaries.md` section 10.2 means by a trust set that is
 //! counted per build rather than asserted.
 //!
-//! And the first of the planes, in [`mod@plane`]: every store now records what the bytes it wrote
-//! were stored through, which is the judgement C 6.5 says a store makes and the thing the type
-//! check of milestone S5 will later ask about. The question is not here yet, and the order is
-//! deliberate. A check against a plane that only some of the writes maintain reports on programs
-//! that are correct, and the writes are not all in: a `memcpy` carries the source's effective type
-//! to the destination and there is no opcode for that yet, so a copy leaves whatever the bytes said
-//! before it standing over what it wrote.
+//! And the first of the planes, in [`mod@plane`]: every store records what the bytes it wrote were
+//! stored through, which is the judgement C 6.5 says a store makes and the thing the type check of
+//! milestone S5 will later ask about, and every copy carries whatever the bytes it read said over
+//! to the bytes it wrote, which is the other half of the same rule. Those two are every write the
+//! type plane has. The question is not here yet, and the order is deliberate: a check against a
+//! plane that only some of the writes maintain reports on programs that are correct, so the writes
+//! go in first and the check goes in once they are all in.
 //!
 //! The initialization and race checks are not here, because their planes are not written at all and
 //! a check against a plane nobody maintains would either report on every access or on none. Those
@@ -108,6 +108,13 @@ pub struct Counts {
     /// plane write today, so the pair would be one number written twice. It goes in beside the
     /// first rule that removes one.
     pub judged: usize,
+    /// Copies that carried whatever the bytes they read said over to the bytes they wrote.
+    ///
+    /// Kept apart from `judged` for the reason the three check counts are kept apart. A store
+    /// records a type the compiler knows and a copy records one only the plane knows, so the two
+    /// are discharged by different rules: a store into storage nothing watches can be dropped by
+    /// looking at the store, and a copy cannot be looked at the same way.
+    pub carried: usize,
 }
 
 impl Counts {
@@ -118,6 +125,7 @@ impl Counts {
         self.derived += other.derived;
         self.skipped += other.skipped;
         self.judged += other.judged;
+        self.carried += other.carried;
     }
 }
 
@@ -181,6 +189,11 @@ pub fn insert(func: &mut Func, plane: &Plane) -> Counts {
                 }
                 None => counts.skipped += 1,
             },
+            Opcode::Memcpy | Opcode::Memmove => {
+                if carry(func, inst) {
+                    counts.carried += 1;
+                }
+            }
             Opcode::PtrAdd => {
                 if derivation(func, inst) {
                     counts.derived += 1;
@@ -271,6 +284,49 @@ fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value) -> bool {
     // After the constant it reads rather than after the store, since both go in the same place and
     // the one that goes in second ends up in front.
     func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `meta_type_copy` immediately after one copy, carrying what its source said to its
+/// destination.
+///
+/// The other half of the judgement C 6.5 describes. A copy does not store through a type, so there
+/// is no type for the compiler to record: what the copied bytes are is whatever the bytes they came
+/// from were, and the only place that is written down is the plane over the source. So this names
+/// two ranges and no node, and the runtime moves the entries across.
+///
+/// Without it the destination would keep whatever the bytes there said before the copy, which is
+/// the thing that makes a check against the plane unusable. A structure copied into a fresh
+/// allocation would come out untyped at best and, once the allocation had been reused, wrong at
+/// worst, and the very next read of a field would be refused on a program that is correct.
+///
+/// After the copy rather than before it, for the same reason a store's judgement goes after the
+/// store. The bytes say the new thing once the copy has happened. Reading the source's plane
+/// afterwards is the same answer as reading it before, overlap included, because a copy writes no
+/// plane entries of its own.
+fn carry(func: &mut Func, copy: Inst) -> bool {
+    let Extra::Mem(info) = func[copy].extra else { return false };
+    // A copy of a known size is what the opcode is, and the verifier refuses one whose payload says
+    // zero, so this is a shape that does not arise rather than a case being handled.
+    let size = func[info].size;
+    if size == 0 {
+        return false;
+    }
+    let [to, from] = func[func[copy].args] else { return false };
+
+    let span = func.span(copy);
+    let word = Type::int(64);
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
+    func.insert_after(made, copy);
+    let length = func[made].results().next().expect("a constant created with one result has one");
+
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaTypeCopy) };
+    let carried = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the copy, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(carried, made);
     true
 }
 
@@ -455,7 +511,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "both.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1 }
+            Counts { checked: 2, live: 2, derived: 0, skipped: 0, judged: 1, carried: 0 }
         );
 
         assert_eq!(
@@ -528,6 +584,71 @@ mod tests {
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
+    }
+
+    /// A function that copies a fixed number of bytes from one of its parameters to the other.
+    fn one_copy(names: &mut Interner, opcode: Opcode) -> Func {
+        let mut func =
+            Func::new(names.intern("move"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 24,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, from]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_copy_carries_whatever_the_bytes_it_read_said() {
+        // The other half of the judgement C 6.5 describes. A copy does not store through a type, so
+        // there is nothing here for the compiler to name: what the copied bytes are is whatever the
+        // bytes they came from were, and the plane over the source is the only place that is
+        // written down. Without this the destination would go on saying whatever was there before.
+        let mut names = Interner::new();
+        let mut func = one_copy(&mut names, Opcode::Memcpy);
+        let (module, plane) = planed(&mut names, "move.c");
+        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, ..Counts::default() });
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            // After the copy, for the same reason a store's judgement is after the store.
+            "func @move(ptr, ptr), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr):\n    \
+             memcpy %0, %1, size 24, align 8\n    \
+             %2 = iconst.i64 24\n    \
+             meta_type_copy %0, %1, %2\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_ranges_may_overlap_is_carried_the_same_way() {
+        // `memmove` is `memcpy` with the overlap allowed, and the overlap is the runtime's problem
+        // rather than this pass's: a copy writes no plane entries of its own, so the entries over
+        // the source are the same ones whichever end the bytes were moved from.
+        let mut names = Interner::new();
+        let mut func = one_copy(&mut names, Opcode::Memmove);
+        let (module, plane) = planed(&mut names, "overlap.c");
+        assert_eq!(insert(&mut func, &plane), Counts { carried: 1, ..Counts::default() });
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
     }
 
     #[test]
@@ -623,7 +744,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "walk.c");
         assert_eq!(
             insert(&mut func, &plane),
-            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0 }
+            Counts { checked: 0, live: 0, derived: 1, skipped: 0, judged: 0, carried: 0 }
         );
 
         assert_eq!(
@@ -680,7 +801,7 @@ mod tests {
 
         assert_eq!(
             run(&mut module),
-            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2 }
+            Counts { checked: 4, live: 4, derived: 0, skipped: 0, judged: 2, carried: 0 }
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");

@@ -1568,6 +1568,17 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // The one plane write that is about two ranges rather than one. It carries no node,
+            // because what the destination ends up saying is whatever the source said and the
+            // compiler does not know that: the plane over the source is where it is written down.
+            Opcode::MetaTypeCopy => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+            }
+
             // The region markers, which say something about the code between them rather than
             // about any value, so there is nothing here but the operand count.
             Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => {

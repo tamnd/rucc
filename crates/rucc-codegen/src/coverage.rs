@@ -149,6 +149,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CheckBounds, "`rucc_safety::lower`, into a call carrying the row that describes it"),
     (Opcode::CheckLive, "`rucc_safety::lower`, the same call over the lifetime plane"),
     (Opcode::CheckDeriv, "`rucc_safety::lower`, the same call where the pointer is computed"),
+    // The two plane writes the same pass emits, which become calls the same way. A judgement
+    // decides nothing, so neither call carries a descriptor row.
+    (Opcode::MetaType, "`rucc_safety::lower`, into the call that records what a store stored"),
+    (Opcode::MetaTypeCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
     (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
     (Opcode::CapExtentBack, "`rucc_safety::lower`, the same call about the bytes below an address"),
     // The capability the checks were reading, which the same pass takes out once they are calls,
@@ -202,7 +206,8 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The six the safety pass does emit are on `ELSEWHERE`.
+    // back end can be handed that reaches one. The eight the safety pass does emit are on
+    // `ELSEWHERE`.
     (
         Opcode::CapLoad,
         "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
@@ -227,7 +232,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "the same write, with the version bumped past every capability",
         "tamnd/rucc#856",
     ),
-    (Opcode::MetaType, "the same over the type plane, which is S5's", "tamnd/rucc#431"),
     (Opcode::MetaInit, "the same over the init plane, which is S5's", "tamnd/rucc#431"),
     (
         Opcode::MetaTransfer,

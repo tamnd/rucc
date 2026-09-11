@@ -258,6 +258,14 @@ pub enum Opcode {
     MetaEnd,
     /// The effective type of a range is now this one.
     MetaType,
+    /// The effective types of a range are now the ones the range it was copied from had.
+    ///
+    /// Three operands, because a copy has two ranges and one length: the destination, the source,
+    /// and how many bytes moved. A `memcpy` does not store through a type, so there is no type to
+    /// name here and naming one would be wrong: C 6.5 says the copied bytes keep the effective type
+    /// they had, whatever that was, and the only place that is written down is the plane over the
+    /// source.
+    MetaTypeCopy,
     /// The bytes of a range are now initialized.
     MetaInit,
     /// A range leaves the monitor's authority, or comes back, which is judgement J7.
@@ -442,6 +450,7 @@ impl Opcode {
             Self::MetaBegin => "meta_begin",
             Self::MetaEnd => "meta_end",
             Self::MetaType => "meta_type",
+            Self::MetaTypeCopy => "meta_type_copy",
             Self::MetaInit => "meta_init",
             Self::MetaTransfer => "meta_transfer",
             Self::SafeRegionBegin => "safe_region_begin",
@@ -726,6 +735,7 @@ impl Opcode {
             | Self::MetaBegin
             | Self::MetaEnd
             | Self::MetaType
+            | Self::MetaTypeCopy
             | Self::MetaInit
             | Self::MetaTransfer
             | Self::SafeRegionBegin
@@ -949,6 +959,7 @@ static ALL: &[Opcode] = &[
     Opcode::MetaBegin,
     Opcode::MetaEnd,
     Opcode::MetaType,
+    Opcode::MetaTypeCopy,
     Opcode::MetaInit,
     Opcode::MetaTransfer,
     Opcode::SafeRegionBegin,
