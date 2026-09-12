@@ -1,7 +1,8 @@
 //! Double precision arithmetic in integers, which is the reference for the entry points in
 //! `runtime/builtins/double.c`: the four operations a target with no floating point unit calls for a
 //! `double`, the negation, the eight comparisons, which are calls on such a target too, and the eight
-//! conversions to and from an integer, which is what a cast becomes there.
+//! conversions to and from an integer, which is what a cast becomes there, and the pair at the bottom
+//! that crosses between this format and binary128.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's.
 //!
@@ -39,6 +40,16 @@
 //! while one archive here serves every row of the target matrix, and `runtime/builtins/quad.c` is
 //! where that is written down at length. A subtraction is the one place the sign of a not a number is
 //! not a per machine choice there, and that one is matched.
+
+// The two entry points here that take or hand back a quad are not FFI-safe as far as rustc is
+// concerned, for the reason `quad.rs` gives where it allows the same lint: the type has no layout the
+// language promises, and all either of these does with one is move sixteen bytes.
+#![allow(improper_ctypes_definitions)]
+
+// The pair of routines at the bottom of this file crosses between this format and binary128, so it
+// reads that format's fields and its rounding from next door rather than writing a second copy of
+// either.
+use crate::quad;
 
 /// How many bits of the significand the format writes down, the other one being implied.
 pub(crate) const FRACTION: u32 = 52;
@@ -604,6 +615,60 @@ pub extern "C" fn __fixunsdfdi(value: f64) -> u64 {
     truncate_unsigned(value.to_bits(), UNSIGNED_64).map_or(0, |answer| answer as u64)
 }
 
+/// How far a fraction moves between this format and binary128.
+///
+/// The quiet bit needs no case of its own: this format's is bit fifty one, that format's is bit a
+/// hundred and eleven, and the distance between the two fractions is sixty.
+const BETWEEN_QUAD: u32 = quad::FRACTION - FRACTION;
+
+/// `_Float128 __extenddftf2(double)`, the widening.
+///
+/// Both directions are the two lines `float.rs` uses for its own two pairs, because `round_from` takes
+/// a significand and a scale and does not care which format they came from. The shipped C in
+/// `runtime/builtins/double.c` moves fields instead, in two pieces because the wider fraction crosses a
+/// word boundary, and normalizes a subnormal by hand.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __extenddftf2(value: f64) -> quad::Quad {
+    quad::quad_of(widen_quad(value.to_bits()))
+}
+
+pub(crate) fn widen_quad(bits: u64) -> u128 {
+    let sign = u128::from(bits & SIGN) << 64;
+    if is_nan(bits) {
+        let payload = u128::from(bits & FRACTION_MASK) << BETWEEN_QUAD;
+        let quiet = u128::from(QUIET) << BETWEEN_QUAD;
+        return sign | (quad::TOP << quad::FRACTION) | payload | quiet;
+    }
+    if is_infinite(bits) {
+        return sign | (quad::TOP << quad::FRACTION);
+    }
+    let taken = parts(bits);
+    quad::round_from(sign, quad::Wide::narrow(u128::from(taken.significand)), taken.scale, false)
+}
+
+/// `double __trunctfdf2(_Float128)`, the narrowing, which is the direction that rounds.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __trunctfdf2(value: quad::Quad) -> f64 {
+    narrow_quad(quad::bits_of(value))
+}
+
+fn narrow_quad(bits: u128) -> f64 {
+    let sign = (bits >> 64) as u64 & SIGN;
+    if quad::is_nan(bits) {
+        // The payload loses its bottom sixty bits, so one that lived only down there comes back empty,
+        // and the quiet bit goes on afterwards so that what comes back is a not a number either way.
+        let payload = ((bits & quad::FRACTION_MASK) >> BETWEEN_QUAD) as u64;
+        return f64::from_bits(sign | (TOP << FRACTION) | payload | QUIET);
+    }
+    if quad::is_infinite(bits) {
+        return infinity(sign);
+    }
+    let taken = quad::parts(bits);
+    round_from(sign, taken.significand, taken.scale, false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -1072,6 +1137,171 @@ mod tests {
             assert!(back <= dividend, "{dividend} over {divisor} came out too large");
             assert!(dividend - back < u128::from(divisor), "{dividend} over {divisor} is short");
             assert_eq!(above, dividend != back, "{dividend} over {divisor}");
+        }
+    }
+
+    /// What libgcc answers for the pair between this format and binary128, as `(double, quad)` going up
+    /// and `(quad, double)` coming down, written down for the reason `float.rs` gives about its own two
+    /// tables and read off the same gcc.
+    const LIBGCC_UP_QUAD: &[(u64, u128)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000_0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000_0000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x3bcd_0000_0000_0000_0000_0000_0000_0000),
+        (0x000f_ffff_ffff_ffff, 0x3c00_ffff_ffff_ffff_e000_0000_0000_0000),
+        (0x0010_0000_0000_0000, 0x3c01_0000_0000_0000_0000_0000_0000_0000),
+        (0x0010_0000_0000_0001, 0x3c01_0000_0000_0000_1000_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3fff_0000_0000_0000_0000_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xbfff_0000_0000_0000_0000_0000_0000_0000),
+        (0x3fef_ffff_ffff_ffff, 0x3ffe_ffff_ffff_ffff_f000_0000_0000_0000),
+        (0x4000_0000_0000_0000, 0x4000_0000_0000_0000_0000_0000_0000_0000),
+        (0x7fef_ffff_ffff_ffff, 0x43fe_ffff_ffff_ffff_f000_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0x7fff_0000_0000_0000_0000_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xffff_0000_0000_0000_0000_0000_0000_0000),
+        (0x7ff0_0000_0000_0001, 0x7fff_8000_0000_0000_1000_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7fff_8000_0000_0000_0000_0000_0000_0000),
+        (0x7fff_ffff_ffff_ffff, 0x7fff_ffff_ffff_ffff_f000_0000_0000_0000),
+        (0x4009_21fb_5444_2d18, 0x4000_921f_b544_42d1_8000_0000_0000_0000),
+        (0x3cb0_0000_0000_0000, 0x3fcb_0000_0000_0000_0000_0000_0000_0000),
+        (0xb817_d521_e8a2_5c19, 0xbf81_7d52_1e8a_25c1_9000_0000_0000_0000),
+        (0x5dfd_1f2b_b5a5_3ee1, 0x41df_d1f2_bb5a_53ee_1000_0000_0000_0000),
+        (0x4d7c_01f7_f5e5_ecdc, 0x40d7_c01f_7f5e_5ecd_c000_0000_0000_0000),
+        (0x39b3_c768_fee4_9005, 0x3f9b_3c76_8fee_4900_5000_0000_0000_0000),
+        (0x8bd6_6d7e_f4f7_f865, 0xbcbd_66d7_ef4f_7f86_5000_0000_0000_0000),
+        (0xc7fa_d75e_9646_aed5, 0xc07f_ad75_e964_6aed_5000_0000_0000_0000),
+        (0xd311_f9ab_028b_36c8, 0xc131_1f9a_b028_b36c_8000_0000_0000_0000),
+        (0x4c6f_f1fc_b5d0_92a5, 0x40c6_ff1f_cb5d_092a_5000_0000_0000_0000),
+        (0x3c24_921e_5f4b_3ac0, 0x3fc2_4921_e5f4_b3ac_0000_0000_0000_0000),
+        (0x81b2_3b82_ef09_1cb5, 0xbc1b_23b8_2ef0_91cb_5000_0000_0000_0000),
+        (0x0211_f4a2_0c9e_83cc, 0x3c21_1f4a_20c9_e83c_c000_0000_0000_0000),
+        (0x404b_c0e6_24c8_cdcb, 0x4004_bc0e_624c_8cdc_b000_0000_0000_0000),
+    ];
+
+    const LIBGCC_DOWN_QUAD: &[(u128, u64)] = &[
+        (0x0000_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000_0000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0000_0000_0000_0000_0001, 0x0000_0000_0000_0000),
+        (0x0001_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x3fff_0000_0000_0000_0000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0xbfff_0000_0000_0000_0000_0000_0000_0000, 0xbff0_0000_0000_0000),
+        (0x7ffe_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x7ff0_0000_0000_0000),
+        (0x7fff_0000_0000_0000_0000_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xffff_0000_0000_0000_0000_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x7fff_0000_0000_0000_0000_0000_0000_0001, 0x7ff8_0000_0000_0000),
+        (0x7fff_8000_0000_0000_0000_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x7fff_ffff_ffff_ffff),
+        (0x7fff_0000_0000_0001_0000_0000_0000_0000, 0x7ff8_0000_0000_0010),
+        (0x407e_ffff_fe00_0000_0000_0000_0000_0000, 0x47ef_ffff_e000_0000),
+        (0x407e_ffff_feff_ffff_ffff_ffff_ffff_ffff, 0x47ef_ffff_f000_0000),
+        (0x407e_ffff_ff00_0000_0000_0000_0000_0000, 0x47ef_ffff_f000_0000),
+        (0x407e_ffff_ff00_0000_0000_0000_0000_0001, 0x47ef_ffff_f000_0000),
+        (0x407f_0000_0000_0000_0000_0000_0000_0000, 0x47f0_0000_0000_0000),
+        (0x3f81_0000_0000_0000_0000_0000_0000_0000, 0x3810_0000_0000_0000),
+        (0x3f80_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x3810_0000_0000_0000),
+        (0x3f6a_0000_0000_0000_0000_0000_0000_0000, 0x36a0_0000_0000_0000),
+        (0x3f69_0000_0000_0000_0000_0000_0000_0000, 0x3690_0000_0000_0000),
+        (0x3f69_0000_0000_0000_0000_0000_0000_0001, 0x3690_0000_0000_0000),
+        (0x3f69_8000_0000_0000_0000_0000_0000_0000, 0x3698_0000_0000_0000),
+        (0x3fff_0000_0100_0000_0000_0000_0000_0000, 0x3ff0_0000_1000_0000),
+        (0x3fff_0000_0100_0000_0000_0000_0000_0001, 0x3ff0_0000_1000_0000),
+        (0x3fff_0000_0300_0000_0000_0000_0000_0000, 0x3ff0_0000_3000_0000),
+        (0x3f37_0000_0000_0000_0000_0000_0000_0000, 0x3370_0000_0000_0000),
+        (0x40c7_0000_0000_0000_0000_0000_0000_0000, 0x4c70_0000_0000_0000),
+        (0x43fe_ffff_ffff_ffff_f000_0000_0000_0000, 0x7fef_ffff_ffff_ffff),
+        (0x43fe_ffff_ffff_ffff_f7ff_ffff_ffff_ffff, 0x7fef_ffff_ffff_ffff),
+        (0x43fe_ffff_ffff_ffff_f800_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x43fe_ffff_ffff_ffff_f800_0000_0000_0001, 0x7ff0_0000_0000_0000),
+        (0x43ff_0000_0000_0000_0000_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x3c01_0000_0000_0000_0000_0000_0000_0000, 0x0010_0000_0000_0000),
+        (0x3c00_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x0010_0000_0000_0000),
+        (0x3bcd_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000_0000_0001),
+        (0x3bcc_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x3bcc_0000_0000_0000_0000_0000_0000_0001, 0x0000_0000_0000_0001),
+        (0x3bcc_8000_0000_0000_0000_0000_0000_0000, 0x0000_0000_0000_0001),
+        (0x3fff_0000_0000_0000_0800_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x3fff_0000_0000_0000_0800_0000_0000_0001, 0x3ff0_0000_0000_0001),
+        (0x3fff_0000_0000_0000_1800_0000_0000_0000, 0x3ff0_0000_0000_0002),
+        (0x43c4_7086_078c_bc0d_5a0f_ef4d_7347_0635, 0x7c47_0860_78cb_c0d6),
+        (0x43ed_1591_a210_7273_b636_b99d_57a8_ae57, 0x7ed1_591a_2107_273b),
+        (0xbeff_42fe_3f39_b91e_dc6a_5c07_a1d2_4dec, 0xaff4_2fe3_f39b_91ee),
+        (0xbfc3_58cb_fd13_cd93_a78d_1e76_8a38_eec8, 0xbc35_8cbf_d13c_d93a),
+        (0x4401_5b66_f50e_000f_84d9_5007_44fb_ffcf, 0x7ff0_0000_0000_0000),
+        (0xbe94_e7cd_071b_cfc7_11e1_699d_f12e_e998, 0xa94e_7cd0_71bc_fc71),
+        (0xbeef_e612_81c1_872f_119e_67ca_bb84_2fe1, 0xaefe_6128_1c18_72f1),
+        (0xc2b2_bcb3_1251_3181_6c92_7957_614d_d3a2, 0xeb2b_cb31_2513_1817),
+        (0x4189_7254_f92a_6a04_797e_12af_28a2_3fd0, 0x5897_254f_92a6_a048),
+        (0x3e8b_a8e3_79e3_3570_09b9_36b7_ff47_af1a, 0x28ba_8e37_9e33_5701),
+        (0x3df0_a33d_1768_e489_2858_300f_c5ee_3700, 0x1f0a_33d1_768e_4893),
+        (0xc05a_570e_96a0_98b8_654c_e9a8_dfae_f789, 0xc5a5_70e9_6a09_8b86),
+        (0xbfd2_2766_8275_8376_f523_5838_899f_75f0, 0xbd22_7668_2758_376f),
+        (0x4227_472f_0622_23b5_6ab4_7d04_c1b4_2ab2, 0x6274_72f0_6222_3b57),
+        (0xc163_488b_870d_9cfb_b773_cded_52ff_d902, 0xd634_88b8_70d9_cfbb),
+        (0x3e5c_f398_10da_727c_293d_ca31_eb18_d998, 0x25cf_3981_0da7_27c3),
+    ];
+
+    #[test]
+    fn the_quads_libgcc_widens_a_double_to_come_out_bit_for_bit() {
+        for &(bits, wanted) in LIBGCC_UP_QUAD {
+            let got = widen_quad(bits);
+            assert_eq!(
+                got, wanted,
+                "{bits:016x} widened: got {got:032x}, libgcc says {wanted:032x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_doubles_libgcc_narrows_a_quad_to_come_out_bit_for_bit() {
+        for &(bits, wanted) in LIBGCC_DOWN_QUAD {
+            let got = narrow_quad(bits).to_bits();
+            assert_eq!(
+                got, wanted,
+                "{bits:032x} narrowed: got {got:016x}, libgcc says {wanted:016x}"
+            );
+        }
+    }
+
+    fn check_round_trip_quad(bits: u64) {
+        let back = narrow_quad(widen_quad(bits)).to_bits();
+        let wanted = if is_nan(bits) { bits | QUIET } else { bits };
+        assert_eq!(back, wanted, "{bits:016x} there and back by way of a quad came to {back:016x}");
+    }
+
+    /// The two directions against each other, which needs no oracle for the reason `float.rs` gives
+    /// about its own pair: the widening is exact, so the narrowing has nothing to round.
+    #[test]
+    fn widening_a_double_to_a_quad_and_narrowing_it_back_is_where_it_started() {
+        let mut stream = Stream(0x5eed_f128_d00d_f121);
+        for _ in 0..60_000 {
+            check_round_trip_quad(stream.next());
+            // And a subnormal, which is the one input whose fields the widening does not simply move.
+            check_round_trip_quad(stream.next() & (SIGN | FRACTION_MASK));
+        }
+        for value in corners() {
+            check_round_trip_quad(value.to_bits());
+        }
+    }
+
+    fn check_widen_through_quad(bits: u32) {
+        let value = f32::from_bits(bits);
+        let wanted = black_box(f64::from(black_box(value))).to_bits();
+        let got = narrow_quad(crate::float::widen_quad(bits)).to_bits();
+        assert_eq!(
+            got, wanted,
+            "{bits:08x} widened by way of a quad: got {got:016x}, the machine says {wanted:016x}"
+        );
+    }
+
+    /// And the narrowing against the machine, by going up two formats at once and coming down one: a
+    /// float widened to a quad is exact and so is the double that quad narrows to, so the answer has to
+    /// be the double the machine widens the float to. This is what holds the narrowing over a spread of
+    /// patterns rather than over the rows above, there being no machine answer at the wider format.
+    #[test]
+    fn narrowing_a_quad_that_came_from_a_float_is_the_double_the_machine_widens_to() {
+        let mut stream = Stream(0x0bad_f128_0bad_f121);
+        for _ in 0..60_000 {
+            check_widen_through_quad(stream.next() as u32);
+            // And a float subnormal, which is a normal number at both of the wider formats.
+            check_widen_through_quad((stream.next() as u32) & 0x807f_ffff);
         }
     }
 }

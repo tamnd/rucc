@@ -149,6 +149,14 @@ unsigned int __fixunstfsi(_Float128 value);
 long long __fixtfdi(_Float128 value);
 unsigned long long __fixunstfdi(_Float128 value);
 
+/* And the two pairs that cross between that format and each of the two below it, which are the same
+ * shape as the pair further up and are the only other things in the set that need two formats at once.
+ */
+_Float128 __extendsftf2(float value);
+float __trunctfsf2(_Float128 value);
+_Float128 __extenddftf2(double value);
+double __trunctfdf2(_Float128 value);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -1602,6 +1610,137 @@ static void quad_corner_integers(void) {
     say("quadintcorner", 0, digest);
 }
 
+/* The two pairs between this format and the two below it. A group of their own rather than calls added
+ * to the families above, for the reason the pair between the two narrower formats gives, and one group
+ * for both pairs rather than one each, because every case here is the same case at two widths.
+ */
+#define QUAD_BETWEEN_CASES 1024
+
+/* A quad whose exponent is somewhere around a float's range, from below the smallest subnormal float to
+ * above the largest finite one, which is the only place the narrowing to that format has a decision to
+ * make. Random bits land there about once in every hundred and eighteen patterns, since the range is two
+ * hundred and seventy eight exponents out of thirty two thousand seven hundred and sixty eight.
+ */
+static uwide quad_near_single(void) {
+    return quad_at(16230 + (next_random() % 290));
+}
+
+/* The same around a double's range, which is two thousand one hundred exponents wide and so is reached
+ * about once in every sixteen patterns.
+ */
+static uwide quad_near_double(void) {
+    return quad_at(15300 + (next_random() % 2120));
+}
+
+static void quad_between(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_BETWEEN_CASES; i++) {
+        digest = mix_quad(digest, __extendsftf2(single_of(random_single())));
+        digest = mix_quad(digest, __extenddftf2(double_of(random_double())));
+        /* A subnormal at each narrow format, which is the one input to each widening that is not a
+         * field move, since both of those are normal numbers at this width. One random pattern in two
+         * hundred and fifty six is a float subnormal and one in two thousand and forty eight is a
+         * double one, and these two are one of each every time.
+         */
+        digest = mix_quad(digest, __extendsftf2(single_of(random_single() & 0x807FFFFFu)));
+        digest = mix_quad(digest, __extenddftf2(double_of(random_double() & 0x800FFFFFFFFFFFFFull)));
+        digest = mix_float(digest, __trunctfsf2(quad_of(random_quad())));
+        digest = mix_float(digest, __trunctfsf2(quad_of(quad_near_single())));
+        digest = mix_double(digest, __trunctfdf2(quad_of(random_quad())));
+        digest = mix_double(digest, __trunctfdf2(quad_of(quad_near_double())));
+        cases += 8;
+    }
+    say("quadbetween", round, digest);
+}
+
+/* The quads at the ends of each narrow format's range, where a narrowing chooses between a finite answer
+ * and an infinity and between a subnormal and a zero, and the quads whose extra bits are exactly half of
+ * a narrow step, where it chooses between the two neighbours. The float cases are the first group and
+ * the double ones the second, and the two differ in which word the decision is made in: a float's lowest
+ * bit is bit twenty four of the high word and a double's is bit sixty of the low one.
+ */
+static const uwide QUAD_BETWEEN_EDGES[] = {
+    QUAD(0x407EFFFFFE000000, 0x0000000000000000), /* the largest finite float, exactly */
+    QUAD(0x407EFFFFFEFFFFFF, 0xFFFFFFFFFFFFFFFF), /* just under halfway to 2^128 */
+    QUAD(0x407EFFFFFF000000, 0x0000000000000000), /* halfway, so an infinity by the tie to the even one */
+    QUAD(0x407EFFFFFF000000, 0x0000000000000001), /* a hair past halfway, an infinity anyway */
+    QUAD(0x407F000000000000, 0x0000000000000000), /* 2^128, past the format */
+    QUAD(0x3F81000000000000, 0x0000000000000000), /* 2^-126, the smallest normal float */
+    QUAD(0x3F80FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* just under it, which rounds up to it */
+    QUAD(0x3F6A000000000000, 0x0000000000000000), /* 2^-149, the smallest subnormal float */
+    QUAD(0x3F69000000000000, 0x0000000000000000), /* half of that, so a zero by the same tie */
+    QUAD(0x3F69000000000000, 0x0000000000000001), /* a hair more than half, so that subnormal */
+    QUAD(0x3F69800000000000, 0x0000000000000000), /* three quarters of it, which rounds up */
+    QUAD(0x3FFF000001000000, 0x0000000000000000), /* one and half a float step, a tie down to one */
+    QUAD(0x3FFF000001000000, 0x0000000000000001), /* a hair more, so the float above one */
+    QUAD(0x3FFF000003000000, 0x0000000000000000), /* one and a step and a half, a tie up */
+    QUAD(0x3F37000000000000, 0x0000000000000000), /* 2^-200, a zero there and a normal double */
+    QUAD(0x40C7000000000000, 0x0000000000000000), /* 2^200, an infinity there and a normal double */
+    QUAD(0x43FEFFFFFFFFFFFF, 0xF000000000000000), /* the largest finite double, exactly */
+    QUAD(0x43FEFFFFFFFFFFFF, 0xF7FFFFFFFFFFFFFF), /* just under halfway to 2^1024 */
+    QUAD(0x43FEFFFFFFFFFFFF, 0xF800000000000000), /* halfway, so an infinity by the tie */
+    QUAD(0x43FEFFFFFFFFFFFF, 0xF800000000000001), /* a hair past halfway */
+    QUAD(0x43FF000000000000, 0x0000000000000000), /* 2^1024, past that format too */
+    QUAD(0x3C01000000000000, 0x0000000000000000), /* 2^-1022, the smallest normal double */
+    QUAD(0x3C00FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* just under it, which rounds up to it */
+    QUAD(0x3BCD000000000000, 0x0000000000000000), /* 2^-1074, the smallest subnormal double */
+    QUAD(0x3BCC000000000000, 0x0000000000000000), /* half of that, so a zero by the same tie */
+    QUAD(0x3BCC000000000000, 0x0000000000000001), /* a hair more than half, so that subnormal */
+    QUAD(0x3BCC800000000000, 0x0000000000000000), /* three quarters of it, which rounds up */
+    QUAD(0x3FFF000000000000, 0x0800000000000000), /* one and half a double step, a tie down to one */
+    QUAD(0x3FFF000000000000, 0x0800000000000001), /* a hair more, so the double above one */
+    QUAD(0x3FFF000000000000, 0x1800000000000000), /* one and a step and a half, a tie up */
+    QUAD(0x7FFF000000000001, 0x0000000000000000), /* a payload the float loses and the double keeps */
+};
+
+#define QUAD_BETWEEN_EDGES_COUNT ((int)(sizeof QUAD_BETWEEN_EDGES / sizeof QUAD_BETWEEN_EDGES[0]))
+
+/* The edges by name, and the two round trips. A float or a double widened to a quad and narrowed back is
+ * the value it started as, because the widening loses nothing for the narrowing to round, and a not a
+ * number comes back with its quiet bit set whether it went in with one or not. That is a property of a
+ * pair rather than of either routine, so it is digested here rather than checked with an `if`, for the
+ * reason the narrower pair gives: a `1` that both sides agree on says nothing, while the value that came
+ * back says what went wrong.
+ */
+static void quad_between_corners(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        digest = mix_quad(digest, __extendsftf2(single_of(SINGLE_CORNERS[i])));
+        digest = mix_quad(digest, __extendsftf2(single_of(SINGLE_CORNERS[i] | SINGLE_SIGN)));
+        digest = mix_float(digest, __trunctfsf2(__extendsftf2(single_of(SINGLE_CORNERS[i]))));
+        cases += 3;
+    }
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        digest = mix_quad(digest, __extenddftf2(double_of(DOUBLE_CORNERS[i])));
+        digest = mix_quad(digest, __extenddftf2(double_of(DOUBLE_CORNERS[i] | DOUBLE_SIGN)));
+        digest = mix_double(digest, __trunctfdf2(__extenddftf2(double_of(DOUBLE_CORNERS[i]))));
+        cases += 3;
+    }
+    for (int i = 0; i < QUAD_CORNER_COUNT; i++) {
+        digest = mix_float(digest, __trunctfsf2(quad_of(QUAD_CORNERS[i])));
+        digest = mix_float(digest, __trunctfsf2(quad_of(QUAD_CORNERS[i] | QUAD_SIGN)));
+        digest = mix_double(digest, __trunctfdf2(quad_of(QUAD_CORNERS[i])));
+        digest = mix_double(digest, __trunctfdf2(quad_of(QUAD_CORNERS[i] | QUAD_SIGN)));
+        cases += 4;
+    }
+    for (int i = 0; i < QUAD_BETWEEN_EDGES_COUNT; i++) {
+        digest = mix_float(digest, __trunctfsf2(quad_of(QUAD_BETWEEN_EDGES[i])));
+        digest = mix_float(digest, __trunctfsf2(quad_of(QUAD_BETWEEN_EDGES[i] | QUAD_SIGN)));
+        digest = mix_double(digest, __trunctfdf2(quad_of(QUAD_BETWEEN_EDGES[i])));
+        digest = mix_double(digest, __trunctfdf2(quad_of(QUAD_BETWEEN_EDGES[i] | QUAD_SIGN)));
+        cases += 4;
+    }
+    /* And the way down two formats at once, which is how a program that keeps a long double and prints a
+     * float gets there. Narrowing twice is not always the same answer as narrowing once, since each step
+     * rounds, and both sides are asked for the same two steps rather than for either claim.
+     */
+    for (int i = 0; i < QUAD_BETWEEN_EDGES_COUNT; i++) {
+        digest = mix_float(digest, __truncdfsf2(__trunctfdf2(quad_of(QUAD_BETWEEN_EDGES[i]))));
+        cases += 1;
+    }
+    say("quadbetweencorner", 0, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -1664,11 +1803,13 @@ int main(int argc, char **argv) {
         quad_corner_cases(i);
     }
     quad_corner_integers();
+    quad_between_corners();
     for (int i = 0; i < QUAD_ROUNDS; i++) {
         quads(i);
         quad_ties(i);
         quad_edges(i);
         quad_integers(i);
+        quad_between(i);
     }
     printf("cases %ld\n", cases);
     return 0;

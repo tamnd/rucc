@@ -5,8 +5,8 @@
  * such a target an addition of two floats is not an instruction, so the front end emits a call and
  * the names in here are what it calls: the four operations and the negation, the eight comparisons
  * further down, since `a < b` on two floats is a call there as much as `a + b` is, and the eight
- * conversions after them, since a cast between a float and an integer is one too, and the pair at the
- * very bottom that crosses between this format and the next one up. They are libgcc's names, for the
+ * conversions after them, since a cast between a float and an integer is one too, and the two pairs at
+ * the very bottom, which cross between this format and each of the two wider ones. They are libgcc's names, for the
  * reason every other name in this directory is: an object we produced gets linked against objects GCC
  * produced and one of us has to give way.
  *
@@ -833,4 +833,140 @@ float __truncdfsf2(double value) {
         exponent = stored - DOUBLE_BIAS + BIAS;
     }
     return round_and_pack(sign, exponent, shift_down(significand, DOUBLE_FRACTION - LEADING));
+}
+
+/* The two conversions between this format and binary128, which are `__extendsftf2` and `__trunctfsf2`.
+ * They are here and not in quad.c for the reason the pair above is here rather than in double.c, and
+ * the reason carries over word for word: a widening needs nothing of the wider format but where its
+ * fields are, and a narrowing is a rounding into this format, so it wants this file's own
+ * `round_and_pack`. What is new is only that the wider format's fields do not fit in a word, so the
+ * two words are written out and the low one is a sticky bit coming down and a zero going up.
+ *
+ * There is no rounding going up, for the same reason there is none going up to a double and with more
+ * room to spare: every exponent a float holds is inside binary128's range and a hundred and thirteen
+ * bits hold twenty four. A float subnormal is again the one input that is not a field move and again
+ * not a rounding, since the wider range reaches far below the smallest float.
+ */
+
+/* The wider format's fields, as much of them as this file needs, which is the high word's worth. */
+#define QUAD_FRACTION_HIGH 48
+#define QUAD_BIAS 16383
+#define QUAD_TOP 32767
+#define QUAD_IMPLICIT_HIGH 0x0001000000000000ull
+#define QUAD_FRACTION_MASK_HIGH 0x0000ffffffffffffull
+
+/* How far a fraction moves inside the high word. The whole distance between the two fractions is
+ * eighty nine bits, which crosses the word boundary, but a float's twenty three fraction bits land
+ * entirely in the high word and the low one is a zero, so the distance that gets written is this one.
+ * The quiet bit moves with the fraction as before: bit twenty two here is bit a hundred and eleven
+ * there, which is that format's own quiet bit, so neither direction says anything about it.
+ */
+#define QUAD_BETWEEN_HIGH (QUAD_FRACTION_HIGH - FRACTION)
+
+/* Which half of a pair in memory holds the sign and the exponent, asked once the way quad.c asks it. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) \
+    && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define HIGH_WORD 0
+#define LOW_WORD 1
+#else
+#define HIGH_WORD 1
+#define LOW_WORD 0
+#endif
+
+union quad_bits {
+    _Float128 number;
+    u64 words[2];
+};
+
+static _Float128 quad_of_words(u64 high, u64 low) {
+    union quad_bits at;
+    at.words[HIGH_WORD] = high;
+    at.words[LOW_WORD] = low;
+    return at.number;
+}
+
+static void words_of_quad(_Float128 value, u64 *high, u64 *low) {
+    union quad_bits at;
+    at.number = value;
+    *high = at.words[HIGH_WORD];
+    *low = at.words[LOW_WORD];
+}
+
+_Float128 __extendsftf2(float value) {
+    u32 pattern = pattern_of(value);
+    u64 sign = (u64)(pattern & SIGN) << 32;
+    int stored = exponent_of(pattern);
+    u32 fraction = fraction_of(pattern);
+    if (stored == TOP) {
+        if (fraction == 0) {
+            return quad_of_words(sign | ((u64)QUAD_TOP << QUAD_FRACTION_HIGH), 0);
+        }
+        /* The payload moves up with the fraction and the quiet bit goes with it, and it is set here as
+         * well for the one input it was not already set in, which is what every other routine in this
+         * file does with a not a number.
+         */
+        u64 payload = (u64)(fraction | QUIET) << QUAD_BETWEEN_HIGH;
+        return quad_of_words(sign | ((u64)QUAD_TOP << QUAD_FRACTION_HIGH) | payload, 0);
+    }
+    if (stored == 0) {
+        if (fraction == 0) {
+            return quad_of_words(sign, 0);
+        }
+        /* A float subnormal, which is a normal at this width. The loop brings the leading one up to
+         * where the format implies it and takes the exponent down to match, the way the pair above
+         * does it, and the exponent it moves is the wider format's.
+         */
+        u32 significand = fraction;
+        int exponent = 1 - BIAS + QUAD_BIAS;
+        while ((significand & IMPLICIT) == 0) {
+            significand <<= 1;
+            exponent -= 1;
+        }
+        u64 high = sign | ((u64)exponent << QUAD_FRACTION_HIGH);
+        high |= ((u64)significand << QUAD_BETWEEN_HIGH) & QUAD_FRACTION_MASK_HIGH;
+        return quad_of_words(high, 0);
+    }
+    u64 high = sign | ((u64)(stored - BIAS + QUAD_BIAS) << QUAD_FRACTION_HIGH);
+    high |= (u64)fraction << QUAD_BETWEEN_HIGH;
+    return quad_of_words(high, 0);
+}
+
+float __trunctfsf2(_Float128 value) {
+    u64 high;
+    u64 low;
+    words_of_quad(value, &high, &low);
+    u32 sign = (u32)(high >> 32) & SIGN;
+    int stored = (int)((high >> QUAD_FRACTION_HIGH) & QUAD_TOP);
+    u64 fraction = high & QUAD_FRACTION_MASK_HIGH;
+    if (stored == QUAD_TOP) {
+        if (fraction == 0 && low == 0) {
+            return float_of(sign | ((u32)TOP << FRACTION));
+        }
+        /* The payload loses eighty nine bits of itself, all sixty four of the low word among them, so
+         * one that lived only down there comes back empty. The quiet bit is set afterwards, so what
+         * comes back is a not a number either way and never the infinity that would be wrong rather
+         * than merely lossy.
+         */
+        return float_of(sign | ((u32)TOP << FRACTION) | (u32)(fraction >> QUAD_BETWEEN_HIGH) | QUIET);
+    }
+    if (stored == 0 && fraction == 0 && low == 0) {
+        return float_of(sign);
+    }
+    /* The rounding, and the only one of the four cases that is. The significand's leading one arrives
+     * at bit forty eight of the high word and `round_and_pack` wants it at LEADING, so the shift is
+     * the distance between those two and the low word joins whatever that shift loses in the sticky
+     * bit. The rebiased exponent may land far above the top or far below zero, which are the two
+     * departures `round_and_pack` already allows for, so a value too large becomes an infinity and one
+     * too small becomes a subnormal or a signed zero with nothing written for either.
+     */
+    u64 significand = fraction;
+    int exponent;
+    if (stored == 0) {
+        exponent = 1 - QUAD_BIAS + BIAS;
+    } else {
+        significand |= QUAD_IMPLICIT_HIGH;
+        exponent = stored - QUAD_BIAS + BIAS;
+    }
+    significand = shift_down(significand, QUAD_FRACTION_HIGH - LEADING) | (low != 0);
+    return round_and_pack(sign, exponent, significand);
 }
