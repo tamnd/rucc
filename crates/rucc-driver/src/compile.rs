@@ -1167,6 +1167,60 @@ mod tests {
         assert!(text.contains("put"), "{text}");
     }
 
+    /// `<xmmintrin.h>` is the next rung of the chain and pulls the other two in behind it, so a
+    /// program that includes this one alone has to get all three. What the intrinsics answer is
+    /// checked the same way `<mmintrin.h>` next door is checked and for the same reason: a
+    /// hundred and forty eight lines of answers over nans, infinities, both zeros and values
+    /// that do not fit in the integer they convert to, identical to GCC 16.2.0 at `-O0`, `-O1`,
+    /// `-O2` and `-Os`.
+    ///
+    /// `_mm_rcp_ps` is the one answer in that run that is not identical, and is not meant to be.
+    /// The instruction approximates a reciprocal and this computes one exactly, so the bits
+    /// differ while both sit inside the relative error Intel documents, which the same program
+    /// checks directly rather than by comparing bits.
+    #[test]
+    fn the_shipped_xmmintrin_defines_the_sse_type_and_the_operations_over_it() {
+        let text = shipped(concat!(
+            "#include <xmmintrin.h>\n",
+            "__m128 add(__m128 a, __m128 b) { return _mm_add_ps(a, b); }\n",
+            "__m128 one(__m128 a, __m128 b) { return _mm_max_ss(a, b); }\n",
+            "__m128 mask(__m128 a, __m128 b) { return _mm_cmpnle_ps(a, b); }\n",
+            "__m128 pick(__m128 a, __m128 b) { return _mm_shuffle_ps(a, b, _MM_SHUFFLE(0,1,2,3)); }\n",
+            "int bits(__m128 a) { return _mm_movemask_ps(a); }\n",
+            "int near(__m128 a) { return _mm_cvtss_si32(a); }\n",
+            "__m128 wide(__m64 a) { return _mm_cvtpi16_ps(a); }\n",
+            "void *room(void) { return _mm_malloc(64, 16); }\n",
+            "void hint(const float *p) { _mm_prefetch(p, _MM_HINT_T0); _mm_sfence(); }\n",
+        ));
+        assert!(text.contains("add"), "{text}");
+        assert!(text.contains("mask"), "{text}");
+        assert!(text.contains("pick"), "{text}");
+        assert!(text.contains("wide"), "{text}");
+    }
+
+    /// The six names of gcc's header this one leaves out, each of which is an instruction whose
+    /// answer no plain C reproduces exactly. Leaving them out is what turns a program that wants
+    /// one into a diagnostic naming the function it called, rather than into a wrong answer, and
+    /// this is what notices if one is ever quietly defined to something close.
+    ///
+    /// `tamnd/rucc#1157` is the square root, which brings the first four back.
+    #[test]
+    fn the_shipped_xmmintrin_leaves_out_the_names_that_need_an_instruction() {
+        let text = rucc_session::runtime::header("xmmintrin.h").expect("xmmintrin.h is shipped");
+        for absent in [
+            "_mm_sqrt_ps",
+            "_mm_sqrt_ss",
+            "_mm_rsqrt_ps",
+            "_mm_rsqrt_ss",
+            "_mm_getcsr",
+            "_mm_setcsr",
+        ] {
+            let defined = text.contains(&format!("{absent}("));
+            assert!(!defined, "{absent} is defined and the header says it is not");
+            assert!(text.contains(absent), "{absent} is absent and unexplained");
+        }
+    }
+
     #[test]
     fn the_three_formality_headers_still_have_to_work() {
         let text = shipped(concat!(
