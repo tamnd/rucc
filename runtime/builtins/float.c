@@ -5,13 +5,14 @@
  * such a target an addition of two floats is not an instruction, so the front end emits a call and
  * the names in here are what it calls: the four operations and the negation, the eight comparisons
  * further down, since `a < b` on two floats is a call there as much as `a + b` is, and the eight
- * conversions at the bottom, since a cast between a float and an integer is one too. They are libgcc's names, for the reason every other name in this directory is: an
- * object we produced gets linked against objects GCC produced and one of us has to give way.
+ * conversions after them, since a cast between a float and an integer is one too, and the pair at the
+ * very bottom that crosses between this format and the next one up. They are libgcc's names, for the
+ * reason every other name in this directory is: an object we produced gets linked against objects GCC
+ * produced and one of us has to give way.
  *
- * This is the single precision half. The double precision set is the same routines over a wider
- * field layout and arrives next, and binary128 is the large piece section 10.2 calls the
- * largest in the document, which wants this one to exist first because it is where the shape gets
- * settled.
+ * This is the single precision half. The double precision set is the same routines over a wider field
+ * layout and is in double.c next door, and binary128 is the large piece section 10.2 calls the largest
+ * in the document, which wanted this one to exist first because it is where the shape got settled.
  *
  * # What correct means here
  *
@@ -697,4 +698,131 @@ unsigned long long __fixunssfdi(float value) {
         return 0;
     }
     return magnitude;
+}
+
+/* The two conversions between this format and the next one up, which are `__extendsfdf2` and
+ * `__truncdfsf2`. They are the first routines in this directory that needed both formats to exist,
+ * which is why they waited for double.c next door.
+ *
+ * They are here rather than there, and the reason is the same for both directions. A widening never
+ * rounds, so all it needs of the wider format is where its fields are, and a narrowing is a rounding
+ * into this format, so it wants this file's own `round_and_pack` and nothing of the wider format but
+ * where its fields are again. So the pair needs the double's field widths and none of the double's
+ * arithmetic, and a file that already knows how to round a float is the place for it.
+ *
+ * Why a widening never rounds is worth one sentence, because it is the whole of the easy direction:
+ * every exponent a float holds is inside the double's range and fifty three bits hold twenty four, so
+ * the fields move and nothing is lost. A float subnormal is the one case that is not a field move,
+ * and it is not a rounding either: it is a normal double, since the double's range reaches far below
+ * the smallest float.
+ */
+
+/* The wider format's fields, which is all of it this file needs. */
+#define DOUBLE_FRACTION 52
+#define DOUBLE_BIAS 1023
+#define DOUBLE_TOP 2047
+#define DOUBLE_SIGN 0x8000000000000000ull
+#define DOUBLE_IMPLICIT 0x0010000000000000ull
+#define DOUBLE_FRACTION_MASK 0x000fffffffffffffull
+
+/* How far a fraction moves between the two formats, which is also how far a payload moves and is why
+ * a not a number keeps its quiet bit without either direction saying anything about that bit: the
+ * float's quiet bit is twenty two and the double's is fifty one, and the distance between the two
+ * fractions is twenty nine.
+ */
+#define BETWEEN (DOUBLE_FRACTION - FRACTION)
+
+union double_bits {
+    double number;
+    u64 pattern;
+};
+
+static u64 double_pattern_of(double value) {
+    union double_bits at;
+    at.number = value;
+    return at.pattern;
+}
+
+static double double_of_pattern(u64 pattern) {
+    union double_bits at;
+    at.pattern = pattern;
+    return at.number;
+}
+
+double __extendsfdf2(float value) {
+    u32 pattern = pattern_of(value);
+    u64 sign = (u64)(pattern & SIGN) << 32;
+    int stored = exponent_of(pattern);
+    u32 fraction = fraction_of(pattern);
+    if (stored == TOP) {
+        if (fraction == 0) {
+            return double_of_pattern(sign | ((u64)DOUBLE_TOP << DOUBLE_FRACTION));
+        }
+        /* The payload moves up with the fraction, which carries the quiet bit along with it, and the
+         * bit is set here as well for the one input it was not already set in, the way every other
+         * routine in this file hands a not a number back quieted.
+         */
+        u64 payload = (u64)fraction << BETWEEN;
+        return double_of_pattern(sign | ((u64)DOUBLE_TOP << DOUBLE_FRACTION) | payload
+                                 | ((u64)QUIET << BETWEEN));
+    }
+    if (stored == 0) {
+        if (fraction == 0) {
+            return double_of_pattern(sign);
+        }
+        /* A float subnormal, which is a normal double. The loop brings the leading one up to where
+         * the format implies it and takes the exponent down to match, which is the same work
+         * `normalize` above does and is written out here because the exponent it moves is the wider
+         * format's.
+         */
+        u32 significand = fraction;
+        int exponent = 1 - BIAS + DOUBLE_BIAS;
+        while ((significand & IMPLICIT) == 0) {
+            significand <<= 1;
+            exponent -= 1;
+        }
+        u64 result = sign | ((u64)exponent << DOUBLE_FRACTION);
+        result |= ((u64)significand << BETWEEN) & DOUBLE_FRACTION_MASK;
+        return double_of_pattern(result);
+    }
+    u64 result = sign | ((u64)(stored - BIAS + DOUBLE_BIAS) << DOUBLE_FRACTION);
+    result |= (u64)fraction << BETWEEN;
+    return double_of_pattern(result);
+}
+
+float __truncdfsf2(double value) {
+    u64 pattern = double_pattern_of(value);
+    u32 sign = (u32)(pattern >> 32) & SIGN;
+    int stored = (int)((pattern >> DOUBLE_FRACTION) & DOUBLE_TOP);
+    u64 fraction = pattern & DOUBLE_FRACTION_MASK;
+    if (stored == DOUBLE_TOP) {
+        if (fraction == 0) {
+            return float_of(sign | ((u32)TOP << FRACTION));
+        }
+        /* The payload moves down, which loses the bottom twenty nine bits of it, so a not a number
+         * whose payload was only in those bits would come back with an empty one. The quiet bit is
+         * set afterwards, so what comes back is a not a number either way and never an infinity,
+         * which is the thing that would be wrong rather than merely lossy.
+         */
+        return float_of(sign | ((u32)TOP << FRACTION) | (u32)(fraction >> BETWEEN) | QUIET);
+    }
+    if (stored == 0 && fraction == 0) {
+        return float_of(sign);
+    }
+    /* A rounding, and the only one of the four cases that is. The significand arrives with its
+     * leading one at bit fifty two and `round_and_pack` wants it at LEADING, so the shift down is
+     * the distance between those two with the sticky bit keeping what falls off. The exponent is
+     * rebiased into this format and may land anywhere, including far above the top and far below
+     * zero, which is exactly the two departures `round_and_pack` already allows for: a value too
+     * large becomes an infinity and one too small becomes a subnormal or a signed zero.
+     */
+    u64 significand = fraction;
+    int exponent;
+    if (stored == 0) {
+        exponent = 1 - DOUBLE_BIAS + BIAS;
+    } else {
+        significand |= DOUBLE_IMPLICIT;
+        exponent = stored - DOUBLE_BIAS + BIAS;
+    }
+    return round_and_pack(sign, exponent, shift_down(significand, DOUBLE_FRACTION - LEADING));
 }

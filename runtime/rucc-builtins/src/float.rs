@@ -1,7 +1,8 @@
 //! Single precision arithmetic in integers, which is the reference for the entry points in
 //! `runtime/builtins/float.c`: the four operations a target with no floating point unit calls, the
-//! negation, the eight comparisons, which are calls on such a target too, and the eight conversions
-//! between a float and an integer, which is what a cast becomes there.
+//! negation, the eight comparisons, which are calls on such a target too, the eight conversions
+//! between a float and an integer, which is what a cast becomes there, and the pair at the bottom that
+//! crosses between this format and the next one up.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's,
 //! the same as everything else here.
@@ -40,6 +41,10 @@
 //! canonicalization that would hide a real disagreement. An operation with no answer at all, an
 //! infinity less an infinity, a zero times an infinity, or a zero over a zero, gives the quiet not
 //! a number with an empty payload.
+
+// The pair of routines at the bottom of this file crosses between the two formats, so it reads the
+// wider format's fields and its rounding from next door rather than writing a second copy of either.
+use crate::double;
 
 /// How many bits of the significand the format writes down, the other one being implied.
 const FRACTION: u32 = 23;
@@ -592,6 +597,64 @@ pub extern "C" fn __fixunssfdi(value: f32) -> u64 {
     truncate_unsigned(value.to_bits(), UNSIGNED_64).map_or(0, |answer| answer as u64)
 }
 
+/// How far a fraction moves between the two formats, which is also how far a payload moves.
+///
+/// The one consequence worth naming is that the quiet bit needs no case of its own in either
+/// direction: the narrow format's is bit twenty two, the wide one's is bit fifty one, and the
+/// distance between the two fractions is twenty nine.
+const BETWEEN: u32 = double::FRACTION - FRACTION;
+
+/// `double __extendsfdf2(float)`, the widening.
+///
+/// Both directions are one line of arithmetic here, and the line is the same one: take the input
+/// apart into the exact value it is and round that once into the other format. That the widening
+/// never rounds is then a property of the two formats rather than something this code relies on,
+/// which is the better way round for a reference to have it, and the test is what demonstrates it.
+/// The shipped C in `runtime/builtins/float.c` moves the fields instead, and normalizes by hand for
+/// the one input where a field move is not enough, which is a float subnormal.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __extendsfdf2(value: f32) -> f64 {
+    widen(value.to_bits())
+}
+
+fn widen(bits: u32) -> f64 {
+    let sign = u64::from(bits & SIGN) << 32;
+    if is_nan(bits) {
+        let payload = u64::from(bits & FRACTION_MASK) << BETWEEN;
+        let quiet = u64::from(QUIET) << BETWEEN;
+        return f64::from_bits(sign | (double::TOP << double::FRACTION) | payload | quiet);
+    }
+    if is_infinite(bits) {
+        return f64::from_bits(sign | (double::TOP << double::FRACTION));
+    }
+    let taken = parts(bits);
+    double::round_from(sign, u128::from(taken.significand), taken.scale, false)
+}
+
+/// `float __truncdfsf2(double)`, the narrowing, which is the direction that rounds.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __truncdfsf2(value: f64) -> f32 {
+    narrow(value.to_bits())
+}
+
+fn narrow(bits: u64) -> f32 {
+    let sign = (bits >> 32) as u32 & SIGN;
+    if double::is_nan(bits) {
+        // The payload loses its bottom twenty nine bits, so one that lived only down there comes
+        // back empty. The quiet bit goes on afterwards, so what comes back is a not a number either
+        // way rather than the infinity that would be wrong rather than merely lossy.
+        let payload = ((bits & double::FRACTION_MASK) >> BETWEEN) as u32;
+        return f32::from_bits(sign | (TOP << FRACTION) | payload | QUIET);
+    }
+    if double::is_infinite(bits) {
+        return infinity(sign);
+    }
+    let taken = double::parts(bits);
+    round_from(sign, u128::from(taken.significand), taken.scale, false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -1014,5 +1077,106 @@ mod tests {
         check(2, largest, 2.0);
         check(3, largest, 0.5);
         check(1, -largest, largest);
+    }
+
+    /// Holds the widening against the machine's own, bit for bit, which includes the payload of a not
+    /// a number since the instruction that does this moves it the same way.
+    fn check_widen(bits: u32) {
+        let value = f32::from_bits(bits);
+        let wanted = black_box(f64::from(black_box(value)));
+        let got = widen(bits);
+        assert_eq!(
+            got.to_bits(),
+            wanted.to_bits(),
+            "{bits:08x} widened: got {:016x}, the machine says {:016x}",
+            got.to_bits(),
+            wanted.to_bits()
+        );
+    }
+
+    fn check_narrow(bits: u64) {
+        let value = f64::from_bits(bits);
+        let wanted = black_box(black_box(value) as f32);
+        let got = narrow(bits);
+        assert_eq!(
+            got.to_bits(),
+            wanted.to_bits(),
+            "{bits:016x} narrowed: got {:08x}, the machine says {:08x}",
+            got.to_bits(),
+            wanted.to_bits()
+        );
+    }
+
+    #[test]
+    fn widening_a_float_is_the_double_the_machine_widens_it_to() {
+        let mut stream = Stream(0x1234_5678_9abc_def1);
+        for _ in 0..60_000 {
+            check_widen(stream.next() as u32);
+            // And a subnormal, which is the one input where the fields do not simply move: it is a
+            // normal double, since the wider format's range reaches far below the smallest float.
+            // Random bits land on one once in every two hundred and fifty six patterns and this lands
+            // on one every time.
+            check_widen((stream.next() as u32) & (SIGN | FRACTION_MASK));
+        }
+        for value in corners() {
+            check_widen(value.to_bits());
+        }
+    }
+
+    /// The doubles at the ends of the narrow format's range, which is where the narrowing decides
+    /// between a finite answer and an infinity and between a subnormal and a zero.
+    fn narrow_edges() -> Vec<u64> {
+        let mut out = Vec::new();
+        for bits in [
+            0x47ef_ffff_e000_0000, // the largest finite float, exactly
+            0x47ef_ffff_efff_ffff, // just under halfway to 2^128, so the largest float again
+            0x47ef_ffff_f000_0000, // exactly halfway, so the even neighbour wins and it is infinite
+            0x4800_0000_0000_0000, // 2^128, which is past the format
+            0x3810_0000_0000_0000, // 2^-126, the smallest normal float
+            0x380f_ffff_ffff_ffff, // just under it, so the largest subnormal rounded up
+            0x36a0_0000_0000_0000, // 2^-149, the smallest subnormal float
+            0x3690_0000_0000_0000, // 2^-150, exactly half of it, so a zero by the tie to even
+            0x3690_0000_0000_0001, // a hair more than half, so the smallest subnormal
+            0x3698_0000_0000_0000, // three quarters of it, which rounds up for the same reason
+            0x7ff0_0000_0000_0001, // a not a number whose payload is only in the bits that are lost
+            0x7ff8_0000_0000_0000, // a quiet one with an empty payload
+            0x7ff0_0000_0000_0000, // an infinity
+            0x0000_0000_0000_0001, // the smallest subnormal double, far below the format
+        ] {
+            out.push(bits);
+            out.push(bits | double::SIGN);
+        }
+        out
+    }
+
+    #[test]
+    fn narrowing_a_double_is_the_float_the_machine_rounds_it_to() {
+        let mut stream = Stream(0xfeed_face_1234_5671);
+        for _ in 0..60_000 {
+            check_narrow(stream.next());
+            // Random bits are almost never inside the narrow format's range, where the rounding is,
+            // so this puts the exponent from below the smallest subnormal to above the largest finite
+            // and keeps the fraction and the sign random.
+            let stored = 870 + stream.next() % 290;
+            let rest = stream.next() & (double::SIGN | double::FRACTION_MASK);
+            check_narrow(rest | (stored << double::FRACTION));
+        }
+        for bits in narrow_edges() {
+            check_narrow(bits);
+        }
+    }
+
+    /// The two directions against each other, which is the property that makes the pair worth having
+    /// in one place: a float widened and narrowed again is the float it started as, every time, since
+    /// the widening loses nothing for the narrowing to round.
+    #[test]
+    fn widening_a_float_and_narrowing_it_back_is_where_it_started() {
+        let mut stream = Stream(0x0bad_c0de_0bad_c0d1);
+        for _ in 0..60_000 {
+            let bits = stream.next() as u32;
+            let back = narrow(widen(bits).to_bits()).to_bits();
+            let wanted = if is_nan(bits) { bits | QUIET } else { bits };
+            assert_eq!(back, wanted, "{bits:08x} there and back came to {back:08x}");
+        }
     }
 }

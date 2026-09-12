@@ -114,6 +114,12 @@ unsigned int __fixunsdfsi(double value);
 long long __fixdfdi(double value);
 unsigned long long __fixunsdfdi(double value);
 
+/* And the pair between the two formats, which is the only thing in the soft float set that needs both
+ * of them. A cast either way is an instruction on this host, so these are by name like the rest.
+ */
+double __extendsfdf2(float value);
+float __truncdfsf2(double value);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -1175,6 +1181,89 @@ static void double_corner_integers(void) {
     say("doubleintcorner", 0, digest);
 }
 
+/* The pair between the two formats. One group of its own rather than a pair of calls added to the
+ * families above, because every digest up there would have changed and none of them would have been
+ * saying anything new: these two take one operand and the families above are built around pairs.
+ */
+#define BETWEEN_ROUNDS 8
+#define BETWEEN_CASES 2048
+
+/* A double whose exponent is somewhere around the narrow format's range, from below the smallest
+ * subnormal float to above the largest finite one, which is the only place the narrowing has a
+ * decision to make. Random bits land outside it nearly always.
+ */
+static unsigned long long double_near_single(void) {
+    unsigned long long stored = 870 + (next_random() % 290);
+    return (random_double() & 0x800FFFFFFFFFFFFFull) | (stored << 52);
+}
+
+static void between(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < BETWEEN_CASES; i++) {
+        digest = mix_double(digest, __extendsfdf2(single_of(random_single())));
+        /* And a float subnormal, which is the one input to the widening that is not a field move,
+         * since it is a normal double. One pattern in two hundred and fifty six is one of those and
+         * this is one every time.
+         */
+        digest = mix_double(digest, __extendsfdf2(single_of(random_single() & 0x807FFFFFu)));
+        digest = mix_float(digest, __truncdfsf2(double_of(random_double())));
+        digest = mix_float(digest, __truncdfsf2(double_of(double_near_single())));
+        cases += 4;
+    }
+    say("between", round, digest);
+}
+
+/* The doubles at the ends of the narrow format's range, which is where the narrowing chooses between
+ * a finite answer and an infinity and between a subnormal and a zero.
+ */
+static const unsigned long long BETWEEN_EDGES[] = {
+    0x47EFFFFFE0000000ull, /* the largest finite float, exactly */
+    0x47EFFFFFEFFFFFFFull, /* just under halfway to 2^128, so the largest float again */
+    0x47EFFFFFF0000000ull, /* exactly halfway, so the even neighbour wins and it is an infinity */
+    0x47EFFFFFF0000001ull, /* a hair past halfway, which is an infinity for the ordinary reason */
+    0x4800000000000000ull, /* 2^128, past the format */
+    0x3810000000000000ull, /* 2^-126, the smallest normal float */
+    0x380FFFFFFFFFFFFFull, /* just under it, so the largest subnormal rounded up to it */
+    0x36A0000000000000ull, /* 2^-149, the smallest subnormal float */
+    0x3690000000000000ull, /* 2^-150, exactly half of it, so a zero by the tie to the even one */
+    0x3690000000000001ull, /* a hair more than half, so the smallest subnormal */
+    0x3698000000000000ull, /* three quarters of it, which rounds up for the same reason */
+    0x7FF0000000000001ull, /* a not a number whose payload is only in the bits the narrowing loses */
+    0x7FF8000000000000ull, /* a quiet one with an empty payload */
+    0x7FF0000000000000ull, /* an infinity */
+    0x0000000000000001ull, /* the smallest subnormal double, far below anything the format holds */
+    0x3FF0000000000000ull, /* one, which both directions leave alone */
+};
+
+#define BETWEEN_EDGES_COUNT ((int)(sizeof BETWEEN_EDGES / sizeof BETWEEN_EDGES[0]))
+
+/* The edges by name, and the round trip. A float widened and narrowed again is the float it started
+ * as, because the widening loses nothing for the narrowing to round, and a not a number comes back
+ * with its quiet bit set whether it went in with one or not. That is a property of the pair rather
+ * than of either routine, so it is digested here rather than checked with an `if`: a `1` that both
+ * sides agree on says nothing, while the value that came back says what went wrong.
+ */
+static void between_corners(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        digest = mix_double(digest, __extendsfdf2(single_of(SINGLE_CORNERS[i])));
+        digest = mix_double(digest, __extendsfdf2(single_of(SINGLE_CORNERS[i] | SINGLE_SIGN)));
+        digest = mix_float(digest, __truncdfsf2(__extendsfdf2(single_of(SINGLE_CORNERS[i]))));
+        cases += 3;
+    }
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        digest = mix_float(digest, __truncdfsf2(double_of(DOUBLE_CORNERS[i])));
+        digest = mix_float(digest, __truncdfsf2(double_of(DOUBLE_CORNERS[i] | DOUBLE_SIGN)));
+        cases += 2;
+    }
+    for (int i = 0; i < BETWEEN_EDGES_COUNT; i++) {
+        digest = mix_float(digest, __truncdfsf2(double_of(BETWEEN_EDGES[i])));
+        digest = mix_float(digest, __truncdfsf2(double_of(BETWEEN_EDGES[i] | DOUBLE_SIGN)));
+        cases += 2;
+    }
+    say("betweencorner", 0, digest);
+}
+
 /* Every corner against every corner, both ways round and at all four pairs of signs, grouped by which
  * corner one side was.
  */
@@ -1244,6 +1333,10 @@ int main(int argc, char **argv) {
         double_ties(i);
         double_edges(i);
         double_integers(i);
+    }
+    between_corners();
+    for (int i = 0; i < BETWEEN_ROUNDS; i++) {
+        between(i);
     }
     printf("cases %ld\n", cases);
     return 0;
