@@ -48,7 +48,7 @@ tasks:
   abi-signatures    regenerate tests/abi-signatures, or check it with --check
   link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
   abi-differential  compile the signature corpus with both compilers in both directions and run it
-  builtins          build rucc-builtins as a static library for a target
+  builtins          compile the C runtime support routines into a static library for a target
   bench             time the throughput floor workload against the reference compiler
   size              measure the distribution against the budget in document 13.1
   disasm            check every instruction we encode against an independent decoder
@@ -988,23 +988,35 @@ fn file_name(path: &Path) -> String {
 
 // The target-side runtime.
 
-/// Builds `rucc-builtins` into the static library the driver puts on a link line.
+/// Compiles the C in `runtime/builtins` into the static library the driver puts on a link line.
 ///
-/// This is an `xtask` rather than part of `cargo build` because it is the one crate in the
-/// workspace compiled *for the target* rather than for the host, and a `cargo build` of the
-/// workspace on a machine that has no standard library for the target should still work. So the
-/// normal build compiles this crate for the host as an ordinary library, which is what makes its
-/// tests run, and this task compiles the same source again as a `staticlib` for wherever the
-/// generated code is going.
+/// With rucc itself, which is the whole point of the task rather than a detail of how it is
+/// implemented. `spec/12-abi-and-runtime.md` section 12.8 settled in tamnd/rucc#912 that what
+/// ships is C compiled by this compiler, and the reason was thirty targets: the Rust path needs a
+/// Rust target for every row of `spec/cross-compile/04-target-matrix.md` and that table has rows
+/// rustc does not have, and the archive rustc produces brings Rust's own `compiler_builtins` with
+/// it, which was 4.5 MB for four routines against a 10 MB budget for every tier 1 and tier 2
+/// archive together.
 ///
-/// The output lands where `cargo` puts it, `target/<triple>/release/librucc_builtins.a`, and the
-/// path is printed because the thing that wants it next is a link line.
+/// It also makes each archive evidence. A target whose builtins do not build is a target whose
+/// codegen does not work, and that is a better thing to learn here than on somebody's link line.
+///
+/// The compiler is built first, release, because this is the one task whose tool is the thing
+/// under test. Then one command line compiles every `.c` in that directory and writes the archive,
+/// which is what `--emit=archive` is for: the objects never reach the file system and the symbol
+/// index comes from what the writer just wrote.
+///
+/// The output lands where `cargo rustc --crate-type staticlib` used to put it,
+/// `target/<triple>/release/librucc_builtins.a`, so that `cargo xtask size` and the driver's
+/// search still find it under the name they already look for. The path is printed because the
+/// thing that wants it next is a link line.
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when `cargo` cannot be run or when the target has no `core` installed, which is
-/// the usual reason this fails and is worth saying out loud rather than passing on a linker
-/// message about a missing crate.
+/// [`Error::Io`] when `cargo` or the compiler cannot be run, and [`Error::Failed`] when the build
+/// of the compiler fails, when there is no C to compile, or when compiling it fails. That last one
+/// is the interesting failure and the message says so, because on a target this compiler does not
+/// support yet it is the answer rather than an accident.
 fn builtins(args: &[String]) -> Result<()> {
     let mut target = None;
     let mut at = 0;
@@ -1032,8 +1044,77 @@ fn builtins(args: &[String]) -> Result<()> {
         None => host_triple()?,
     };
 
-    println!("{}", staticlib("rucc-builtins", &target)?.display());
+    let sources = builtin_sources()?;
+    let archive = root().join("target").join(&target).join("release").join("librucc_builtins.a");
+    if let Some(dir) = archive.parent() {
+        fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
+    }
+
+    let rucc = cost::compiler()?;
+    let status = Command::new(&rucc)
+        .arg(format!("--target={target}"))
+        // Freestanding because this is what a program gets instead of a C library, so there is no
+        // C library under it to call. No builtins because a loop that copies bytes is a loop a
+        // compiler may recognize and replace with a call to memcpy, and in this file that call
+        // would be the function calling itself. This is the flag the Rust crate spells
+        // `#![no_builtins]`.
+        .args(["-ffreestanding", "-fno-builtin", "-O2", "--emit=archive", "-o"])
+        .arg(&archive)
+        .args(&sources)
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run {}: {e}", rucc.display())))?;
+    if !status.success() {
+        return Err(Error::Failed {
+            task: "builtins",
+            problems: vec![format!(
+                "compiling the runtime support routines for {target} failed. The message above is \
+                 this compiler's, and on a target it does not support yet that is the answer \
+                 rather than an accident"
+            )],
+        });
+    }
+    if !archive.is_file() {
+        return Err(Error::Failed {
+            task: "builtins",
+            problems: vec![format!(
+                "the compiler reported success but {} is not there",
+                archive.display()
+            )],
+        });
+    }
+
+    println!("{}", archive.display());
     Ok(())
+}
+
+/// Every `.c` under `runtime/builtins`, in the order their names sort in.
+///
+/// Sorted rather than in whatever order the file system hands them back, because the members of an
+/// archive come out in the order they went in and `spec/cross-compile/13-distribution.md` section
+/// 13.6 asks for the same bytes from the same tree on any machine.
+///
+/// # Errors
+///
+/// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is no C in it
+/// at all, which would otherwise write an empty archive and call it a success.
+fn builtin_sources() -> Result<Vec<PathBuf>> {
+    let dir = root().join("runtime").join("builtins");
+    let mut sources = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))? {
+        let path = entry.map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?.path();
+        if path.extension().is_some_and(|e| e == "c") {
+            sources.push(path);
+        }
+    }
+    sources.sort();
+    if sources.is_empty() {
+        return Err(Error::Failed {
+            task: "builtins",
+            problems: vec![format!("there is no C to compile in {}", dir.display())],
+        });
+    }
+    Ok(sources)
 }
 
 /// Builds one of the target-side crates as a static library for `target`, and says where it is.
