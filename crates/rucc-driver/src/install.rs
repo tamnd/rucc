@@ -474,6 +474,48 @@ mod tests {
         assert_eq!(left, Vec::<PathBuf>::new(), "a staging tree was left behind");
     }
 
+    /// `--fetch` from end to end, with the artifact already where a downloader would have put it.
+    ///
+    /// No downloader runs, and that is the case rather than a way around one: section 13.8 says a
+    /// machine with none of the three is told the path to put a file at and a second run carries on
+    /// from the check, so this is that machine. What it tests is that the table, the check, the
+    /// unpack and the rename are wired to each other, which is the one thing neither module's own
+    /// tests can see.
+    ///
+    /// It is here rather than beside the parser because the fixtures for an artifact are here, and a
+    /// second copy of them next door is the thing most likely to drift away from this one.
+    #[test]
+    fn a_fetch_of_an_artifact_that_is_already_on_the_machine_installs_it() {
+        let tree = Tree::new("fetch");
+        let manifest = manifest_for(FILES);
+        let (built, hash) = artifact(&tree, FILES, &manifest);
+        let cache = tree.0.join("cache");
+
+        // A table row names an artifact by a URL and a hash, and both are static strings there
+        // because a release is what writes them. A test computes the hash as it goes, so it leaks
+        // two strings into a process that is about to end.
+        let pinned = crate::artifact::Pinned {
+            tuple: "x86_64-linux-musl",
+            url: "https://example.invalid/rucc-sysroot-x86_64-linux-musl.tar.gz",
+            sha256: String::leak(hash),
+        };
+        // Where a downloader would have written it, which is what the fetch looks at first.
+        let at = pinned.archive_in(&cache);
+        std::fs::create_dir_all(at.parent().expect("a parent")).expect("a downloads directory");
+        std::fs::copy(&built, &at).expect("the artifact should be placeable");
+
+        assert_eq!(crate::fetch_sysroot(&pinned, target(), &cache), 0);
+        let root = cache.join("sysroots").join("x86_64-linux-musl");
+        assert!(root.join("include/stdio.h").is_file());
+        assert_eq!(
+            std::fs::read_to_string(root.join("manifest")).expect("a manifest"),
+            manifest.render()
+        );
+        // And again, which is the ordinary second run: the archive is still there, it still matches,
+        // and the tree it would install is the tree that is already installed.
+        assert_eq!(crate::fetch_sysroot(&pinned, target(), &cache), 0);
+    }
+
     #[test]
     fn the_same_artifact_twice_does_not_move_anything() {
         let tree = Tree::new("again");

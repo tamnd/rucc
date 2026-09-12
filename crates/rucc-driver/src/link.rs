@@ -214,6 +214,9 @@ pub enum Error {
         target: String,
         /// Where its sysroot would be.
         dir: String,
+        /// Whether this release pins an artifact for that target, which decides whether the message
+        /// can name a command that would fix it.
+        pinned: bool,
     },
     /// The linker was found and could not be started.
     Spawn {
@@ -242,12 +245,23 @@ impl std::fmt::Display for Error {
                 write!(f, "there is no link line for {triple} in this compiler yet")
             }
             Error::Cross { why } => f.write_str(why),
-            Error::Sysroot { target, dir } => write!(
+            // Two sentences and the second one changes, because a person whose link just failed
+            // wants the command that fixes it and there is only a command to name when this release
+            // pins an artifact for that target. Section 13.8's rule is that a compile which is
+            // missing a sysroot says what to run rather than running it, and this is where it says
+            // it.
+            Error::Sysroot { target, dir, pinned: true } => write!(
                 f,
                 "there is no sysroot for {target} at {dir}, so there is nothing to link it \
-                 against. Pass --sysroot=<dir> to name a tree you have already, or see \
-                 spec/cross-compile/13-distribution.md section 13.2 for the cache that will hold \
-                 one"
+                 against. `rucc --fetch {target}` gets the one this release pins, or pass \
+                 --sysroot=<dir> to name a tree you have already"
+            ),
+            Error::Sysroot { target, dir, pinned: false } => write!(
+                f,
+                "there is no sysroot for {target} at {dir}, so there is nothing to link it \
+                 against, and this release pins none for it to fetch. Pass --sysroot=<dir> to name \
+                 a tree you have already, or see spec/cross-compile/13-distribution.md section \
+                 13.2 for the cache that will hold one"
             ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
             Error::Refused { status } => write!(f, "the linker {status}"),
@@ -485,9 +499,11 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     // been created and never populated is there and holds nothing. Section 11.6's rule is that
     // suitable is checked and not assumed, and this is the cheapest form of that.
     if !sysroot.lib().is_dir() {
+        let tuple = target_tuple(target, opts).to_canonical_string();
         return Err(Error::Sysroot {
-            target: target.tuple().to_canonical_string(),
             dir: sysroot.root().display().to_string(),
+            pinned: crate::artifact::pinned_for(&tuple).is_some(),
+            target: tuple,
         });
     }
     Ok(())
@@ -1469,8 +1485,30 @@ mod tests {
             ..LinkOptions::default()
         };
         let error = preflight(foreign(), &opts).expect_err("nothing has built one");
-        let Error::Sysroot { dir, .. } = &error else { panic!("{error:?}") };
+        let Error::Sysroot { dir, pinned, .. } = &error else { panic!("{error:?}") };
         assert!(dir.ends_with("x86_64-none"), "{dir}");
+        // Nothing is pinned for that target, or for any target yet, so the message says that rather
+        // than naming a command that would not work.
+        assert!(!pinned, "nothing should be pinned for a bare metal target");
+        let said = error.to_string();
+        assert!(said.contains("pins none for it to fetch"), "{said}");
+    }
+
+    /// The other half of the same message, which is what a target this release does pin an artifact
+    /// for is told. Built by hand rather than through `preflight`, because what decides it is the
+    /// table in `crate::artifact` and that table has no rows in it yet.
+    #[test]
+    fn a_sysroot_that_could_be_fetched_is_told_what_to_run() {
+        let said = Error::Sysroot {
+            target: "x86_64-linux-musl".to_owned(),
+            dir: "/somewhere/sysroots/x86_64-linux-musl".to_owned(),
+            pinned: true,
+        }
+        .to_string();
+        assert!(said.contains("`rucc --fetch x86_64-linux-musl`"), "{said}");
+        // And the other way out of it, because a person who has a tree already does not want a
+        // download.
+        assert!(said.contains("--sysroot=<dir>"), "{said}");
     }
 
     #[test]
