@@ -126,7 +126,7 @@
 //! call frame, and it is J8. Nothing reaches it yet either: the front end works out which pointer
 //! an access went through, and the pass that turns that into a call is the compiler's half.
 //!
-//! [`aux`] is the sixteen bytes beside every pointer sized word, which is section 5.2.2's aux
+//! [`aux_slot`] is the sixteen bytes beside every pointer sized word, which is section 5.2.2's aux
 //! plane, and what goes in them is a decision that was open until tamnd/rucc#1068 and is closed
 //! now. The straw man was CHERI's compression, an exponent and two mantissas, and the sweep in
 //! `cargo xtask compress` turned it down: what it rounds off is whole heap objects rather than the
@@ -137,7 +137,7 @@
 //! pointer in the word beside them, with the lifetime version at its full sixty four bits and the
 //! part of `meta` a check reads. An object too long for that sets a flag and its reader takes the
 //! two numbers out of the header instead. Finding the slot for a word is there too, as
-//! `aux::address_of` and the `store` and `load` pair over it, and it is arithmetic off the
+//! `aux_slot::address_of` and the `store` and `load` pair over it, and it is arithmetic off the
 //! capability the check in front of the access already holds rather than a lookup in anything. It
 //! answers for allocated storage only, since a local's aux goes beside the frame and a global's
 //! goes in a section of the image and neither of those exists.
@@ -178,7 +178,7 @@ extern crate std;
 pub mod adopt;
 #[cfg(unix)]
 pub mod alloc;
-pub mod aux;
+pub mod aux_slot;
 #[cfg(unix)]
 pub mod cap;
 #[cfg(unix)]

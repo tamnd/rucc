@@ -1,10 +1,10 @@
 //! The two ends of a capability in memory, which document 06 section 6.2.2 calls `cap_store` and
 //! `cap_load`.
 //!
-//! [`crate::aux`] is the format and the arithmetic and knows nothing about the rest of the runtime.
-//! This is the policy over it: what a store does when there is nowhere to write the capability
-//! down, and what a load answers when the slot cannot say the whole thing by itself. Both of those
-//! are questions about the planes and the allocator, so they are here and not there.
+//! [`crate::aux_slot`] is the format and the arithmetic and knows nothing about the rest of the
+//! runtime. This is the policy over it: what a store does when there is nowhere to write the
+//! capability down, and what a load answers when the slot cannot say the whole thing by itself.
+//! Both of those are questions about the planes and the allocator, so they are here and not there.
 //!
 //! # What a load answers
 //!
@@ -36,14 +36,15 @@
 //!
 //! # What a store does with nowhere to write
 //!
-//! Nothing, and it says so. A word with no slot is the same three cases [`crate::aux::address_of`]
-//! reports, and the capability is dropped. The load beside it recovers, so the pair stays honest,
-//! and no judgement is made at the store: a store of a pointer into a local is not a fault.
+//! Nothing, and it says so. A word with no slot is the same three cases
+//! [`crate::aux_slot::address_of`] reports, and the capability is dropped. The load beside it
+//! recovers, so the pair stays honest, and no judgement is made at the store: a store of a pointer
+//! into a local is not a fault.
 
 use core::ffi::c_void;
 
 use crate::alloc;
-use crate::aux::{self, Read};
+use crate::aux_slot::{self, Read};
 use crate::layout::{Cap, Meta};
 use crate::plane::Version;
 use crate::recover;
@@ -60,8 +61,8 @@ use crate::recover;
 /// in front of it the runtime's storage rather than the program's. `at` and `value` are never read
 /// through, so either may be any value at all.
 pub unsafe fn store(dest: Cap, at: *const c_void, value: *const c_void, cap: Cap) -> bool {
-    // SAFETY: the caller's contract is the one `aux::store` asks for, passed straight on.
-    unsafe { aux::store(dest, at as u64, value as u64, cap) }
+    // SAFETY: the caller's contract is the one `aux_slot::store` asks for, passed straight on.
+    unsafe { aux_slot::store(dest, at as u64, value as u64, cap) }
 }
 
 /// The capability of the pointer `value`, which was loaded from the word at `at`.
@@ -75,7 +76,7 @@ pub unsafe fn store(dest: Cap, at: *const c_void, value: *const c_void, cap: Cap
 #[must_use]
 pub unsafe fn load(dest: Cap, at: *const c_void, value: *const c_void) -> Cap {
     // SAFETY: as `store`.
-    let Some(read) = (unsafe { aux::load(dest, at as u64, value as u64) }) else {
+    let Some(read) = (unsafe { aux_slot::load(dest, at as u64, value as u64) }) else {
         return recover::recover(value);
     };
     match read {
@@ -257,7 +258,7 @@ mod tests {
         // Two megabytes and one granule, which is a byte over what twenty one bits of extent can
         // say, so the slot keeps the version and the meta and the bounds come from the planes.
         let holder = alloc(64);
-        let long = alloc(aux::EXACT as usize + 1);
+        let long = alloc(aux_slot::EXACT as usize + 1);
         assert!(!long.is_null(), "the arena has room for one");
         let word = at(holder, 8);
         let inside = at(long, 4096);
@@ -286,7 +287,7 @@ mod tests {
         // the address now, so a slot written about an instance that is gone must not be believed
         // about the instance that took its place.
         let holder = alloc(64);
-        let long = alloc(aux::EXACT as usize + 1);
+        let long = alloc(aux_slot::EXACT as usize + 1);
         let word = at(holder, 8);
         let inside = at(long, 4096);
         // SAFETY: instances this test owns, neither address read through.

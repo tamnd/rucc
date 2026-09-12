@@ -228,7 +228,7 @@ pub const HEADER: usize = size_of::<Header>();
 /// How many bytes of aux one pointer sized word of payload needs.
 ///
 /// A capability is four words in flight and is squeezed into two here. What goes in the two is
-/// [`crate::aux::Slot`], which says where the object starts and how far it runs exactly rather
+/// [`crate::aux_slot::Slot`], which says where the object starts and how far it runs exactly rather
 /// than compressed, and sends a reader to the header for an object too long to say that way.
 /// Nothing here writes an aux entry yet, because what writes one is the compiler's `cap_store`.
 /// How much room it gets was fixed before the contents were, because that is what fixes the memory

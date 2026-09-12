@@ -4,6 +4,11 @@
 //! `spec/safe-memory/17-open-questions.md` question 5, which is the decision about what goes in
 //! here and was answered in tamnd/rucc#1068.
 //!
+//! The file is not called `aux.rs` because it cannot be. `AUX` is a reserved device name on Windows
+//! whatever extension follows it, so git refuses to write such a path and a tree holding one cannot
+//! be checked out there at all, which is a failure before any crate is compiled. `xtask/src/aux.rs`
+//! was renamed for the same reason once already. The word itself is the spec's and stays.
+//!
 //! A capability in flight is four words, and there are two here, so something has to give. What
 //! gives is not the numbers. [`Slot`] keeps the lifetime version at its full width, keeps the part
 //! of [`Meta`] a check reads, and says where the object starts and how far it runs exactly, as a
