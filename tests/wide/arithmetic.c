@@ -18,7 +18,10 @@
  * of them.
  *
  * Nothing here divides by zero and nothing divides the most negative value by minus one. Both are
- * undefined in C, so a program that did either would be comparing two compilers' guesses.
+ * undefined in C, so a program that did either would be comparing two compilers' guesses. The
+ * conversions to and from a float keep the same rule: a value with no float to become and a float
+ * whose integer part the type cannot hold are both undefined, so the values are built to stay inside
+ * the range rather than tested there and excluded afterwards.
  */
 
 typedef unsigned __int128 uwide;
@@ -28,6 +31,12 @@ typedef __int128 wide;
  * declaration and neither is reading a header this compiler ships and the other one does not.
  */
 int printf(const char *format, ...);
+
+/* A float and its bits are the same bytes read two ways, and this is how a program says so without
+ * asking what either compiler does about reading a union back the other way round. It is also how
+ * the digest gets at a float at all, since what a conversion rounded to is a question about bits.
+ */
+void *memcpy(void *to, const void *from, unsigned long size);
 
 /* How many rounds of random cases, and how many cases in one. The product is what the pairs number
  * in the output is, and the split into rounds is so that a difference says which round it started
@@ -70,6 +79,48 @@ static unsigned long long mix(unsigned long long digest, uwide value) {
         digest *= 1099511628211ull;
     }
     return digest;
+}
+
+/* The first value of each integer type that the type cannot hold, both of them exact as a double.
+ * They are the bounds a conversion coming down is kept inside, since a float above them has no
+ * integer to truncate to.
+ */
+#define TWO_TO_127 170141183460469231731687303715884105728.0
+#define TWO_TO_128 340282366920938463463374607431768211456.0
+
+static unsigned long long bits_of_double(double value) {
+    unsigned long long bits;
+    memcpy(&bits, &value, sizeof bits);
+    return bits;
+}
+
+static unsigned long long bits_of_float(float value) {
+    unsigned int bits;
+    memcpy(&bits, &value, sizeof bits);
+    return (unsigned long long)bits;
+}
+
+static double double_of_bits(unsigned long long bits) {
+    double value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+/* A random double whose magnitude is at least 2^-8 and below 2^top, negative half the time when
+ * signs is set.
+ *
+ * The bits are built rather than a value converted, so that what goes into a conversion did not come
+ * out of one. The low end is below one on purpose: a float that truncates to nothing is the answer a
+ * conversion is most likely to get wrong in a way no other case notices.
+ */
+static double random_double(int top, int signs) {
+    unsigned long long bits = next_random();
+    unsigned long long exponent = 1015 + next_random() % (unsigned long long)(top + 8);
+    bits = (bits & 0xFFFFFFFFFFFFFull) | (exponent << 52);
+    if (signs && (next_random() & 1)) {
+        bits |= (unsigned long long)1 << 63;
+    }
+    return double_of_bits(bits);
 }
 
 /* A random value of a random width, from nothing at all up to the whole type. */
@@ -239,6 +290,81 @@ static void constants(int round) {
     report("const-high", round, high);
 }
 
+/* The conversions to and from a float, which are the other operation at this width that is a call
+ * into the compiler runtime rather than arithmetic over the halves.
+ *
+ * Four names go up and four come down, for a signed and an unsigned integer against each of the two
+ * formats. The digest is over the bits of the float rather than over the float, because what a
+ * conversion going up has to get right is which way it rounded and that is one bit of the answer.
+ *
+ * A value within a rounding step of 2^128 has no single precision float to become, so the single
+ * precision cases take the value with its top bit gone, whose largest float is 2^127 exactly. Coming
+ * down the bound is on the exponent, one for the signed type and a wider one for the unsigned, and a
+ * little lower again where the double is narrowed to a float first, since that narrowing is allowed
+ * to round upwards into the value the type cannot hold.
+ */
+static void conversions(int round) {
+    unsigned long long up = 0, up_signed = 0, down = 0, down_signed = 0;
+    for (int i = 0; i < CASES; i++) {
+        uwide a = random_wide();
+        uwide narrow = a >> 1;
+        up = mix(up, (uwide)bits_of_double((double)a));
+        up = mix(up, (uwide)bits_of_float((float)narrow));
+        up_signed = mix(up_signed, (uwide)bits_of_double((double)(wide)a));
+        up_signed = mix(up_signed, (uwide)bits_of_float((float)-(wide)narrow));
+        cases += 4;
+
+        double big = random_double(128, 0);
+        double small = random_double(127, 1);
+        down = mix(down, (uwide)big);
+        down = mix(down, (uwide)(float)random_double(127, 0));
+        down_signed = mix(down_signed, (uwide)(wide)small);
+        down_signed = mix(down_signed, (uwide)(wide)(float)random_double(126, 1));
+        cases += 4;
+    }
+    report("convert-up", round, up);
+    report("convert-up-signed", round, up_signed);
+    report("convert-down", round, down);
+    report("convert-down-signed", round, down_signed);
+}
+
+/* Every corner value up to a float, and the floats they became back down again.
+ *
+ * Going up, a corner is where the rounding has to decide something: a value one below a power of two
+ * has more significant bits than either format holds and the lowest of them is what decides the
+ * answer. Coming down, the float a corner became is a power of two or one step away from one, which
+ * is where a conversion that shifted by the wrong amount is still right about half the table.
+ */
+static void corner_conversions(void) {
+    unsigned long long up = 0, down = 0;
+    for (int i = 0; i < CORNERS; i++) {
+        uwide a = corners[i];
+        uwide narrow = a >> 1;
+        double whole = (double)a;
+        double halved = (double)narrow;
+        up = mix(up, (uwide)bits_of_double(whole));
+        up = mix(up, (uwide)bits_of_float((float)narrow));
+        up = mix(up, (uwide)bits_of_double((double)(wide)a));
+        up = mix(up, (uwide)bits_of_float((float)-(wide)narrow));
+        cases += 4;
+        /* Back down only where there is an answer. The double a value at the top of the type became
+         * can be 2^128 exactly, and the double the half of it became can be 2^127, and neither of
+         * those is a number its own type holds.
+         */
+        if (whole < TWO_TO_128) {
+            down = mix(down, (uwide)whole);
+            cases += 1;
+        }
+        if (halved < TWO_TO_127) {
+            down = mix(down, (uwide)(wide)halved);
+            down = mix(down, (uwide)(wide)-halved);
+            cases += 2;
+        }
+    }
+    report("corner-convert-up", 0, up);
+    report("corner-convert-down", 0, down);
+}
+
 /* Every pair of corner values through every operation.
  *
  * The pairs are where the answers are decided by something other than the bits: equal high halves,
@@ -289,12 +415,14 @@ static void corner_pairs(void) {
 int main(void) {
     make_corners();
     corner_pairs();
+    corner_conversions();
     for (int round = 0; round < ROUNDS; round++) {
         arithmetic(round);
         shifts(round);
         comparisons(round);
         divisions(round);
         constants(round);
+        conversions(round);
     }
     printf("cases %ld\n", cases);
     return 0;
