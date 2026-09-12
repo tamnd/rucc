@@ -340,6 +340,17 @@ pub struct Cap {
 }
 
 impl Cap {
+    /// How many bytes one takes, which is what generated code reserves for a slot to keep one in.
+    ///
+    /// `rucc_safety::slot::BYTES` is the other end of this. A capability is a value the back end
+    /// holds now rather than something the runtime works out for itself at every call, so the size
+    /// is part of the ABI in the way [`HEADER`] is: a build with one number in it and a runtime
+    /// with the other would read four words out of a slot that holds three.
+    pub const BYTES: usize = 32;
+
+    /// What a slot holding one is aligned to, which is `rucc_safety::slot::ALIGN`.
+    pub const ALIGN: usize = 8;
+
     /// The bottom capability, which permits nothing.
     ///
     /// A version of [`crate::plane::DEAD`] is the encoding, which is the same thing an untouched
@@ -396,6 +407,30 @@ mod tests {
         assert!(!cap.covers(1024, 65));
         // A length no object could hold, which is the overflow a signed compare would let past.
         assert!(!cap.covers(1024, u64::MAX));
+    }
+
+    #[test]
+    fn a_capability_is_the_four_words_the_backend_reserves_frame_for() {
+        // `rucc_safety::slot` writes an `alloca` of exactly this size and alignment and then four
+        // stores into it, so a field added here without the compiler being told would be a field
+        // generated code never writes and this runtime reads anyway.
+        assert_eq!(size_of::<Cap>(), Cap::BYTES);
+        assert_eq!(align_of::<Cap>(), Cap::ALIGN);
+    }
+
+    #[test]
+    fn the_bottom_capability_is_the_slot_a_null_pointer_gets_and_that_slot_is_zero() {
+        // What `cap_null` lowers to is four stores of zero, which is only the bottom capability
+        // because a version of zero is what the lifetime plane holds for storage nobody owns. If
+        // that ever stopped being true the compiler would have to write something else, so this is
+        // the assertion that says so rather than a restatement of the constant above.
+        let bottom = Cap::BOTTOM;
+        // SAFETY: `Cap` is `#[repr(C)]` over four integers, so it has no padding and every bit
+        // pattern of it is one, which is what reading it as bytes asks for.
+        let bytes = unsafe {
+            core::slice::from_raw_parts((&raw const bottom).cast::<u8>(), size_of::<Cap>())
+        };
+        assert!(bytes.iter().all(|&byte| byte == 0));
     }
 
     #[test]

@@ -168,13 +168,9 @@ fn calls(
         }
     }
     // Every `cap_of` in the function was put there to feed a check, and no check reads one any
-    // more. They are removed rather than left for the optimizer because the optimizer has already
-    // run, and a `cap` is a type the back end has never been taught.
-    for &inst in &insts {
-        if func[inst].opcode == Opcode::CapOf {
-            func.remove_inst(inst);
-        }
-    }
+    // more, so almost all of what this does is take them out again. The rest of it is putting the
+    // capabilities that are left somewhere the back end can keep them, which is [`crate::slot`].
+    crate::slot::frames(func, names, word);
 }
 
 /// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, descriptor)`.
@@ -629,7 +625,7 @@ fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
 /// In place rather than as a new instruction beside it, because the check is already where it has
 /// to be: in front of the access for the two access checks and behind the arithmetic for the
 /// derivation one. Moving it would be a chance to get that wrong.
-fn call(
+pub(crate) fn call(
     func: &mut Func,
     names: &mut Interner,
     inst: Inst,
