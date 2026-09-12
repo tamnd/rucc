@@ -48,7 +48,9 @@ For an allocated instance, `rucc-safe-rt`'s allocator over-allocates:
 
 The header is adjacent to the payload rather than at the front of the block, which is the one place this differs from an otherwise obvious layout and is worth the sentence. The aux is as long as the payload is, so a header at the front of the block would be a different distance from the payload for every size, and finding it from the pointer the program holds would mean already knowing the size. Putting it directly behind the payload makes `cap_of` a subtract by a constant and a load, and makes `free` the same, which is what section 5.2.2's own goal asks for. The aux entry for the word at `off` bytes into the payload is then at `lo - 32 - ext * 2 + (off / 8) * 16`, and every term of that is in the capability the check already has.
 
-The header holds `ext`, `ver`, `meta` and the allocator identity. `lo` is not a field: it is the header's own address plus 32, and a field that can be computed is a field that can disagree. The aux array holds 16 bytes per 8 payload bytes: `ver` and a packed `(lo, ext, meta)` for the capability of the pointer stored at that slot, with `lo` and `ext` compressed to 26 bits of exponent-and-mantissa in the manner of CHERI's capability compression, which bounds the representable-region error and is well studied. **[The compression scheme is a design decision not yet made; document 17 question 5. The straw man is CHERI-128's, adapted.]**
+The header holds `ext`, `ver`, `meta` and the allocator identity. `lo` is not a field: it is the header's own address plus 32, and a field that can be computed is a field that can disagree. The aux array holds 16 bytes per 8 payload bytes: `ver` and a packed `(lo, ext, meta)` for the capability of the pointer stored at that slot. The packing is exact rather than compressed, which is document 17 question 5's answer and is measured in section 5.2.7. `ver` takes a full 64 bits and `meta` takes 21, which is section 5.2.1's `meta` with `instance_id` left in the header where a report reads it from anyway. The 43 bits left over are a 21-bit displacement, a 21-bit extent and one flag. Both numbers are relative to the pointer value stored in the word the slot sits beside: the displacement is `addr - lo`, which a stored pointer has because it is in bounds or one past the end, and the extent is `ext` itself. So `lo` costs no bits of its own, and for every object up to 2 MiB the bounds in the slot are the bounds the program has, with no rounding at all.
+
+Above 2 MiB neither number fits, and then the flag is set, the other 42 bits say nothing, and the capability is recovered from the address the way a pointer arriving from uninstrumented code already is, which is a lookup for the block and then its header. That path costs a load the small case does not pay, on exactly the allocations large enough that one load is nothing. The alternative was to round the bounds outward in the manner of CHERI's capability compression, and section 5.2.7 is the measurement that rejected it: rounding is wrong in the wrong place, since it is exact on the small members where this design claims an advantage over Fil-C and inexact on the megabyte buffers where an overflow has the most room to run.
 
 A slot whose payload word is not a pointer has `ver = 0`, which is the encoding of `⊥`. That single fact gives class Y1 for free: reading a non-pointer word as a pointer yields `⊥` and the first access through it fails.
 
@@ -131,6 +133,47 @@ Shadow is never worse than adjacent on trips to memory, is better on five of the
 The reason does not depend on the simulation at all, and is the part of this worth remembering. The aux array is twice the payload and the header sits between them, so the aux slot for a word at offset `off` is `32 + ext * 2 - off * 2` bytes behind that word. For any object of 32 bytes or more that distance exceeds a cache line for every word in it. Adjacency buys the same page and never the same line. What it costs in exchange is a block three to four times the size the program asked for, which is three to four times the pages, and on these patterns the extra pages cost more walks than the shared page saves. The control confirms the simulator is measuring the monitor and not the allocator: a program with no pointers is identical under both schemes on every count except heap.
 
 What this does not settle. There is no hardware prefetcher in it, which matters most for the sweep, where both schemes stream equally regularly and a real prefetcher would likely hide both; on the pointer chases there is nothing to prefetch under either scheme. Nothing is freed, so an allocator's reuse of a hot free list is not modelled. Recovering a capability from a bare address costs a header lookup under both schemes and is charged to neither. And the allocator's own zeroing of a new block's aux is not counted, which is the one omission that favours shadow: under 5.2.2's layout that zeroing lands in pages the allocation already touched. It is a per-allocation cost against a per-access saving, so it would have to be a very allocation-heavy program to reverse the ordering above, but it is the experiment to run first if anyone wants to argue with this section.
+
+### 5.2.7 The compression measurement
+
+`cargo xtask compress` prints it. It is a sweep over geometry rather than a build of anything, because representability is a property of two numbers and not of a program: a range is exactly representable at a mantissa of `m` bits when there is an exponent `e` such that both ends land on a multiple of `2^e` and the length fits in `m` bits at that scale. Sweeping the ranges that can arise therefore answers the question outright rather than estimating it, and the answer is available now, which matters because the slot format is what S5's monitor gets written against.
+
+The budget comes first, because it is what rules things out. Every row is one aux slot, `ver` is the lifetime version, `meta` is the part of section 5.2.1's `meta` that a check reads rather than a report, and `bounds` is what is left for `lo` and `ext` between them.
+
+| layout | bytes | ver | bounds | meta | spare | gives up |
+|---|---|---|---|---|---|---|
+| cheri-128 | 16 | 64 | 34 | 21 | 9 | the straw man, with `instance_id` left in the header |
+| cheri-128, short ver | 16 | 32 | 34 | 21 | 41 | the same with the version halved, which is what judgement C1 would need |
+| **exact or recover** | **16** | **64** | **43** | **21** | **0** | an exact displacement and extent up to 2 MiB, header lookup past that |
+| wide | 32 | 64 | 128 | 64 | 0 | nothing compressed, and twice the aux plane |
+
+Then what an exponent and two mantissas of `m` bits round off. The populations are separate because the ranges that arise are not one kind of thing. **heap** is whole allocations as `rucc-safe-rt` places them today, at 16-byte alignment. **aligned** is the same allocations from an allocator that puts each block on whatever alignment its own size needs, which is what CHERI's allocators do, with the worst slack that leaves, in bytes and as a share of the range it was about. **member** is a narrowed range at `-fsafety-subobject` inside an object, up to 4 KiB. **array** is a narrowed range over a large array member, with its worst slack in bytes. **mapping** is what the boundary code recovers for memory no instrumented allocator owns. Every percentage is the share of that population represented with no error at all.
+
+| m | heap | aligned | aligned worst | aligned share | member | array | array worst | mapping |
+|---|---|---|---|---|---|---|---|---|
+| 8 | 7.8% | 14.3% | 1048560 | 0.781% | 17.2% | 0.1% | 34316 | 35.2% |
+| 10 | 26.3% | 38.2% | 262128 | 0.195% | 50.0% | 0.2% | 9740 | 43.9% |
+| 12 | 76.5% | 76.5% | 65520 | 0.049% | 100.0% | 0.2% | 3596 | 55.7% |
+| **14** | **77.4%** | **77.4%** | **16368** | **0.012%** | **100.0%** | **1.4%** | **503** | **64.3%** |
+| 16 | 81.0% | 81.0% | 4080 | 0.003% | 100.0% | 4.4% | 119 | 75.2% |
+| 18 | 95.3% | 95.3% | 1008 | 0.001% | 100.0% | 17.2% | 23 | 86.1% |
+| 20 | 95.5% | 95.5% | 240 | 0.000% | 100.0% | 49.9% | 3 | 94.3% |
+
+CHERI-128's 14 is the emphasized row and the rows either side say what a bit is worth. Three things fall out of it. **A small member is exact from twelve bits up**, which is the encouraging one: intra-object overflow is the class this design claims over Fil-C, the offsets inside a structure are pointer-aligned and the members are short, and compression is not where that claim would be lost. **A large array member fails for the same reason a whole heap object does**, which is that the length is the declaration's and neither end is anybody's to align. **Over-aligning the block helps and does not finish the job**: the aligned column is better than the heap column only below twelve bits, because aligning the base settles one end and the top still has to round up, so what is left is a slack of about one part in `2^m` however the allocator behaves. At fourteen bits that is up to 64 bytes past a 1 MB buffer and 4 KB past a 64 MB one, and those are bytes no bounds check can refuse. A redzone allocator refuses them today.
+
+The last table is the other way round, and is what the decision rests on. It asks how far an exact displacement and an exact extent of `b` bits each reach before they have to give up, against the 128 bits of the slot with a full `ver` and the 21 bits of `meta` already taken out.
+
+| bits each | of 128 | covers up to | left over |
+|---|---|---|---|
+| 16 | 118 | 64 KiB | 10 |
+| 18 | 122 | 256 KiB | 6 |
+| 20 | 126 | 1 MiB | 2 |
+| **21** | **128** | **2 MiB** | **0** |
+| 22 | 130 | 4 MiB | -2 |
+
+Twenty one bits each is the largest pair that fits, and the count in the second column includes the flag that says the pair did not, so that row fills the slot to the bit. The error is then zero up to 2 MiB and zero above it as well, at the price of a lookup, rather than small everywhere and worst on the objects where an overflow has the most room to run. That is the scheme section 5.2.2 describes.
+
+What this does not settle. Nothing here is a running program: whether the slack a scheme leaves is ever reached by a real overflow is a question about programs and this is a question about numbers, so the figures are an upper bound on the hole rather than a prediction of what gets through. They are also per range rather than weighted by how often a range of that shape occurs, since weighting needs an allocation profile from a monitor that does not exist yet, and the 2 MiB threshold is exactly the number such a profile would move: it is chosen to fill the slot, not because anybody has counted how many live allocations are above it. The cost of the recover path is asserted to be one load and is not measured, and section 5.2.6 charges that same lookup to neither scheme. And CHERI's representable region, which is how far a pointer may roam before its bounds stop decoding, is not measured at all, because it constrains pointer arithmetic rather than bounds and a pointer that has roamed further than one past the end is refused at the derivation check before anything stores it.
 
 ## 5.3 The ABI
 

@@ -15,6 +15,7 @@ mod aux_plane;
 mod bench;
 mod bisect;
 mod builtins_diff;
+mod compress;
 mod corpus;
 mod cost;
 mod differential;
@@ -67,6 +68,7 @@ tasks:
   pressure          compile bench/safety both ways at -O2, and with any -f flags given, and
                     report the spill and fill delta
   aux               simulate the two aux plane layouts and compare their cache misses
+  compress          sweep what a compressed capability in an aux slot can say exactly
   bisect            halve the optimizer's fuel until one rewrite is left holding the bug
   corpus            run the pinned C corpus against the compiler this tree builds
   bless             rewrite the expectations in tests/golden from what the compiler produces now
@@ -105,6 +107,7 @@ fn main() -> ExitCode {
         Some("cost") => cost::cost(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("pressure") => pressure::pressure(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("aux") => aux_plane::aux(),
+        Some("compress") => compress::compress(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
