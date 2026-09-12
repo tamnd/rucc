@@ -37,13 +37,14 @@
 //! operations and the negation, the eight comparisons, since `a < b` is a call there too, and the
 //! eight conversions to and from an integer, since a cast is. That set is the first of these where
 //! the reference and the shipped C are different algorithms rather than the same one written twice.
-//! Double precision is there now except for one pair, with the four operations, the negation, the
-//! eight comparisons and the eight conversions to and from an integer on a `double`, which is the
-//! same shape one format up and two routines that are genuinely new, a product that no longer fits in
-//! a word and a division that cannot be written as a `/`. The rest of section 12.8, which is the pair
-//! that widens and narrows between the two formats, quad soft float, the remaining `__int128`
-//! arithmetic, the eighty bit and quad conversions and the atomics, is not written, and the set is
-//! driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
+//! Double precision is here too, with the four operations, the negation, the eight comparisons and
+//! the eight conversions to and from an integer on a `double`, which is the same shape one format up
+//! and two routines that are genuinely new, a product that no longer fits in a word and a division
+//! that cannot be written as a `/`. And so is the pair between the two formats, `__extendsfdf2` and
+//! `__truncdfsf2`, which is the first thing here that needed both of them and is the end of the two
+//! format soft float set. The rest of section 12.8, which is quad soft float, the remaining
+//! `__int128` arithmetic, the eighty bit and quad conversions and the atomics, is not written, and
+//! the set is driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with

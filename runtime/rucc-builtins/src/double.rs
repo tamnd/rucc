@@ -38,17 +38,17 @@
 //! payload.
 
 /// How many bits of the significand the format writes down, the other one being implied.
-const FRACTION: u32 = 52;
+pub(crate) const FRACTION: u32 = 52;
 
 /// What is added to an exponent before it is stored.
 const BIAS: i32 = 1023;
 
 /// The stored exponent of an infinity and of a not a number.
-const TOP: u64 = 2047;
+pub(crate) const TOP: u64 = 2047;
 
-const SIGN: u64 = 0x8000_0000_0000_0000;
+pub(crate) const SIGN: u64 = 0x8000_0000_0000_0000;
 const IMPLICIT: u64 = 0x0010_0000_0000_0000;
-const FRACTION_MASK: u64 = 0x000f_ffff_ffff_ffff;
+pub(crate) const FRACTION_MASK: u64 = 0x000f_ffff_ffff_ffff;
 
 /// The top bit of the fraction, which is what tells a quiet not a number from a signalling one.
 const QUIET: u64 = 0x0008_0000_0000_0000;
@@ -67,13 +67,13 @@ const SMALLEST: i32 = 1 - BIAS - FRACTION as i32;
 const TOO_FAR: i32 = 64;
 
 /// A double's magnitude taken apart exactly: it is `significand * 2^scale`.
-struct Parts {
-    significand: u64,
-    scale: i32,
+pub(crate) struct Parts {
+    pub(crate) significand: u64,
+    pub(crate) scale: i32,
 }
 
 /// The bits of a double as the parts the arithmetic below works on.
-fn parts(bits: u64) -> Parts {
+pub(crate) fn parts(bits: u64) -> Parts {
     let stored = (bits >> FRACTION) & TOP;
     let fraction = bits & FRACTION_MASK;
     if stored == 0 {
@@ -83,11 +83,11 @@ fn parts(bits: u64) -> Parts {
     }
 }
 
-fn is_nan(bits: u64) -> bool {
+pub(crate) fn is_nan(bits: u64) -> bool {
     (bits >> FRACTION) & TOP == TOP && bits & FRACTION_MASK != 0
 }
 
-fn is_infinite(bits: u64) -> bool {
+pub(crate) fn is_infinite(bits: u64) -> bool {
     (bits >> FRACTION) & TOP == TOP && bits & FRACTION_MASK == 0
 }
 
@@ -108,7 +108,7 @@ fn infinity(sign: u64) -> f64 {
 /// `above` says the value is really a little more than that, by less than one unit of the magnitude's
 /// lowest bit, which is what the division leaves behind. It is read where the rounding is an exact
 /// tie and nowhere else.
-fn round_from(sign: u64, magnitude: u128, scale: i32, above: bool) -> f64 {
+pub(crate) fn round_from(sign: u64, magnitude: u128, scale: i32, above: bool) -> f64 {
     if magnitude == 0 {
         return f64::from_bits(sign);
     }
