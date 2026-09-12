@@ -207,6 +207,11 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // The capability the checks were reading, which the same pass takes out once they are calls,
     // because a call to the runtime is handed an address and finds the rest for itself.
     (Opcode::CapOf, "`rucc_safety::lower`, which removes it, since nothing reads it any more"),
+    // The two ends of a capability that something does read. A capability is four words of frame
+    // and the value that stands for one is the slot's address, so the pair below is an `alloca`
+    // with four zero words written into it and a call handed the addresses of two slots.
+    (Opcode::CapNull, "`rucc_safety::slot`, into a frame slot with the bottom capability in it"),
+    (Opcode::CapStore, "`rucc_safety::slot`, into the call that writes one into the aux plane"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.
@@ -251,17 +256,14 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The eighteen the safety pass does emit are on
-    // `ELSEWHERE`.
+    // back end can be handed that reaches one. The ones the safety pass lowers are on `ELSEWHERE`,
+    // and two of those left this list without anything emitting them: `cap_null` and `cap_store`
+    // have a lowering waiting for the pass that will write one, because a capability had to be a
+    // value the back end could hold before either could be written down at all, which is
+    // tamnd/rucc#1085.
     (
         Opcode::CapLoad,
         "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
-        "tamnd/rucc#856",
-    ),
-    (Opcode::CapStore, "the same, and a store into the slot beside a pointer", "tamnd/rucc#856"),
-    (
-        Opcode::CapNull,
-        "the same, and it is whatever the representation says nothing is",
         "tamnd/rucc#856",
     ),
     (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#856"),

@@ -97,6 +97,7 @@ pub mod boundary;
 pub mod lower;
 pub mod plane;
 pub mod promise;
+pub mod slot;
 pub mod summary;
 pub mod wrap;
 
