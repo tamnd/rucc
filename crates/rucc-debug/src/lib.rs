@@ -27,7 +27,7 @@
 //! worth more than anything else a distribution shipping debug symbols passes, so a build that
 //! asked for it and got a file twice the size it expected has a real complaint.
 
-#![doc(html_root_url = "https://docs.rs/rucc-debug/0.10.24")]
+#![doc(html_root_url = "https://docs.rs/rucc-debug/0.10.25")]
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M8";
