@@ -75,10 +75,14 @@ pub(crate) const OPTIMIZED: &str = "-O2";
 /// to `-O0` would change the code the checks are in as well, so the passes are disabled by name and
 /// the rest of the pipeline runs exactly as it does in build B.
 ///
-/// Every pass that takes a check out belongs here. A pass left off the list is a pass whose
-/// removals are in both builds, and a comparison of two builds that both did the thing has nothing
-/// to say about whether the thing was right.
-pub(crate) const NO_ELIMINATION: &[&str] = &["-fdisable-discharge", "-fdisable-hoist"];
+/// Every pass that takes a check out belongs here, and so does every pass that changes what the
+/// monitor is told. `coalesce` is the second kind: it removes no check at all, it merges the plane
+/// writes a run of stores produced, and a merge that covered the wrong bytes would make a check
+/// downstream of it answer differently. That is the same class of failure and it is caught the same
+/// way. A pass left off the list is a pass whose work is in both builds, and a comparison of two
+/// builds that both did the thing has nothing to say about whether the thing was right.
+pub(crate) const NO_ELIMINATION: &[&str] =
+    &["-fdisable-discharge", "-fdisable-hoist", "-fdisable-coalesce"];
 
 /// The line every report starts with, which is what says one happened at all.
 pub(crate) const BANNER: &str = "rucc: memory safety violation";

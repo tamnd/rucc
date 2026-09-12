@@ -8,8 +8,10 @@
 ;; the same question the discharge pass asks when the walk got past a step it could not read and
 ;; what it has is a range of distances rather than one. The next two are the question the split pass
 ;; asks about a loop whose extent is a value the program works out rather than a number, once for a
-;; walk that goes up and once for a walk that goes down. The last is the alignment half of a bounds
-;; check, which is a different question about the same address and is asked of the same pass.
+;; walk that goes up and once for a walk that goes down. The next is the question the coalescing
+;; pass asks about two writes to one plane that sit next to each other, which is the one head here
+;; that is not about a check at all. The last is the alignment half of a bounds check, which is a
+;; different question about the same address and is asked of the same pass.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -149,6 +151,48 @@
            (bvugt delta far)
            (and (bvule (bvsub at delta) at)
                 (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
+       1
+       0))
+
+;; Whether one write over two ranges at once touches the same bytes the two writes touched.
+;;
+;; The one head here that is not about a check. `spec/safe-memory/07-check-elimination.md` section
+;; 7.6 has a run of writes to one plane become a single write over the whole range, and this is the
+;; step from the two ranges the pass found to the one range it wants to put in their place.
+;;
+;; `at` is the address the first write starts at and `span` is how many bytes it covers. `delta` is
+;; how far past that address the second write starts and `reach` is how many bytes that one covers.
+;; `byte` is any address at all, and it is what makes this a claim about the bytes rather than about
+;; the numbers: the question is asked once with `byte` left open, so an answer covers every address
+;; in the program at once.
+;;
+;; It answers one when `byte` is written by the two writes exactly when it is written by one write
+;; of `span` plus `reach` bytes at `at`. Both directions matter and for different reasons. A byte
+;; the merged write covers and neither original covered is a plane told something that did not
+;; happen, which is a check that should have refused and did not. A byte an original covered and the
+;; merged write does not is a plane not told about a store that did happen, which is a check that
+;; refuses a program doing nothing wrong. Neither is a thing to find out about later, so the claim
+;; is equality and not containment either way round.
+;;
+;; The first disjunct is the assumption the heads above make, in the same words. A write whose byte
+;; range runs off the top of the address space and wraps round to the bottom is not one range in the
+;; order at all, and no such write exists, because document 05's allocator hands out storage
+;; instances that do not wrap and every one of these writes is inside the instance the store that
+;; caused it went to.
+(semantics (joined.i64 at span delta reach byte)
+  (ite (or (bvugt at (bvadd at (bvadd span reach)))
+           (and (or (not (or (and (bvuge byte at)
+                                  (bvult byte (bvadd at span)))
+                             (and (bvuge byte (bvadd at delta))
+                                  (bvult byte (bvadd (bvadd at delta) reach)))))
+                    (and (bvuge byte at)
+                         (bvult byte (bvadd at (bvadd span reach)))))
+                (or (not (and (bvuge byte at)
+                              (bvult byte (bvadd at (bvadd span reach)))))
+                    (or (and (bvuge byte at)
+                             (bvult byte (bvadd at span)))
+                        (and (bvuge byte (bvadd at delta))
+                             (bvult byte (bvadd (bvadd at delta) reach)))))))
        1
        0))
 

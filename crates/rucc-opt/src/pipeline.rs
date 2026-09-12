@@ -206,6 +206,7 @@ const O1: &[&str] = &[
     "simplify",
     "hoist",
     "discharge",
+    "coalesce",
     "dce",
 ];
 
@@ -269,6 +270,7 @@ const O2: &[&str] = &[
     "ivopts",
     "simplify-cfg",
     "discharge",
+    "coalesce",
     "dce",
 ];
 
@@ -301,6 +303,7 @@ const O3: &[&str] = &[
     "ivopts",
     "simplify-cfg",
     "discharge",
+    "coalesce",
     "dce",
 ];
 
@@ -344,6 +347,7 @@ const OS: &[&str] = &[
     "fold",
     "simplify",
     "discharge",
+    "coalesce",
     "dce",
 ];
 
@@ -370,6 +374,7 @@ const OZ: &[&str] = &[
     "fold",
     "simplify",
     "discharge",
+    "coalesce",
     "dce",
 ];
 

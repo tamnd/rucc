@@ -1244,7 +1244,7 @@ fn past(func: &mut Func, before: Inst, from: Value, offset: i128) -> Value {
 }
 
 /// A constant, computed in front of an instruction.
-fn number(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
+pub(crate) fn number(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
     let imm = func.add_imm(rucc_ir::Imm::int(value, ty.lane()));
     let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
     let span = func.span(before);
