@@ -81,12 +81,12 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
-    Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
-    PrefetchHint, RmwOp, Type, Value, Visibility,
+    Abi, AsmOperand, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder,
+    Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{CallRegs, Constraint, RegClass, Segment};
+use rucc_target::{CallRegs, Constraint, OperandDesc, RegClass, Role, Segment};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -2209,7 +2209,7 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// One `asm` statement, for as long as its template has no instructions in it.
+    /// One `asm` statement.
     ///
     /// An empty template is most of the inline assembly in a test suite, and it is not a corner
     /// case somebody wrote by accident. A program that wants a value computed where it stands, or a
@@ -2217,9 +2217,8 @@ impl<'a> Lowering<'a> {
     /// years of bug reports about optimizers are full of them. What such a statement asks for is
     /// the barrier and the operand places, and no instructions at all.
     ///
-    /// So the instructions are the easy half here and there are none of them. The half that is
-    /// real is the operands: a constraint says where a value has to be, and where it has to be is
-    /// still true when the template between them is empty.
+    /// So the operands are the half that is always real: a constraint says where a value has to be,
+    /// and where it has to be is still true when the template between them is empty.
     ///
     /// What the constraints ask for, on an empty template, is only ever that two operands share a
     /// place. Nothing reads a register no text names, so `"r"` on its own asks for a register and
@@ -2228,14 +2227,41 @@ impl<'a> Lowering<'a> {
     /// no instructions between them that is the input unchanged. So it is a rename and not a move:
     /// the value is already in a register and the result is that register.
     ///
-    /// An output nothing is tied to is whatever the assembly left there, which for a template that
-    /// writes nothing is whatever was in the register. That is a value the program is not entitled
-    /// to, and this writes a zero rather than reading one, because the allocator has to be given a
-    /// definition before a use whatever the program is entitled to.
+    /// An output nothing is tied to and no instruction writes is whatever the assembly left there,
+    /// which for a template that writes nothing is whatever was in the register. That is a value
+    /// the program is not entitled to, and this writes a zero rather than reading one, because the
+    /// allocator has to be given a definition before a use whatever the program is entitled to.
     ///
-    /// The clobber list is not read, and on an empty template that is right rather than an
-    /// omission. A clobber says the assembly ruins a register, and a template with no instructions
-    /// in it ruins nothing.
+    /// # A template with instructions in it
+    ///
+    /// [`x86_64::read`] turns the text into the opcodes this backend already has, which is what
+    /// `spec/11-asm-objects-debug.md` section 11.1 asks for: the machine is described once, and an
+    /// instruction a program wrote is looked up in that description rather than copied through to
+    /// an assembler that has one of its own. So nothing here assembles anything. What it does is
+    /// put the statement's operands where the opcode holds them, and from there an `asm` statement
+    /// is ordinary machine code: the allocator picks the registers, the listing and the object file
+    /// are written from the same table as every other instruction, and a spill around one works
+    /// because there is nothing left about it for a spill to get wrong.
+    ///
+    /// Three things are refused, all for one reason, which is that placing them by a guess gives a
+    /// program that assembles into something other than what it says.
+    ///
+    /// A register the template named itself. The registers an instruction here names are the ones
+    /// the allocator handed out, and a name in the text is a claim on a register nobody told the
+    /// allocator about. Doing it properly is the clobber list and a fixed operand, and that is the
+    /// next piece of this rather than something to approximate now.
+    ///
+    /// An output the template writes more than once, and an output that is tied to an input and
+    /// written. Both are one place with two definitions in it, and the machine IR between here and
+    /// the allocator has one definition per register by construction.
+    ///
+    /// An operand read where the opcode writes, or written where it reads. An output that has not
+    /// been written yet is not a value, and an input the assembly writes over is a value something
+    /// else may still be using.
+    ///
+    /// The clobber list is still not read. On an empty template that is right rather than an
+    /// omission, since a template with no instructions in it ruins nothing, and on a template with
+    /// instructions in it the only registers reachable are the ones named above, which are refused.
     fn assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
@@ -2243,34 +2269,162 @@ impl<'a> Lowering<'a> {
         if !self.source[info.targets].is_empty() {
             return Err(Unsupported::Assembly { inst, refused: Written::Goto });
         }
-        if !self.names.resolve(info.template).trim().is_empty() {
-            return Err(Unsupported::Assembly { inst, refused: Written::Template });
-        }
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+
+        let template = self.names.resolve(info.template).to_string();
+        let lines = if template.trim().is_empty() {
+            Vec::new()
+        } else {
+            x86_64::read(&template)
+                .ok_or(Unsupported::Assembly { inst, refused: Written::Template })?
+        };
 
         let constraints = self.names.resolve(info.constraints).to_string();
         let results: Vec<Value> = data.results().collect();
         let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
-            .ok_or(Unsupported::Assembly { inst, refused: Written::Operand })?;
+            .ok_or_else(refused)?;
+        let list: Vec<AsmOperand> = operands.iter().copied().collect();
 
-        for (index, operand) in operands.iter().copied().enumerate().collect::<Vec<_>>() {
-            let Some(result) = operand.result else { continue };
+        // Which operands the template writes, counted before anything is placed, because the answer
+        // decides where each of the three below comes from and one instruction may name an operand
+        // that a later one writes.
+        let mut writes = vec![0usize; list.len()];
+        for line in &lines {
+            let form = x86_64::form(line.opcode).ok_or_else(refused)?;
+            for (desc, piece) in form.operands().iter().zip(&line.operands) {
+                let x86_64::Piece::Operand { index, .. } = piece else { continue };
+                if matches!(desc.role, Role::Def | Role::EarlyDef) {
+                    *writes.get_mut(*index).ok_or_else(refused)? += 1;
+                }
+            }
+        }
+
+        // Where every operand is. Worked out in full before the first instruction is written, since
+        // reading a value may be what puts it in a register in the first place, and that has to
+        // happen in front of the assembly rather than in the middle of it.
+        let mut places: Vec<Option<mir::Reg>> = vec![None; list.len()];
+        for (index, operand) in list.iter().copied().enumerate() {
+            let Some(result) = operand.result else {
+                // An input, or an output the assembly was handed the address of, and both are a
+                // value that arrives in a register and is read out of it.
+                places[index] = Some(self.reg_of(operand.value.ok_or_else(refused)?)?);
+                continue;
+            };
             let ty = self.source[result].ty;
-            if on_x87(ty) {
-                return Err(Unsupported::Assembly { inst, refused: Written::Operand });
+            if on_x87(ty) || writes[index] > 1 {
+                return Err(refused());
             }
             match operands.tied_to(index) {
                 // The place the input arrived in, which the assembly wrote nothing over.
                 Some(from) => {
-                    if self.class_of(self.source[from].ty) != self.class_of(ty) {
-                        return Err(Unsupported::Assembly { inst, refused: Written::Operand });
+                    if writes[index] > 0 || self.class_of(self.source[from].ty) != self.class_of(ty)
+                    {
+                        return Err(refused());
                     }
                     let reg = self.reg_of(from)?;
                     self.regs[result.index()] = Some(reg);
+                    places[index] = Some(reg);
                 }
-                None => self.undefined(inst, result)?,
+                None if writes[index] == 1 => places[index] = Some(self.new_reg(result)),
+                None => {
+                    self.undefined(inst, result)?;
+                    places[index] = self.regs[result.index()];
+                }
             }
         }
+
+        for line in &lines {
+            self.instruction(inst, line, &places, &list)?;
+        }
         Ok(())
+    }
+
+    /// One instruction of a template, as the machine instruction it was read back into.
+    fn instruction(
+        &mut self,
+        inst: Inst,
+        line: &x86_64::Line,
+        places: &[Option<mir::Reg>],
+        list: &[AsmOperand],
+    ) -> Result<(), Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let form = x86_64::form(line.opcode).ok_or_else(refused)?;
+        let mut built = Vec::with_capacity(line.operands.len());
+        for (desc, piece) in form.operands().iter().zip(&line.operands) {
+            built.push(self.placed(inst, *desc, *piece, places, list)?);
+        }
+        let at = match line.at {
+            Some(at) => Some(self.addressed(inst, at, places)?),
+            None => None,
+        };
+
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", line.opcode)));
+        let mut build = self.out.build(block, opcode).at(span);
+        for operand in built {
+            build = build.operand(operand);
+        }
+        if let Some(value) = line.imm {
+            build = build.imm(value);
+        }
+        if let Some(mem) = at {
+            build = build.mem(mem);
+        }
+        build.finish();
+        Ok(())
+    }
+
+    /// One operand of one instruction of a template, in the register the statement put it in.
+    fn placed(
+        &mut self,
+        inst: Inst,
+        desc: OperandDesc,
+        piece: x86_64::Piece,
+        places: &[Option<mir::Reg>],
+        list: &[AsmOperand],
+    ) -> Result<mir::Operand, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let x86_64::Piece::Operand { index, width } = piece else { return Err(refused()) };
+        let operand = list.get(index).copied().ok_or_else(refused)?;
+        let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
+
+        // Read where the opcode reads and written where it writes, which is what the first half of
+        // this asks. An output has a result and an input has a value, and an output written `+` has
+        // both, because it is read before it is written.
+        let placeable = match desc.role {
+            Role::Use => operand.value.is_some(),
+            Role::Def | Role::EarlyDef => operand.result.is_some(),
+        };
+        let ty = match (operand.result, operand.value) {
+            (Some(result), _) => self.source[result].ty,
+            (None, Some(value)) => self.source[value].ty,
+            (None, None) => return Err(refused()),
+        };
+        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        if !placeable || self.class_of(ty) != desc.class || bits != width.bits() {
+            return Err(refused());
+        }
+        Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
+    }
+
+    /// The address one instruction of a template reads or writes.
+    fn addressed(
+        &mut self,
+        inst: Inst,
+        at: x86_64::At,
+        places: &[Option<mir::Reg>],
+    ) -> Result<mir::Mem, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let base = match at.base {
+            None => None,
+            Some(x86_64::Piece::Operand { index, .. }) => {
+                let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
+                Some(mir::Operand::read(reg, self.gpr))
+            }
+            Some(x86_64::Piece::Reg { .. }) => return Err(refused()),
+        };
+        Ok(mir::Mem { base, scale: 1, disp: at.disp, segment: at.segment, ..mir::Mem::default() })
     }
 
     /// A register holding a value the program has no claim on, written as a zero.
@@ -4372,17 +4526,63 @@ mod tests {
     }
 
     #[test]
-    fn an_asm_with_instructions_in_its_template_is_refused_as_an_asm() {
+    fn a_template_that_is_one_instruction_becomes_that_instruction() {
         let (mut names, mut source, block, _) = blank(&[]);
-        assembly(&mut source, block, &mut names, "nop", "", &[], &[]);
+        assembly(&mut source, block, &mut names, "pause", "", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        // `asm volatile ("pause")`, which is what every spin lock in every allocator writes. One
+        // instruction, no operands, and nothing between the template and the machine but the table
+        // that already says what a `pause` is.
+        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    x64.pause\n}\n");
+    }
+
+    #[test]
+    fn a_template_that_reads_a_segment_becomes_the_load_it_already_was() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let out = assembly(&mut source, block, &mut names, "movq %%fs:0, %0", "=r", &[], &[i64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // `asm ("movq %%fs:0, %0" : "=r" (tid))`, which is how a program finds the block its own
+        // thread owns. The same instruction `crate::lower` already writes for a thread-local
+        // variable, reached this time because a program wrote it out by hand.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [fs:0]\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_template_naming_an_instruction_this_machine_has_not_got_is_refused() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        assembly(&mut source, block, &mut names, "hcf", "", &[], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
         let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("nothing here assembles a template");
+            .expect_err("there is no such instruction");
         assert_eq!(
             failed.to_string(),
             "this `asm` has instructions in its template, which nothing here assembles"
         );
+    }
+
+    /// A register the template named is a claim on a register nobody told the allocator about, and
+    /// the clobber list that would say so is not read yet. Refused rather than placed, because a
+    /// register two things believe they own is a wrong program that nothing reports.
+    #[test]
+    fn a_template_naming_a_register_the_allocator_did_not_hand_out_is_refused() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let out = assembly(&mut source, block, &mut names, "movq %%rax, %0", "=r", &[], &[i64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("the template named a register");
+        assert_eq!(failed.to_string(), "this `asm` has an operand this cannot place");
     }
 
     #[test]

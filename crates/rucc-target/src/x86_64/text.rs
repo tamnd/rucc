@@ -58,6 +58,21 @@ pub enum Width {
 }
 
 impl Width {
+    /// How many bits of a register it is.
+    ///
+    /// What [`Self::index`] is counting, said as the number rather than as the place in the order.
+    /// An operand of a C program has a width too, and the two have to be the same number before an
+    /// instruction can be said to be the one that operand belongs in.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        match self {
+            Byte => 8,
+            Word => 16,
+            Long => 32,
+            Quad => 64,
+        }
+    }
+
     /// Which of the four spellings of a register this is, counting from the narrowest.
     #[must_use]
     pub fn index(self) -> usize {
@@ -619,6 +634,9 @@ static TEXT: &[(&str, &[Written])] = &[
     // The byte that does nothing. No operands and one spelling, and the name is the whole of it
     // the way the landing pad's is.
     ("nop", &[spell("nop", &[])]),
+    // The hint a spin loop writes. No operands and one spelling, the same as the two above it, and
+    // the name is the whole of it.
+    ("pause", &[spell("pause", &[])]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of
@@ -862,6 +880,108 @@ static TEXT: &[(&str, &[Written])] = &[
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
     TEXT.iter().find(|(known, _)| *known == name).map(|&(_, insts)| insts)
+}
+
+/// Which general purpose register that name is, and how much of it the name says.
+///
+/// The inverse of [`gpr_name`], and over the same table for the same reason [`machine`] is over
+/// the same table as [`written`]. `None` for anything that is not one of the sixty four spellings,
+/// which includes every name in another register file and every name this machine does not have.
+///
+/// Without the sigil, so `rax` rather than `%rax`. What puts the sigil on and takes it off is the
+/// syntax, and this is about the register rather than about how it was written down.
+#[must_use]
+pub fn gpr_named(name: &str) -> Option<(PhysReg, Width)> {
+    GPR_TEXT.iter().enumerate().find_map(|(number, names)| {
+        let at = names.iter().position(|&known| known == name)?;
+        let width = [Byte, Word, Long, Quad][at];
+        Some((PhysReg::new(u8::try_from(number).ok()?), width))
+    })
+}
+
+/// What kind of thing one argument of an instruction is, without saying which one.
+///
+/// [`Arg`] says both at once, because the table above is written from the opcode's side and knows
+/// which operand each argument is drawn from. Something reading an instruction back off a page has
+/// the other half: it can see that an argument is a register and cannot see which operand of which
+/// opcode that register is, since working that out is what the reading is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// A general purpose register.
+    Reg,
+    /// A number on the instruction.
+    Imm,
+    /// An address.
+    Mem,
+}
+
+/// The one opcode this machine writes as that instruction, when there is exactly one.
+///
+/// The inverse of [`written`], over the same table and not over a second one, which is what
+/// `spec/11-asm-objects-debug.md` section 11.1 asks for: a compiler that reads an instruction back
+/// differently from how it writes it has two descriptions of the machine and they will disagree.
+/// An `asm` template is where a program hands this compiler an instruction as text, and this is
+/// how the text becomes the opcode the rest of the backend already knows what to do with.
+///
+/// `None` in four cases, and all four are the same answer for the caller, which is that the
+/// instruction is not one this compiler can place. There is no opcode with that mnemonic. There is
+/// one but its arguments are a different shape, so `movq %rax, %rbx` and `movq (%rax), %rbx` pick
+/// out different rows and neither answers for the other. The mnemonic belongs to an opcode the
+/// machine writes as more than one instruction, such as a division or a comparison and the byte
+/// behind it, and half of one of those is not an instruction. Or the opcode has an operand its
+/// spelling does not name, which is a fixed register the instruction reads without being told, the
+/// way a compare and exchange reads `rax`: the operand is there so the allocator keeps out of the
+/// register, and a template that named the instruction did not thereby say anything about who owns
+/// that register.
+///
+/// More than one row matching is treated the same way, since two opcodes that are the same
+/// instruction with the same arguments would leave nothing here to choose between them.
+#[must_use]
+pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
+    let mut answer = None;
+    for &(name, insts) in TEXT {
+        let [only] = insts else { continue };
+        if only.mnemonic != mnemonic || only.args.len() != args.len() {
+            continue;
+        }
+        if !only.args.iter().zip(args).all(|(&arg, &shape)| shape_of(arg) == Some(shape)) {
+            continue;
+        }
+        if !names_every_operand(name, only.args) {
+            continue;
+        }
+        if answer.replace(name).is_some() {
+            return None;
+        }
+    }
+    answer
+}
+
+/// What kind of thing an argument is, for the ones a template can write.
+///
+/// `None` for the four that are the opcode's own business rather than something a program could
+/// have written down: a register named in the table instead of drawn from an operand, a depth on
+/// the x87 stack, a symbol, and the block a jump goes to.
+fn shape_of(arg: Arg) -> Option<Shape> {
+    match arg {
+        Reg(..) => Some(Shape::Reg),
+        Imm => Some(Shape::Imm),
+        Mem => Some(Shape::Mem),
+        Xmm(_) | Named(_) | Stack(_) | Symbol | Through | Label => None,
+    }
+}
+
+/// Whether the spelling of that opcode names every operand the opcode has.
+///
+/// The question behind the last of the four refusals above. An operand no argument names is one
+/// the instruction uses without being told, and a template that wrote the instruction said nothing
+/// about it, so there is nobody to ask what goes there.
+fn names_every_operand(name: &str, args: &[Arg]) -> bool {
+    let Some(form) = crate::x86_64::insts::form(name) else { return false };
+    (0..form.operands().len()).all(|index| {
+        let index = u8::try_from(index).unwrap_or(u8::MAX);
+        args.iter().any(|&arg| matches!(arg, Reg(at, _) if at == index))
+    })
 }
 
 /// How many bits of the operand at that index the instruction of that name uses.

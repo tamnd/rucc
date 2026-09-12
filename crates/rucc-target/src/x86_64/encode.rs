@@ -640,6 +640,11 @@ static ENCODINGS: &[Encoding] = &[
     // asked for wants a whole number of bytes it can start at, so the reserved space is that many
     // one byte instructions and not the shortest sequence that adds up.
     bytes("nop", &NO_ARGS, Long, &[0x90], NO_MODRM, NO_IMM),
+    // The spin loop hint, which is the byte above with the repeat prefix in front of it. A machine
+    // that has never heard of it decodes the prefix as having nothing to repeat and runs the `nop`,
+    // which is why the hint could be added to the instruction set without breaking anything that
+    // was already written.
+    bytes("pause", &NO_ARGS, Long, &[0xF3, 0x90], NO_MODRM, NO_IMM),
     // The lock prefix, which is a row of its own because that is what it is in the encoding: one
     // byte in front of the instruction it applies to, and not a bit of anything the instruction
     // itself writes. An assembler reads it the same way, so the text form is the word on a line of

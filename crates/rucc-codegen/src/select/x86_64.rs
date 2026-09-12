@@ -251,6 +251,16 @@ mod tests {
     /// carries beside the instruction.
     const HINT: &[&str] = &["prefetch_nta", "prefetch_t0", "prefetch_t1", "prefetch_t2"];
 
+    /// The instructions nothing but an `asm` statement asks for.
+    ///
+    /// One step further out again. A prefetch is a hint and is still something the compiler decides
+    /// to write, out of a builtin the program called. This is a hint the program wrote down as an
+    /// instruction, by name, in a template, and nothing else in the language reaches it: there is no
+    /// builtin for it, no rule could match a term that produces it because it produces no value, and
+    /// `crate::lower` writes it only because [`rucc_target::x86_64::read`] found the name in a
+    /// template and said which opcode that is.
+    const TEMPLATE: &[&str] = &["pause"];
+
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
     /// A rule replaces a term with a term, and a term is the value one instruction computes. A
@@ -510,7 +520,7 @@ mod tests {
             if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
                 continue;
             }
-            if COMPARE.contains(&opcode) {
+            if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -542,6 +552,19 @@ mod tests {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
             assert!(form.takes_mem(), "{opcode} is a hint about an address and is given none");
+        }
+    }
+
+    /// The same claim about the template list. An instruction is exempt for this reason exactly
+    /// when it computes nothing and is given nothing, since anything with an operand or an address
+    /// is something a rule or a builtin could have been written for, and the whole of the claim is
+    /// that there was nowhere else for it to come from.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_only_a_template_asks_for_it_is_bare() {
+        for &opcode in TEMPLATE {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+            assert!(!form.takes_mem(), "{opcode} is given an address, so a rule could name it");
         }
     }
 
