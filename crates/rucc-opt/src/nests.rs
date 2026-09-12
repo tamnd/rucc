@@ -93,16 +93,16 @@ impl Pass for Nests {
         if func.entry().is_none() {
             return stats;
         }
-        let cfg = an.cfg(func).clone();
-        let loops = an.loops(func).clone();
-        let mut scev = Scev::new(func, &cfg, &loops);
+        let cfg = an.cfg(func);
+        let loops = an.loops(func);
+        let mut scev = Scev::new(func, cfg, loops);
         for id in loops.all() {
             if loops.parent(id).is_some() {
                 continue;
             }
-            match chain(func, &loops, id) {
+            match chain(func, loops, id) {
                 Chain::Broken => stats.note(NOT_PERFECT),
-                Chain::Perfect(nest) => report(func, &loops, &mut scev, &nest, &mut stats),
+                Chain::Perfect(nest) => report(func, loops, &mut scev, &nest, &mut stats),
             }
         }
         stats

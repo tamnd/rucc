@@ -208,9 +208,9 @@ struct Plan {
 /// has worked out and a second one would start from nothing.
 fn answers(func: &Func, an: &mut Analyses, stats: &mut Stats) -> Plan {
     let mut plan = Plan::default();
-    let cfg = an.cfg(func).clone();
-    let dom = an.dominators(func).clone();
-    let mut ranges = Ranges::new(func, &cfg, &dom);
+    let cfg = an.cfg(func);
+    let dom = an.dominators(func);
+    let mut ranges = Ranges::new(func, cfg, dom);
     for block in func.blocks() {
         if !cfg.reaches(block) {
             continue;

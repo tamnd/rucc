@@ -186,9 +186,9 @@ impl Pass for Ivopts {
             stats.missed(NO_TARGET);
             return stats;
         };
-        let cfg = an.cfg(func).clone();
-        let loops = an.loops(func).clone();
-        let doms = an.dominators(func).clone();
+        let cfg = an.cfg(func);
+        let loops = an.loops(func);
+        let doms = an.dominators(func);
 
         // Every loop is decided before any loop is touched. The evolutions are read off the
         // function as it arrived, and a rewrite that ran between two of them would leave the
@@ -197,8 +197,8 @@ impl Pass for Ivopts {
         // which the two phases make plain rather than fight.
         let mut plans = Vec::new();
         {
-            let mut scev = Scev::new(func, &cfg, &loops);
-            let it = Loop { func, loops: &loops, doms: &doms, machine, table };
+            let mut scev = Scev::new(func, cfg, loops);
+            let it = Loop { func, loops, doms, machine, table };
             for id in loops.all() {
                 consider(&it, &mut scev, id, &mut stats, &mut plans);
             }
@@ -206,7 +206,7 @@ impl Pass for Ivopts {
         for plan in plans {
             // The exit test is asked of the pointer, so there is no exit test to rewrite until
             // the pointer is there. A refused rewrite takes the test it was carrying with it.
-            let Some(walk) = rewrite(func, &cfg, &loops, &doms, &plan, fuel, &mut stats) else {
+            let Some(walk) = rewrite(func, cfg, loops, doms, &plan, fuel, &mut stats) else {
                 continue;
             };
             if let Some(aim) = plan.aim {

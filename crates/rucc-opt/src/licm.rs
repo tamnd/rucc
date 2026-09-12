@@ -156,13 +156,13 @@ impl Pass for Licm {
             return stats;
         }
         let machine = an.machine();
-        let cfg = an.cfg(func).clone();
-        let loops = an.loops(func).clone();
+        let cfg = an.cfg(func);
+        let loops = an.loops(func);
         if loops.count() == 0 {
             return stats;
         }
-        let dom = an.dominators(func).clone();
-        let post = an.post_dominators(func).clone();
+        let dom = an.dominators(func);
+        let post = an.post_dominators(func);
         let invented: HashSet<Block> = post.fake_exits().iter().copied().collect();
 
         // Innermost first, so a value hoisted out of an inner loop lands in the outer loop's body
@@ -171,7 +171,7 @@ impl Pass for Licm {
         let mut order: Vec<LoopId> = loops.all().collect();
         order.sort_by_key(|&id| std::cmp::Reverse(loops.depth(id)));
 
-        let mut pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
+        let mut pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
         // Blocks whose counts a hoist has changed since the numbers above were worked out. A hoist
         // takes instructions from inside one loop and puts them in its preheader, so no block
         // outside those can hold a different number afterwards, and a loop sharing none of them
@@ -181,23 +181,16 @@ impl Pass for Licm {
         let mut stale: HashSet<Block> = HashSet::new();
         for id in order {
             if loops.blocks(id).iter().any(|block| stale.contains(block)) {
-                pressure = Pressure::of(func, &cfg, &Liveness::of(func, &cfg));
+                pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
                 stale.clear();
             }
-            let job = Job {
-                machine,
-                cfg: &cfg,
-                dom: &dom,
-                post: &post,
-                loops: &loops,
-                invented: &invented,
-            };
+            let job = Job { machine, cfg, dom, post, loops, invented: &invented };
             if job.run(func, &pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
                 // asked what it holds. The alternative to noticing that is deciding the outer loop
                 // against a number the inner loop invalidated.
                 stale.extend(loops.blocks(id).iter().copied());
-                stale.extend(loops.preheader(&cfg, id));
+                stale.extend(loops.preheader(cfg, id));
             }
         }
         stats

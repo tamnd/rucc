@@ -194,16 +194,16 @@ fn plan(
     stats: &mut Stats,
     say: bool,
 ) -> Option<Job> {
-    let cfg = an.cfg(func).clone();
-    let doms = an.dominators(func).clone();
-    let loops = an.loops(func).clone();
-    let mut scev = Scev::new(func, &cfg, &loops);
+    let cfg = an.cfg(func);
+    let doms = an.dominators(func);
+    let loops = an.loops(func);
+    let mut scev = Scev::new(func, cfg, loops);
     let mut found: Option<Job> = None;
     for id in loops.all() {
         if done.contains(&loops.header(id)) {
             continue;
         }
-        match consider(func, &cfg, &doms, &loops, &mut scev, id) {
+        match consider(func, cfg, doms, loops, &mut scev, id) {
             Ok(job) => {
                 if found.as_ref().is_none_or(|had| job.depth > had.depth) {
                     found = Some(job);
