@@ -3,12 +3,13 @@
  * Design: spec/12-abi-and-runtime.md section 12.8 and spec/cross-compile/10-runtime.md section
  * 10.2, which lists soft float as wanted on armv7 soft-float and on any target without an FPU. On
  * such a target an addition of two floats is not an instruction, so the front end emits a call and
- * these five names are what it calls. They are libgcc's names, for the reason every other name in
- * this directory is: an object we produced gets linked against objects GCC produced and one of us
- * has to give way.
+ * the names in here are what it calls: the four operations and the negation, and the eight
+ * comparisons at the bottom of the file, since `a < b` on two floats is a call there as much as
+ * `a + b` is. They are libgcc's names, for the reason every other name in this directory is: an
+ * object we produced gets linked against objects GCC produced and one of us has to give way.
  *
- * This is the single precision half. The double precision set is the same five routines over a
- * wider field layout and arrives next, and binary128 is the large piece section 10.2 calls the
+ * This is the single precision half. The double precision set is the same routines over a wider
+ * field layout and arrives next, and binary128 is the large piece section 10.2 calls the
  * largest in the document, which wants this one to exist first because it is where the shape gets
  * settled.
  *
@@ -422,4 +423,93 @@ float __divsf3(float left, float right) {
  */
 float __negsf2(float value) {
     return float_of(pattern_of(value) ^ SIGN);
+}
+
+/* The comparisons.
+ *
+ * On a machine with no floating point unit, `a < b` on two floats is a call as much as `a + b` is,
+ * and libgcc answers it with eight routines over one piece of work. What they share is this
+ * function, and what differs between them is one number: what to hand back when an operand is a not
+ * a number, which is an answer that has to make the caller's test fail.
+ *
+ * Only the sign of what these return is specified, not its magnitude, which is why the caller
+ * compares the result against zero rather than against minus one. The order below is the order of
+ * the bit patterns: two floats of the same sign compare the way their patterns do as integers, which
+ * is the property the format was designed to have, so the whole of the work after the zeros and the
+ * signs are out of the way is one comparison of two unsigned integers.
+ */
+static int compare(u32 left, u32 right, int unordered) {
+    if (is_nan(left) || is_nan(right)) {
+        return unordered;
+    }
+    u32 left_magnitude = left & ~SIGN;
+    u32 right_magnitude = right & ~SIGN;
+    /* A negative zero equals a positive zero, which is the one place the sign is not read. */
+    if (left_magnitude == 0 && right_magnitude == 0) {
+        return 0;
+    }
+    int left_negative = (left & SIGN) != 0;
+    int right_negative = (right & SIGN) != 0;
+    if (left_negative != right_negative) {
+        return left_negative ? -1 : 1;
+    }
+    if (left_magnitude == right_magnitude) {
+        return 0;
+    }
+    int ordered = left_magnitude > right_magnitude ? 1 : -1;
+    /* Both negative, so the larger magnitude is the smaller number. */
+    return left_negative ? -ordered : ordered;
+}
+
+/* The three way comparison. Minus one, zero or one, and one for a not a number as well, which the
+ * documentation says not to rely on and which is here because the compiler emits this routine only
+ * where it has already ruled a not a number out.
+ */
+int __cmpsf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Zero when the two are equal, and anything else when they are not, so the caller tests against
+ * zero. A not a number is unequal to everything including itself, so the answer there is not zero.
+ */
+int __eqsf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* The same work as the one above it, since a caller testing for inequality tests the same answer
+ * against zero the other way round. libgcc has both names because a compiler emits both, and they
+ * are two functions here rather than one alias because an alias is a linker feature and this file is
+ * meant to compile with nothing underneath it.
+ */
+int __nesf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* At or above zero when the left one is greater or equal, so a not a number has to come back below
+ * zero for the test to fail.
+ */
+int __gesf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), -1);
+}
+
+/* Above zero when the left one is greater, so a not a number comes back at or below zero. */
+int __gtsf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), -1);
+}
+
+/* At or below zero when the left one is less or equal, so a not a number comes back above zero. */
+int __lesf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Below zero when the left one is less, so a not a number comes back at or above zero. */
+int __ltsf2(float left, float right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Not zero when the two cannot be ordered, which is when either of them is a not a number. This is
+ * the one the others are defined in terms of: each of them is its own comparison and this answer.
+ */
+int __unordsf2(float left, float right) {
+    return is_nan(pattern_of(left)) || is_nan(pattern_of(right));
 }
