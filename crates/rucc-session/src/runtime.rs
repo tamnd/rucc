@@ -39,6 +39,8 @@ const HEADERS: &[(&str, &str)] = &[
     ("float.h", include_str!("../runtime/include/float.h")),
     ("iso646.h", include_str!("../runtime/include/iso646.h")),
     ("limits.h", include_str!("../runtime/include/limits.h")),
+    ("mm_malloc.h", include_str!("../runtime/include/mm_malloc.h")),
+    ("mmintrin.h", include_str!("../runtime/include/mmintrin.h")),
     ("stdalign.h", include_str!("../runtime/include/stdalign.h")),
     ("stdarg.h", include_str!("../runtime/include/stdarg.h")),
     ("stdatomic.h", include_str!("../runtime/include/stdatomic.h")),
