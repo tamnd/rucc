@@ -182,8 +182,36 @@ impl<'a> Convention<'a> {
     }
 }
 
+/// Which instruction each of the allocator's moves became.
+///
+/// A spill and a copy are both a `mov` once they are written, and so is an instruction the lowering
+/// wrote that happens to move the same register to the same address. Telling them apart afterwards
+/// by looking at them is guesswork, and a pass that guesses wrong about a store to a volatile
+/// variable deletes a read the program insisted on. So what the allocator asked for is recorded as
+/// it is written, and a later pass that is only allowed to touch the allocator's own moves has the
+/// list rather than a heuristic. See [`crate::reload`], which is the one pass that reads this.
+#[derive(Debug, Default)]
+pub struct Moves(HashMap<Inst, Edit>);
+
+impl Moves {
+    /// What the allocator asked for at this instruction, or `None` at an instruction that is not
+    /// one of its moves.
+    #[must_use]
+    pub fn at(&self, inst: Inst) -> Option<Edit> {
+        self.0.get(&inst).copied()
+    }
+
+    /// Records that this instruction is what that move came to.
+    pub fn record(&mut self, inst: Inst, edit: Edit) {
+        self.0.insert(inst, edit);
+    }
+}
+
 /// Writes the moves, the prologue and the epilogue into a function the allocator has finished
 /// with.
+///
+/// Hands back which instruction each of the allocator's moves became, for the one pass that is
+/// allowed to take one of them out again.
 ///
 /// # Panics
 ///
@@ -197,7 +225,7 @@ pub fn finish(
     stack: &Stack,
     convention: Convention<'_>,
     names: &mut Interner,
-) {
+) -> Moves {
     let Convention { regs: conv, insts, protect, probe, landing, trace, pad } = convention;
     let entry = func.entry().expect("a function with a block in it");
     let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
@@ -251,9 +279,11 @@ pub fn finish(
     let mut writer = Writer { func, conv, insts, names, base, ahead: None };
 
     let mut cursors: HashMap<At, Inst> = HashMap::new();
+    let mut moves = Moves::default();
     for edit in &allocation.edits {
         let inst = writer.mov(edit, frame);
         writer.put(&mut cursors, edit.at, inst);
+        moves.record(inst, *edit);
     }
 
     let prologue = writer.prologue(frame, protect, probe, landing, trace, pad);
@@ -284,6 +314,7 @@ pub fn finish(
         let order: Vec<Block> = ahead.into_iter().chain(rest).collect();
         writer.func.set_block_order(&order);
     }
+    moves
 }
 
 /// How many pages a probing prologue touches one after another before it writes a loop instead.
