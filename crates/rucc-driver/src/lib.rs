@@ -28,6 +28,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.10.26")]
 
+pub mod artifact;
 pub mod cache;
 pub mod compile;
 pub mod deps;
@@ -53,6 +54,7 @@ use rucc_session::{
 };
 use rucc_sysroot::{Manifest, Sysroot};
 use rucc_target::{ObjectFormat, Triple};
+use rucc_tuple::TargetTuple;
 
 use crate::link::LinkOptions;
 
@@ -89,6 +91,22 @@ pub enum Action {
         plan: Box<Plan>,
         /// What the command line said about linking.
         link: Box<LinkOptions>,
+    },
+    /// `--fetch <tuple>`, which gets the sysroot this release pins for a target and installs it.
+    ///
+    /// The only action in this compiler that may run another program to move bytes onto the
+    /// machine, which is `spec/cross-compile/13-distribution.md` section 13.8's rule rather than a
+    /// property of how this happens to be written: a compilation has no branch that reaches it.
+    Fetch {
+        /// The artifact, from the table in [`crate::artifact`]. Resolved here rather than where the
+        /// work happens, so that a target nothing is pinned for is a refusal from the parser like
+        /// every other thing a command line can ask for and not have.
+        what: &'static artifact::Pinned,
+        /// The target, which names the directory under the cache the tree is installed at and is
+        /// checked against the record inside the artifact.
+        target: TargetTuple,
+        /// Where the cache is, read where everything else that needs it reads it.
+        cache: PathBuf,
     },
     /// Compile the given inputs.
     Compile {
@@ -232,6 +250,8 @@ options:
   -print-sysroot         the root the headers and the libraries are read under
   -print-sysroot-provenance   every input under it, where it came from and its licence
   -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
+  --fetch <tuple>        get the sysroot this release pins for <tuple> and install it in the cache
+  --offline              never download anything, which a compilation never does anyway
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
@@ -332,10 +352,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // The whole ten field target, kept beside the three field one because `--target=` can pin a
     // libc version and `Triple` has nowhere to put it. It decides `__GLIBC_MINOR__` and nothing
     // else today, and `None` is a command line that named no target, which is this machine.
-    let mut pinned: Option<rucc_tuple::TargetTuple> = None;
+    let mut pinned: Option<TargetTuple> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
+    // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
+    // because either can be written after the other.
+    let mut fetch: Option<String> = None;
+    let mut offline = false;
     let mut threads = false;
     // Which sanitizers are still asked for by the end of the command line. Accumulated across the
     // loop rather than answered where it was read, because `-fno-sanitize=` turns one off and a
@@ -360,6 +384,26 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         match arg {
             "-h" | "--help" => return Ok(Action::Help),
             "--version" => return Ok(Action::Version),
+            // The sysroot fetch, which is weighed after the loop rather than acted on here, because
+            // `--offline` written after it has to be able to forbid it. Both spellings, since a
+            // flag that takes a tuple gets written both ways and neither is a guess at what the
+            // other meant.
+            "--fetch" => {
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| err("--fetch requires the target to get a sysroot for"))?;
+                i += 1;
+                fetch = Some(value.clone());
+            }
+            _ if arg.starts_with("--fetch=") => {
+                fetch = Some(arg["--fetch=".len()..].to_owned());
+            }
+            // Accepted on any command line and only ever read by the fetch, because an ordinary
+            // compile downloads nothing with or without it. So this flag takes nothing away today,
+            // which is the property section 13.2 asks for rather than an omission: a build that
+            // passes it is saying what it expects of this compiler, and what it expects is already
+            // true.
+            "--offline" => offline = true,
             "--print-config" => print_config = true,
             "--print-pipeline" => print_pipeline = true,
             "-###" => print_plan = true,
@@ -1615,6 +1659,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
 
+    // The fetch, before anything that resolves a compilation, because `--fetch` does not describe
+    // one. It is here rather than in the loop so that `--offline` can forbid it whichever order the
+    // two were written in, and it is before the refusals below so that a command line asking for a
+    // sysroot is not told about a sanitizer.
+    if let Some(named) = fetch {
+        return fetch_action(&named, offline, &inputs);
+    }
+
     // Last, so that it lands after every `-isystem` the command line gave. That is GCC's
     // order: a directory the user names outranks the compiler's own, and the compiler's own
     // outranks the library's. It is pushed after the loop rather than before it because
@@ -1726,6 +1778,116 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         jobs,
         verbose,
     })
+}
+
+/// What `--fetch <tuple>` asked for, or why it is not a thing that can be done.
+///
+/// The lookup happens here rather than at the point the bytes would move, so that a target this
+/// release pins nothing for is a refusal from the parser and the only code that runs a downloader is
+/// code that already knows what it is getting.
+///
+/// # Errors
+///
+/// [`CliError`] when `--offline` forbade it, when there are input files as well, when the tuple is
+/// not a target this compiler knows, and when this release pins no artifact for it.
+fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, CliError> {
+    // Not a precedence question. Section 13.2 says `--offline` forbids a fetch entirely, so a
+    // command line that writes both has asked for two opposite things and the answer is to say so
+    // rather than to pick one of them.
+    if offline {
+        return Err(err(
+            "--fetch asks for a download and --offline forbids every download, so this command \
+             line asks for two opposite things. Drop one of them: --offline is how a build says it \
+             will not reach the network, and --fetch is the only thing in this compiler that does",
+        ));
+    }
+    if let Some(first) = inputs.first() {
+        return Err(err(format!(
+            "--fetch gets a sysroot and compiles nothing, so `{}` on the same command line is an \
+             input that nothing would read",
+            first.path
+        )));
+    }
+    let target: TargetTuple = named
+        .parse()
+        .map_err(|why| err(format!("--fetch {named}: {why}, so there is no sysroot to get")))?;
+    // The canonical spelling, because that is what a row is named by and what the directory under
+    // the cache is called, and a person is free to write a tuple the long way round.
+    let tuple = target.to_canonical_string();
+    let Some(what) = artifact::pinned_for(&tuple) else {
+        return Err(err(unpinned(&tuple)));
+    };
+    Ok(Action::Fetch { what, target, cache: cache::dir() })
+}
+
+/// Why there is nothing to fetch for a target, which is a different sentence while the table is
+/// empty.
+///
+/// A release that pins nothing and a release that pins eleven targets and not this one are two
+/// situations, and a message that did not tell them apart would send somebody looking for a typo in
+/// their tuple when the answer is that this work is not finished.
+fn unpinned(tuple: &str) -> String {
+    let pinned = artifact::pinned_targets();
+    if pinned.is_empty() {
+        return format!(
+            "this release pins no sysroot for {tuple}, and it pins none for any target yet. A \
+             sysroot is built and published by the producer in tamnd/rucc-cross, per \
+             spec/cross-compile/13-distribution.md section 13.8, and a release of this compiler \
+             names one by URL and by hash afterwards. Until then, pass --sysroot=<dir> to compile \
+             against a tree you have already"
+        );
+    }
+    format!(
+        "this release pins no sysroot for {tuple}. What it pins is {}. Pass --sysroot=<dir> to \
+         compile against a tree you have already",
+        pinned.join(", ")
+    )
+}
+
+/// Gets the artifact and installs it, saying what each step did.
+///
+/// The steps are section 13.8's and so are the messages: the transport is somebody else's program
+/// and the check is ours, so a person reading this wants to know which downloader ran, that the
+/// bytes matched, how many files the record named and where the tree ended up. A fetch of something
+/// that is already there says that instead and moves nothing.
+fn fetch_sysroot(what: &artifact::Pinned, target: TargetTuple, cache: &std::path::Path) -> i32 {
+    let tuple = target.to_canonical_string();
+    let archive = what.archive_in(cache);
+    let say = |line: &str| println!("rucc: {tuple}: {line}");
+    match fetch::fetch(what.url, what.sha256, &archive) {
+        Ok(fetch::Fetched::AlreadyThere) => {
+            say(&format!("{} is already here and matches the hash", archive.display()));
+        }
+        Ok(fetch::Fetched::Downloaded(by)) => {
+            say(&format!("downloaded {} with {}", what.url, by.program()));
+        }
+        Err(why) => return complain(why),
+    }
+    match install::install(&archive, what.sha256, target, cache) {
+        Ok(done) => {
+            match &done.before {
+                install::Before::Nothing => {
+                    say(&format!("{} files installed at {}", done.files, done.root.display()));
+                }
+                install::Before::TheSame => {
+                    say(&format!(
+                        "the same sysroot is already at {}, so nothing moved",
+                        done.root.display()
+                    ));
+                }
+                install::Before::Different(was) => {
+                    say(&format!(
+                        "{} files installed at {}, over a tree whose record digested to {was}",
+                        done.files,
+                        done.root.display()
+                    ));
+                }
+            }
+            say(&format!("the record digests to {}", done.digest));
+            0
+        }
+        Err(why) => complain(why),
+    }
 }
 
 /// What one of the `-dump` and `-print` flags prints.
@@ -2639,6 +2801,7 @@ pub fn run(args: &[String]) -> i32 {
             }
             0
         }
+        Ok(Action::Fetch { what, target, cache }) => fetch_sysroot(what, target, &cache),
         Ok(Action::Compile { opts, plan, link, jobs, verbose }) => {
             {
                 let mut stderr = std::io::stderr().lock();
@@ -2806,6 +2969,59 @@ mod tests {
     fn dash_x_names_what_it_accepts_when_it_does_not_know_a_language() {
         let e = parse_args(&args(&["-x", "fortran", "a.c"])).unwrap_err();
         assert!(e.message.contains("assembler-with-cpp"), "{}", e.message);
+    }
+
+    /// What `--fetch` says while the table in [`artifact`] has no rows in it, which is what every
+    /// run of it says today and is the reason the message distinguishes the two cases.
+    #[test]
+    fn a_fetch_of_a_target_nothing_is_pinned_for_says_so_rather_than_reaching_the_network() {
+        let e = parse_args(&args(&["--fetch", "x86_64-linux-musl"])).unwrap_err();
+        assert!(e.message.contains("pins no sysroot for x86_64-linux-musl"), "{}", e.message);
+        // And where one comes from, because the answer is not on this machine.
+        assert!(e.message.contains("tamnd/rucc-cross"), "{}", e.message);
+        // The joined spelling is the same flag.
+        let joined = parse_args(&args(&["--fetch=x86_64-linux-musl"])).unwrap_err();
+        assert_eq!(joined, e);
+    }
+
+    #[test]
+    fn a_fetch_with_no_target_and_a_fetch_of_a_tuple_that_is_not_one_both_say_which() {
+        let e = parse_args(&args(&["--fetch"])).unwrap_err();
+        assert!(e.message.contains("--fetch requires"), "{}", e.message);
+        let e = parse_args(&args(&["--fetch", "sparc64-solaris-gnu"])).unwrap_err();
+        assert!(e.message.contains("--fetch sparc64-solaris-gnu"), "{}", e.message);
+        assert!(e.message.contains("no sysroot to get"), "{}", e.message);
+    }
+
+    /// Both flags on one line ask for opposite things, in either order.
+    #[test]
+    fn a_fetch_and_offline_together_is_a_refusal_whichever_way_round_they_are_written() {
+        for line in [
+            vec!["--offline", "--fetch", "x86_64-linux-musl"],
+            vec!["--fetch", "x86_64-linux-musl", "--offline"],
+        ] {
+            let e = parse_args(&args(&line)).unwrap_err();
+            assert!(e.message.contains("two opposite things"), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn a_fetch_does_not_compile_anything_and_says_so_when_it_is_handed_a_file() {
+        let e = parse_args(&args(&["--fetch", "x86_64-linux-musl", "a.c"])).unwrap_err();
+        assert!(e.message.contains("compiles nothing"), "{}", e.message);
+        assert!(e.message.contains("a.c"), "{}", e.message);
+    }
+
+    /// `--offline` on its own is accepted and changes nothing, because an ordinary compile
+    /// downloads nothing with or without it. A build that passes it everywhere is the case this is
+    /// for, and it must not lose the compilation it was passed beside.
+    #[test]
+    fn offline_on_a_compilation_is_the_same_compilation() {
+        let (opts, plan) = compile(&["-c", "--offline", "a.c"]);
+        let (plain, without) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.target, plain.target);
+        assert_eq!(plan.jobs.len(), without.jobs.len());
+        assert_eq!(plan.jobs[0].output, without.jobs[0].output);
     }
 
     #[test]
@@ -4993,7 +5209,12 @@ mod tests {
         // one it went up by last is the digest of that record, which is the same tree as one number
         // and could not share the line above it because that line prints a few hundred lines and
         // this one prints sixty four characters, and a reader who wants the short answer is looking
-        // for it by name rather than reading the long one.
-        assert!(USAGE.lines().count() < 70, "usage text has grown past one screen");
+        // for it by name rather than reading the long one. The one it went up by last is the
+        // sysroot fetch, which is the only command here that gets something from somewhere else and
+        // is therefore the one a person wants to have read before they run it rather than after.
+        // And the flag beside it that forbids every download, which earns its line by being what a
+        // build in a sealed environment passes and by meaning something even though an ordinary
+        // compile downloads nothing either way.
+        assert!(USAGE.lines().count() < 72, "usage text has grown past one screen");
     }
 }
