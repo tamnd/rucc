@@ -169,7 +169,8 @@ for side in ours reference; do
         __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4 \\
         __udivdi3 __umoddi3 __udivmoddi4 __divdi3 __moddi3 __divmoddi4 \\
         __floattidf __floattisf __floatuntidf __floatuntisf \\
-        __fixdfti __fixsfti __fixunsdfti __fixunssfti; do
+        __fixdfti __fixsfti __fixunsdfti __fixunssfti \\
+        __addsf3 __subsf3 __mulsf3 __divsf3 __negsf2; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
     done
 done
