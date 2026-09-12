@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.32
+
 ### Added
 
 - A boolean widened and compared against zero is the boolean, which is eight rules in tier five and takes four instructions off the branch that shape produces. `if (flag)` on an `int` holding a comparison, `(long)(a == b)`, and every `__builtin_expect` all arrive as a comparison, a zero extension of it, and a second comparison of the wide value against zero, and what came out was a `sete`, a `movzbl`, a `cmpl` and a jump where the machine wanted a `cmpl` and a jump. The builtin is the reason this is worth doing now: its prototype is `long(long, long)`, so the condition is converted before the call whether or not the program wrote a cast, and tamnd/rucc#364 landed the pass that reads the hint off exactly this shape. The rules are written where the rest of the comparison tier is and they are the first below tier four to need an operand expanded into the instruction that computed it, so the tier is matched under two plans now rather than one, differing only in how the left operand is shown. The other predicate writes an exclusive or with a one bit one rather than a flipped comparison, because what is under the widening is whatever produced the bit and in the general case there is no predicate to flip; where it is a comparison, which is nearly always, the hand written rewrite beside the tables turns that back into the opposite comparison on the next run of the pass. Sign extension is not covered, because nothing in the IR widens one bit that way and the model gives no semantics for one. All 72 rules of the tier are proved by z3 against `crates/rucc-ir/rules/ir.model`. tamnd/rucc#1113.
