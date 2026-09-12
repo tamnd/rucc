@@ -185,6 +185,8 @@ pub struct SearchPath {
     /// Whether the directory of the including file has been taken off the front of the quoted
     /// chain, which is half of what `-I-` does.
     no_current_dir: bool,
+    /// Why the target's own system directories are not on here, when somebody knows.
+    missing_system: Option<String>,
 }
 
 impl SearchPath {
@@ -252,6 +254,23 @@ impl SearchPath {
         }
         self.quote_end = self.bracket_end;
         self.no_current_dir = true;
+    }
+
+    /// Records why this target has no system directories, for whoever has to report a header that
+    /// was not found.
+    ///
+    /// The driver is the only thing that knows the answer and the preprocessor is the only thing in
+    /// a position to use it, and a header that could not be found is the one moment where it helps.
+    /// Saying it earlier would mean refusing a program that includes none of the library, which for
+    /// a target whose headers nobody may redistribute is exactly the program that has to keep
+    /// working, so the reason travels with the path and waits.
+    pub fn explain_missing_system(&mut self, why: impl Into<String>) {
+        self.missing_system = Some(why.into());
+    }
+
+    /// What to add to a header that was not found, or [`None`] when nobody left a reason.
+    pub fn missing_system(&self) -> Option<&str> {
+        self.missing_system.as_deref()
     }
 
     /// Whether the directory of the including file is searched for a quoted include.

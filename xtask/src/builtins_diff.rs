@@ -29,11 +29,12 @@
 //! # Why the divisions and the conversions are guarded the other way round
 //!
 //! The same hazard is there for the 128-bit division and modulo, and for the conversions between
-//! that width and a float, and reading undefined symbols will not catch it. gcc puts libgcc on every link line, libgcc is a static archive, and a link that
-//! found `__udivti3` there instead of in the archive under test has the routine inside the program
-//! rather than undefined outside it, so both sides would quietly agree about libgcc's answer. What
-//! can be read instead is the archive: the script lists what each one defines and reports a name
-//! that is not in there, which is the case that would have the link reach past it.
+//! that width and a float, and reading undefined symbols will not catch it. gcc puts libgcc on every
+//! link line, libgcc is a static archive, and a link that found `__udivti3` there instead of in the
+//! archive under test has the routine inside the program rather than undefined outside it, so both
+//! sides would quietly agree about libgcc's answer. What can be read instead is the archive: the
+//! script lists what each one defines and reports a name that is not in there, which is the case
+//! that would have the link reach past it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

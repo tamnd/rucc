@@ -1748,9 +1748,31 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ))
             })?;
         }
-        for dir in
-            library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref(), kernel.as_ref())
-        {
+        let system =
+            library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref(), kernel.as_ref());
+        // The two licence walls of `spec/cross-compile/13-distribution.md` section 13.4, which are
+        // the only way step 3 comes back with nothing on a hosted target. Section 8.6 asks for the
+        // answer to name the licence and the lawful ways to get what is behind it, rather than
+        // leaving a person with an `#include` that failed as though a directory had gone missing.
+        //
+        // It is left on the search path instead of refused here, because a program that includes
+        // none of the library needs none of the SDK and section 8.6 is explicit that targeting the
+        // platform has to keep working. So the reason waits until an include has actually failed,
+        // which is the only moment it helps and the only moment it is true.
+        //
+        // The condition is that step 3 found nothing at all, so an `SDKROOT`, an `INCLUDE` or a mac
+        // with Xcode on it all pass through untouched, and `-nostdinc` never reaches this block. A
+        // `--sysroot` or `-isysroot` passes through as well, even when the tree it names turns out to
+        // be empty or absent: somebody who wrote a path has already answered the question this
+        // message asks, and answering it again over the top of a mistyped directory would hide the
+        // mistake behind a licence notice.
+        if system.is_empty() && sysroot.is_none() {
+            let tuple = pinned.unwrap_or_else(|| opts.target.tuple());
+            if let Some(wall) = rucc_sysroot::Wall::of(tuple) {
+                opts.search.explain_missing_system(wall.no_headers(&tuple.to_canonical_string()));
+            }
+        }
+        for dir in system {
             opts.search.push_system(dir);
         }
     }
@@ -1793,7 +1815,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
 /// # Errors
 ///
 /// [`CliError`] when `--offline` forbade it, when there are input files as well, when the tuple is
-/// not a target this compiler knows, and when this release pins no artifact for it.
+/// not a target this compiler knows, when its sysroot is behind one of section 13.4's licence walls,
+/// and when this release pins no artifact for it.
 fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, CliError> {
     // Not a precedence question. Section 13.2 says `--offline` forbids a fetch entirely, so a
     // command line that writes both has asked for two opposite things and the answer is to say so
@@ -1818,6 +1841,12 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
     // The canonical spelling, because that is what a row is named by and what the directory under
     // the cache is called, and a person is free to write a tuple the long way round.
     let tuple = target.to_canonical_string();
+    // Before the table is consulted, because a target behind a licence wall is not a row that has not
+    // been written yet. Section 13.4 is that no release pins one of these ever, so the message says
+    // the licence and the two lawful ways rather than naming the producer that will publish the rest.
+    if let Some(wall) = rucc_sysroot::Wall::of(target) {
+        return Err(err(format!("--fetch {tuple}: {}", wall.no_fetch(&tuple))));
+    }
     let Some(what) = artifact::pinned_for(&tuple) else {
         return Err(err(unpinned(&tuple)));
     };
@@ -2986,6 +3015,69 @@ mod tests {
         // The joined spelling is the same flag.
         let joined = parse_args(&args(&["--fetch=x86_64-linux-musl"])).unwrap_err();
         assert_eq!(joined, e);
+    }
+
+    /// The two targets a release will never pin, which is a different answer from the one above.
+    ///
+    /// Section 13.4. A person who reads "this release pins no sysroot yet" waits for a release that
+    /// does, and no release of this compiler can ship either of these, so the message names the
+    /// licence that decides it and what to do instead.
+    #[test]
+    fn a_fetch_of_a_target_behind_a_licence_wall_says_so_rather_than_saying_not_yet() {
+        let e = parse_args(&args(&["--fetch", "aarch64-macos"])).unwrap_err();
+        assert!(e.message.contains("Xcode licence"), "{}", e.message);
+        assert!(e.message.contains("there never will be"), "{}", e.message);
+        assert!(!e.message.contains("tamnd/rucc-cross"), "{}", e.message);
+
+        let e = parse_args(&args(&["--fetch", "x86_64-windows-msvc"])).unwrap_err();
+        assert!(e.message.contains("redistributed"), "{}", e.message);
+        // The way out of this one is a target rather than a download, and it is the default already.
+        assert!(e.message.contains("mingw-w64"), "{}", e.message);
+        // And the mingw-w64 target next to it is an ordinary unpinned target.
+        let e = parse_args(&args(&["--fetch", "x86_64-windows-gnu"])).unwrap_err();
+        assert!(e.message.contains("pins no sysroot"), "{}", e.message);
+    }
+
+    /// An Apple target on a machine with no SDK, which is section 8.6's other host.
+    ///
+    /// Not run on a mac, where the SDK this is about is installed and the compile is the ordinary one
+    /// that uses it. What the reason says is asserted in `rucc_sysroot::wall` and where it is printed
+    /// is asserted in `rucc-pp`, so what is left here is that the driver works it out and leaves it
+    /// where the preprocessor will find it, and that neither way past the wall leaves one behind.
+    #[test]
+    fn an_apple_target_with_no_sdk_anywhere_carries_the_licence_rather_than_a_missing_directory() {
+        if cfg!(target_os = "macos") || std::env::var_os("SDKROOT").is_some() {
+            return;
+        }
+        let (opts, _) = compile(&["--target=aarch64-macos", "-c", "a.c"]);
+        let why = opts.search.missing_system().expect("the wall is the reason there are none");
+        assert!(why.contains("aarch64-macos needs a macOS SDK"), "{why}");
+        assert!(why.contains("Xcode licence"), "{why}");
+        assert!(why.contains("-isysroot"), "{why}");
+
+        // A program that includes none of the library needs none of the SDK, which is what section
+        // 8.6 means by being able to target the platform without one, so there is nothing to explain.
+        let (opts, _) = compile(&["--target=aarch64-macos", "-nostdinc", "-c", "a.c"]);
+        assert_eq!(opts.search.missing_system(), None);
+        // And naming a path is the other way through, whether or not the path is there: a mistyped
+        // directory is a mistake to report on its own terms rather than a licence to explain.
+        let (opts, _) = compile(&["--target=aarch64-macos", "-isysroot", "/opt/sdk", "-c", "a.c"]);
+        assert_eq!(opts.search.missing_system(), None);
+    }
+
+    /// The same wall on the compile side of an MSVC target, where the way past it is a tuple.
+    #[test]
+    fn an_msvc_target_with_no_sdk_named_says_which_environment_needs_nothing_installed() {
+        if std::env::var_os("INCLUDE").is_some() {
+            return;
+        }
+        let (opts, _) = compile(&["--target=x86_64-windows-msvc", "-c", "a.c"]);
+        let why = opts.search.missing_system().expect("the wall is the reason there are none");
+        assert!(why.contains("the Windows SDK and its universal CRT"), "{why}");
+        assert!(why.contains("mingw-w64"), "{why}");
+        // And the mingw-w64 target has its headers from us, so nothing is missing to explain.
+        let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-c", "a.c"]);
+        assert_eq!(opts.search.missing_system(), None);
     }
 
     #[test]
