@@ -43,6 +43,7 @@ use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::pressure::{Cost, Pressure};
+use crate::quad;
 use crate::reload;
 use crate::retry;
 use crate::split;
@@ -321,6 +322,12 @@ pub fn compile_recording(
     widths::integers(source);
     expand::bytes(source);
     expand::counts(source);
+    // Above the float rewriting rather than part of it, because the two are written about different
+    // machines: every rewrite down there ends at an instruction this one has, and every operation up
+    // here ends at a call because this machine has no instruction at the format at all. Running
+    // first means the pass below never sees a quad, so its rules about what it will not touch above
+    // sixty four bits are about the eighty bit format and nothing else.
+    quad::calls(source, names);
     expand::floats(source);
     expand::bulk(source, names, machine.conv.word);
     expand::rounds(source, machine.conv.stack_align);

@@ -148,6 +148,7 @@ pub mod layout;
 pub mod lower;
 pub mod pipeline;
 pub mod pressure;
+pub mod quad;
 pub mod reload;
 pub mod retry;
 pub mod select;
