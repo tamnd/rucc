@@ -44,6 +44,7 @@ pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, operand_width, writ
 
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion};
+use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
 
@@ -339,6 +340,327 @@ static FUSED: [Fusion; 80] = [
     Fusion { set: "cmp_set_ae_ri_64", cmp: "cmp_ri_64", if_true: "jcc_ae", if_false: "jcc_b" },
 ];
 
+/// What each x86-64 instruction leaves in the condition state.
+///
+/// The widths come out of the assembly description next door, the same way [`BITS`] takes them,
+/// because two comparisons that agree about a register's low half and not about the rest of it
+/// have not asked the same question.
+pub static FLAGS: FlagInsts = FlagInsts {
+    prefix: "x64.",
+    width: operand_width,
+    writes: writes_flags,
+    compares: &COMPARES,
+    readers: &READERS,
+    zeroing: &ZEROING,
+};
+
+/// Whether the instruction of that name leaves the condition state other than it found it.
+///
+/// Written as the ones that do not, because that is the list that can be checked against the
+/// machine: a move, an address computation, a load, a store, a conversion between widths, a
+/// constant into a register, a push, a pop and a `setcc` are the instructions Intel's description
+/// of each says nothing about the flags in, and the vector unit's arithmetic writes its own status
+/// word rather than this one. Everything else writes them, and so does every name this target does
+/// not have, which is what keeps a rule set that grows an opcode from quietly growing a wrong
+/// answer here.
+#[must_use]
+fn writes_flags(name: &str) -> bool {
+    let Some(shape) = form(name) else { return true };
+    !matches!(
+        shape,
+        Form::Move
+            | Form::Convert
+            | Form::Lea
+            | Form::Load
+            | Form::Store
+            | Form::LoadImm
+            | Form::Push
+            | Form::Pop
+            | Form::Set
+            | Form::Jcc
+            | Form::Jmp
+            | Form::Nop
+            | Form::Landing
+            | Form::Prefetch
+            | Form::RetVal
+            | Form::RetVal2
+            | Form::ArgVal
+            | Form::BrCond
+            | Form::MoveVec
+            | Form::LoadVec
+            | Form::StoreVec
+            | Form::AluVec
+            | Form::ConvertVec
+            | Form::ConvertToVec
+            | Form::ConvertFromVec
+            | Form::RetValVec
+            | Form::RetVal2Vec
+            | Form::ArgValVec
+    )
+}
+
+/// Every comparison this machine makes, and what is left of one it has already made.
+///
+/// Ten conditions at four widths against a register and against a constant, which is the same
+/// eighty [`FUSED`] covers, and then the eight that keep no answer. What a comparison asks is the
+/// name of the one that keeps nothing, so the eighty and the eight meet in the middle: a program
+/// that compares and keeps the byte, and then compares the same two registers and branches, is two
+/// rows here that agree.
+static COMPARES: [Compare; 88] = [
+    Compare { name: "cmp_set_e_8", asks: "cmp_rr_8", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_16", asks: "cmp_rr_16", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_32", asks: "cmp_rr_32", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_64", asks: "cmp_rr_64", kept: Some("set_e") },
+    Compare { name: "cmp_set_ne_8", asks: "cmp_rr_8", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_16", asks: "cmp_rr_16", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_32", asks: "cmp_rr_32", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_64", asks: "cmp_rr_64", kept: Some("set_ne") },
+    Compare { name: "cmp_set_l_8", asks: "cmp_rr_8", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_16", asks: "cmp_rr_16", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_32", asks: "cmp_rr_32", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_64", asks: "cmp_rr_64", kept: Some("set_l") },
+    Compare { name: "cmp_set_le_8", asks: "cmp_rr_8", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_16", asks: "cmp_rr_16", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_32", asks: "cmp_rr_32", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_64", asks: "cmp_rr_64", kept: Some("set_le") },
+    Compare { name: "cmp_set_g_8", asks: "cmp_rr_8", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_16", asks: "cmp_rr_16", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_32", asks: "cmp_rr_32", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_64", asks: "cmp_rr_64", kept: Some("set_g") },
+    Compare { name: "cmp_set_ge_8", asks: "cmp_rr_8", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_16", asks: "cmp_rr_16", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_32", asks: "cmp_rr_32", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_64", asks: "cmp_rr_64", kept: Some("set_ge") },
+    Compare { name: "cmp_set_b_8", asks: "cmp_rr_8", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_16", asks: "cmp_rr_16", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_32", asks: "cmp_rr_32", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_64", asks: "cmp_rr_64", kept: Some("set_b") },
+    Compare { name: "cmp_set_be_8", asks: "cmp_rr_8", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_16", asks: "cmp_rr_16", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_32", asks: "cmp_rr_32", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_64", asks: "cmp_rr_64", kept: Some("set_be") },
+    Compare { name: "cmp_set_a_8", asks: "cmp_rr_8", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_16", asks: "cmp_rr_16", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_32", asks: "cmp_rr_32", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_64", asks: "cmp_rr_64", kept: Some("set_a") },
+    Compare { name: "cmp_set_ae_8", asks: "cmp_rr_8", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_16", asks: "cmp_rr_16", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_32", asks: "cmp_rr_32", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_64", asks: "cmp_rr_64", kept: Some("set_ae") },
+    Compare { name: "cmp_set_e_ri_8", asks: "cmp_ri_8", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_ri_16", asks: "cmp_ri_16", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_ri_32", asks: "cmp_ri_32", kept: Some("set_e") },
+    Compare { name: "cmp_set_e_ri_64", asks: "cmp_ri_64", kept: Some("set_e") },
+    Compare { name: "cmp_set_ne_ri_8", asks: "cmp_ri_8", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_ri_16", asks: "cmp_ri_16", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_ri_32", asks: "cmp_ri_32", kept: Some("set_ne") },
+    Compare { name: "cmp_set_ne_ri_64", asks: "cmp_ri_64", kept: Some("set_ne") },
+    Compare { name: "cmp_set_l_ri_8", asks: "cmp_ri_8", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_ri_16", asks: "cmp_ri_16", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_ri_32", asks: "cmp_ri_32", kept: Some("set_l") },
+    Compare { name: "cmp_set_l_ri_64", asks: "cmp_ri_64", kept: Some("set_l") },
+    Compare { name: "cmp_set_le_ri_8", asks: "cmp_ri_8", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_ri_16", asks: "cmp_ri_16", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_ri_32", asks: "cmp_ri_32", kept: Some("set_le") },
+    Compare { name: "cmp_set_le_ri_64", asks: "cmp_ri_64", kept: Some("set_le") },
+    Compare { name: "cmp_set_g_ri_8", asks: "cmp_ri_8", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_ri_16", asks: "cmp_ri_16", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_ri_32", asks: "cmp_ri_32", kept: Some("set_g") },
+    Compare { name: "cmp_set_g_ri_64", asks: "cmp_ri_64", kept: Some("set_g") },
+    Compare { name: "cmp_set_ge_ri_8", asks: "cmp_ri_8", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_ri_16", asks: "cmp_ri_16", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_ri_32", asks: "cmp_ri_32", kept: Some("set_ge") },
+    Compare { name: "cmp_set_ge_ri_64", asks: "cmp_ri_64", kept: Some("set_ge") },
+    Compare { name: "cmp_set_b_ri_8", asks: "cmp_ri_8", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_ri_16", asks: "cmp_ri_16", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_ri_32", asks: "cmp_ri_32", kept: Some("set_b") },
+    Compare { name: "cmp_set_b_ri_64", asks: "cmp_ri_64", kept: Some("set_b") },
+    Compare { name: "cmp_set_be_ri_8", asks: "cmp_ri_8", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_ri_16", asks: "cmp_ri_16", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_ri_32", asks: "cmp_ri_32", kept: Some("set_be") },
+    Compare { name: "cmp_set_be_ri_64", asks: "cmp_ri_64", kept: Some("set_be") },
+    Compare { name: "cmp_set_a_ri_8", asks: "cmp_ri_8", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_ri_16", asks: "cmp_ri_16", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_ri_32", asks: "cmp_ri_32", kept: Some("set_a") },
+    Compare { name: "cmp_set_a_ri_64", asks: "cmp_ri_64", kept: Some("set_a") },
+    Compare { name: "cmp_set_ae_ri_8", asks: "cmp_ri_8", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_ri_16", asks: "cmp_ri_16", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_ri_32", asks: "cmp_ri_32", kept: Some("set_ae") },
+    Compare { name: "cmp_set_ae_ri_64", asks: "cmp_ri_64", kept: Some("set_ae") },
+    Compare { name: "cmp_rr_8", asks: "cmp_rr_8", kept: None },
+    Compare { name: "cmp_rr_16", asks: "cmp_rr_16", kept: None },
+    Compare { name: "cmp_rr_32", asks: "cmp_rr_32", kept: None },
+    Compare { name: "cmp_rr_64", asks: "cmp_rr_64", kept: None },
+    Compare { name: "cmp_ri_8", asks: "cmp_ri_8", kept: None },
+    Compare { name: "cmp_ri_16", asks: "cmp_ri_16", kept: None },
+    Compare { name: "cmp_ri_32", asks: "cmp_ri_32", kept: None },
+    Compare { name: "cmp_ri_64", asks: "cmp_ri_64", kept: None },
+];
+
+/// Every instruction that reads the condition state, and which part of it each names.
+///
+/// A comparison that keeps a byte is in here as well as above, because the condition on the front
+/// of it is a condition whoever set the bits it reads. The `setcc` with no comparison and the ten
+/// jumps are the rest. The two that are about the carry and the zero together are filed under the
+/// carry, since an entry says which part has to be right and both of theirs do.
+static READERS: [Reader; 100] = [
+    Reader { name: "cmp_set_e_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_l_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_b_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_e_ri_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_ri_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_ri_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_ri_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_ri_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_ri_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_ri_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_ri_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_l_ri_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_ri_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_ri_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_ri_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_ri_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_ri_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_ri_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_ri_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_ri_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_ri_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_ri_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_ri_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_ri_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_ri_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_ri_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_ri_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_b_ri_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_ri_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_ri_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_ri_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_ri_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_ri_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_ri_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_ri_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_ri_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_ri_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_ri_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_ri_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_ri_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_ri_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_ri_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_ri_64", reads: Reads::Unsigned },
+    Reader { name: "set_e", reads: Reads::Zero },
+    Reader { name: "set_ne", reads: Reads::Zero },
+    Reader { name: "set_l", reads: Reads::Signed },
+    Reader { name: "set_le", reads: Reads::Signed },
+    Reader { name: "set_g", reads: Reads::Signed },
+    Reader { name: "set_ge", reads: Reads::Signed },
+    Reader { name: "set_b", reads: Reads::Unsigned },
+    Reader { name: "set_be", reads: Reads::Unsigned },
+    Reader { name: "set_a", reads: Reads::Unsigned },
+    Reader { name: "set_ae", reads: Reads::Unsigned },
+    Reader { name: "jcc_e", reads: Reads::Zero },
+    Reader { name: "jcc_ne", reads: Reads::Zero },
+    Reader { name: "jcc_l", reads: Reads::Signed },
+    Reader { name: "jcc_le", reads: Reads::Signed },
+    Reader { name: "jcc_g", reads: Reads::Signed },
+    Reader { name: "jcc_ge", reads: Reads::Signed },
+    Reader { name: "jcc_b", reads: Reads::Unsigned },
+    Reader { name: "jcc_be", reads: Reads::Unsigned },
+    Reader { name: "jcc_a", reads: Reads::Unsigned },
+    Reader { name: "jcc_ae", reads: Reads::Unsigned },
+];
+
+/// Every instruction that leaves behind what a comparison of what it wrote against zero leaves.
+///
+/// The three bitwise operations clear the carry and the overflow and set the zero and the sign
+/// from the result, which is every bit a comparison against zero would have set and the same
+/// values, so every condition reads them and gets the right answer. The additions, the
+/// subtractions and the negation set the carry and the overflow from what really happened, which
+/// is not what comparing the answer against zero would have said, so only the conditions about the
+/// zero may read them.
+static ZEROING: [Zeroing; 44] = [
+    Zeroing { name: "and_rr_8", signed: true, unsigned: true },
+    Zeroing { name: "and_rr_16", signed: true, unsigned: true },
+    Zeroing { name: "and_rr_32", signed: true, unsigned: true },
+    Zeroing { name: "and_rr_64", signed: true, unsigned: true },
+    Zeroing { name: "and_ri_8", signed: true, unsigned: true },
+    Zeroing { name: "and_ri_16", signed: true, unsigned: true },
+    Zeroing { name: "and_ri_32", signed: true, unsigned: true },
+    Zeroing { name: "and_ri_64", signed: true, unsigned: true },
+    Zeroing { name: "or_rr_8", signed: true, unsigned: true },
+    Zeroing { name: "or_rr_16", signed: true, unsigned: true },
+    Zeroing { name: "or_rr_32", signed: true, unsigned: true },
+    Zeroing { name: "or_rr_64", signed: true, unsigned: true },
+    Zeroing { name: "or_ri_8", signed: true, unsigned: true },
+    Zeroing { name: "or_ri_16", signed: true, unsigned: true },
+    Zeroing { name: "or_ri_32", signed: true, unsigned: true },
+    Zeroing { name: "or_ri_64", signed: true, unsigned: true },
+    Zeroing { name: "xor_rr_8", signed: true, unsigned: true },
+    Zeroing { name: "xor_rr_16", signed: true, unsigned: true },
+    Zeroing { name: "xor_rr_32", signed: true, unsigned: true },
+    Zeroing { name: "xor_rr_64", signed: true, unsigned: true },
+    Zeroing { name: "xor_ri_8", signed: true, unsigned: true },
+    Zeroing { name: "xor_ri_16", signed: true, unsigned: true },
+    Zeroing { name: "xor_ri_32", signed: true, unsigned: true },
+    Zeroing { name: "xor_ri_64", signed: true, unsigned: true },
+    Zeroing { name: "add_rr_8", signed: false, unsigned: false },
+    Zeroing { name: "add_rr_16", signed: false, unsigned: false },
+    Zeroing { name: "add_rr_32", signed: false, unsigned: false },
+    Zeroing { name: "add_rr_64", signed: false, unsigned: false },
+    Zeroing { name: "add_ri_8", signed: false, unsigned: false },
+    Zeroing { name: "add_ri_16", signed: false, unsigned: false },
+    Zeroing { name: "add_ri_32", signed: false, unsigned: false },
+    Zeroing { name: "add_ri_64", signed: false, unsigned: false },
+    Zeroing { name: "sub_rr_8", signed: false, unsigned: false },
+    Zeroing { name: "sub_rr_16", signed: false, unsigned: false },
+    Zeroing { name: "sub_rr_32", signed: false, unsigned: false },
+    Zeroing { name: "sub_rr_64", signed: false, unsigned: false },
+    Zeroing { name: "sub_ri_8", signed: false, unsigned: false },
+    Zeroing { name: "sub_ri_16", signed: false, unsigned: false },
+    Zeroing { name: "sub_ri_32", signed: false, unsigned: false },
+    Zeroing { name: "sub_ri_64", signed: false, unsigned: false },
+    Zeroing { name: "neg_r_8", signed: false, unsigned: false },
+    Zeroing { name: "neg_r_16", signed: false, unsigned: false },
+    Zeroing { name: "neg_r_32", signed: false, unsigned: false },
+    Zeroing { name: "neg_r_64", signed: false, unsigned: false },
+];
+
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];
 static SYSV_SSE_ARGS: [PhysReg; 8] =
     [xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5), xmm(6), xmm(7)];
@@ -463,6 +785,8 @@ pub static WIN64: CallRegs = CallRegs {
 
 #[cfg(test)]
 mod tests {
+    use crate::Role;
+
     use super::*;
 
     /// Every register in a list, and no register twice.
@@ -662,5 +986,150 @@ mod tests {
         // folded branches and another for the rest.
         let jumps: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.if_true).collect();
         assert!(jumps.contains(&BRANCH.if_true) && jumps.contains(&BRANCH.if_false));
+    }
+
+    /// The condition on the end of an opcode's name, which is the part the tables are indexed by.
+    fn condition(name: &str) -> &str {
+        let name = name
+            .strip_prefix("cmp_set_")
+            .or_else(|| name.strip_prefix("set_"))
+            .or_else(|| name.strip_prefix("jcc_"))
+            .expect("an opcode with a condition in its name");
+        let name = name.rsplit_once('_').map_or(name, |(front, back)| {
+            if matches!(back, "8" | "16" | "32" | "64") { front } else { name }
+        });
+        name.strip_suffix("_ri").unwrap_or(name)
+    }
+
+    /// Every comparison this target has is one the pass knows what to do with.
+    ///
+    /// The same argument the fusion table is checked under. A comparison added later with no entry
+    /// here would be one the pass walks past, and the only sign of it would be a saving that
+    /// quietly did not happen, so the list is taken from the instruction descriptions rather than
+    /// written out again.
+    #[test]
+    fn every_comparison_has_an_entry_saying_what_it_asks_and_what_is_left_of_it() {
+        let described = |name: &str| INSTS.iter().any(|&(opcode, _)| opcode == name);
+        let comparisons: Vec<&str> = INSTS
+            .iter()
+            .filter(|&&(_, shape)| {
+                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::Cmp | Form::CmpRi)
+            })
+            .map(|&(opcode, _)| opcode)
+            .collect();
+        let entries: Vec<&str> = COMPARES.iter().map(|entry| entry.name).collect();
+        assert_eq!(entries, comparisons);
+
+        for entry in &COMPARES {
+            assert!(described(entry.asks), "{} asks {}, which is nothing", entry.name, entry.asks);
+            let operands = form(entry.name).expect("a described comparison").operands();
+            match entry.kept {
+                // A comparison that keeps a byte asks what the flag-only one of its width asks,
+                // which is the same instruction with the byte taken off the front, and what is
+                // left of it is the byte alone. Those two halves have to add back up to it or the
+                // pass would be writing an instruction that reads somewhere the original did not.
+                Some(kept) => {
+                    assert!(described(kept), "{} becomes {}, which is nothing", entry.name, kept);
+                    assert_eq!(form(kept), Some(Form::Set), "{kept} is not a byte on its own");
+                    assert_eq!(form(kept).expect("a described byte").operands(), &operands[..1]);
+                    let asks = form(entry.asks).expect("a described comparison").operands();
+                    assert_eq!(asks, &operands[1..], "{} and {} disagree", entry.name, entry.asks);
+                }
+                // A comparison that keeps nothing is already the whole of what it asks, so there
+                // is nothing to leave behind and nothing for the entry to point at but itself.
+                None => assert_eq!(entry.asks, entry.name),
+            }
+        }
+    }
+
+    /// Every instruction that reads the condition state says which part of it it reads.
+    ///
+    /// This is the table the pass is at the mercy of. A condition missing from it is one the pass
+    /// does not see, and the instruction it belongs to would be left reading the bits of whatever
+    /// the pass decided to keep instead, so the list is again taken from the descriptions. That
+    /// each entry names the right part is checked against the condition in the opcode's own name,
+    /// which is a hundred rows that cannot be hand checked and three groups that can.
+    #[test]
+    fn every_condition_says_which_part_of_the_state_it_is_about() {
+        let readers: Vec<&str> = INSTS
+            .iter()
+            .filter(|&&(_, shape)| {
+                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::Set | Form::Jcc)
+            })
+            .map(|&(opcode, _)| opcode)
+            .collect();
+        let entries: Vec<&str> = READERS.iter().map(|entry| entry.name).collect();
+        assert_eq!(entries, readers);
+
+        for entry in &READERS {
+            let wanted = match condition(entry.name) {
+                "e" | "ne" => Reads::Zero,
+                "l" | "le" | "g" | "ge" => Reads::Signed,
+                "b" | "be" | "a" | "ae" => Reads::Unsigned,
+                other => panic!("{} asks about {other}, which is nothing", entry.name),
+            };
+            assert_eq!(entry.reads, wanted, "{} reads the wrong part", entry.name);
+        }
+    }
+
+    /// Nothing that only reads the condition state also writes it.
+    ///
+    /// The pass looks forward from a comparison it wants to take out for everything that would end
+    /// up reading what it leaves instead, and it stops at the first instruction that writes the
+    /// state, because past that point what is there is not its business. A byte or a jump wrongly
+    /// counted as a writer would stop that walk early and leave a condition behind it unaccounted
+    /// for, which is the one way this pass could be wrong rather than merely unhelpful.
+    #[test]
+    fn a_byte_or_a_jump_leaves_the_condition_state_where_it_found_it() {
+        for entry in &READERS {
+            if matches!(form(entry.name), Some(Form::Set | Form::Jcc)) {
+                assert!(!writes_flags(entry.name), "{} is said to write the state", entry.name);
+            } else {
+                assert!(writes_flags(entry.name), "{} makes a comparison", entry.name);
+            }
+        }
+    }
+
+    /// Every instruction said to leave a comparison behind is arithmetic that writes one register.
+    ///
+    /// What the entry claims is that the state after it is the state after comparing the register
+    /// it wrote against zero, which only means anything if there is exactly one such register and
+    /// the description says how wide it is. The three kinds the doc argues are not safe are named
+    /// again here, because the argument for leaving them out lives in prose and this is the part
+    /// of it a change to the table would have to get past.
+    #[test]
+    fn what_leaves_a_comparison_behind_is_arithmetic_with_one_answer() {
+        for entry in &ZEROING {
+            let shape = form(entry.name).expect("a described instruction");
+            assert!(
+                matches!(shape, Form::AluRr | Form::AluRi | Form::UnaryR),
+                "{} is not arithmetic",
+                entry.name
+            );
+            assert!(writes_flags(entry.name), "{} leaves the state alone", entry.name);
+            let written: Vec<u8> = shape
+                .operands()
+                .iter()
+                .enumerate()
+                .filter(|(_, operand)| matches!(operand.role, Role::Def | Role::EarlyDef))
+                .map(|(at, _)| u8::try_from(at).expect("an operand index"))
+                .collect();
+            assert_eq!(written.len(), 1, "{} does not write one register", entry.name);
+            assert!(
+                operand_width(entry.name, written[0]).is_some(),
+                "{} writes a register of no stated width",
+                entry.name
+            );
+            let name = entry.name;
+            assert!(
+                !name.starts_with("shl") && !name.starts_with("shr") && !name.starts_with("sar"),
+                "{name} is a shift, and a shift by zero leaves the state alone"
+            );
+            assert!(!name.starts_with("imul"), "{name} leaves the zero bit undefined");
+            assert!(
+                !name.starts_with("inc") && !name.starts_with("dec"),
+                "{name} leaves the carry alone"
+            );
+        }
     }
 }
