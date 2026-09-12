@@ -313,6 +313,11 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
         "tamnd/rucc#326",
     ),
     (
+        "a hundred and twenty eight bits of float, for everything but a move",
+        "the machine has no instruction at that format and every operation on one is a call",
+        "tamnd/rucc#1064",
+    ),
+    (
         "a vector of any lane count",
         "a rule at a width says nothing about how many lanes",
         "tamnd/rucc#200",

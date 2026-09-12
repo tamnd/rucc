@@ -975,6 +975,10 @@ pub static INSTS: &[(&str, Form)] = &[
     // and a listing says which of the two the program meant.
     ("ret_val_f32", RetValVec),
     ("ret_val_f64", RetValVec),
+    // And the whole of `xmm0` for the format that fills it, which is a third opcode for the same
+    // reason the first two are two: the register is the same one and how much of it the value is
+    // is not.
+    ("ret_val_f128", RetValVec),
     // The second half of a structure that comes back in two registers, at every width a half can
     // be. The narrow ones are not a rounding of the wide one: the second eightbyte of a nine byte
     // structure is one byte, and saying so is what keeps a listing honest about how much of the
@@ -985,6 +989,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val2_64", RetVal2),
     ("ret_val2_f32", RetVal2Vec),
     ("ret_val2_f64", RetVal2Vec),
+    ("ret_val2_f128", RetVal2Vec),
     // Naming the register an argument arrived in, which is the other half of the same job and is
     // the one thing here no lowering rule reaches: where an argument is depends on its position
     // and a rule pattern cannot see one.
@@ -994,6 +999,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("arg_val_64", ArgVal),
     ("arg_val_f32", ArgValVec),
     ("arg_val_f64", ArgValVec),
+    ("arg_val_f128", ArgValVec),
     // The condition a block leaves on, which is as much of a conditional branch as a lowering
     // rule decides, since which arm falls through is the block layout's answer.
     ("br_cond_8", BrCond),
@@ -1312,7 +1318,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 362);
+        assert_eq!(described, 365);
     }
 
     #[test]

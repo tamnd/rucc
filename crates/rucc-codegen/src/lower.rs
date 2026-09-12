@@ -1024,7 +1024,7 @@ impl<'a> Lowering<'a> {
         }
         for value in self.sret().into_iter().chain(values) {
             let ty = self.source[value].ty;
-            let at = if crate::term::float_slot(ty).is_some() { &mut floats } else { &mut ints };
+            let at = if crate::term::in_vector_file(ty) { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
             // says so itself, and a type that travels perfectly well ran out of registers.
             let missing = abi::refuses(ty).unwrap_or(Missing::NoRoom);
@@ -2780,16 +2780,19 @@ impl<'a> Lowering<'a> {
 
     /// Which register file a value of that type lives in.
     ///
-    /// The vector one for the two float widths the machine has scalar instructions for, and the
-    /// general purpose one for everything else. A `long double` is in neither, and it is here
-    /// rather than in the vector class on purpose: it would be put in a register that cannot hold
-    /// it, and there is no rule that names one, so the instruction computing it is reported. The
-    /// wrong class would make that a wrong program instead of a refused one.
+    /// The vector one for the two float widths the machine has scalar instructions for and for the
+    /// one it only moves, and the general purpose one for everything else. An eighty bit `long
+    /// double` is in neither, and it is here rather than in the vector class on purpose: it would
+    /// be put in a register that cannot hold it, and there is no rule that names one, so the
+    /// instruction computing it is reported. The wrong class would make that a wrong program
+    /// instead of a refused one.
+    ///
+    /// A hundred and twenty eight bit float is in the vector class and fits it exactly, which is
+    /// the difference. Nothing computes in it, so every arithmetic on one is still reported, and
+    /// what the class buys is the moves: a register that holds the whole value is a register a
+    /// spill, a reload and a copy are each one instruction for.
     fn class_of(&self, ty: Type) -> RegClass {
-        match crate::term::float_slot(ty) {
-            Some(_) => self.conv.sse_class,
-            None => self.gpr,
-        }
+        if crate::term::in_vector_file(ty) { self.conv.sse_class } else { self.gpr }
     }
 
     /// A fresh register for a value, which is what the instruction computing it writes.

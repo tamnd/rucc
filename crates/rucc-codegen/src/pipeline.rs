@@ -880,6 +880,45 @@ mod tests {
         assert!(!text.contains("x64.movaps_mr"), "{text}");
     }
 
+    /// The same journey at the format the machine only moves, which is the whole of what it can do
+    /// with one: in from memory, back out to memory, in and out of a register, and back to the
+    /// caller.
+    ///
+    /// No arithmetic, because there is no instruction for any and every one of them is a call to
+    /// the runtime. What this says is that the value gets where a call would need it to be.
+    #[test]
+    fn a_quad_float_read_from_memory_and_written_back_uses_the_whole_register_move() {
+        let quad = Type::float(rucc_ir::Float::F128);
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, quad]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let read = build.load(quad, args[0], info, ir::Flags::default());
+        build.store(args[1], args[0], info, ir::Flags::default());
+        build.ret(&[read]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.movaps_rm"), "{text}");
+        assert!(text.contains("x64.movaps_mr"), "{text}");
+        assert!(text.contains("x64.arg_val_f128"), "{text}");
+        assert!(text.contains("x64.ret_val_f128"), "{text}");
+        // In the vector file and not the general purpose one, which is where the two eightbytes
+        // of this value would have gone if it had been classified as a pair of integers.
+        assert!(text.contains("$xmm0"), "{text}");
+        assert!(!text.contains("gpr($rax)"), "{text}");
+    }
+
     /// Both conversions between an unsigned word and a `long double`, all the way to instructions.
     ///
     /// What the rewrite writes and what the x87 group in [`crate::lower`] has are two lists put
