@@ -1178,7 +1178,10 @@ mod tests {
         let again = build.binary(Opcode::Add, doubled, doubled, Flags::NONE);
         build.ret(&[again]);
 
-        assert!(halves(&mut func, &SYSV), "the definition runs before the use whatever the list says");
+        assert!(
+            halves(&mut func, &SYSV),
+            "the definition runs before the use whatever the list says"
+        );
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
     }
