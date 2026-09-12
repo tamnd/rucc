@@ -48,6 +48,18 @@ long long __divdi3(long long top, long long bottom);
 long long __moddi3(long long top, long long bottom);
 long long __divmoddi4(long long top, long long bottom, long long *rest);
 
+/* And the five single precision soft float routines, by name for the same reason.
+ *
+ * Writing a + b here would compile to the machine's own instruction, which is not what is under
+ * test: what is under test is what a target with no floating point unit calls instead. The host has
+ * a floating point unit, so the only way to reach these is to say their names.
+ */
+float __addsf3(float left, float right);
+float __subsf3(float left, float right);
+float __mulsf3(float left, float right);
+float __divsf3(float left, float right);
+float __negsf2(float value);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -583,6 +595,151 @@ static void corner_conversions(int which) {
     say("convcorner", which, digest);
 }
 
+/* The sign bit of a single, which the groups below set and clear on operands of their own. */
+#define SINGLE_SIGN 0x80000000u
+
+/* A bit pattern as the float it is, by memcpy for the reason the digests use it: a union or a cast
+ * through a pointer would be this file taking a position on effective types while testing something
+ * else.
+ */
+static float single_of(unsigned int pattern) {
+    float value;
+    memcpy(&value, &pattern, sizeof value);
+    return value;
+}
+
+/* One pair through all five routines. The negation takes one operand, so it is the left one here and
+ * every pair below is also run the other way round, which is what gets the right one through it.
+ */
+static unsigned long long five(unsigned long long digest, unsigned int left, unsigned int right) {
+    float one = single_of(left);
+    float two = single_of(right);
+    digest = mix_float(digest, __addsf3(one, two));
+    digest = mix_float(digest, __subsf3(one, two));
+    digest = mix_float(digest, __mulsf3(one, two));
+    digest = mix_float(digest, __divsf3(one, two));
+    digest = mix_float(digest, __negsf2(one));
+    cases += 5;
+    return digest;
+}
+
+/* Random bits read as a float, which is how the infinities, the not a numbers and the subnormals get
+ * in without a generator for each: every one of those is a slice of the patterns, and one pattern in
+ * every two hundred and fifty six lands in the slice that is not an ordinary number.
+ */
+static unsigned int random_single(void) {
+    return (unsigned int)(next_random() >> 32);
+}
+
+/* A pattern whose exponent is within four of another's, which is where the additions that say
+ * something are. Two values far apart add to the larger one and ask nothing about the alignment, and
+ * random pairs are far apart nearly always.
+ */
+static unsigned int near_single(unsigned int other) {
+    long long moved = (long long)((other >> 23) & 0xFF) + (long long)(next_random() % 9) - 4;
+    if (moved < 0) {
+        moved = 0;
+    }
+    if (moved > 254) {
+        moved = 254;
+    }
+    return (random_single() & 0x807FFFFFu) | ((unsigned int)moved << 23);
+}
+
+#define SINGLE_ROUNDS 8
+#define SINGLE_CASES 2048
+
+static void singles(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CASES; i++) {
+        unsigned int left = random_single();
+        unsigned int right = random_single();
+        unsigned int close = near_single(left);
+        digest = five(digest, left, right);
+        digest = five(digest, right, left);
+        digest = five(digest, left, close);
+        digest = five(digest, close, left);
+    }
+    say("single", round, digest);
+}
+
+/* A value and exactly half the spacing of its own exponent, which is the pair that puts a sum
+ * exactly between two floats. There the rounding cannot be decided by the bits that were dropped,
+ * because they are the same either way, and what decides it is the lowest bit that was kept. Both
+ * values of that bit are here by name rather than by luck, since an implementation that rounds a tie
+ * up agrees with a correct one on one of the two.
+ */
+static void single_ties(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CASES; i++) {
+        /* An exponent with room for half the spacing to be an ordinary number below it and room for
+         * the sum to stay inside the type above it.
+         */
+        unsigned int stored = 30 + (unsigned int)(next_random() % 200);
+        unsigned int value = (random_single() & 0x007FFFFFu) | (stored << 23);
+        unsigned int half = (stored - 24) << 23;
+        digest = five(digest, value & ~1u, half);
+        digest = five(digest, value | 1u, half);
+        digest = five(digest, (value & ~1u) | SINGLE_SIGN, half);
+        digest = five(digest, half, value | 1u);
+    }
+    say("singletie", round, digest);
+}
+
+/* The bottom of the range and the top of it, which random patterns reach now and then and these two
+ * families are nothing but.
+ *
+ * At the bottom a result has fewer bits than the format usually keeps, and an implementation that
+ * rounded before it shifted into place gets a different answer there. At the top a rounding carries
+ * past the largest finite value and the answer is an infinity rather than a wrapped exponent.
+ */
+static void single_edges(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CASES; i++) {
+        unsigned int small = (random_single() & 0x807FFFFFu)
+                             | ((unsigned int)(next_random() % 3) << 23);
+        unsigned int other = (random_single() & 0x807FFFFFu)
+                             | ((unsigned int)(next_random() % 3) << 23);
+        unsigned int large = (random_single() & 0x807FFFFFu)
+                             | ((unsigned int)(248 + next_random() % 7) << 23);
+        digest = five(digest, small, other);
+        digest = five(digest, small, large);
+        digest = five(digest, large, small);
+        digest = five(digest, large, large);
+    }
+    say("singleedge", round, digest);
+}
+
+/* The patterns worth asking about by name: both zeros, the ends of the subnormal range, the ends of
+ * the normal one, the two powers of two where the spacing of the floats reaches and passes one, half
+ * the spacing at one, an infinity, and a not a number of each kind.
+ */
+static const unsigned int SINGLE_CORNERS[] = {
+    0x00000000u, 0x00000001u, 0x00000002u, 0x007FFFFEu, 0x007FFFFFu, 0x00800000u, 0x00800001u,
+    0x33800000u, 0x34000000u, 0x3F7FFFFFu, 0x3F800000u, 0x3F800001u, 0x40000000u, 0x4B000000u,
+    0x4B800000u, 0x7F7FFFFFu, 0x7F800000u, 0x7F800001u, 0x7FC00000u, 0x7FFFFFFFu,
+};
+
+#define SINGLE_CORNER_COUNT ((int)(sizeof SINGLE_CORNERS / sizeof SINGLE_CORNERS[0]))
+
+/* Every corner against every corner, both ways round and at all four pairs of signs, grouped by
+ * which corner one side was. The signs are swept rather than sampled because the sign of a zero and
+ * the sign of an infinity are where a subtraction and a division decide what to hand back out of the
+ * two signs they were given.
+ */
+static void single_corner_cases(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        for (int signs = 0; signs < 4; signs++) {
+            unsigned int left = SINGLE_CORNERS[which] | ((signs & 1) ? SINGLE_SIGN : 0u);
+            unsigned int right = SINGLE_CORNERS[i] | ((signs & 2) ? SINGLE_SIGN : 0u);
+            digest = five(digest, left, right);
+            digest = five(digest, right, left);
+        }
+    }
+    say("singlecorner", which, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -616,6 +773,14 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < CONVERSION_ROUNDS; i++) {
         conversions(i);
+    }
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        single_corner_cases(i);
+    }
+    for (int i = 0; i < SINGLE_ROUNDS; i++) {
+        singles(i);
+        single_ties(i);
+        single_edges(i);
     }
     printf("cases %ld\n", cases);
     return 0;
