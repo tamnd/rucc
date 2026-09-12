@@ -89,7 +89,7 @@ Document 02's tier table gives totals. A total is not actionable; this is where 
 
 The honest reading of that table is that **the budget is at the optimistic end of the prediction**, and if the aux traffic or the lost optimizations land at the top of their ranges, Tier E is 1.5x and is a draw with Fil-C rather than a win. Document 02 section 2.6 says a Tier E above 2x should stop the project; between 1.3x and 2x it is a narrower win than claimed and the specification should say so rather than quietly moving the target.
 
-**Tier D, 4x geomean budget:** Tier E's cost plus the type plane (15-25%, document 09.8), the byte-granular init plane (10-20%), the epoch plane (<5%), and (the large one) the loss of most check elimination, because Tier D's whole point is that checks are not removed on the strength of anything but a verified rule. The 4x figure assumes the type and init planes' *maintenance* traffic dominates their check traffic, which is the opposite of the usual assumption and is document 09's least certain claim.
+**Tier D, 4x geomean budget:** Tier E's cost plus the type plane (15-25%, document 09.8), the byte-granular init plane (10-20%), the epoch plane (<5%, at the two stamps per pointer store document 09.5 now writes rather than one), and (the large one) the loss of most check elimination, because Tier D's whole point is that checks are not removed on the strength of anything but a verified rule. The 4x figure assumes the type and init planes' *maintenance* traffic dominates their check traffic, which is the opposite of the usual assumption and is document 09's least certain claim.
 
 **Tier K, 3x budget:** measured on the kernel's own benchmarks, not on SPEC. Section 13.6.
 

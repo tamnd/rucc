@@ -77,6 +77,8 @@ Tier E turns off the type and init planes entirely except for pointer slots, whi
 
 The lifetime plane at 16-byte granularity is why allocations round to 16 bytes and 16-byte alignment, which is Fil-C's minimum too and is the natural malloc alignment on both our 64-bit targets anyway.
 
+The epoch plane covers a watched region rather than the payloads inside it, and that is a difference only one judgement notices. A block is the aux, then the header, then the payload, and the reservation and the bias are over the whole region, so the aux beside a payload word has a stamp of its own at its own address. Document 09.5's judgement C1 needs exactly that and it is why the aux slot did not have to give up any of its 128 bits to hold a second stamp.
+
 ### 5.2.4 Mapping the shadow
 
 Direct-mapped with a shift and an add, per ASan and KASAN: `shadow = (addr >> k) + offset`. Three concerns, each with a decided answer.

@@ -61,10 +61,10 @@
 //! Where that second stamp goes is settled even though nothing writes it, and it goes here rather
 //! than in the aux slot. This plane is reserved and biased over a whole region, and a block is the
 //! aux, then the header, then the payload, all three inside the region, so the aux beside a pointer
-//! word already has a slot of its own and it is not the pointer word's slot. That is the candidate
-//! tamnd/rucc#1069 calls the one that gives up no bits, and the half of its cost that was taken for
-//! new mapping turns out to be none. What it still costs is a second write on the path a pointer
-//! store takes, which is a different argument and is the one left to have.
+//! word already has a slot of its own and it is not the pointer word's slot. That was the candidate
+//! that gives up no bits, the half of its cost that was taken for new mapping turned out to be none,
+//! and it is what `spec/safe-memory/09-type-init-and-races.md` section 9.5 now says. What it costs
+//! is a second write on the path a pointer store takes, and section 9.5 has the bounds on that.
 //!
 //! The edges are all in. [`sync`] is what an interposed primitive calls and [`crate::sync`] is the
 //! table of them, so a lock given up and taken, a thread created, a thread joined, a condition
