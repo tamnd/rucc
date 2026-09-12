@@ -43,7 +43,7 @@ use Form::{
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
     LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2,
-    RetVal2Vec, RetValVec, Rmw, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
+    RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
     UnaryX87,
 };
 
@@ -89,6 +89,20 @@ pub enum Form {
     Cmp,
     /// The same against a constant, which is [`Form::CmpSetRi`] with the byte gone.
     CmpRi,
+    /// The byte a comparison sets, with the comparison gone.
+    ///
+    /// The other half of [`Form::CmpSet`], and it exists for the mirror of the reason [`Form::Cmp`]
+    /// does. A comparison whose answer is already in the condition state still has to put that
+    /// answer in a register if something wanted it there, and what is left of the pair then is the
+    /// byte alone. Nothing selects one, for the reason nothing selects a [`Form::Cmp`]: a rule
+    /// replaces a term with a term, and which comparison set the bits this reads is not something a
+    /// pattern can see. `rucc_codegen::compare` writes one, in place of a comparison it found the
+    /// machine had already made.
+    ///
+    /// One register written and none read, which makes it the only form here that names a
+    /// destination and no source. What it really reads is the condition state, and the condition
+    /// state is not an operand on this target, for the reason the module comment gives.
+    Set,
     /// A move between widths, which reads one register and writes another.
     Convert,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
@@ -635,7 +649,11 @@ static X87_MEM: [OperandDesc; 0] = [];
 // A hint names nothing either, and for the first half of the reason above rather than the second:
 // the registers its address is built out of are the address's own, and there is no second end.
 static HINT: [OperandDesc; 0] = [];
-static X87_TO_ONE: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+// A byte written and nothing read, which is what a condition put in a register is whichever unit
+// made the comparison. The x87 comparison is one of these because a truth value is a byte and a
+// byte is not something the x87 holds, and `set_e` is one because the comparison it belongs to is
+// somewhere further up the block.
+static ONE_WRITTEN: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static X87_TO_ONE_BOTH: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::write(GPR)];
 
 impl Form {
@@ -657,6 +675,7 @@ impl Form {
             CmpSetRi => &ONE_TO_ONE,
             Cmp => &CMP,
             CmpRi => &CMP_RI,
+            Set => &ONE_WRITTEN,
             Convert => &ONE_TO_ONE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
@@ -691,7 +710,7 @@ impl Form {
             CmpSetVec => &VEC_TO_ONE,
             CmpSetVecBoth => &VEC_TO_ONE_BOTH,
             PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87 => &X87_MEM,
-            CmpSetX87 => &X87_TO_ONE,
+            CmpSetX87 => &ONE_WRITTEN,
             CmpSetX87Both => &X87_TO_ONE_BOTH,
         }
     }
@@ -1037,6 +1056,19 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_ri_16", CmpRi),
     ("cmp_ri_32", CmpRi),
     ("cmp_ri_64", CmpRi),
+    // And the other half of the same pair, which is the byte with the comparison gone. There is
+    // one per condition and not one per width, because what a `setcc` writes is a byte whatever
+    // the comparison in front of it was comparing.
+    ("set_e", Set),
+    ("set_ne", Set),
+    ("set_l", Set),
+    ("set_le", Set),
+    ("set_g", Set),
+    ("set_ge", Set),
+    ("set_b", Set),
+    ("set_be", Set),
+    ("set_a", Set),
+    ("set_ae", Set),
     // The ten conditions a jump can name, which are the ten a comparison can write a byte for.
     // Two of them are what a test of a byte against itself comes to, and the eight below are
     // only ever reached from a comparison the layout put the jump behind.
@@ -1318,7 +1350,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 365);
+        assert_eq!(described, 375);
     }
 
     #[test]

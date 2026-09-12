@@ -118,6 +118,14 @@
 //! itself in one block; what this takes is the rest, which is the ones with a block boundary in
 //! the middle and the ones the selector wrote itself.
 //!
+//! [`compare`] is the last thing that runs and the third entry in that section. A comparison on
+//! this machine produces no value: it sets a few bits nobody named and the instruction behind it
+//! reads them, so one that sets the bits that are already there is one nothing could tell had run.
+//! Either the same comparison was made a few instructions ago, or the comparison is against zero
+//! and arithmetic worked the value out and set the same bits on its way past. It runs after the
+//! layout because the layout is the other pass about a pair of instructions with nothing allowed
+//! between them, and after it there is nothing left that could put something there.
+//!
 //! What is not here yet is the rest of the optimizing path: no scheduling, and a block order from
 //! the shape of the control flow rather than from how often each block runs.
 //!
@@ -129,6 +137,7 @@
 
 pub mod abi;
 pub mod bits;
+pub mod compare;
 pub mod coverage;
 pub mod elsewhere;
 pub mod expand;
