@@ -18,6 +18,7 @@
 mod corpus;
 mod docs;
 mod lines;
+mod provenance;
 mod rng;
 mod signatures;
 
@@ -51,6 +52,8 @@ commands:
   link-lines <tup>  the linker command line for one target, in every mode
   link-lines --write   write tests/link-lines for every target
   link-lines --check   check that tests/link-lines matches what would be written
+  provenance --write   write PROVENANCE, which is what a release brings per target
+  provenance --check   check that PROVENANCE matches the tables it comes from
   help
 ";
 
@@ -112,6 +115,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["provenance", "--write"] => provenance::run(&root(), provenance::Mode::Write),
+        ["provenance", "--check"] => provenance::run(&root(), provenance::Mode::Check),
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
         ["sysroot", tuple] => run(tuple, sysroot),

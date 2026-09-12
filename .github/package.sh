@@ -54,13 +54,14 @@ sha256() {
   fi
 }
 
-# Everything that goes in, which is the binary and the three files somebody needs to know what they
-# have: what it is, what they may do with it, and what changed.
+# Everything that goes in, which is the binary and the four files somebody needs to know what they
+# have: what it is, what they may do with it, what changed, and what it will bring onto a machine
+# for each target, which is the manifest of section 13.5.
 stage() {
   local into=$1
   mkdir -p "$into/$name"
   cp "$binary" "$into/$name/"
-  cp README.md LICENSE-APACHE CHANGELOG.md "$into/$name/"
+  cp README.md LICENSE-APACHE CHANGELOG.md PROVENANCE "$into/$name/"
   # Sorted here rather than by either archiver, because one of the two cannot sort. The names are
   # relative to the directory the archivers run in, which is how they end up in the archive.
   (cd "$into" && find "$name" -type f | LC_ALL=C sort > .files)

@@ -494,7 +494,7 @@ mod tests {
         // A table row names an artifact by a URL and a hash, and both are static strings there
         // because a release is what writes them. A test computes the hash as it goes, so it leaks
         // two strings into a process that is about to end.
-        let pinned = crate::artifact::Pinned {
+        let pinned = rucc_sysroot::Pinned {
             tuple: "x86_64-linux-musl",
             url: "https://example.invalid/rucc-sysroot-x86_64-linux-musl.tar.gz",
             sha256: String::leak(hash),

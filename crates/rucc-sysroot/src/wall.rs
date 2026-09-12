@@ -79,6 +79,21 @@ impl Wall {
         }
     }
 
+    /// The licence as an identifier rather than as a clause, which is what a record carries.
+    ///
+    /// Two spellings of one fact, and they are both here because a sentence and a field want
+    /// different things. [`Wall::licence`] is what a person is told and reads as English.
+    /// This is what [`crate::distribution`] writes into a column, where a clause would be
+    /// unreadable and a second vocabulary of licence names would be a thing to keep in step with
+    /// [`crate::Licence`].
+    #[must_use]
+    pub const fn under(self) -> crate::Licence {
+        match self {
+            Wall::Apple => crate::Licence::AppleSdk,
+            Wall::Microsoft => crate::Licence::MicrosoftSdk,
+        }
+    }
+
     /// The lawful ways to get what is behind the wall, which every message here ends with.
     ///
     /// A flag in each, because section 8.6's third rule is that the fetch is never automatic and
@@ -164,6 +179,15 @@ mod tests {
         for tuple in ["x86_64-linux-gnu", "riscv64-linux-musl", "armv7m-none-eabi", "wasm32-wasi"] {
             assert_eq!(Wall::of(target(tuple)), None, "{tuple}");
         }
+    }
+
+    #[test]
+    fn the_licence_behind_each_wall_is_the_one_that_is_never_redistributable() {
+        for wall in [Wall::Apple, Wall::Microsoft] {
+            assert!(!wall.under().redistributable(), "{wall}");
+        }
+        assert_eq!(Wall::Apple.under().as_str(), "apple-sdk");
+        assert_eq!(Wall::Microsoft.under().as_str(), "microsoft-sdk");
     }
 
     #[test]

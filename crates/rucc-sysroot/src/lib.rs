@@ -56,6 +56,15 @@
 //! the manifest inside it, which is section 13.8's division of a fetch into the transport and the
 //! part that decides whether the result is correct.
 //!
+//! [`artifact`] is what a release pins: one sysroot artifact per target, by URL and by hash. It is
+//! here rather than beside the fetch that uses it because the generator of the file below cannot
+//! depend on the driver, and because a pin is a fact about a sysroot.
+//!
+//! [`distribution`] is that table and [`Wall`] and the target table written out as one file, which is
+//! what `spec/cross-compile/13-distribution.md` section 13.5 asks to ship beside the binary: for
+//! every target, whether the sysroot for it is in the archive, is a download this release pins, is
+//! behind a licence wall, or is ours to ship and not published yet.
+//!
 //! [`Wall`] is section 13.4's two licence walls as data. Apple's SDK and Microsoft's are the two
 //! things in section 8.2's table that are not ours to ship, so for those targets there is no bundled
 //! tree, no artifact a release can pin, and a message that names the licence and the lawful ways to
@@ -102,6 +111,8 @@
 #![deny(missing_docs)]
 
 pub mod argv;
+pub mod artifact;
+pub mod distribution;
 pub mod layout;
 pub mod link;
 pub mod manifest;
@@ -110,6 +121,8 @@ pub mod sha256;
 pub mod wall;
 
 pub use argv::{Invocation, Item, Unsupported};
+pub use artifact::{PINNED, Pinned, pinned_for, pinned_targets};
+pub use distribution::Arrival;
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError, Provenance};

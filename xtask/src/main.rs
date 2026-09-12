@@ -50,6 +50,7 @@ tasks:
   abi-corpus        regenerate tests/abi-corpus from the layout engine, or check it with --check
   abi-signatures    regenerate tests/abi-signatures, or check it with --check
   link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
+  provenance        regenerate PROVENANCE from the tables, or check it with --check
   abi-differential  compile the signature corpus with both compilers in both directions and run it
   builtins          compile the C runtime support routines into a static library for a target
   builtins-diff     hold the C runtime routines against the Rust reference over the same cases
@@ -91,6 +92,7 @@ fn main() -> ExitCode {
         Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-corpus") => abi_corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("link-lines") => link_lines(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("provenance") => provenance(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-differential") => differential::differential(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -1295,6 +1297,34 @@ fn link_lines(args: &[String]) -> Result<()> {
     })
 }
 
+/// Regenerates `PROVENANCE`, or checks it.
+///
+/// The fourth generator of this shape. What it guards is the one file in a release that says what
+/// that release will bring onto a machine: a URL and a hash per target where there is one, a licence
+/// where section 13.4 says there will never be one, and the word that tells a target nobody has
+/// published a tree for yet apart from a target nobody ever will. Those four answers come from three
+/// tables, and a file that drifted from them would be a provenance record that reads like an answer
+/// and is not one.
+///
+/// It is checked here rather than only before a release for the same reason the others are. The
+/// release workflow runs `cargo xtask ci` on the tag before it packages anything, so a version bump
+/// that forgot the file fails there, which is the cheapest place to find out.
+fn provenance(args: &[String]) -> Result<()> {
+    let mode = if args.iter().any(|a| a == "--check") { "--check" } else { "--write" };
+    let status = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc-targets", "--", "provenance", mode])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::Failed {
+        task: "provenance",
+        problems: vec!["PROVENANCE does not match the tables it is generated from".to_owned()],
+    })
+}
+
 /// What to print about the checks that did not run.
 ///
 /// Always a line, including when there is nothing to report. `cargo xtask ci` saying nothing about
@@ -1332,6 +1362,7 @@ fn ci() -> Result<()> {
     abi_corpus(&["--check".to_owned()])?;
     abi_signatures(&["--check".to_owned()])?;
     link_lines(&["--check".to_owned()])?;
+    provenance(&["--check".to_owned()])?;
     for (bin, args) in steps {
         println!("xtask: running {bin} {}", args.join(" "));
         let status = Command::new(bin)
