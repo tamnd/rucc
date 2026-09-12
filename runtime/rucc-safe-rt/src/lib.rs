@@ -136,9 +136,13 @@
 //! starts and how far it runs exactly, in twenty one bits each, both of them relative to the
 //! pointer in the word beside them, with the lifetime version at its full sixty four bits and the
 //! part of `meta` a check reads. An object too long for that sets a flag and its reader takes the
-//! two numbers out of the header instead. Nothing writes one of these yet, because what writes one
-//! is a `cap_store` beside every store of a pointer and that opcode has no lowering, which is
-//! tamnd/rucc#856.
+//! two numbers out of the header instead. Finding the slot for a word is there too, as
+//! `aux::address_of` and the `store` and `load` pair over it, and it is arithmetic off the
+//! capability the check in front of the access already holds rather than a lookup in anything. It
+//! answers for allocated storage only, since a local's aux goes beside the frame and a global's
+//! goes in a section of the image and neither of those exists. Nothing calls any of it yet, because
+//! what calls it is a `cap_store` beside every store of a pointer and that opcode has no lowering,
+//! which is tamnd/rucc#856.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
