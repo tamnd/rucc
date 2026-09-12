@@ -2285,6 +2285,13 @@ impl<'u> Body<'_, 'u> {
                 Place::new(Where::Addr(addr), ty)
             }
             ExprKind::Unary { op: UnaryOp::Deref, operand } => self.place_of_deref(operand, ty),
+            // `__real__ z` and `__imag__ z`, which name the two halves of whatever object `z`
+            // names. Only a complex operand arrives here, because the checking makes one of
+            // these an lvalue only for a complex operand and nothing else asks where a value is.
+            ExprKind::Unary { op: op @ (UnaryOp::Real | UnaryOp::Imag), operand } => {
+                let addr = self.complex_addr(operand, span);
+                self.half_place(addr, op == UnaryOp::Imag, ty, span)
+            }
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
                 let addr = self.element(base, index, ty, span);
@@ -2362,6 +2369,16 @@ impl<'u> Body<'_, 'u> {
                 let align = repr::align_of(self.types(), self.target(), ty);
                 let at = self.scratch(size, align, span);
                 self.vector_into(at, expr, ty, span);
+                Place::new(Where::Addr(at), ty)
+            }
+            // A complex value that is not already an object, which is the answer to every
+            // operator over one. It has no value type for the same reason a vector has none, so
+            // it is given somewhere to be and built there.
+            _ if rucc_types::is_complex(self.types(), ty) => {
+                let size = repr::size_of(self.types(), self.target(), ty);
+                let align = repr::align_of(self.types(), self.target(), ty);
+                let at = self.scratch(size, align, span);
+                self.complex_into(at, expr, ty, span);
                 Place::new(Where::Addr(at), ty)
             }
             _ => {
@@ -2684,6 +2701,221 @@ impl<'u> Body<'_, 'u> {
             Some(value) => value,
             None => {
                 let ty = self.value_type(lane, span);
+                self.poison(ty, span)
+            }
+        }
+    }
+
+    // Complex values.
+
+    /// A complex expression written into the object at `at`, one half at a time.
+    ///
+    /// A complex value is a pair of real ones, and nothing in the IR holds a pair, so it lives in
+    /// memory the way a vector does and every operator over one is written out as the operators
+    /// over its halves. That is close to what the hardware does anyway: no target here has a
+    /// complex add, and the multiply and the divide that no target has either are calls into
+    /// libgcc, which takes its operands apart the same way.
+    ///
+    /// Only the shapes that reach it are handled. One that is already an object never arrives,
+    /// because [`Self::place`] answers those above without asking, and that is a variable, a
+    /// member, a subscript, a dereference, a call, a compound literal, a conditional, a statement
+    /// expression and a plain assignment between them.
+    fn complex_into(&mut self, at: Value, expr: ExprId, ty: TypeId, span: Span) {
+        let part = self.real_part(ty);
+        match self.tast()[expr].kind {
+            // `z + w` and `z - w`, which are the real operator on each half. Sema has converted
+            // both operands to this type already, so there is no widening left to do here.
+            ExprKind::Binary { op: op @ (BinaryOp::Add | BinaryOp::Sub), lhs, rhs } => {
+                let left = self.complex_addr(lhs, span);
+                let right = self.complex_addr(rhs, span);
+                for imag in [false, true] {
+                    let a = self.half(left, imag, part, span);
+                    let b = self.half(right, imag, part, span);
+                    let value = self.arithmetic(op, a, b, part, span);
+                    let into = self.half_place(at, imag, part, span);
+                    self.write(into, value, span);
+                }
+            }
+            // `-z`, which is the real negation on each half.
+            ExprKind::Unary { op: UnaryOp::Minus, operand } => {
+                let from = self.complex_addr(operand, span);
+                for imag in [false, true] {
+                    let value = self.half(from, imag, part, span);
+                    let out = self.func[value].ty;
+                    let value = self.build(span).unary(Opcode::FNeg, value, out);
+                    let into = self.half_place(at, imag, part, span);
+                    self.write(into, value, span);
+                }
+            }
+            // `+z`, which is the identity and leaves a node here the way it does on a real
+            // operand, and `(z, w)`, whose value is the object the right side named.
+            ExprKind::Unary { op: UnaryOp::Plus, operand } => {
+                self.complex_copy(at, operand, ty, span);
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                self.discard(lhs);
+                self.complex_copy(at, rhs, ty, span);
+            }
+            // A conversion to a complex type, which is either the other complex type's halves
+            // converted or a real value beside a zero. `(_Complex double)x` is written the same
+            // way and means the same thing, which is why the cast comes through here as well.
+            ExprKind::Convert { kind: Conversion::Arithmetic, operand }
+            | ExprKind::Cast(operand) => {
+                let from = self.tast()[operand].ty;
+                match rucc_types::real_part(self.types(), from) {
+                    Some(source) => {
+                        let addr = self.complex_addr(operand, span);
+                        for imag in [false, true] {
+                            let value = self.half(addr, imag, source, span);
+                            let value = self.coerce(value, source, part, span);
+                            let into = self.half_place(at, imag, part, span);
+                            self.write(into, value, span);
+                        }
+                    }
+                    None => {
+                        let value = self.value(operand);
+                        let value = self.coerce(value, from, part, span);
+                        let real = self.half_place(at, false, part, span);
+                        self.write(real, value, span);
+                        let out = self.value_type(part, span);
+                        let zero = self.blank(out, span);
+                        let imaginary = self.half_place(at, true, part, span);
+                        self.write(imaginary, zero, span);
+                    }
+                }
+            }
+            // `w = (z += u)`, where the value of the compound assignment is the one wanted. The
+            // assignment happens at the object it names and what lands here is a copy of it.
+            ExprKind::Assign { op: Some(op), computation, lhs, rhs } => {
+                let into = self.place(lhs);
+                let target = self.address_of(into, span);
+                self.complex_compound(target, op, computation, rhs, ty, span);
+                self.copy_bytes(at, target, ty, span);
+            }
+            _ => self.unsupported("this complex expression", span),
+        }
+    }
+
+    /// `z op= w` performed half by half at the object `target` names.
+    ///
+    /// The computation type is not the object's type where the two differ: `_Complex float z; z
+    /// += 1.0;` adds in `_Complex double` and converts back, which is the same rule a real
+    /// compound assignment follows and is why the halves are widened and narrowed around the
+    /// operator rather than added where they sit.
+    fn complex_compound(
+        &mut self,
+        target: Value,
+        op: BinaryOp,
+        computation: TypeId,
+        rhs: ExprId,
+        ty: TypeId,
+        span: Span,
+    ) {
+        let part = self.real_part(ty);
+        let wide = self.real_part(computation);
+        let right = self.complex_addr(rhs, span);
+        for imag in [false, true] {
+            let a = self.half(target, imag, part, span);
+            let a = self.coerce(a, part, wide, span);
+            let b = self.half(right, imag, wide, span);
+            let value = self.arithmetic(op, a, b, wide, span);
+            let value = self.coerce(value, wide, part, span);
+            let slot = self.half_place(target, imag, part, span);
+            self.write(slot, value, span);
+        }
+    }
+
+    /// `z == w` and `z != w`, as one bit.
+    ///
+    /// Both halves are compared and the two answers are combined with the operator that matches:
+    /// two complex values are equal when both halves are, and unequal when either half is. A NaN
+    /// in either half needs nothing said about it, because the unordered comparison the real `!=`
+    /// already uses is what makes it unequal to itself here too.
+    fn complex_compare(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
+        let part = self.real_part(self.tast()[lhs].ty);
+        let left = self.complex_addr(lhs, span);
+        let right = self.complex_addr(rhs, span);
+        let a = self.half(left, false, part, span);
+        let b = self.half(right, false, part, span);
+        let real = self.compare(op, a, b, part, span);
+        let a = self.half(left, true, part, span);
+        let b = self.half(right, true, part, span);
+        let imaginary = self.compare(op, a, b, part, span);
+        let opcode = if op == BinaryOp::Eq { Opcode::And } else { Opcode::Or };
+        self.build(span).binary(opcode, real, imaginary, Flags::NONE)
+    }
+
+    /// Whether a complex value is not zero, which is whether either half is not zero.
+    fn complex_truth(&mut self, expr: ExprId, span: Span) -> Value {
+        let part = self.real_part(self.tast()[expr].ty);
+        let addr = self.complex_addr(expr, span);
+        let real = self.half(addr, false, part, span);
+        let real = self.is_nonzero(real, span);
+        let imaginary = self.half(addr, true, part, span);
+        let imaginary = self.is_nonzero(imaginary, span);
+        self.build(span).binary(Opcode::Or, real, imaginary, Flags::NONE)
+    }
+
+    /// The real half of a complex expression converted to `ty`, and [`None`] where that is not
+    /// what is being asked for.
+    ///
+    /// Going from complex to real keeps the real half and drops the imaginary one, 6.3.1.7p2,
+    /// and that is the one direction between the two that answers with a value. The other has
+    /// no value form and is [`Self::complex_into`]'s to build, which is why a complex answer
+    /// backs out here rather than dropping half of itself.
+    fn complex_to_real(&mut self, operand: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+        if rucc_types::is_complex(self.types(), ty) {
+            return None;
+        }
+        let from = self.tast()[operand].ty;
+        let part = rucc_types::real_part(self.types(), from)?;
+        let addr = self.complex_addr(operand, span);
+        let value = self.half(addr, false, part, span);
+        Some(self.coerce(value, part, ty, span))
+    }
+
+    /// A complex value copied into the object at `at` from wherever its own object is, which is
+    /// what the shapes that compute nothing of their own need.
+    fn complex_copy(&mut self, at: Value, expr: ExprId, ty: TypeId, span: Span) {
+        let from = self.complex_addr(expr, span);
+        self.copy_bytes(at, from, ty, span);
+    }
+
+    /// The address of the object a complex expression's value is in.
+    fn complex_addr(&mut self, expr: ExprId, span: Span) -> Value {
+        let place = self.place(expr);
+        self.address_of(place, span)
+    }
+
+    /// One whole object of a type copied from one address to another.
+    fn copy_bytes(&mut self, to: Value, from: Value, ty: TypeId, span: Span) {
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        self.memcpy(to, from, size, align, span);
+    }
+
+    /// The type both halves of a complex type have.
+    fn real_part(&self, ty: TypeId) -> TypeId {
+        rucc_types::real_part(self.types(), ty).expect("a complex type")
+    }
+
+    /// One half of the complex object at `addr`, as a place.
+    ///
+    /// The imaginary half sits one whole real behind the real one, which is what the layout
+    /// gives a complex type and what every ABI here already reads it as.
+    fn half_place(&mut self, addr: Value, imag: bool, part: TypeId, span: Span) -> Place {
+        let stride = repr::size_of(self.types(), self.target(), part);
+        let at = self.offset(addr, if imag { stride } else { 0 }, span);
+        Place::new(Where::Addr(at), part)
+    }
+
+    /// One half of the complex object at `addr`, read.
+    fn half(&mut self, addr: Value, imag: bool, part: TypeId, span: Span) -> Value {
+        let place = self.half_place(addr, imag, part, span);
+        match self.read(place, span) {
+            Some(value) => value,
+            None => {
+                let ty = self.value_type(part, span);
                 self.poison(ty, span)
             }
         }
@@ -3178,6 +3410,13 @@ impl<'u> Body<'_, 'u> {
             self.assign(op, computation, lhs, rhs, false, span);
             return;
         }
+        // A complex value thrown away, `z + w;` on its own. It has no value form for `eval` to
+        // answer with, so it is built where one would live and the object is then dropped on the
+        // floor, which is what discarding one means.
+        if rucc_types::is_complex(self.types(), tast[expr].ty) {
+            self.place(expr);
+            return;
+        }
         self.eval(expr);
     }
 
@@ -3239,6 +3478,11 @@ impl<'u> Body<'_, 'u> {
                 if rucc_types::is_vector(self.types(), from) {
                     let at = self.vector_addr(operand, span);
                     return self.read(Place::new(Where::Addr(at), ty), span);
+                }
+                // A cast of a complex value to a real type, which is the same conversion the
+                // language performs without being asked and is written out in the same place.
+                if let Some(value) = self.complex_to_real(operand, ty, span) {
+                    return Some(value);
                 }
                 let value = self.eval(operand)?;
                 Some(self.coerce(value, from, ty, span))
@@ -3339,6 +3583,9 @@ impl<'u> Body<'_, 'u> {
         match tast[expr].kind {
             ExprKind::Binary { op, lhs, rhs } if op.is_comparison() => {
                 let operand = tast[lhs].ty;
+                if rucc_types::is_complex(self.types(), operand) {
+                    return self.complex_compare(op, lhs, rhs, span);
+                }
                 let left = self.value(lhs);
                 let right = self.value(rhs);
                 self.compare(op, left, right, operand, span)
@@ -3360,6 +3607,11 @@ impl<'u> Body<'_, 'u> {
             // The conversion the checking wrote on a condition, which is this question asked
             // one node further down.
             ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit(operand),
+            // A complex value, which has no value form for the comparison against zero below to
+            // be handed, so the question is asked of its two halves instead.
+            _ if rucc_types::is_complex(self.types(), tast[expr].ty) => {
+                self.complex_truth(expr, span)
+            }
             _ => {
                 let value = self.value(expr);
                 self.is_nonzero(value, span)
@@ -3435,6 +3687,9 @@ impl<'u> Body<'_, 'u> {
                 Some(self.address_of(place, span))
             }
             Conversion::Arithmetic | Conversion::Pointer => {
+                if let Some(value) = self.complex_to_real(operand, ty, span) {
+                    return Some(value);
+                }
                 let value = self.eval(operand)?;
                 Some(self.coerce(value, from, ty, span))
             }
@@ -3552,10 +3807,22 @@ impl<'u> Body<'_, 'u> {
             UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => {
                 self.step_by_one(op, operand, span)
             }
+            // `__real__ z` and `__imag__ z`, which are the two halves of the object. gcc takes
+            // both on a real operand as well, where the real half is the value itself and the
+            // imaginary half is a zero the operand is still evaluated for.
             UnaryOp::Real | UnaryOp::Imag => {
-                self.unsupported("a complex type", span);
-                let ty = repr::value_type(self.types(), self.target(), ty)?;
-                Some(self.poison(ty, span))
+                let imag = op == UnaryOp::Imag;
+                let from = self.tast()[operand].ty;
+                if let Some(part) = rucc_types::real_part(self.types(), from) {
+                    let addr = self.complex_addr(operand, span);
+                    return Some(self.half(addr, imag, part, span));
+                }
+                let value = self.eval(operand)?;
+                if !imag {
+                    return Some(value);
+                }
+                let out = self.value_type(ty, span);
+                Some(self.blank(out, span))
             }
         }
     }
@@ -3713,9 +3980,13 @@ impl<'u> Body<'_, 'u> {
             }
             _ if op.is_comparison() => {
                 let operand = self.tast()[lhs].ty;
-                let left = self.value(lhs);
-                let right = self.value(rhs);
-                let bit = self.compare(op, left, right, operand, span);
+                let bit = if rucc_types::is_complex(self.types(), operand) {
+                    self.complex_compare(op, lhs, rhs, span)
+                } else {
+                    let left = self.value(lhs);
+                    let right = self.value(rhs);
+                    self.compare(op, left, right, operand, span)
+                };
                 let into = self.value_type(ty, span);
                 Some(self.widen(bit, false, into, span))
             }
@@ -4973,6 +5244,14 @@ impl<'u> Body<'_, 'u> {
         if rucc_types::is_vector(self.types(), ty) {
             let target = self.address_of(place, span);
             self.vector_compound(target, rhs, op, ty, span);
+            return None;
+        }
+        // A complex value, for the same reason and with the same answer: the operator is applied
+        // to the halves of the object the place names, and what one of these is worth is that
+        // object, which the caller that wants it reads through `place`.
+        if rucc_types::is_complex(self.types(), ty) {
+            let target = self.address_of(place, span);
+            self.complex_compound(target, op, computation, rhs, ty, span);
             return None;
         }
         let right = self.value(rhs);

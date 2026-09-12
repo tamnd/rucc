@@ -1,0 +1,92 @@
+// `_Complex`, which is a pair of real values held as one object. What the walk makes of one is
+// the point of this case: a complex value has no form a register holds, the way a vector has
+// none, so every operator over one comes out as that operator over its two halves and there is
+// no complex anything left in the IR below.
+//
+// The multiply and the divide are not here yet, and neither are the imaginary constants that
+// would let a case below give the imaginary half a value without going through a parameter.
+// `tamnd/rucc#201` is where the rest of it lands.
+
+// The two ways one is given a value: a real one, which fills the real half and zeroes the other,
+// and another complex one, which is a copy.
+_Complex double built(double x) {
+  _Complex double a = x;
+  _Complex double b = a;
+  return b;
+}
+
+// Half by half, which is what these mean and what comes out of the walk.
+_Complex double added(_Complex double a, _Complex double b) {
+  return a + b;
+}
+
+// A negation of a half is `fneg` and not zero minus the half, which is the difference `-0.0`
+// makes and is the same answer a real operand gets.
+_Complex double negated(_Complex double a) {
+  return -a;
+}
+
+// The compound form, where the object is read after the right side is worked out.
+_Complex double compound(_Complex double a, _Complex double b) {
+  a -= b;
+  return a;
+}
+
+// The two halves, which are reached by offset and by nothing else.
+double real_half(_Complex double a) {
+  return __real__ a;
+}
+
+double imaginary_half(_Complex double a) {
+  return __imag__ a;
+}
+
+// Both of them are lvalues wherever the operand is one, which gcc has always said and which is
+// the only way a program can give the imaginary half a value until the imaginary constants
+// arrive. So this is how a complex value is built out of two real ones.
+_Complex double assembled(double x, double y) {
+  _Complex double z;
+  __real__ z = x;
+  __imag__ z = y;
+  return z;
+}
+
+// Equality, which is both halves compared and the two answers combined. There is no `<` beside
+// it, because a complex operand is not a real one and C says an ordering on two of them is a
+// constraint violation.
+int equal(_Complex double a, _Complex double b) {
+  return a == b;
+}
+
+// One as a condition, which is whether either half is not zero.
+int nonzero(_Complex float a) {
+  return a ? 1 : 0;
+}
+
+// The three conversions. A real value to a complex type fills one half and zeroes the other, one
+// complex type to another converts each half, and a complex value to a real type keeps the real
+// half and drops the imaginary one.
+_Complex float narrowed(_Complex double a) {
+  return a;
+}
+
+double dropped(_Complex double a) {
+  return (double)a;
+}
+
+// `_Complex float` is one eightbyte of SSE and `_Complex double` is two, which is the psABI's
+// answer for both and is what the signatures here show.
+_Complex float small(_Complex float a, _Complex float b) {
+  return a + b;
+}
+
+// A complex member, which is laid out and copied the way any other member of its size is.
+struct wrapped {
+  _Complex double z;
+  int tag;
+};
+
+struct wrapped tagged(_Complex double z) {
+  struct wrapped w = { z, 1 };
+  return w;
+}
