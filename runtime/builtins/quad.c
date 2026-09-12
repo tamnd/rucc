@@ -707,3 +707,213 @@ int __lttf2(_Float128 left, _Float128 right) {
 int __unordtf2(_Float128 left, _Float128 right) {
     return is_nan(pattern_of(left)) || is_nan(pattern_of(right));
 }
+
+/* The conversions between this format and an integer, which are the same eight entry points the two
+ * narrower files have and the one set here where the wider format makes the work smaller rather than
+ * larger.
+ *
+ * A hundred and thirteen significant bits hold every value of every integer type C has on a machine
+ * whose widest one is sixty four bits, exactly and with nothing left over. So none of the four
+ * conversions going up rounds, ever, and the sticky bit under the significand is never set: two of the
+ * four round one format down and all four round two formats down, and here the rounding in
+ * `round_and_pack` is reached and does nothing. Coming down is smaller for the same reason. An answer
+ * has to fit in sixty four bits, so the largest exponent with an answer at all is sixty three, which
+ * is below the fraction width of a hundred and twelve, so the significand only ever moves down and the
+ * case double.c needed an upward shift for cannot arise here.
+ *
+ * The four undefined cases answer zero, which is the convention the other two files keep and which
+ * section 12.8 records as a convention rather than a promise: an infinity, a not a number, and a
+ * magnitude past what the caller's type holds all come back as zero.
+ */
+
+/* How many bits an integer needs, which is one more than the power of two its highest bit is worth. A
+ * loop for the same reason `normalize` above is a loop.
+ */
+static int width_of(u64 value) {
+    int bits = 0;
+    while (value != 0) {
+        value >>= 1;
+        bits += 1;
+    }
+    return bits;
+}
+
+/* The magnitude of a signed value, taken through an unsigned type on purpose: the most negative value
+ * of a type has no positive counterpart in it, and negating it there is exactly the case a conversion
+ * has to get right rather than the case it may overflow on.
+ */
+static u64 integer_magnitude(long long value) {
+    return value < 0 ? (u64)0 - (u64)value : (u64)value;
+}
+
+/* A word placed in a pair and shifted up, for a distance that can be more than a word wide. `shift_up`
+ * above cannot be asked for one of those, since it shifts a pair and would read a word by a distance C
+ * leaves undefined, and the distances here run from fifty two to a hundred and fifteen.
+ */
+static struct wide word_shifted_up(u64 value, int up) {
+    if (up >= 64) {
+        return make(value << (up - 64), 0);
+    }
+    if (up == 0) {
+        return make(0, value);
+    }
+    return make(value >> (64 - up), value << up);
+}
+
+/* The low word of a pair shifted down, dropping everything below rather than keeping a sticky bit,
+ * because what is wanted here is a truncation and not a rounding. The distances run from forty nine to
+ * a hundred and twelve, so this crosses the word boundary both ways and neither shift may be written
+ * as one.
+ */
+static u64 word_shifted_down(struct wide value, int down) {
+    if (down >= 64) {
+        return value.high >> (down - 64);
+    }
+    if (down == 0) {
+        return value.low;
+    }
+    return (value.low >> down) | (value.high << (64 - down));
+}
+
+/* The quad nearest an integer, which at this format is the integer itself, with the sign handed in
+ * separately because the magnitude came through the routine above.
+ *
+ * The integer is already the significand, so the work is moving its highest bit up to where
+ * `round_and_pack` wants it. The shift is upwards for every input, since the highest bit of a sixty
+ * four bit integer is sixty three and the leading one belongs at a hundred and fifteen.
+ */
+static _Float128 quad_of_integer(u64 sign, u64 magnitude) {
+    if (magnitude == 0) {
+        return quad_of(make(sign, 0));
+    }
+    int top = width_of(magnitude) - 1;
+    return round_and_pack(sign, top + BIAS, word_shifted_up(magnitude, LEADING - top));
+}
+
+_Float128 __floatsitf(int value) {
+    return quad_of_integer(value < 0 ? SIGN_HIGH : 0, integer_magnitude(value));
+}
+
+_Float128 __floatunsitf(unsigned int value) {
+    return quad_of_integer(0, value);
+}
+
+_Float128 __floatditf(long long value) {
+    return quad_of_integer(value < 0 ? SIGN_HIGH : 0, integer_magnitude(value));
+}
+
+_Float128 __floatunditf(unsigned long long value) {
+    return quad_of_integer(0, value);
+}
+
+/* The part of a quad that is on the integer side of the point, with the sign and the magnitude handed
+ * back separately so that each caller can hold the answer to the bounds of its own type.
+ *
+ * Zero rather than a refusal where the whole value is below one, since truncating a half to an integer
+ * is an answer and not an overflow. Zero and a refusal where there is no answer at all, which is an
+ * infinity, a not a number, and a magnitude past what any of the four types hold.
+ */
+static int integer_of_quad(_Float128 value, u64 *sign, u64 *magnitude) {
+    struct wide pattern = pattern_of(value);
+    *sign = pattern.high & SIGN_HIGH;
+    *magnitude = 0;
+    if (exponent_of(pattern) == TOP) {
+        return 0;
+    }
+    struct wide significand;
+    int stored;
+    unpack(pattern, &significand, &stored);
+    int exponent = stored - BIAS;
+    if (exponent < 0) {
+        return 1;
+    }
+    if (exponent > 63) {
+        return 0;
+    }
+    *magnitude = word_shifted_down(significand, FRACTION - exponent);
+    return 1;
+}
+
+/* The largest magnitude each of the four types holds. The signed ones hold one more going down than
+ * going up, which is the whole reason the magnitude and the sign travel separately above. Every one of
+ * these four bounds is a quad exactly, which is not true one format down, where 2^63 is a double and
+ * the largest `long long` is not: at this width the bound and the value are compared as the integers
+ * they both are and the only hazard left is the off by one.
+ */
+#define SIGNED_32 2147483648ull
+#define SIGNED_64 9223372036854775808ull
+#define UNSIGNED_32 4294967295ull
+#define UNSIGNED_64 18446744073709551615ull
+
+int __fixtfsi(_Float128 value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_32) {
+            return 0;
+        }
+        /* One less than the magnitude, negated, and one more taken off, because the most negative
+         * value is not the negation of anything an `int` holds and writing it that way would be the
+         * overflow this is here to avoid.
+         */
+        return -(int)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_32 - 1) {
+        return 0;
+    }
+    return (int)magnitude;
+}
+
+unsigned int __fixunstfsi(_Float128 value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    /* A negative value is undefined here, and a negative one that truncates to zero is not: the answer
+     * for that one is zero and it is the value rather than the convention.
+     */
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_32) {
+        return 0;
+    }
+    return (unsigned int)magnitude;
+}
+
+long long __fixtfdi(_Float128 value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_64) {
+            return 0;
+        }
+        return -(long long)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_64 - 1) {
+        return 0;
+    }
+    return (long long)magnitude;
+}
+
+unsigned long long __fixunstfdi(_Float128 value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_64) {
+        return 0;
+    }
+    return magnitude;
+}
