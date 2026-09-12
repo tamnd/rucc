@@ -284,6 +284,8 @@ pub struct Region {
     /// guarantee from one that watches three heaps, and the count that says so has to come from
     /// somewhere.
     pub class: u32,
+    /// Whether this crate's own allocator laid the region out, which is [`Watch::carved`].
+    pub carved: bool,
 }
 
 impl Region {
@@ -328,6 +330,8 @@ struct Slot {
     end: AtomicUsize,
     /// What kind of storage it is.
     class: AtomicU32,
+    /// Whether this crate's own allocator laid the region out.
+    carved: AtomicBool,
 }
 
 impl Slot {
@@ -341,6 +345,7 @@ impl Slot {
             base: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
             class: AtomicU32::new(0),
+            carved: AtomicBool::new(false),
         }
     }
 }
@@ -394,6 +399,14 @@ pub(crate) struct Watch {
     pub end: usize,
     /// Document 04's storage class, as the allocator that owns the region described it.
     pub class: u32,
+    /// Whether this crate's own allocator laid the region out, block by block.
+    ///
+    /// False for section 10.4's adopted arenas, and the difference matters to exactly one reader.
+    /// [`crate::recover`] reads the header in front of a payload to find how far the instance
+    /// runs, and the thirty two bytes in front of a payload are a header only where this crate put
+    /// one there. In somebody else's arena they are somebody else's bytes, and a version that
+    /// happened to match would be a wrong extent rather than a fast one.
+    pub carved: bool,
 }
 
 /// Adds a region to the table, and says whether there was room.
@@ -415,8 +428,18 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
     let at = FILLED.load(Ordering::Relaxed);
     let room = at < REGIONS;
     if room {
-        let Watch { origin, typing, initing, epoching, side, room: entries, base, end, class } =
-            watch;
+        let Watch {
+            origin,
+            typing,
+            initing,
+            epoching,
+            side,
+            room: entries,
+            base,
+            end,
+            class,
+            carved,
+        } = watch;
         // Before the count grows, like the stores below, and for the same reason: a reader that
         // has acquired the count reads a side table that is already pointed at its mapping.
         //
@@ -430,6 +453,7 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
         SPACE[at].base.store(base, Ordering::Relaxed);
         SPACE[at].end.store(end, Ordering::Relaxed);
         SPACE[at].class.store(class, Ordering::Relaxed);
+        SPACE[at].carved.store(carved, Ordering::Relaxed);
         // The release that publishes the stores above, and the reason a reader may load them
         // relaxed once it has acquired this.
         FILLED.store(at + 1, Ordering::Release);
@@ -474,6 +498,7 @@ pub fn covering(addr: usize) -> Option<Region> {
                 base,
                 end,
                 class: slot.class.load(Ordering::Relaxed),
+                carved: slot.carved.load(Ordering::Relaxed),
             });
         }
     }
@@ -552,6 +577,7 @@ fn reserve(want: usize) -> Option<Arena> {
         base: region,
         end: region + len,
         class: Class::Allocated as u32,
+        carved: true,
     };
     // SAFETY: the mapping above is writable and is never handed back, the side table is the span
     // between the type plane and the init plane and holds exactly the entries named here, and all

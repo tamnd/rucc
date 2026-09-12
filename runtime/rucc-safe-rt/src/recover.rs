@@ -45,7 +45,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::{self, Region};
-use crate::layout::{Cap, Class, Meta, perm};
+use crate::layout::{self, Cap, Class, Header, Meta, State, perm};
 use crate::plane::{self, GRANULE, Version};
 
 /// Where a recovered capability's bounds came from.
@@ -232,8 +232,26 @@ pub fn extent(region: &Region, addr: usize) -> Option<(usize, usize)> {
 /// Walked in both directions and stopped at the region's edges, which bounds it at the size of the
 /// region in the worst case. That worst case is a single instance filling the whole region, and
 /// walking it is linear in an instance's size rather than in the heap's.
+///
+/// Except where the header answers, which is the case document 05 section 5.2.3 built the layout
+/// for and is [`stated`]. An address whose own granule is owned and whose neighbour below is not is
+/// the first granule of a run, and the thirty two bytes in front of the first granule of a run are
+/// that instance's header, which states the extent. That is a load rather than a walk, and it is
+/// the common case at a boundary: a pointer handed to a library is far more often the address an
+/// allocator returned than a pointer into the middle of the object.
 fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     let here = addr & !(GRANULE - 1);
+
+    // The same read the walk below starts with. Asking it twice is a hit in the first level cache
+    // and asking it here is what makes the header safe to read: a granule with the same version
+    // underneath it is not the first of its run, so the thirty two bytes in front of it are some
+    // other instance's payload, and the program can put anything it likes in those.
+    // SAFETY: `here` is above the region's base, so the granule below it is one the plane covers.
+    let below = (here > region.base).then(|| unsafe { region.plane.version(here - GRANULE) });
+    let first = (below != Some(version)).then(|| stated(region, here, version)).flatten();
+    if let Some(ext) = first {
+        return (here, ext);
+    }
 
     let mut lo = here;
     // SAFETY: the walk stops at the region's base, so every granule it reads is one the plane
@@ -249,6 +267,53 @@ fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     }
 
     (lo, hi - lo)
+}
+
+/// How far the instance whose payload begins at `payload` runs, out of its own header.
+///
+/// Nothing unless the header in front of the address is a live allocated instance's and says the
+/// version the plane says. The caller has already established that `payload` is the first granule
+/// of a run, which is what makes the address in front of it a header rather than somebody's bytes,
+/// and the version compare is what makes a header nobody wrote say nothing: a block the allocator
+/// has never used holds whatever the mapping came with, and a block it has finished with holds the
+/// ended version, and neither of those is the version the plane is holding for a live instance.
+///
+/// The other fields are checked because a header that disagrees with itself is a header not to
+/// believe. What could produce one is storage adopted from an allocator that lays its own blocks
+/// out differently, per `spec/safe-memory/10-interop.md`, which is a region the runtime watches
+/// without having carved it.
+fn stated(region: &Region, payload: usize, version: Version) -> Option<usize> {
+    // Somebody else's arena has no header of ours in front of anything, so there is nothing here
+    // to read and the walk is the only answer. See `alloc::Watch::carved`.
+    if !region.carved {
+        return None;
+    }
+    // Room for a header between the region's base and the payload, which is the one thing that
+    // makes reading the bytes in front of it a read of this region rather than of whatever is
+    // mapped below it.
+    if payload < region.base + layout::HEADER {
+        return None;
+    }
+    // SAFETY: the address is inside the region, which the caller found it in, and the thirty two
+    // bytes in front of it are too by the check above. They are the runtime's own storage rather
+    // than the program's, because the caller established that the granule below is not part of
+    // this instance and the only thing that sits between two payloads is a header and an aux.
+    let header = unsafe { (layout::header_of(payload) as *const Header).read() };
+    if header.ver != version {
+        return None;
+    }
+
+    let ext = header.ext as usize;
+    if ext == 0
+        || ext % GRANULE != 0
+        || header.meta.class() != Class::Allocated as u8
+        || header.meta.state() != State::Live as u8
+        || payload + ext > region.end
+        || layout::block_of(payload, ext) < region.base
+    {
+        return None;
+    }
+    Some(ext)
 }
 
 /// The metadata word a recovered capability carries.
@@ -333,7 +398,7 @@ pub mod exports {
 mod tests {
     use core::ffi::c_void;
 
-    use super::{Cap, Meta, Origin, counts, recover, witness};
+    use super::{Cap, Header, Meta, Origin, counts, recover, witness};
     use crate::alloc;
     use crate::layout::Class;
     use crate::plane;
@@ -510,5 +575,70 @@ mod tests {
 
         free(second);
         free(first);
+    }
+
+    #[test]
+    fn the_header_and_the_walk_say_the_same_thing_about_every_size() {
+        let _turn = crate::turnstile::turn();
+        // The point of reading the header is that it is the same answer for less work, so the two
+        // are compared over a spread of sizes: one granule, a size class boundary, one that gets
+        // rounded, and one large enough that the walk it replaces would be thousands of granules.
+        for n in [1, 16, 72, 4096, 1 << 17] {
+            let ptr = alloc::alloc(n);
+            assert!(!ptr.is_null(), "{n}");
+
+            let base = recover(ptr);
+            // Halfway in, which for everything above a granule is past the first one, so that
+            // address cannot take the header path and has to walk down to the base.
+            let inside = recover(ptr.cast::<u8>().wrapping_add(n / 2).cast());
+            assert_eq!(base.lo, ptr as u64, "{n}");
+            assert_eq!(base.lo, inside.lo, "{n}");
+            assert_eq!(base.ext, inside.ext, "{n}");
+            assert_eq!(base.ver, inside.ver, "{n}");
+            assert_eq!(base.meta, inside.meta, "{n}");
+
+            free(ptr);
+        }
+    }
+
+    #[test]
+    fn a_header_shaped_thing_in_somebody_elses_arena_is_not_believed() {
+        let _turn = crate::turnstile::turn();
+        // The reason `alloc::Watch::carved` exists. An adopted arena's blocks are laid out by
+        // whoever adopted them, so the thirty two bytes in front of a payload are that program's
+        // own bytes and it may put anything there, including something shaped exactly like one of
+        // our headers. Believing it would be answering with an extent a program chose.
+        let payload = arena() + 0x2000;
+        // SAFETY: the mapping is this process's and these bytes are inside it.
+        unsafe { crate::adopt::split(payload as *mut c_void, 64, 0) };
+        let region = alloc::covering(payload).expect("the adopted arena is watched");
+        // SAFETY: the region covers this address, so its plane is built over it.
+        let version = unsafe { region.plane.version(payload) };
+
+        let forged = Header {
+            ext: 4096,
+            ver: version,
+            meta: Meta::new(Class::Allocated, crate::layout::perm::READ, 0),
+            allocator: 1,
+        };
+        // SAFETY: the thirty two bytes in front of the payload are inside the same mapping, which
+        // is this process's and is writable.
+        unsafe { (crate::layout::header_of(payload) as *mut Header).write(forged) };
+
+        let cap = recover(payload as *const c_void);
+        assert_eq!(cap.lo, payload as u64);
+        assert_eq!(cap.ext, 64, "the walk answered rather than the forgery");
+    }
+
+    #[test]
+    fn the_header_of_an_instance_that_has_been_given_back_says_nothing() {
+        let _turn = crate::turnstile::turn();
+        // Freeing leaves the header in place with the ended version in it, and the plane holds the
+        // same ended version, so the two agree. What stops the header being read is that nothing
+        // owns the granule, which is decided before any of this: an address in a freed block is
+        // `Origin::Nobody` and recovers the bottom capability.
+        let ptr = alloc::alloc(64);
+        free(ptr);
+        assert!(recover(ptr).is_bottom());
     }
 }
