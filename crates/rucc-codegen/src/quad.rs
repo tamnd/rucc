@@ -472,3 +472,279 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[Va
     data.extra = extra;
     data.flags = data.flags.intersection(Flags::legal_on(opcode));
 }
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_ir::{Block, Builder, Module, Signature};
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
+    use super::{BITS, Flags, Float, FloatPred, Func, Opcode, Type, Value, calls};
+
+    /// The format the pass is about, as a type, which is what every test builds with.
+    fn quad() -> Type {
+        Type::float(Float::F128)
+    }
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    fn printed(func: &Func, names: &mut Interner) -> String {
+        let module = Module::new(names.intern("q.c"), &target());
+        rucc_ir::print_func(&module, func, names)
+    }
+
+    /// A function of those parameters returning that, with its entry block and its parameters.
+    fn shell(names: &mut Interner, params: &[Type], returns: &[Type]) -> (Func, Block, Vec<Value>) {
+        let signature = Signature::new().with_params(params).with_returns(returns);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let values = params.iter().map(|&ty| func.append_param(entry, ty)).collect();
+        (func, entry, values)
+    }
+
+    /// The pass run over a function of two quads whose one instruction is that binary operation.
+    fn binary(opcode: Opcode) -> String {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.binary(opcode, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+        calls(&mut func, &mut names);
+        printed(&func, &mut names)
+    }
+
+    /// The pass run over a function of two quads whose one instruction is that comparison.
+    fn compared(pred: FloatPred) -> String {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[Type::I1]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.fcmp(pred, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+        calls(&mut func, &mut names);
+        printed(&func, &mut names)
+    }
+
+    #[test]
+    fn the_four_operations_are_the_four_routines() {
+        for (opcode, routine) in [
+            (Opcode::FAdd, "__addtf3"),
+            (Opcode::FSub, "__subtf3"),
+            (Opcode::FMul, "__multf3"),
+            (Opcode::FDiv, "__divtf3"),
+        ] {
+            let text = binary(opcode);
+            assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
+            // The arithmetic is gone rather than sitting beside the call, which is the whole point:
+            // the selector has no rule to match it with.
+            assert_eq!(text.matches(" = f").count(), 0, "no float arithmetic left: {text}");
+            assert_eq!(text.matches(" = call").count(), 1, "one call: {text}");
+        }
+    }
+
+    #[test]
+    fn a_negation_is_the_routine_rather_than_a_sign_flip() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad()], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::FNeg, params[0], quad());
+        build.ret(&[answer]);
+        calls(&mut func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__negtf2"), "{text}");
+        assert!(!text.contains("xor"), "no sign flip in a register: {text}");
+    }
+
+    /// The six ordered predicates, each the routine of its name and the test its answer is read
+    /// with.
+    #[test]
+    fn an_ordered_comparison_is_its_own_routine_tested_against_zero() {
+        for (pred, routine, test) in [
+            (FloatPred::Oeq, "__eqtf2", "icmp eq"),
+            (FloatPred::Une, "__netf2", "icmp ne"),
+            (FloatPred::Olt, "__lttf2", "icmp slt"),
+            (FloatPred::Ole, "__letf2", "icmp sle"),
+            (FloatPred::Ogt, "__gttf2", "icmp sgt"),
+            (FloatPred::Oge, "__getf2", "icmp sge"),
+        ] {
+            let text = compared(pred);
+            assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
+            assert!(text.contains(test), "{test}: {text}");
+            assert!(!text.contains("fcmp"), "the comparison is gone: {text}");
+        }
+    }
+
+    /// The four that are one of those six answers read as its negation.
+    ///
+    /// The routine is the opposite one and the test is the same one, which is the part worth a test
+    /// of its own: a pass that took the obvious route and kept the routine while flipping the test
+    /// would be wrong only for a not a number, which is the operand nothing in a corpus has.
+    #[test]
+    fn an_unordered_comparison_is_the_opposite_routine_read_the_same_way() {
+        for (pred, routine, test) in [
+            (FloatPred::Ult, "__getf2", "icmp slt"),
+            (FloatPred::Ule, "__gttf2", "icmp sle"),
+            (FloatPred::Ugt, "__letf2", "icmp sgt"),
+            (FloatPred::Uge, "__lttf2", "icmp sge"),
+        ] {
+            let text = compared(pred);
+            assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
+            assert!(text.contains(test), "{test}: {text}");
+        }
+    }
+
+    #[test]
+    fn whether_two_values_can_be_ordered_at_all_is_one_routine_either_way_round() {
+        let unordered = compared(FloatPred::Uno);
+        assert!(unordered.contains("@__unordtf2"), "{unordered}");
+        assert!(unordered.contains("icmp ne"), "{unordered}");
+        let ordered = compared(FloatPred::Ord);
+        assert!(ordered.contains("@__unordtf2"), "{ordered}");
+        assert!(ordered.contains("icmp eq"), "{ordered}");
+    }
+
+    /// Ordered and not equal is the one predicate that needs both calls.
+    #[test]
+    fn ordered_and_different_is_two_calls_joined() {
+        let text = compared(FloatPred::One);
+        assert!(text.contains("@__unordtf2"), "{text}");
+        assert!(text.contains("@__netf2"), "{text}");
+        assert_eq!(text.matches(" = call").count(), 2, "both calls: {text}");
+        assert_eq!(text.matches(" = and").count(), 1, "joined: {text}");
+        assert!(!text.contains("xor"), "nothing is negated: {text}");
+    }
+
+    /// Unordered or equal is the negation of that, which is the same two calls the other way up.
+    #[test]
+    fn unordered_or_equal_is_the_negation_of_it() {
+        let text = compared(FloatPred::Ueq);
+        assert_eq!(text.matches(" = call").count(), 2, "both calls: {text}");
+        assert_eq!(text.matches(" = or").count(), 1, "joined the other way: {text}");
+        assert_eq!(text.matches(" = xor").count(), 2, "both answers negated: {text}");
+    }
+
+    #[test]
+    fn the_two_comparisons_with_no_operands_to_read_are_constants() {
+        let never = compared(FloatPred::False);
+        assert!(never.contains("iconst.i1 0"), "{never}");
+        assert!(!never.contains("call"), "nothing is called: {never}");
+        let always = compared(FloatPred::True);
+        assert!(always.contains("iconst.i1 1"), "{always}");
+    }
+
+    /// A constant is the bits written into a slot and read back at the format.
+    #[test]
+    fn a_constant_goes_through_the_frame_a_word_at_a_time() {
+        let mut names = Interner::new();
+        let (mut func, entry, _) = shell(&mut names, &[], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        // One in the low word and one in the high word, so a pass that wrote either word twice or
+        // wrote one of them into the wrong half is a different answer rather than the same zero.
+        let value = build.fconst(quad(), (3u128 << 64) | 5);
+        build.ret(&[value]);
+        calls(&mut func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fconst"), "the constant is gone: {text}");
+        assert_eq!(text.matches("alloca").count(), 1, "one slot: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a word at a time: {text}");
+        assert!(text.contains("iconst.i64 5"), "the low word first: {text}");
+        assert!(text.contains("iconst.i64 3"), "the high word above it: {text}");
+        assert_eq!(text.matches("ptr_add").count(), 1, "the high word is eight bytes up: {text}");
+        assert_eq!(text.matches(" = load").count(), 1, "read back as one value: {text}");
+    }
+
+    #[test]
+    fn the_two_narrower_formats_are_a_routine_each_way() {
+        for (from, to, routine) in [
+            (Float::F32, Float::F128, "__extendsftf2"),
+            (Float::F64, Float::F128, "__extenddftf2"),
+            (Float::F128, Float::F32, "__trunctfsf2"),
+            (Float::F128, Float::F64, "__trunctfdf2"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) =
+                shell(&mut names, &[Type::float(from)], &[Type::float(to)]);
+            let mut build = Builder::new(&mut func, entry);
+            let opcode =
+                if to == Float::F128 { Opcode::FPExt } else { Opcode::FPTrunc };
+            let answer = build.unary(opcode, params[0], Type::float(to));
+            build.ret(&[answer]);
+            calls(&mut func, &mut names);
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
+        }
+    }
+
+    /// An integer the runtime has no routine at is widened to one it does, with the sign the
+    /// conversion has.
+    #[test]
+    fn a_narrow_integer_is_widened_before_the_conversion() {
+        for (opcode, bits, extend, routine) in [
+            (Opcode::SIToFP, 16, " = sext", "__floatsitf"),
+            (Opcode::UIToFP, 16, " = zext", "__floatunsitf"),
+            (Opcode::SIToFP, 32, "", "__floatsitf"),
+            (Opcode::UIToFP, 64, "", "__floatunditf"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[Type::int(bits)], &[quad()]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], quad());
+            build.ret(&[answer]);
+            calls(&mut func, &mut names);
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
+            if extend.is_empty() {
+                assert!(!text.contains(" = sext"), "nothing to widen: {text}");
+                assert!(!text.contains(" = zext"), "nothing to widen: {text}");
+            } else {
+                assert!(text.contains(extend), "{extend}: {text}");
+            }
+        }
+    }
+
+    /// Coming down, the answer is truncated to the width the program asked for.
+    #[test]
+    fn a_narrow_answer_is_the_wider_routine_and_a_truncation() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad()], &[Type::int(16)]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::FPToSI, params[0], Type::int(16));
+        build.ret(&[answer]);
+        calls(&mut func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__fixtfsi"), "{text}");
+        assert_eq!(text.matches(" = trunc").count(), 1, "cut down afterwards: {text}");
+    }
+
+    #[test]
+    fn a_conversion_against_a_wide_integer_is_left_exactly_as_it_was() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[Type::int(BITS)], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::SIToFP, params[0], quad());
+        build.ret(&[answer]);
+        calls(&mut func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("call"), "no routine is called: {text}");
+        assert!(text.contains("sitofp"), "the conversion is still there to be refused: {text}");
+    }
+
+    /// An operation at a format the machine has is not this pass's business.
+    #[test]
+    fn the_narrower_formats_go_past_untouched() {
+        let mut names = Interner::new();
+        let double = Type::float(Float::F64);
+        let (mut func, entry, params) = shell(&mut names, &[double, double], &[double]);
+        let mut build = Builder::new(&mut func, entry);
+        let sum = build.binary(Opcode::FAdd, params[0], params[1], Flags::NONE);
+        let answer = build.fcmp(FloatPred::Olt, sum, params[1], Flags::NONE);
+        build.ret(&[sum]);
+        let _ = answer;
+        calls(&mut func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("call"), "nothing became a call: {text}");
+        assert!(text.contains("fadd"), "the add is still an add: {text}");
+        assert!(text.contains("fcmp"), "the comparison is still a comparison: {text}");
+    }
+}

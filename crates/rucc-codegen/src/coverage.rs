@@ -316,8 +316,9 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
         "tamnd/rucc#326",
     ),
     (
-        "a hundred and twenty eight bits of float, for everything but a move",
-        "the machine has no instruction at that format and every operation on one is a call",
+        "a hundred and twenty eight bits of float",
+        "turned into a call before selection, except a conditional move and the conversions \
+         against an integer that wide",
         "tamnd/rucc#1064",
     ),
     (
