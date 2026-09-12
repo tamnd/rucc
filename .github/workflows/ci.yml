@@ -231,6 +231,29 @@ jobs:
       - name: read back every instruction we encode
         run: cargo xtask disasm
 
+  # spec/12-abi-and-runtime.md section 12.8 asks for the runtime support routines to be held against
+  # a reference rather than against expectations written beside them, and the Rust crate in
+  # runtime/rucc-builtins is kept for that. This is the job where the two meet: one harness compiled
+  # twice, linked against the archive rucc wrote out of runtime/builtins and against the same
+  # routines built from Rust, and every group of cases has to come out the same on both sides.
+  #
+  # It is also the job that holds the archive to being buildable at all, which is the bootstrapping
+  # property of that section: an archive that does not build is a code generator that does not work.
+  builtins:
+    name: the runtime held against its reference
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # The reference is compiled for the target rather than for the host, so the standard library
+      # for that target has to be there even though it is the same machine. The archive under test
+      # needs nothing installed, which is the whole point of it being C this compiler builds.
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: run the same cases against both
+        run: cargo xtask builtins-diff
+
   # spec/cross-compile/09-libc-stubs.md section 9.8 wants the stub writer's output checked by
   # something that does not share its beliefs. The round trip test in the crate does not qualify,
   # because whoever wrote the writer wrote the reader: both thought a .hash entry was four bytes on
