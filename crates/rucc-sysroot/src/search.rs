@@ -34,11 +34,13 @@
 //! # Why an SDK is a source of its own
 //!
 //! [`Options::sdk`] is the fourth of those sources and it is not one of the other three. It is not a
-//! tree the user named, because on a mac it is found by asking `xcrun` and nobody wrote it on the
-//! command line. It is not a bundled tree, because `spec/cross-compile/13-distribution.md` section
-//! 13.4 says we may never ship one. And it is not the host's own directories, because the SDK holds
-//! the headers of every Apple architecture rather than of this machine, so one installed SDK serves
-//! `x86_64-macos` on an arm64 mac and that is what Apple's own tools do with it.
+//! tree the user named, because on a mac it is found by asking `xcrun` and on Windows by asking the
+//! Visual Studio installer, and nobody wrote either on the command line. It is not a bundled tree,
+//! because `spec/cross-compile/13-distribution.md` section 13.4 says we may never ship one. And it is
+//! not the host's own directories, because the SDK holds the headers of every architecture of its
+//! platform rather than of this machine, so one installed SDK serves `x86_64-macos` on an arm64 mac
+//! and one Windows Kit serves `aarch64-windows-msvc` on an x86_64 box, which is what the platform's
+//! own tools do with them.
 //!
 //! The other half of the same rule is that a target behind one of those licence walls never takes
 //! the bundled branch at all, whatever the caller passes, because [`crate::Wall`] is the statement

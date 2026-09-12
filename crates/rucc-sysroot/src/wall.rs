@@ -22,7 +22,9 @@
 //! nothing installed at all, which is why the default Windows environment for a cross build is `gnu`.
 //! A macOS program has no alternative: the two lawful ways to get the SDK are to compile on a mac,
 //! where the installed one is found by asking `xcrun`, or to download Xcode yourself under its
-//! licence, and both of them end at a path that somebody has to name.
+//! licence, and both of them end at a path that somebody has to name. The Windows one is found the
+//! same way on its own platform, by asking the installer that put it there rather than by looking in
+//! a fixed place, because neither the toolchain nor the kit is in one.
 //!
 //! # What a wall is not
 //!
@@ -108,8 +110,10 @@ impl Wall {
             }
             Wall::Microsoft => {
                 "Build for the mingw-w64 environment instead, which is fully redistributable and \
-                 needs nothing installed, or install the SDK yourself and name it with \
-                 --sysroot=<dir>, or on Windows run the vcvarsall.bat that puts it in INCLUDE"
+                 needs nothing installed, or install Visual Studio and the Windows SDK, which are \
+                 found without being named on a Windows machine and are what INCLUDE names \
+                 anywhere else, or point --sysroot=<dir> at a tree laid out with crt/include and \
+                 sdk/include"
             }
         }
     }
