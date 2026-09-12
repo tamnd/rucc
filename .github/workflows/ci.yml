@@ -397,7 +397,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.2
+      - uses: taiki-e/install-action@v2.87.9
         with:
           tool: cargo-deny
       # Licenses, advisories, banned crates and unknown registries, all configured in
@@ -514,7 +514,7 @@ jobs:
           done
       - name: keep the report
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: differential-${{ matrix.libc }}
           path: compat/results/
