@@ -37,7 +37,7 @@
 //! same as a function this pass does not understand. `tamnd/rucc#351` carries what passing one in
 //! memory would take, which is a form of parameter the IR has no way to spell today.
 //!
-//! # Dividing is a call into the runtime
+//! # Dividing and converting are calls into the runtime
 //!
 //! Every other operation at this width is the same operation over the halves with whatever crossed
 //! between them put back. A quotient is not. The halves of a quotient are not a function of the
@@ -46,24 +46,26 @@
 //! remainder become a call to the routines `runtime/builtins/div.c` defines, which are libgcc's four
 //! names and libgcc's signatures, and `spec/12-abi-and-runtime.md` section 12.8 is what they are.
 //!
+//! A conversion to or from a floating point value is the other one, for a plainer reason: the
+//! machine's own conversion reaches sixty four bits and no further, so there is no instruction to
+//! split into. Those are the eight names `runtime/builtins/convert.c` defines, one for each of a
+//! signed and an unsigned integer against a `float` and a `double` in each direction. An eighty bit
+//! float is not among them, because this machine has no register that holds one and the back end
+//! says so, which is tamnd/rucc#326, so a function converting at that width is left alone here and
+//! refused below the way every function of this width used to be.
+//!
 //! The call is built with the halves already in it, four parameters of sixty four bits for the two
-//! operands and two results for the answer, which is the shape this pass gives a call it found in
-//! the program anyway. Both ends agree because the convention puts a `__int128` argument in two
-//! registers in a row and hands out argument registers in order, which is the same sentence the
-//! section below about crossing the boundary is.
-//!
-//! # What it does not do yet
-//!
-//! A conversion between one of these and a floating point value. The machine's own conversion stops
-//! at sixty four bits, so what is needed there is arithmetic rather than a split, and it belongs
-//! beside the other conversions in [`crate::expand`]. A function holding one is left alone here and
-//! refused by the selector, which is the same answer it got before this pass existed.
+//! operands of a divide and two results for the answer, or two parameters and a float, or a float
+//! and two results, which is the shape this pass gives a call it found in the program anyway. Both
+//! ends agree because the convention puts a `__int128` argument in two registers in a row and hands
+//! out argument registers in order, which is the same sentence the section below about crossing the
+//! boundary is.
 
 use std::collections::{HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_ir::{
-    Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred,
+    Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred,
     MemInfo, Opcode, Param, Signature, Type, Value,
 };
 use rucc_target::{CallRegs, Places, Where};
@@ -180,9 +182,10 @@ type Halves = HashMap<Value, (Value, Value)>;
 /// function is left alone, so this list is the pass's own statement of what it has thought about.
 /// Adding to it is adding an arm to [`rewrite`] as well.
 ///
-/// The four divisions are here and are the one entry that becomes a call rather than arithmetic over
-/// the halves. A conversion between one of these and a floating point value is the entry that is
-/// still missing, for the reason the module documentation gives.
+/// The four divisions and the four conversions to and from a floating point value are here, and they
+/// are the entries that become a call rather than arithmetic over the halves. Which float formats
+/// those conversions are understood at is a separate question, asked in [`can_split`], because it is
+/// about the type rather than about the opcode.
 fn understood(opcode: Opcode) -> bool {
     matches!(
         opcode,
@@ -204,6 +207,10 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Xor
             | Opcode::ICmp
             | Opcode::Select
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::FPToSI
+            | Opcode::FPToUI
             | Opcode::Trunc
             | Opcode::SExt
             | Opcode::ZExt
@@ -241,6 +248,15 @@ fn can_split(func: &Func, order: &HashMap<Inst, usize>, at: usize, inst: Inst) -
     if data.opcode == Opcode::SExt && reads.iter().any(|&value| func[value].ty.bits() < 8) {
         return false;
     }
+    // The runtime has a conversion for a `float` and for a `double` and for nothing else, so every
+    // other format is refused here rather than turned into a call to a name nothing defines. An
+    // eighty bit float is the one a program reaches without asking for it, since `long double` is
+    // that type on this target, and it is tamnd/rucc#326 rather than an oversight.
+    if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
+        && converted(func, inst).is_none()
+    {
+        return false;
+    }
     // Splitting an argument makes two of them, and which parameter an argument stands for is how a
     // variadic call knows what the ABI asks of the ones its signature does not name. Two values
     // where that list has one entry is a call laid out against the wrong list.
@@ -257,6 +273,30 @@ fn can_split(func: &Func, order: &HashMap<Inst, usize>, at: usize, inst: Inst) -
         Def::Result { inst, .. } => order.get(&inst).is_some_and(|&def| def < at),
         Def::Param { .. } => true,
     })
+}
+
+/// The format of the floating point side of a conversion, when the runtime has a routine for it.
+///
+/// One float type is in such an instruction, the result of a conversion going up and the operand of
+/// one coming down, so both ends are looked at and the one is found. `None` means the function is
+/// left alone, and it covers a format with no routine, no float at all, and a float on both ends,
+/// which are three shapes that have nothing to be turned into rather than one.
+fn converted(func: &Func, inst: Inst) -> Option<Float> {
+    let data = func[inst];
+    let mut floats = func[data.args]
+        .iter()
+        .copied()
+        .chain(data.results())
+        .map(|value| func[value].ty)
+        .filter(|ty| ty.is_float());
+    let only = floats.next()?;
+    if floats.next().is_some() {
+        return None;
+    }
+    match only.format() {
+        Some(format @ (Float::F32 | Float::F64)) => Some(format),
+        _ => None,
+    }
 }
 
 /// Everything an instruction reads: its own operands, and the arguments it passes along its edges.
@@ -358,6 +398,12 @@ fn rewrite(
         }
         Opcode::And | Opcode::Or | Opcode::Xor if produces => {
             bitwise(func, halves, inst, data.opcode);
+        }
+        Opcode::SIToFP | Opcode::UIToFP if takes => {
+            to_float(func, names, halves, forward, inst, data.opcode == Opcode::SIToFP);
+        }
+        Opcode::FPToSI | Opcode::FPToUI if produces => {
+            from_float(func, names, halves, inst, data.opcode == Opcode::FPToSI);
         }
         Opcode::ICmp if takes => compare(func, halves, forward, inst),
         Opcode::Select if produces => choose(func, halves, inst),
@@ -505,19 +551,113 @@ fn divide(func: &mut Func, names: &mut Interner, halves: &mut Halves, inst: Inst
         Opcode::URem => "__umodti3",
         _ => "__modti3",
     };
-    let signature = func
-        .add_signature(Signature::new().with_params(&[half(); 4]).with_returns(&[half(), half()]));
-    let callee = Some(names.intern(routine));
-    let varargs = func.push_abis(&[]);
-    let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
-    let args = func.push_values(&[a_low, a_high, b_low, b_high]);
-    let span = func.span(inst);
-    let data = InstData { args, extra, ..InstData::new(Opcode::Call) };
-    let made = func.create_inst(data, &[half(), half()], span);
-    func.insert_before(made, inst);
+    let made =
+        runtime(func, names, inst, routine, &[a_low, a_high, b_low, b_high], &[half(), half()]);
     let mut results = func[made].results();
     let (Some(low), Some(high)) = (results.next(), results.next()) else { return };
     replace(func, halves, inst, low, high);
+}
+
+/// A conversion from one of these to a float, as a call to the routine that works it out.
+///
+/// Two parameters of sixty four bits and one float result. The answer is not a wide value, so the
+/// instruction's own result is pointed at the call's rather than halved, which is what [`compare`]
+/// and [`truncate`] do with a narrow answer as well.
+///
+/// The sign is in the name because it is in the answer: the same hundred and twenty eight bits are
+/// two different numbers depending on it, and unlike a sum the float they become is two different
+/// floats.
+fn to_float(
+    func: &mut Func,
+    names: &mut Interner,
+    halves: &Halves,
+    forward: &mut HashMap<Value, Value>,
+    inst: Inst,
+    signed: bool,
+) {
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let Some(&(low, high)) = halves.get(&arg) else { return };
+    let (Some(result), Some(format)) = (func[inst].first_result, converted(func, inst)) else {
+        return;
+    };
+    let routine = going_up(signed, format);
+    let made = runtime(func, names, inst, routine, &[low, high], &[func[result].ty]);
+    if let Some(answer) = func[made].first_result {
+        forward.insert(result, answer);
+    }
+    func.remove_inst(inst);
+}
+
+/// A conversion from a float to one of these, as a call to the routine that works it out.
+///
+/// One float parameter and two results of sixty four bits, which is the divide's shape with the
+/// operands and the answer the other way round. The operand is a float and so was never split, and
+/// it is passed along as it is.
+///
+/// A value the integer cannot hold, an infinity and a not a number are all undefined in C, and
+/// nothing is written in front of the call about any of them, for the reason [`divide`] writes
+/// nothing in front of itself about a zero divisor.
+fn from_float(
+    func: &mut Func,
+    names: &mut Interner,
+    halves: &mut Halves,
+    inst: Inst,
+    signed: bool,
+) {
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let Some(format) = converted(func, inst) else { return };
+    let routine = coming_down(signed, format);
+    let made = runtime(func, names, inst, routine, &[arg], &[half(), half()]);
+    let mut results = func[made].results();
+    let (Some(low), Some(high)) = (results.next(), results.next()) else { return };
+    replace(func, halves, inst, low, high);
+}
+
+/// The routine that turns an integer this wide into a float of that format.
+fn going_up(signed: bool, format: Float) -> &'static str {
+    match (signed, format) {
+        (true, Float::F64) => "__floattidf",
+        (true, _) => "__floattisf",
+        (false, Float::F64) => "__floatuntidf",
+        (false, _) => "__floatuntisf",
+    }
+}
+
+/// The routine that turns a float of that format into an integer this wide.
+fn coming_down(signed: bool, format: Float) -> &'static str {
+    match (signed, format) {
+        (true, Float::F64) => "__fixdfti",
+        (true, _) => "__fixsfti",
+        (false, Float::F64) => "__fixunsdfti",
+        (false, _) => "__fixunssfti",
+    }
+}
+
+/// A call to a routine in the compiler runtime, written in front of an instruction.
+///
+/// The signature is made out of the types of the values being handed over, because the values are
+/// already the halves at this point and the routine's own definition went through
+/// [`split_signature`] on the way in, so the two descriptions are the same one arrived at from the
+/// two ends.
+fn runtime(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    routine: &str,
+    args: &[Value],
+    results: &[Type],
+) -> Inst {
+    let params: Vec<Type> = args.iter().map(|&value| func[value].ty).collect();
+    let signature = func.add_signature(Signature::new().with_params(&params).with_returns(results));
+    let callee = Some(names.intern(routine));
+    let varargs = func.push_abis(&[]);
+    let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
+    let args = func.push_values(args);
+    let span = func.span(inst);
+    let data = InstData { args, extra, ..InstData::new(Opcode::Call) };
+    let made = func.create_inst(data, results, span);
+    func.insert_before(made, inst);
+    made
 }
 
 /// A shift, as each half shifted by the count with the bits that crossed between them put back, and
@@ -907,7 +1047,7 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, MemOrder, Module, Restrict, Signature, Type, Value,
+        Block, Builder, Flags, Float, Func, MemOrder, Module, Restrict, Signature, Type, Value,
     };
     use rucc_target::x86_64::SYSV;
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
@@ -1201,6 +1341,102 @@ mod tests {
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert_eq!(text.matches(" = add ").count(), 3, "the sum is still a sum: {text}");
         assert_eq!(text.matches("call @__divti3").count(), 1, "one call: {text}");
+    }
+
+    /// Each conversion between this width and a float becomes a call to the routine of that name.
+    ///
+    /// Eight of them, which is a signed and an unsigned integer against a `float` and a `double` in
+    /// each direction, and the table is here rather than in a comment because the names are the
+    /// whole of what this has to get right.
+    #[test]
+    fn each_conversion_between_this_width_and_a_float_calls_the_routine_of_that_name() {
+        let double = Type::float(Float::F64);
+        let single = Type::float(Float::F32);
+        for (opcode, float, routine) in [
+            (Opcode::SIToFP, double, "__floattidf"),
+            (Opcode::SIToFP, single, "__floattisf"),
+            (Opcode::UIToFP, double, "__floatuntidf"),
+            (Opcode::UIToFP, single, "__floatuntisf"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[wide()], &[float]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], float);
+            build.ret(&[answer]);
+
+            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+            assert!(text.contains(&format!("call @{routine}")), "{routine} is called: {text}");
+        }
+        for (opcode, float, routine) in [
+            (Opcode::FPToSI, double, "__fixdfti"),
+            (Opcode::FPToSI, single, "__fixsfti"),
+            (Opcode::FPToUI, double, "__fixunsdfti"),
+            (Opcode::FPToUI, single, "__fixunssfti"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[float], &[wide()]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], wide());
+            build.ret(&[answer]);
+
+            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+            assert!(text.contains(&format!("call @{routine}")), "{routine} is called: {text}");
+        }
+    }
+
+    /// A conversion up hands over two halves and takes one float back, and one coming down is the
+    /// same call the other way round.
+    ///
+    /// The answer going up is not a wide value, so it is one result and the readers of the
+    /// conversion read it, the way they read the answer of a comparison.
+    #[test]
+    fn a_conversion_hands_over_halves_one_way_and_takes_them_back_the_other() {
+        let double = Type::float(Float::F64);
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide()], &[double]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::SIToFP, params[0], double);
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__floattidf(%0, %1)"), "two halves go over: {text}");
+        assert!(text.contains("return %2"), "and one float comes back: {text}");
+
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[double], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::FPToSI, params[0], wide());
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__fixdfti(%0)"), "the float goes over as it is: {text}");
+        assert!(text.contains("return %1, %2"), "and two halves come back: {text}");
+    }
+
+    /// A conversion at a float width the runtime has no routine for leaves the function alone.
+    ///
+    /// `long double` is the eighty bit float on this target and the runtime has no conversion for
+    /// it, because the back end has no register that holds one, which is tamnd/rucc#326. So the
+    /// function keeps its wide values and is refused below by name, rather than being turned into a
+    /// call to a routine nothing defines.
+    #[test]
+    fn a_conversion_at_a_width_the_runtime_has_no_routine_for_is_left_alone() {
+        let long = Type::float(Float::F80);
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide()], &[long]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::SIToFP, params[0], long);
+        build.ret(&[answer]);
+
+        assert!(!halves(&mut func, &mut names, &SYSV), "the pass does not understand this one");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("i128"), "the width is still there: {text}");
     }
 
     /// A shift left moves each half and chooses between the count having crossed a half and not.

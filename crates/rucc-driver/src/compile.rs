@@ -1932,16 +1932,18 @@ decl #0 x : int object external static defined
     /// type is what makes the message say anything at all in the cases that happen. The span is
     /// the instruction's own, so the message lands on the line rather than on the file.
     ///
-    /// The conversion to a floating point value is what keeps the program refused. Everything else
-    /// here is split into halves by `rucc_codegen::wide`, including the divisions, which became a
-    /// call into the compiler runtime. The conversions between this width and a float are the last
-    /// thing that pass does not understand, so a function holding one is left with its wide values
-    /// and reaches the selector the way every function of this width used to.
+    /// The width of the float is what keeps the program refused. Everything else here is split into
+    /// halves by `rucc_codegen::wide`, including the divisions and the conversions to a `float` and
+    /// a `double`, which became calls into the compiler runtime. A `long double` is the eighty bit
+    /// float on this target, the runtime has no conversion at that width because the back end has no
+    /// register that holds one, which is tamnd/rucc#326, so a function converting to it is left with
+    /// its wide values and reaches the selector the way every function of this width used to.
     #[test]
     fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "double f(int a) {\n  __int128 wide = a;\n  return (double) wide;\n}\n";
+        let source =
+            "long double f(int a) {\n  __int128 wide = a;\n  return (long double) wide;\n}\n";
         let result = run(&opts, source);
         assert!(result.failed());
         assert!(
@@ -1957,7 +1959,7 @@ decl #0 x : int object external static defined
     fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "double f(int a) { __int128 wide = a; return (double) wide; }\n";
+        let source = "long double f(int a) { __int128 wide = a; return (long double) wide; }\n";
         let result = run(&opts, source);
         assert!(result.failed());
         let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");

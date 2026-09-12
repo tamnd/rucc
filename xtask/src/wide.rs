@@ -5,8 +5,8 @@
 //!
 //! `crates/rucc-codegen/src/wide.rs` is the pass that makes this width work: every value becomes the
 //! two registers the convention holds it in and every operation over one becomes operations over the
-//! halves, except the four divisions, which become a call to the routines `runtime/builtins/div.c`
-//! defines. What checked that until now was the pass's own tests, which build a function, run the
+//! halves, except the four divisions and the conversions to and from a float, which become a call to
+//! the routines `runtime/builtins/div.c` and `runtime/builtins/convert.c` define. What checked that until now was the pass's own tests, which build a function, run the
 //! pass and read the IR back. That is the same kind of evidence as a stub writer reading its own
 //! bytes back: it catches a pass that did something other than what it meant to and not a pass that
 //! meant the wrong thing. Nothing ran the code.
@@ -51,15 +51,29 @@ const LEVELS: [&str; 3] = ["0", "1", "2"];
 /// What the system compiler's run is called in the output.
 const REFERENCE: &str = "reference";
 
-/// The four routines a division at this width becomes a call to.
-const ROUTINES: [&str; 4] = ["__udivti3", "__umodti3", "__divti3", "__modti3"];
+/// The routines an operation at this width becomes a call to, which are the four divisions and the
+/// eight conversions against a `float` and a `double`.
+const ROUTINES: [&str; 12] = [
+    "__udivti3",
+    "__umodti3",
+    "__divti3",
+    "__modti3",
+    "__floattidf",
+    "__floattisf",
+    "__floatuntidf",
+    "__floatuntisf",
+    "__fixdfti",
+    "__fixsfti",
+    "__fixunsdfti",
+    "__fixunssfti",
+];
 
 /// Builds the fixture every way, runs all four programs, and compares what they printed.
 ///
 /// # Errors
 ///
 /// [`Error::Io`] when the compiler or the archive will not build or the script will not run, and
-/// [`Error::Failed`] when a build of the fixture does not call the division routines, when a program
+/// [`Error::Failed`] when a build of the fixture does not call the runtime routines, when a program
 /// did not reach the end, or when any group of cases came out differently from the system
 /// compiler's.
 pub(crate) fn wide() -> Result<()> {
@@ -70,7 +84,7 @@ pub(crate) fn wide() -> Result<()> {
 }
 
 /// Lays out the directory the runner is pointed at: the fixture, one object per level, the archive
-/// the divisions are resolved from, and the script.
+/// the calls are resolved from, and the script.
 fn build() -> Result<PathBuf> {
     let work = root().join("target").join(TASK);
     if work.exists() {
@@ -130,11 +144,11 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
 
 /// What the runner runs.
 ///
-/// The archive goes on the link line ahead of everything the driver adds, so a division resolves to
-/// the routine rucc compiled out of `runtime/builtins` rather than to libgcc's, which gcc puts at the
-/// end of every link line it builds. Which one answered is also read back: the object's undefined
-/// symbols say whether the divisions in the fixture became calls at all, and a build where they did
-/// not is a check that would pass for the wrong reason.
+/// The archive goes on the link line ahead of everything the driver adds, so a division or a
+/// conversion resolves to the routine rucc compiled out of `runtime/builtins` rather than to
+/// libgcc's, which gcc puts at the end of every link line it builds. Which one answered is also read
+/// back: the object's undefined symbols say whether the operations in the fixture became calls at
+/// all, and a build where they did not is a check that would pass for the wrong reason.
 ///
 /// The reference is built at `-O1`. What level it is does not matter to the answers, since the
 /// answers are C's, and a level nobody optimizes is a program whose loops are not the loops a program
@@ -147,7 +161,8 @@ gcc -O1 -o \"$out/reference\" arithmetic.c || exit 1
 for level in 0 1 2; do
     gcc -o \"$out/ours-O$level\" \"ours-O$level.o\" librucc_builtins.a || exit 1
     nm -u \"ours-O$level.o\" | awk -v side=\"ours-O$level\" \\
-        '/__(u?div|u?mod)ti3$/ { print side \" calls \" $NF }'
+        '/__(u?div|u?mod)ti3$/ || /__float(un)?ti[sd]f$/ || /__fix(uns)?[sd]fti$/ \\
+            { print side \" calls \" $NF }'
 done
 \"$out/reference\" | sed 's/^/reference /'
 for level in 0 1 2; do
@@ -191,8 +206,9 @@ fn compare(printed: &str, runner: &str) -> Result<()> {
         for routine in ROUTINES {
             if !ours.calls.iter().any(|called| called == routine) {
                 problems.push(format!(
-                    "the object behind {name} does not call {routine}, and the fixture divides \
-                     every one of the four ways, so a divide became something other than that call"
+                    "the object behind {name} does not call {routine}, and the fixture reaches \
+                     every one of these routines, so an operation became something other than \
+                     that call"
                 ));
             }
         }
@@ -277,7 +293,7 @@ fn read(printed: &str) -> BTreeMap<String, Side> {
 mod tests {
     use super::*;
 
-    /// What a run where everything agreed looks like, with the four calls each object makes.
+    /// What a run where everything agreed looks like, with every call each object makes.
     fn agreed() -> String {
         let mut printed = String::new();
         printed.push_str("reference udiv 0 1111111111\n");
@@ -323,7 +339,7 @@ mod tests {
         assert!(problems[0].contains("1111111111"), "{}", problems[0]);
     }
 
-    /// A build whose divisions did not become calls is a pass for the wrong reason.
+    /// A build whose operations did not become calls is a pass for the wrong reason.
     ///
     /// Every digest would still agree, because the fixture's answers are C's answers and an
     /// optimizer that worked one out some other way would work out the same number. What the check
