@@ -466,7 +466,7 @@ mod tests {
     use rucc_types::{IntKind, Types};
 
     use super::*;
-    use crate::decl::{DeclKind, Definition, Emission, Linkage, StorageDuration};
+    use crate::decl::{DeclKind, Definition, Emission, Linkage, Startup, StorageDuration};
     use crate::expr::{Category, Conversion, ExprKind};
 
     /// The sizes are asserted rather than left to whoever adds the next variant.
@@ -566,6 +566,7 @@ mod tests {
                 gnu_inline: false,
                 noreturn: false,
                 visibility: None,
+                startup: Startup::default(),
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

@@ -49,7 +49,7 @@ use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, TypeKind,
 
 use crate::check::Checker;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, StorageDuration,
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, Startup, StorageDuration,
 };
 use crate::expr::{ExprId, ExprKind};
 use crate::scope::Binding;
@@ -153,6 +153,7 @@ impl Checker<'_> {
                 gnu_inline: false,
                 noreturn: false,
                 visibility: None,
+                startup: Startup::default(),
                 init: None,
                 params: DeclList::EMPTY,
                 body: None,

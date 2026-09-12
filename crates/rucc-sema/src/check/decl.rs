@@ -43,8 +43,8 @@ use crate::asm::FileAsm;
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitList, Linkage, StorageDuration,
-    Visibility,
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitList, Linkage, Startup,
+    StorageDuration, Visibility,
 };
 use crate::scope::Binding;
 use crate::tast::StrId;
@@ -84,6 +84,9 @@ struct Declared {
     gnu_inline: bool,
     /// Whether this declaration said control does not come back from a call to it.
     noreturn: bool,
+    /// Where this declaration asked for the function to go in the run-up to `main` and the
+    /// run-down after it.
+    startup: Startup,
     /// How far this declaration said the name reaches outside a shared library.
     visibility: Option<Visibility>,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
@@ -295,6 +298,9 @@ impl Checker<'_> {
             // no declarator to write an attribute after, so a definition that says anything says
             // it there.
             visibility: self.seen(specs.attrs),
+            // And the specifiers only here as well, which is where a definition carrying one of
+            // the two attributes has put it.
+            startup: self.startup(specs.attrs, DeclKind::Function),
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -589,6 +595,10 @@ impl Checker<'_> {
                 || self.never_returns(item.attrs),
             // Both places, for the reason `retained` above reads both.
             visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
+            // Both places as well, and the kind goes with them because only a function can be in
+            // either order and the warning for anything else is given where the attribute was
+            // written rather than later.
+            startup: self.startup(specs.attrs, kind).or(self.startup(item.attrs, kind)),
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
@@ -1075,6 +1085,11 @@ impl Checker<'_> {
             // same grounds it warns about a late `noreturn`: the references above it were
             // already compiled against the answer the first one gave.
             visibility: node.visibility.or(declared.visibility),
+            // The first one written stands, for the reason the visibility above does: the usual
+            // place to write either attribute is a header and the definition below writes nothing,
+            // so a later declaration saying nothing must not take the order away, and a later one
+            // asking for a different number is asking to be moved after the entry has been made.
+            startup: node.startup.or(declared.startup),
             ..node
         };
         self.tast.set_decl(previous, merged);
@@ -1286,6 +1301,7 @@ impl Checker<'_> {
             gnu_inline: declared.gnu_inline,
             noreturn: declared.noreturn,
             visibility: declared.visibility,
+            startup: declared.startup,
             init: None,
             params: DeclList::EMPTY,
             body: None,
@@ -1766,6 +1782,24 @@ mod tests {
                 syntax: rucc_ast::AttrSyntax::Gnu,
                 span: Span::DUMMY,
             }])
+        }
+
+        /// The same with one number in each one's parentheses, which is how a priority is written.
+        fn attributes_taking(&mut self, written: &[(&str, u128)]) -> AttrList {
+            let mut attrs = Vec::with_capacity(written.len());
+            for (spelling, argument) in written {
+                let name = self.name(spelling);
+                let expr = self.int(*argument);
+                let args = self.ast.add_attr_args(&[rucc_ast::AttrArg::Expr(expr)]);
+                attrs.push(rucc_ast::Attribute {
+                    namespace: None,
+                    name,
+                    args,
+                    syntax: rucc_ast::AttrSyntax::Gnu,
+                    span: Span::DUMMY,
+                });
+            }
+            self.ast.add_attr_list(&attrs)
         }
 
         fn checker(&self) -> Checker<'_> {
@@ -2322,6 +2356,86 @@ mod tests {
             "decl #0 die : int(void) function external defined noreturn\n  body\n    block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_definition_keeps_what_the_declaration_above_it_said_about_running_before_main() {
+        let mut f = Fixture::new();
+        let mut declaring = f.int_specs();
+        declaring.attrs = f.attribute("__constructor__");
+        let first = f.var(declaring, "setup", &[function()], None);
+        let body = f.block(&[]);
+        let second = f.define(f.int_specs(), "setup", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The same shape as `noreturn` above and for the same reason: a header is where either of
+        // them is written and a header has no body under it. The armoured spelling is what a
+        // header writes.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 setup : int(void) function external defined constructor\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn both_orders_may_be_asked_for_on_one_function_and_each_keeps_its_own_number() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.attrs = f.attributes_taking(&[("constructor", 101), ("destructor", 102)]);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "both", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        // A function may be in both lists. It is the same function either way and the two numbers
+        // have nothing to do with each other, which is why they are two fields and not one.
+        assert!(dump(&c, id).contains("constructor(101) destructor(102)"), "{}", dump(&c, id));
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_priority_wider_than_the_field_is_refused() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.attrs = f.attributes_taking(&[("constructor", 70_000)]);
+        let body = f.block(&[]);
+        let decl = f.define(specs, "late", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        // The number is the whole of what orders the entries and there is nothing to round it to,
+        // so it is an error. gcc words it this way and so does this.
+        let said = messages(&c);
+        assert!(said.iter().any(|m| m.contains("0 to 65535")), "got {said:?}");
+        assert!(!dump(&c, id).contains("constructor"), "{}", dump(&c, id));
+    }
+
+    #[test]
+    fn the_attribute_on_something_that_is_not_a_function_is_dropped_with_a_word_about_it() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.attrs = f.attribute("constructor");
+        let decl = f.var(specs, "x", &[], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        // An object cannot be called, so there is nothing the attribute could ask for. gcc warns
+        // and keeps the declaration, which is what a program that wrote the attribute on the wrong
+        // line of a macro gets.
+        let said = messages(&c);
+        assert!(said.iter().any(|m| m.contains("attribute ignored")), "got {said:?}");
+        assert!(!dump(&c, id).contains("constructor"), "{}", dump(&c, id));
     }
 
     #[test]

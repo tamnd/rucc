@@ -50,7 +50,7 @@ use rucc_base::Interner;
 use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
-use crate::decl::{DeclId, DeclKind, Definition, Linkage, StorageDuration, Visibility};
+use crate::decl::{DeclId, DeclKind, Definition, Linkage, Priority, StorageDuration, Visibility};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
@@ -146,6 +146,14 @@ impl<'a> Printer<'a> {
         }
         if node.noreturn {
             head.push_str(" noreturn");
+        }
+        // Each on its own, because a function may be in both orders, and a bare one carries no
+        // number because it is not at any number: it runs after every numbered one.
+        if let Some(priority) = node.startup.before {
+            head.push_str(&ordered("constructor", priority));
+        }
+        if let Some(priority) = node.startup.after {
+            head.push_str(&ordered("destructor", priority));
         }
         // Only where a declaration said something, because the other way a name gets one is the
         // command line and this dump is of a tree rather than of a compilation.
@@ -587,6 +595,18 @@ impl<'a> Printer<'a> {
     }
 }
 
+/// How one of the two orders a function can be in is written on its line.
+///
+/// The number is in brackets where there is one, the way the attribute was written, and an
+/// unnumbered one carries nothing rather than the number it would have if it were numbered: those
+/// two are different places in the order and the dump has to be able to tell them apart.
+fn ordered(which: &str, priority: Priority) -> String {
+    match priority {
+        Priority::Unnumbered => format!(" {which}"),
+        Priority::Numbered(number) => format!(" {which}({number})"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_ast::{BinaryOp, UnaryOp};
@@ -594,7 +614,7 @@ mod tests {
     use rucc_types::{ArrayLen, IntKind};
 
     use super::*;
-    use crate::decl::{Decl, DeclList, Emission, InitEntry};
+    use crate::decl::{Decl, DeclList, Emission, InitEntry, Startup};
     use crate::expr::{Conversion, Expr};
     use crate::stmt::Case;
     use crate::tast::Label;
@@ -836,6 +856,7 @@ decl #0 : int[2] object automatic defined
             gnu_inline: false,
             noreturn: false,
             visibility: None,
+            startup: Startup::default(),
             init: None,
             params: DeclList::EMPTY,
             body: None,

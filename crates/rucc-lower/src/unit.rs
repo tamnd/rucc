@@ -37,9 +37,9 @@ use rucc_ir::{
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
-    InitList, Linkage, StorageDuration, StrId, Tast, Visibility,
+    InitList, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
 };
-use rucc_target::TargetInfo;
+use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible};
 
 use crate::abi::{self, Plan};
@@ -187,6 +187,39 @@ impl fmt::Debug for Context<'_> {
     }
 }
 
+/// One function that runs without anything calling it, waiting for the section it goes in.
+///
+/// Held back rather than written where the definition is met, because the order they go in is not
+/// always the order the file defined them: a format with one section for all of them is a format
+/// where the only record of the priority is the position in that section, so they have to be
+/// sorted, and sorting means having all of them.
+#[derive(Debug, Clone, Copy)]
+struct Start {
+    /// The function the entry is the address of.
+    func: Symbol,
+    /// Whether it runs in the run-up to `main` rather than in the run-down after it.
+    before: bool,
+    /// Where in the order the attribute asked for it to go.
+    priority: Priority,
+    /// The definition it came from, for the diagnostic a format with no way to say it needs.
+    span: Span,
+}
+
+impl Start {
+    /// Where this goes among the others, which is the order the entries are written in.
+    ///
+    /// A lower number first, and the unnumbered ones after every numbered one, which is the order
+    /// an ELF linker puts the sections in and therefore the order every format has to come out in
+    /// for the three of them to agree. The sort is stable, so two at the same priority stay in the
+    /// order the file defined them, which is all that decides between them.
+    fn order(&self) -> (u8, u16) {
+        match self.priority {
+            Priority::Numbered(number) => (0, number),
+            Priority::Unnumbered => (1, 0),
+        }
+    }
+}
+
 /// What the walk produced.
 #[derive(Debug)]
 pub struct Lowered {
@@ -237,6 +270,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         done: HashSet::new(),
         aliases: Vec::new(),
         aliased: HashSet::new(),
+        starts: Vec::new(),
         reachable: reach::reachable(tast),
     };
     unit.run();
@@ -291,6 +325,13 @@ pub(crate) struct Unit<'a> {
     /// reason to emit one that no reference in the file says: the string an alias names is not a
     /// use of anything as far as the walk over the tree is concerned.
     aliased: HashSet<Symbol>,
+    /// The functions the file asked to have run without anything calling them, in the order it
+    /// defined them.
+    ///
+    /// Held back rather than emitted where they are met, because the entries go in the order the
+    /// priorities put them and a function written at the top of the file may have asked to run
+    /// last. Only the whole file settles that order.
+    starts: Vec<Start>,
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: HashSet<DeclId>,
@@ -348,6 +389,7 @@ impl Unit<'_> {
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
+        self.startups();
     }
 
     /// The `asm` written at file scope, read into the globals they define.
@@ -500,6 +542,7 @@ impl Unit<'_> {
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let noreturn = node.noreturn;
+        let startup = node.startup;
         let span = tast.decl_span(decl);
         if node.name.is_none() {
             return;
@@ -538,6 +581,17 @@ impl Unit<'_> {
         // of a name the library already defines.
         if body.is_some() && node.inline.emits() {
             body::lower(self, decl, &mut func, &plan);
+            // Only for a definition, because an entry is an address and a declaration of something
+            // another file defines has none to put there. gcc reads the attribute off whichever
+            // declaration carried it and then waits for the definition in the same way, which is
+            // why writing `__attribute__((constructor)) void f(void);` in a header costs every
+            // file that includes it nothing.
+            if let Some(priority) = startup.before {
+                self.starts.push(Start { func: name, before: true, priority, span });
+            }
+            if let Some(priority) = startup.after {
+                self.starts.push(Start { func: name, before: false, priority, span });
+            }
         }
         self.place_func(func);
     }
@@ -621,6 +675,95 @@ impl Unit<'_> {
         // while the thing it points at stays exported, which is how glibc writes half of them.
         alias.visibility = self.seen(decl);
         self.module.add_alias(alias);
+    }
+
+    /// The list of functions to run around `main`, written out as the entries that run them.
+    ///
+    /// In priority order rather than in the order the file defined them, because two of the three
+    /// formats get their order from the order the entries are in and only ELF sorts anything at
+    /// link time.
+    fn startups(&mut self) {
+        let mut starts = std::mem::take(&mut self.starts);
+        starts.sort_by_key(Start::order);
+        for start in starts {
+            self.start_entry(&start);
+        }
+    }
+
+    /// One entry, which is a pointer wide object in the section the format runs.
+    ///
+    /// A relocation against the function rather than a value, since the address is not known until
+    /// the link. The object has internal linkage and a name nothing refers to: the only thing that
+    /// reads it is the CRT walking the section, which finds it by where it is and not by what it is
+    /// called. gcc emits no symbol at all for one, and a name with a dot in it is the nearest thing
+    /// to that here, being one no C program can write and therefore one no program collides with.
+    fn start_entry(&mut self, start: &Start) {
+        let Some(section) = self.start_section(start) else {
+            self.no_start(start);
+            return;
+        };
+        let size = u64::from(self.target.pointer_width / 8);
+        let align = u32::try_from(size).unwrap_or(1);
+        let called = self.names.resolve(start.func).to_owned();
+        let which = if start.before { "ctor" } else { "dtor" };
+        let name = self.names.intern(&format!("__rucc_{which}.{called}"));
+        let section = self.names.intern(&section);
+        let mut global = Global::new(name, size, align);
+        global.linkage = IrLinkage::Internal;
+        global.section = Some(section);
+        let size = u32::try_from(size).unwrap_or(0);
+        let reloc = self.module.add_reloc(Reloc { symbol: start.func, addend: 0, size });
+        global.init = Some(self.module.push_data(&[Datum::Addr(reloc)]));
+        self.place_global(global);
+    }
+
+    /// The section an entry goes in, and [`None`] for a format with no way to ask for one.
+    ///
+    /// ELF has both halves and the linker sorts the numbered sections ahead of the plain one, so
+    /// the number goes in the name and the order comes out right however the files were linked.
+    ///
+    /// COFF has the run-up only. The name is sorted by what follows the `$` and the CRT walks
+    /// everything between the `.CRT$XCA` and `.CRT$XCZ` markers, so a numbered entry goes just
+    /// after the first marker and an unnumbered one at `U`, which keeps the numbered ones first.
+    ///
+    /// Mach-O has the run-up only as well, and it has no sorting at all: the entries run in the
+    /// order the section holds them, which is the order [`Self::startups`] put them in.
+    fn start_section(&self, start: &Start) -> Option<String> {
+        match self.target.object_format {
+            ObjectFormat::Elf => {
+                let base = if start.before { ".init_array" } else { ".fini_array" };
+                Some(match start.priority {
+                    Priority::Numbered(number) => format!("{base}.{number:05}"),
+                    Priority::Unnumbered => base.to_owned(),
+                })
+            }
+            ObjectFormat::Coff if start.before => Some(match start.priority {
+                Priority::Numbered(number) => format!(".CRT$XCA{number:05}"),
+                Priority::Unnumbered => ".CRT$XCU".to_owned(),
+            }),
+            ObjectFormat::MachO if start.before => {
+                Some("__DATA,__mod_init_func,mod_init_funcs".to_owned())
+            }
+            ObjectFormat::Coff | ObjectFormat::MachO | ObjectFormat::Wasm => None,
+        }
+    }
+
+    /// Reports an attribute this format has nowhere to put.
+    ///
+    /// Refused rather than dropped, because the whole point of the attribute is that something
+    /// else calls the function and a program that quietly does not get its call has no way of
+    /// noticing until whatever the function set up is missing.
+    ///
+    /// The run-down is what is missing on the two formats that have a run-up. Mach-O used to have
+    /// a terminator list and dyld stopped running it, so clang registers the call with
+    /// `__cxa_atexit` from a constructor it writes for the purpose, and nothing in the CRT a COFF
+    /// target links against has been confirmed to walk one either. Doing the same here is a
+    /// feature rather than a section name, which is why this is a message and not a branch above.
+    fn no_start(&mut self, start: &Start) {
+        let which = if start.before { "constructor" } else { "destructor" };
+        let format = self.target.object_format.as_str();
+        let what = format!("the '{which}' attribute on a {format} target");
+        self.unsupported(&what, start.span);
     }
 
     /// How far a name reaches outside a shared library, which is what a declaration of it said

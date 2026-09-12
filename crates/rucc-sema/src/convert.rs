@@ -340,7 +340,9 @@ mod tests {
     use rucc_types::{ArrayLen, FunctionType, IntKind, Qualifiers};
 
     use super::*;
-    use crate::decl::{Decl, DeclKind, DeclList, Definition, Emission, Linkage, StorageDuration};
+    use crate::decl::{
+        Decl, DeclKind, DeclList, Definition, Emission, Linkage, Startup, StorageDuration,
+    };
     use crate::print::Printer;
 
     struct Fixture {
@@ -386,6 +388,7 @@ mod tests {
                     gnu_inline: false,
                     noreturn: false,
                     visibility: None,
+                    startup: Startup::default(),
                     init: None,
                     params: DeclList::EMPTY,
                     body: None,

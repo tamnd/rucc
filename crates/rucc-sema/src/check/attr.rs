@@ -48,7 +48,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
-use crate::decl::Visibility;
+use crate::decl::{DeclKind, Priority, Startup, Visibility};
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::tast::StrId;
@@ -79,6 +79,14 @@ const BIGGEST_ALIGNMENT: u32 = 16;
 /// the run-down after it, which is code no translation unit writes. `alias` gives a second name
 /// to a definition, and the name is in a string that nothing resolves as a use.
 const RETAINING: [&str; 5] = ["used", "retain", "constructor", "destructor", "alias"];
+
+/// The highest priority the implementation's own start-up code claims, which GCC calls
+/// `MAX_RESERVED_INIT_PRIORITY`.
+///
+/// A program may still ask for one of these and gcc warns about it, which is what happens here: the
+/// numbers are not reserved by anything that could enforce it, and a program that knows it has to
+/// run before a library's own constructor is entitled to say so.
+const RESERVED_PRIORITY: u16 = 100;
 
 /// The real floating types a machine mode can name, in the order a mode picks between them.
 ///
@@ -192,9 +200,11 @@ impl Checker<'_> {
 
     /// Whether an attribute list asks for the declaration to be kept where nothing refers to it.
     ///
-    /// The armour and the namespace are read the same way [`Self::packing`] reads them. None of these five is implemented as anything else yet, and this is not that
-    /// work: what it settles is only whether the definition exists, which is the one part of each
-    /// of them that a program notices when the definition is dropped instead.
+    /// The armour and the namespace are read the same way [`Self::packing`] reads them. What this
+    /// settles is only whether the definition exists, which is the one part of each of the five
+    /// that a program notices when the definition is dropped instead. What else three of them ask
+    /// for is read elsewhere: `alias` by [`Self::aliased`] and the other two by
+    /// [`Self::startup`]. `used` and `retain` ask for nothing else.
     pub(in crate::check) fn retains(&mut self, attrs: AttrList) -> bool {
         let written = self.ast[attrs].to_vec();
         for attr in written {
@@ -206,6 +216,97 @@ impl Checker<'_> {
             }
         }
         false
+    }
+
+    /// Whether an attribute list says the function runs without anything calling it.
+    ///
+    /// `constructor` puts it in the run-up to `main` and `destructor` in the run-down after `main`
+    /// returns, and a function may carry both, so the two are read into a field each rather than
+    /// into one answer. The armour and the namespace are read the way [`Self::packing`] reads
+    /// them, and two of the same one on a declaration is the first of them, which is what a list
+    /// is read as everywhere else here.
+    ///
+    /// Only a function can be in either order, and an attribute on anything else is dropped with
+    /// the warning gcc gives it. Dropping it silently is what this compiler did until the
+    /// attribute was implemented and is the thing that made it hard to find: nothing runs and
+    /// nothing is said, and the symptom lands a long way from the declaration.
+    pub(in crate::check) fn startup(&mut self, attrs: AttrList, kind: DeclKind) -> Startup {
+        let written = self.ast[attrs].to_vec();
+        let mut startup = Startup::default();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            // Copied out because reading the priority folds an expression, which borrows the
+            // checker that the name was read through.
+            let name = rucc_gnu::unarmour(self.text(attr.name)).to_owned();
+            let before = match name.as_str() {
+                "constructor" => true,
+                "destructor" => false,
+                _ => continue,
+            };
+            if kind != DeclKind::Function {
+                let what = format!("'{name}' attribute ignored");
+                let note = "only a function can be called before `main` or after it returns";
+                let dropped = Diagnostic::warning(what, attr.span).with_code("E0703");
+                self.report(dropped.note(note, attr.span));
+                continue;
+            }
+            let Some(priority) = self.priority(attr, &name) else { continue };
+            let place = if before { &mut startup.before } else { &mut startup.after };
+            if place.is_none() {
+                *place = Some(priority);
+            }
+        }
+        startup
+    }
+
+    /// Where in the order one `constructor` or `destructor` asked to go.
+    ///
+    /// The number is GCC's and so are the two things said about it. Anything outside nought to
+    /// sixty five thousand five hundred and thirty five is refused, because the number is the
+    /// whole of what orders the entries and there is nothing to round it to. A number of a hundred
+    /// or less is warned about and then honoured, since those are the ones the implementation's own
+    /// start-up code claims and a program that takes one is asking to run before something it did
+    /// not write.
+    fn priority(&mut self, attr: rucc_ast::Attribute, name: &str) -> Option<Priority> {
+        let args = self.ast[attr.args].to_vec();
+        let range = format!("{name} priorities must be integers from 0 to 65535 inclusive");
+        let asked = match args.first() {
+            // Written bare, which is not the same as any number: it runs after every numbered one.
+            None => return Some(Priority::Unnumbered),
+            Some(AttrArg::Expr(expr)) => {
+                let value = self.expr(*expr);
+                match self.eval_integer(value) {
+                    Ok(value) => value,
+                    Err(failed) => {
+                        if !failed.poisoned {
+                            let at = self.tast.expr_span(failed.at);
+                            self.report(Diagnostic::error(range, at).with_code("E0703"));
+                        }
+                        return None;
+                    }
+                }
+            }
+            // `constructor(foo)` where `foo` is not an expression, which the parser keeps as an
+            // identifier because `format(printf, 1, 2)` does.
+            Some(AttrArg::Ident(_)) => {
+                self.report(Diagnostic::error(range, attr.span).with_code("E0703"));
+                return None;
+            }
+        };
+        let Ok(number) = u16::try_from(asked) else {
+            self.report(Diagnostic::error(range, attr.span).with_code("E0703"));
+            return None;
+        };
+        if number <= RESERVED_PRIORITY {
+            let what = format!(
+                "{name} priorities from 0 to {RESERVED_PRIORITY} are reserved for the \
+                 implementation"
+            );
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+        }
+        Some(Priority::Numbered(number))
     }
 
     /// The symbol an `alias` attribute makes this declaration a second name for.
