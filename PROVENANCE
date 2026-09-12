@@ -1,5 +1,5 @@
 rucc distribution manifest 1
-release	0.10.35
+release	0.10.36
 producer	https://github.com/tamnd/rucc-cross
 payload	rucc	apache-2.0
 targets	42
