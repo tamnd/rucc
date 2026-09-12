@@ -126,6 +126,20 @@
 //! call frame, and it is J8. Nothing reaches it yet either: the front end works out which pointer
 //! an access went through, and the pass that turns that into a call is the compiler's half.
 //!
+//! [`aux`] is the sixteen bytes beside every pointer sized word, which is section 5.2.2's aux
+//! plane, and what goes in them is a decision that was open until tamnd/rucc#1068 and is closed
+//! now. The straw man was CHERI's compression, an exponent and two mantissas, and the sweep in
+//! `cargo xtask compress` turned it down: what it rounds off is whole heap objects rather than the
+//! members inside them, which is the wrong way round, since intra-object overflow is the class
+//! this design claims over Fil-C and a redzone allocator already refuses the sixty four bytes past
+//! a megabyte buffer that the compressed form would let through. So the slot says where an object
+//! starts and how far it runs exactly, in twenty one bits each, both of them relative to the
+//! pointer in the word beside them, with the lifetime version at its full sixty four bits and the
+//! part of `meta` a check reads. An object too long for that sets a flag and its reader takes the
+//! two numbers out of the header instead. Nothing writes one of these yet, because what writes one
+//! is a `cap_store` beside every store of a pointer and that opcode has no lowering, which is
+//! tamnd/rucc#856.
+//!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
 //! through a name other than those four is a hole of the same kind, and a program that frees one of
@@ -149,6 +163,7 @@ extern crate std;
 pub mod adopt;
 #[cfg(unix)]
 pub mod alloc;
+pub mod aux;
 #[cfg(unix)]
 pub mod check;
 #[cfg(unix)]
