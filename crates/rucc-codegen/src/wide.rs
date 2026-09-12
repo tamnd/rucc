@@ -44,7 +44,7 @@
 //! these is left alone here and refused by the selector, which is the same answer it got before
 //! this pass existed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_ir::{
     Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred,
@@ -88,7 +88,7 @@ pub fn halves(func: &mut Func, conv: &CallRegs) -> bool {
         return false;
     }
     let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        walk(func).into_iter().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     let order: HashMap<Inst, usize> =
         insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
     if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, &order, at, inst)) {
@@ -110,6 +110,49 @@ pub fn halves(func: &mut Func, conv: &CallRegs) -> bool {
     let signature = split_signature(func.signature());
     func.set_signature(signature);
     true
+}
+
+/// Every block, in an order where a block comes after everything that dominates it.
+///
+/// Reverse postorder from the entry, then whatever the walk did not reach, in the order the
+/// function holds them. The order is what the rule below about a use and its definition is read
+/// against, and the two together are the whole of why this is not simply the order the function
+/// holds the blocks in: a value is defined in a block that dominates every block reading it, a
+/// dominator is on every path from the entry, so a depth first walk finishes it last and reverse
+/// postorder puts it first. The order the function holds blocks in says nothing of the kind. It is
+/// the order they were made in, and every pass in the optimizer that makes a block, which is every
+/// pass that gives a loop a preheader or copies a header in front of one, puts a block that runs
+/// early at the end of that list. So the same program compiled at `-O0` and at `-O1` gave two
+/// different answers to whether this pass understood it, and above `-O0` the answer was often no.
+/// tamnd/rucc#1054.
+///
+/// A block nothing reaches cannot be walked to and is put at the end rather than dropped, because
+/// deciding a block is unreachable is not this pass's business. Two of them in the wrong order
+/// refuse the function the way they always did.
+fn walk(func: &Func) -> Vec<Block> {
+    let Some(entry) = func.entry() else { return func.blocks().collect() };
+    let mut seen: HashSet<Block> = HashSet::new();
+    let mut order: Vec<Block> = Vec::new();
+    // A postorder without recursion: the second time a block comes off the stack every block below
+    // it has been finished, so that is where it belongs in the postorder.
+    let mut stack: Vec<(Block, bool)> = vec![(entry, false)];
+    seen.insert(entry);
+    while let Some((block, done)) = stack.pop() {
+        if done {
+            order.push(block);
+            continue;
+        }
+        stack.push((block, true));
+        let Some(term) = func.terminator(block) else { continue };
+        for call in func.successors(term) {
+            if seen.insert(call.block) {
+                stack.push((call.block, false));
+            }
+        }
+    }
+    order.reverse();
+    order.extend(func.blocks().filter(|block| !seen.contains(block)));
+    order
 }
 
 /// The two halves each wide value became, low first.
@@ -1110,6 +1153,34 @@ mod tests {
 
         assert!(!halves(&mut func, &SYSV), "one of the halves has no register");
         assert_eq!(printed(&func, &mut names), before, "so nothing moved");
+    }
+
+    /// The order the function holds its blocks in is not the order they run in.
+    ///
+    /// This is what the optimizer produced and `-O0` did not. A block that runs early is made late
+    /// by whichever pass needed it, so the list the function keeps had a use of a wide value in it
+    /// before the instruction defining that value, and the walk that asks whether every definition
+    /// comes first said no and left the whole function alone. Then the selector met an instruction
+    /// at a width it has no register for and refused the program. The blocks here are made in the
+    /// order that produces, which is the tail before the middle. tamnd/rucc#1054.
+    #[test]
+    fn a_block_made_after_the_one_it_runs_before_is_still_split() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide()], &[wide()]);
+        let tail = func.create_block();
+        let middle = func.create_block();
+        let mut build = Builder::new(&mut func, entry);
+        build.jump(middle, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        let doubled = build.binary(Opcode::Add, params[0], params[0], Flags::NONE);
+        build.jump(tail, &[]);
+        let mut build = Builder::new(&mut func, tail);
+        let again = build.binary(Opcode::Add, doubled, doubled, Flags::NONE);
+        build.ret(&[again]);
+
+        assert!(halves(&mut func, &SYSV), "the definition runs before the use whatever the list says");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i128"), "nothing that wide is left: {text}");
     }
 
     #[test]
