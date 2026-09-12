@@ -781,6 +781,15 @@ impl Fact {
     pub(crate) fn whole(base: Value, size: i128) -> Self {
         Self { base, offset: 0, size }
     }
+
+    /// A range of bytes named by where it starts and how far it runs.
+    ///
+    /// The general form of [`Fact::whole`], for a caller that has both ends of a range in hand
+    /// rather than an object. `crate::dead_plane` is the one, and what it has is a plane write
+    /// rather than an access, which is a different thing to be about and the same thing to ask.
+    pub(crate) fn range(base: Value, offset: i128, size: i128) -> Self {
+        Self { base, offset, size }
+    }
 }
 
 /// A range of addresses an access can land in, and how many bytes it takes when it does.

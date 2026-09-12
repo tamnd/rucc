@@ -122,30 +122,34 @@ impl Pass for Coalesce {
 /// Which plane a write is to, for the two planes this pass touches.
 ///
 /// `meta_epoch` is deliberately not here, for the reason the module comment gives.
-fn plane(opcode: Opcode) -> Option<Opcode> {
+pub(crate) fn plane(opcode: Opcode) -> Option<Opcode> {
     matches!(opcode, Opcode::MetaType | Opcode::MetaInit).then_some(opcode)
 }
 
 /// One plane write, taken apart into what a run is made of.
+///
+/// [`crate::dead_plane`] reads the same four things off a plane write for a different reason, so
+/// this and [`read`] and [`crossed`] are shared with it rather than written out twice. Two accounts
+/// of what a plane write is would be two accounts that drift.
 #[derive(Debug)]
-struct Write {
+pub(crate) struct Write {
     /// Which plane, as the opcode that writes it.
-    kind: Opcode,
+    pub(crate) kind: Opcode,
     /// What the write carries besides its operands, which for `meta_type` is the node.
     extra: Extra,
     /// Where the pointer came from once every constant step has been walked off it.
-    base: Value,
+    pub(crate) base: Value,
     /// How far past that base the write starts.
-    at: i128,
+    pub(crate) at: i128,
     /// How many bytes it covers.
-    size: i128,
+    pub(crate) size: i128,
     /// The pointer as the instruction has it, which is the one to reuse if this write turns out to
     /// be the lowest of its run.
     pointer: Value,
     /// The type the width operand is written in.
     width: Type,
     /// The instruction itself.
-    inst: Inst,
+    pub(crate) inst: Inst,
 }
 
 /// A run of writes to one plane that sit end to end.
@@ -176,7 +180,7 @@ impl Run {
 }
 
 /// A plane write taken apart, if its operands are ones this pass can read.
-fn read(func: &Func, inst: Inst, kind: Opcode) -> Option<Write> {
+pub(crate) fn read(func: &Func, inst: Inst, kind: Opcode) -> Option<Write> {
     let [pointer, length] = func[func[inst].args] else { return None };
     let (imm, width) = crate::fold::constant(func, length)?;
     let size = imm.signed(width);
@@ -316,7 +320,7 @@ fn joins(span: i128, reach: i128) -> bool {
 /// over a range of bytes and reads nothing at all, so it may be moved past anything that does not
 /// read that plane and does not change what its range of bytes means. Everything not named here,
 /// which is every call, every barrier and every lifetime marker, stops the run where it is.
-fn crossed(opcode: Opcode, kind: Opcode) -> bool {
+pub(crate) fn crossed(opcode: Opcode, kind: Opcode) -> bool {
     // The other plane's own writes, and the reads of it, which say nothing about this one.
     let other = if kind == Opcode::MetaType {
         matches!(opcode, Opcode::MetaInit | Opcode::MetaInitCopy | Opcode::CheckInit)
