@@ -715,8 +715,9 @@ fn straighten(
             // A list of its own for each edge rather than one shared between them, because a
             // later substitution rewrites a list in place and a shared one would be rewritten
             // once for every edge that named it.
+            let call = func[at];
             let args = func.push_values(&args);
-            func.set_block_call(at, BlockCall { block: into, args });
+            func.set_block_call(at, BlockCall { block: into, args, ..call });
         }
         edges.entry(into).or_default().extend(ins.iter().copied());
         func.remove_block(block);
@@ -814,7 +815,7 @@ fn take_params(
             .map(|(_, &value)| value)
             .collect();
         let args = func.push_values(&kept);
-        func.set_block_call(at, BlockCall { block: call.block, args });
+        func.set_block_call(at, BlockCall { args, ..call });
     }
     let mut index = 0;
     func.retain_params(block, |_| {

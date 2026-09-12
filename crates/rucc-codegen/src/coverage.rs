@@ -203,6 +203,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // The capability the checks were reading, which the same pass takes out once they are calls,
     // because a call to the runtime is handed an address and finds the rest for itself.
     (Opcode::CapOf, "`rucc_safety::lower`, which removes it, since nothing reads it any more"),
+    // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
+    // about before taking the instruction out, so that a hint and a profile are the same thing to
+    // everything downstream of the optimizer.
+    (Opcode::Expect, "`rucc_opt::expect`, which moves the hint onto the branch and removes it"),
 ];
 
 /// An opcode nothing lowers, why it is here, and the issue that closes it.
@@ -232,7 +236,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#226",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
-    (Opcode::Expect, "a branch weight nothing reads yet", "tamnd/rucc#364"),
     (Opcode::Prefetch, "one instruction, once the hints have somewhere to go", "tamnd/rucc#313"),
     (Opcode::FrameAddress, "a walk up the frame pointers", "tamnd/rucc#312"),
     (Opcode::ReturnAddress, "the same walk, one word further along", "tamnd/rucc#312"),

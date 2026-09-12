@@ -371,7 +371,9 @@ fn apply(func: &mut Func, plan: &Plan) {
     let empty = func.push_values(&[]);
     let mut calls: Vec<BlockCall> = func[func[info].targets].to_vec();
     for call in &mut calls[1..] {
-        *call = BlockCall { block: hit, args: empty };
+        // No hint: the cases that had one had one each, and a single edge standing for all of them
+        // cannot carry a number that was true of one arm.
+        *call = BlockCall::new(hit, empty);
     }
     let targets = func.push_block_calls(&calls);
     let cases = func[info].cases;

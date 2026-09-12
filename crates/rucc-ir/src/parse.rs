@@ -41,8 +41,8 @@ use rucc_tuple::TargetTuple;
 use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
-    Abi, AsmInfo, Block, BlockCall, CallInfo, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param,
-    PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
+    Abi, AsmInfo, Block, BlockCall, CallInfo, Hint, Imm, Inst, InstData, MemInfo, Meta, MetaNode,
+    Param, PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -138,6 +138,7 @@ struct PendingInst<'a> {
 struct PendingCall {
     block: u32,
     args: Vec<u32>,
+    hint: Hint,
 }
 
 /// The payload of an instruction, read but not yet built.
@@ -971,7 +972,7 @@ impl<'a, 'n> Parser<'a, 'n> {
         Ok(slot)
     }
 
-    /// A branch target and the values it passes.
+    /// A branch target, the values it passes, and how often it is the arm taken.
     fn block_call(&mut self) -> Result<PendingCall, ParseError> {
         let block = self.block_ref()?;
         let mut args = Vec::new();
@@ -979,7 +980,15 @@ impl<'a, 'n> Parser<'a, 'n> {
             args = self.value_list()?;
             self.expect(")")?;
         }
-        Ok(PendingCall { block, args })
+        let mut hint = Hint::NONE;
+        if self.eat("taken") {
+            let parts = self.u64()?;
+            if parts > u64::from(Hint::SCALE) {
+                return self.fail(format!("`taken {parts}` is more than {}", Hint::SCALE));
+            }
+            hint = Hint::parts(u32::try_from(parts).unwrap_or(Hint::SCALE));
+        }
+        Ok(PendingCall { block, args, hint })
     }
 
     // Building the function.
@@ -1617,6 +1626,7 @@ fn build_calls(func: &mut Func, targets: &[PendingCall]) -> Vec<BlockCall> {
             BlockCall {
                 block: Block::from_usize(call.block as usize),
                 args: func.push_values(&args),
+                hint: call.hint,
             }
         })
         .collect()

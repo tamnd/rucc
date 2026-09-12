@@ -436,7 +436,7 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
                 continue;
             }
             let args = func.append_arg(call.args, hand);
-            func.set_block_call(at, BlockCall { block: call.block, args });
+            func.set_block_call(at, BlockCall { args, ..call });
         }
     }
     for block in func.blocks().collect::<Vec<_>>() {
@@ -550,7 +550,7 @@ fn route(func: &mut Func, from: &[Block], to: Block) {
         for at in func.target_list(term).iter() {
             let call = func[at];
             if call.block == to {
-                func.set_block_call(at, BlockCall { block: fresh, args: call.args });
+                func.set_block_call(at, BlockCall { block: fresh, ..call });
             }
         }
     }

@@ -205,6 +205,7 @@ impl Reach<'_> {
             | ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Assign { lhs, rhs, .. }
             | ExprKind::VaCopy { dst: lhs, src: rhs }
+            | ExprKind::Expect { value: lhs, hint: rhs, .. }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

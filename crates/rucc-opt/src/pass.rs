@@ -56,6 +56,17 @@ pub trait Pass: Sync {
     /// as wasteful, and it is how two passes end up disagreeing about the same function, so a
     /// pass that wants a dominator tree asks for one here.
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats;
+
+    /// Whether `-fno-<name>` is refused, because the pass is not one the compile can do without.
+    ///
+    /// Almost nothing is. A pass that optimizes can always be left out, and a person turning one
+    /// off to see what it was doing is what the flag is for, so the default is that the flag is
+    /// obeyed. A pass that takes an opcode out of the IR that nothing below the optimizer lowers is
+    /// a different thing: leaving it out is not a slower program, it is a compile that stops with a
+    /// message about a construct nobody wrote, so the flag is ignored rather than obeyed.
+    fn required(&self) -> bool {
+        false
+    }
 }
 
 /// Every pass this compiler has, in no particular order.
@@ -64,6 +75,7 @@ pub trait Pass: Sync {
 /// of them whether or not the level asked for it. A pass that is written and not in here is a
 /// pass nobody can turn on, so the list is the registry rather than a convenience.
 pub static PASSES: &[&dyn Pass] = &[
+    &crate::expect::Expect,
     &crate::fold::Fold,
     &crate::simplify::Simplify,
     &crate::narrow::Narrow,

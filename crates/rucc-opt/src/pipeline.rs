@@ -62,9 +62,13 @@ const READS_SUMMARIES: &[&str] = &[
     "discharge-every",
 ];
 
-/// `-O0`. One pass, and it is not an optimization. Section 9.1 gives this level SSA
+/// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
 /// allocas that are left, which is the next pass to be written.
+///
+/// `expect` is here because what it takes out is a node the front end writes for every
+/// `__builtin_expect` in the program and gcc writes for none of them. Left standing it would be an
+/// instruction in the output of a level whose whole contract is that it emits what it was given.
 ///
 /// `simplify-cfg` is here because a branch on a condition that is a constant is not a missed
 /// optimization, it is a call to a function the program never calls, and a program that calls a
@@ -72,7 +76,7 @@ const READS_SUMMARIES: &[&str] = &[
 /// every level including this one, and a `-O0` that emitted it would be a `-O0` some correct
 /// programs cannot be built at. Nothing else runs, and no analysis beyond the graph the pass
 /// reads reachability out of is computed.
-const O0: &[&str] = &["simplify-cfg"];
+const O0: &[&str] = &["expect", "simplify-cfg"];
 
 /// `-O1`. Section 9.1 asks for one e-graph round, conservative inlining, simplify-CFG, SROA,
 /// GVN, DCE, LICM and the loop canonicalizations. Folding, control flow simplification and dead
@@ -188,6 +192,7 @@ const O0: &[&str] = &["simplify-cfg"];
 /// except `-O0`, which keeps every check on purpose: document 14 measures against a build where
 /// nothing was discharged, and that build is `-O0`.
 const O1: &[&str] = &[
+    "expect",
     "fold",
     "simplify",
     "narrow",
@@ -245,6 +250,7 @@ const O1: &[&str] = &[
 /// pays for the new pointer and keeps the old counter as well, which over the corpus is about half
 /// of what choosing badly costs.
 const O2: &[&str] = &[
+    "expect",
     "fold",
     "simplify",
     "narrow",
@@ -279,6 +285,7 @@ const O2: &[&str] = &[
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
 /// and distribution where the dependence analysis is confident, and function specialization.
 const O3: &[&str] = &[
+    "expect",
     "fold",
     "simplify",
     "narrow",
@@ -333,6 +340,7 @@ const O3: &[&str] = &[
 /// which is slightly smaller in the steady state, so the trade is worth making at a limit that
 /// keeps the header small and not at one that copies twenty instructions to save two.
 const OS: &[&str] = &[
+    "expect",
     "fold",
     "simplify",
     "narrow",
@@ -363,6 +371,7 @@ const OS: &[&str] = &[
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
 const OZ: &[&str] = &[
+    "expect",
     "fold",
     "simplify",
     "narrow",
@@ -538,12 +547,21 @@ impl Options {
             match *on {
                 true if !names.contains(&name) => names.push(name),
                 true => {}
-                false => names.retain(|it| *it != name),
+                // A pass that says it is required stays, since turning it off is a compile that
+                // fails rather than one that optimizes less. See [`Pass::required`].
+                false => names.retain(|it| *it != name || required(it)),
             }
         }
         names.into_iter().filter_map(pass::find).map(Pass::name).collect()
     }
+}
 
+/// Whether the pass of that name is one `-fno-<name>` does not turn off.
+fn required(name: &str) -> bool {
+    pass::find(name).is_some_and(|pass| pass.required())
+}
+
+impl Options {
     /// The passes that will run, in order, over at least one function.
     ///
     /// A pass `-fenable-<name>` reached that the level did not choose is appended after them,
@@ -1094,9 +1112,9 @@ mod tests {
 
     #[test]
     fn the_level_that_optimizes_nothing_still_removes_what_nothing_reaches() {
-        // One pass at `-O0`, and it is the one that is not an optimization. See the comment on
-        // the level itself, and issue 359.
-        assert_eq!(names(&Options::for_level(OptLevel::O0)), ["simplify-cfg"]);
+        // Two passes at `-O0`, and neither of them is an optimization. See the comment on the
+        // level itself, and issue 359.
+        assert_eq!(names(&Options::for_level(OptLevel::O0)), ["expect", "simplify-cfg"]);
         assert!(names(&Options::for_level(OptLevel::O2)).len() > 1);
     }
 
@@ -1112,7 +1130,7 @@ mod tests {
         off.toggles.push(("fold".to_owned(), true));
         assert_eq!(
             names(&off),
-            ["simplify-cfg", "fold"],
+            ["expect", "simplify-cfg", "fold"],
             "a pass the level did not choose is still reachable"
         );
     }
@@ -1129,11 +1147,16 @@ mod tests {
     fn the_pipeline_listing_names_the_level_and_every_pass_in_order() {
         let text = super::print(&Options::for_level(OptLevel::O2));
         assert!(text.starts_with("level: -O2\n"), "{text}");
-        assert!(text.contains("1: fold, "), "{text}");
+        assert!(text.contains("1: expect, "), "{text}");
+        assert!(text.contains("2: fold, "), "{text}");
+        // Turning off everything the level asked for leaves the one pass that cannot be turned
+        // off, since the back end has no rule for what it removes. See `Pass::required`.
         let mut none = Options::for_level(OptLevel::O0);
+        none.toggles.push(("expect".to_owned(), false));
         none.toggles.push(("simplify-cfg".to_owned(), false));
         let none = super::print(&none);
-        assert!(none.contains("no passes"), "{none}");
+        assert!(none.contains("1: expect, "), "{none}");
+        assert!(!none.contains("simplify-cfg"), "{none}");
     }
 
     #[test]
@@ -1188,10 +1211,10 @@ mod tests {
         let (names, mut module) = module();
         let before = rucc_ir::print(&module, &names);
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O0));
-        // The one pass the level runs looked, found no branch it could read and no block nothing
-        // reaches, and spent nothing. The constant arithmetic the fixture is full of is still
-        // there, which is the part of `-O0` that has not changed.
-        assert_eq!(report.spent, vec![("simplify-cfg", 0)]);
+        // The two passes the level runs looked, found no `__builtin_expect`, no branch they could
+        // read and no block nothing reaches, and spent nothing. The constant arithmetic the fixture
+        // is full of is still there, which is the part of `-O0` that has not changed.
+        assert_eq!(report.spent, vec![("expect", 0), ("simplify-cfg", 0)]);
         assert_eq!(rucc_ir::print(&module, &names), before);
     }
 
@@ -1228,7 +1251,7 @@ mod tests {
         let running: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
         assert_eq!(
             running,
-            ["simplify-cfg", "fold"],
+            ["expect", "simplify-cfg", "fold"],
             "the flag has to put the pass in the pipeline"
         );
         let report = super::run(&mut module, &names, &opts);
@@ -1260,7 +1283,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("3: narrow, "), "{text}");
+        assert!(text.contains("4: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
@@ -1273,19 +1296,20 @@ mod tests {
             let (names, mut module) = module();
             let before = rucc_ir::print(&module, &names);
             let mut opts = Options::for_level(OptLevel::O0);
-            // The level's own pass out of the way first, so that what this measures is the one
+            // The level's own passes out of the way first, so that what this measures is the one
             // pass under test. A pass turned off and then on again is on, so this is right for
-            // that pass as well as for the others.
+            // those passes as well as for the others. `expect` cannot be turned off, so it is
+            // starved of fuel instead and is expected in the report ahead of the pass under test.
             opts.toggles.push(("simplify-cfg".to_owned(), false));
             opts.toggles.push((pass.name().to_owned(), true));
+            opts.fuel.insert("expect".to_owned(), 0);
             opts.fuel.insert(pass.name().to_owned(), 0);
             let report = super::run(&mut module, &names, &opts);
-            assert_eq!(
-                report.spent,
-                vec![(pass.name(), 0)],
-                "{} spent fuel it had none of",
-                pass.name()
-            );
+            let mut want = vec![("expect", 0)];
+            if pass.name() != "expect" {
+                want.push((pass.name(), 0));
+            }
+            assert_eq!(report.spent, want, "{} spent fuel it had none of", pass.name());
             assert_eq!(
                 rucc_ir::print(&module, &names),
                 before,
@@ -1401,7 +1425,7 @@ mod tests {
             "{:?}",
             report.dumps.iter().map(|dump| &dump.name).collect::<Vec<&String>>()
         );
-        assert_eq!(report.dumps[0].name, "00-after-fold");
+        assert_eq!(report.dumps[0].name, "01-after-fold");
         assert!(report.dumps[0].text.contains("iconst.i64 7"));
     }
 
@@ -1426,8 +1450,15 @@ mod tests {
             })
             .collect();
         assert_eq!(taken, expected);
-        assert!(report.dumps[0].text.contains("sext.i64"));
-        assert!(!report.dumps[1].text.contains("sext.i64"));
+        // Either side of the fold, which is the pass that has something to do to this fixture,
+        // found by name rather than by position so that a pass in front of it does not move it.
+        let side = |which: &str| {
+            let tail = format!("-{which}-fold");
+            let dump = report.dumps.iter().find(|dump| dump.name.ends_with(&tail));
+            dump.expect("the level folds").text.clone()
+        };
+        assert!(side("before").contains("sext.i64"));
+        assert!(!side("after").contains("sext.i64"));
     }
 
     #[test]

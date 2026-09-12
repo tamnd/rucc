@@ -844,7 +844,7 @@ status = "implemented"
 signature = "long(long, long)"
 used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
 tests = ["rucc-driver::the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace"]
-notes = "The value is the first argument and the second is a hint. The signature is kept because the call is checked against it, which is where the argument count message and the conversion of the first argument to long come from, and the node is replaced after that in check/builtin/expect.rs. The hint is dropped rather than carried, since branch weights arrive with the optimizer and Opcode::Expect is in the IR waiting for them."
+notes = "The value is the first argument and the second is a hint. The signature is kept because the call is checked against it, which is where the argument count message and the conversion of the first argument to long come from, and check/builtin/expect.rs builds an ExprKind::Expect after that. The hint is carried: lowering writes Opcode::Expect, and rucc_opt::expect moves the claim onto the arms of the branch the value ends up controlling and takes the instruction away, so prediction reads a weight on the edge rather than a node."
 
 [[feature]]
 name = "__builtin_expect_with_probability"
@@ -854,7 +854,7 @@ status = "implemented"
 signature = "long(long, long, double)"
 used_by = ["linux"]
 tests = ["rucc-driver::the_hint_builtins_are_their_first_argument_and_the_hint_leaves_no_trace"]
-notes = "The same answer as __builtin_expect with a third argument to ignore. gcc 16 reports nothing about a probability that is not a constant or is outside zero to one, at any optimization level, so neither does this."
+notes = "The same answer as __builtin_expect with a third argument saying how often the expectation holds. The probability is folded to ten thousandths and ends up on the branch arm, and a probability that does not fold or is outside zero to one leaves the default weight in place. gcc 16 reports nothing about such a probability, at any optimization level, so neither does this."
 
 [[feature]]
 name = "__builtin_unreachable"

@@ -4,10 +4,14 @@
 //!
 //! These two say which way a branch is expected to go. The value of `__builtin_expect(x, c)` is
 //! `x`, and everything after the first argument is a hint about how often that value will turn out
-//! to be `c`. So the answer is the first argument, and the hint is dropped here because there is
-//! nothing yet that could read it: branch weights arrive with the optimizer, and until then a node
-//! carrying one would be a node every pass has to step over for no gain. `Opcode::Expect` is in the
-//! IR waiting for that day.
+//! to be `c`. So the answer is the first argument, with the hint kept beside it in an
+//! [`ExprKind::Expect`], which is the node `Opcode::Expect` was in the IR waiting for.
+//!
+//! The hint used to be dropped here, and the reason it was is worth keeping: a node every pass has
+//! to step over is a cost, and it is only worth paying where something reads what the node carries.
+//! Something does now. `rucc_opt::expect` runs first at every level, writes what the node says onto
+//! the arms of the branch the value controls, and takes the node away in the same walk, so no pass
+//! after the first one sees it and nothing downstream of the optimizer has a case for it.
 //!
 //! # Why this is not a link error, which is what it was
 //!
@@ -50,10 +54,15 @@
 //! side effect and folds `sizeof(__builtin_expect((char)1, 1))` to eight.
 
 use rucc_base::Symbol;
+use rucc_base::float::Float;
 use rucc_diag::Span;
 
 use crate::check::Checker;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::tast::Const;
+
+/// What a probability is out of, which is what `rucc_ir::Hint` is out of.
+const SCALE: u32 = 10_000;
 
 /// The names whose value is their first argument.
 ///
@@ -91,26 +100,56 @@ impl Checker<'_> {
         if self.is_poisoned(value) {
             return Some(self.poison(span));
         }
+        for &hint in &args[1..] {
+            if self.is_poisoned(hint) {
+                return Some(self.poison(span));
+            }
+        }
         // The folding is asked and its diagnostics are dropped, because the question here is
         // whether the first argument is a constant and not whether the program was allowed to
         // write one. An argument that is not a constant is not a mistake anywhere in this call.
         if self.eval().integer(value).is_ok() {
             return Some(value);
         }
-        // Backwards, so that the hints are evaluated in the order they were written and the value
-        // last: a comma runs its left side first, so wrapping from the inside out puts the first
-        // hint outermost. The type of each of these is the type of the value, since a comma is its
-        // right side and nothing here changes what the call answers with.
-        let mut answer = value;
-        for &hint in args[1..].iter().rev() {
-            if self.is_poisoned(hint) {
-                return Some(self.poison(span));
-            }
-            let ty = self.tast[answer].ty;
-            let node = ExprKind::Comma { lhs: hint, rhs: answer };
+        // A call with one argument, which the prototype has already refused. The node needs two, so
+        // what is left is the value, which is what the call answers with either way.
+        let Some(&hint) = args.get(1) else { return Some(value) };
+        let parts = args.get(2).and_then(|&arg| self.expect_probability(arg));
+        let ty = self.tast[value].ty;
+        let node = ExprKind::Expect { value, hint, parts };
+        let mut answer = self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
+
+        // Whatever the node did not take, which is the probability where it would not fold and any
+        // argument past the third that the prototype has already complained about. Backwards, so
+        // that they are evaluated in the order they were written: a comma runs its left side first,
+        // so wrapping from the inside out puts the first of them outermost. The type of each is the
+        // type of the value, since a comma is its right side and nothing here changes the answer.
+        let left = if parts.is_some() { 3 } else { 2 };
+        for &rest in args.iter().skip(left).rev() {
+            let node = ExprKind::Comma { lhs: rest, rhs: answer };
             answer = self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
         }
         Some(answer)
+    }
+
+    /// The third argument of `__builtin_expect_with_probability`, in ten thousandths.
+    ///
+    /// Nothing where it is not a floating constant between zero and one, which gcc refuses outright
+    /// and this treats as a call that said nothing about how often the expectation holds. Refusing
+    /// it is the better answer and it is a diagnostic rather than a lowering, so it belongs to
+    /// tamnd/rucc#303's sweep over what the builtins say about their arguments.
+    ///
+    /// The scale is the one [`rucc_ir::Hint`] is in, and the multiplication happens here rather than
+    /// downstream because this is the only place that still has the target's floating format.
+    fn expect_probability(&mut self, expr: ExprId) -> Option<u16> {
+        let Const::Float(value) = self.eval().constant(expr).ok()? else { return None };
+        if !value.is_finite() || value.is_negative() {
+            return None;
+        }
+        let (scale, _) = Float::from_unsigned(u128::from(SCALE), value.format());
+        let (scaled, _) = value.product(scale);
+        let (parts, _) = scaled.to_integer(32, false);
+        u16::try_from(parts).ok().filter(|&parts| u32::from(parts) <= SCALE)
     }
 }
 

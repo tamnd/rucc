@@ -1228,7 +1228,7 @@ impl<'a> Builder<'a> {
     }
 
     fn block_call(&mut self, block: Block, args: &[Value]) -> BlockCall {
-        BlockCall { block, args: self.func.push_values(args) }
+        BlockCall::new(block, self.func.push_values(args))
     }
 }
 
@@ -1318,7 +1318,7 @@ mod tests {
             clobbers: Symbol::from_raw(0),
             targets: BlockCallList::EMPTY,
         });
-        let call = BlockCall { block, args: ValueList::EMPTY };
+        let call = BlockCall::to(block);
         let targets = func.push_block_calls(&[call]);
         let labelled = func.add_asm(AsmInfo {
             template: Symbol::from_raw(0),

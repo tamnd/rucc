@@ -3493,15 +3493,20 @@ mod tests {
 
         let a = parse_args(&args(&["--print-pipeline"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
-        // One pass runs at `-O0` and it is the one that removes code nothing reaches, which is
-        // not an optimization. See issue 359.
-        assert!(print_pipeline(&opts).contains("1: simplify-cfg,"), "{}", print_pipeline(&opts));
+        // Two passes run at `-O0` and neither is an optimization. The first moves what
+        // `__builtin_expect` said onto the branch and takes the instruction away, so that nothing
+        // past the optimizer has to know the instruction exists. The second removes code nothing
+        // reaches. See issue 359.
+        assert!(print_pipeline(&opts).contains("1: expect,"), "{}", print_pipeline(&opts));
+        assert!(print_pipeline(&opts).contains("2: simplify-cfg,"), "{}", print_pipeline(&opts));
 
         let a = parse_args(&args(&["--print-pipeline", "-fno-simplify-cfg"])).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
-        // And with that one turned off there is nothing left, which the dump says rather than
-        // printing an empty list.
-        assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
+        // The second turns off and the first does not, because nothing below the optimizer lowers
+        // what it removes, so `-fno-expect` is a compile that stops rather than one that runs.
+        let text = print_pipeline(&opts);
+        assert!(text.contains("1: expect,"), "{text}");
+        assert!(!text.contains("simplify-cfg"), "{text}");
     }
 
     #[test]
@@ -3516,13 +3521,22 @@ mod tests {
 
         // Every pass the compiler has, named off. Built from the registry rather than written
         // out, so a pass added later is turned off here too and this keeps testing the thing it
-        // is about, which is that the toggles can empty a level.
+        // is about, which is that the toggles can empty a level down to the passes that are not
+        // optional. Those are named, because a listing that is all of them is a level nobody
+        // emptied and the assertion would pass while saying nothing.
         let mut off = vec!["--print-pipeline".to_owned(), "-O2".to_owned()];
         off.extend(rucc_opt::PASSES.iter().map(|p| format!("-fno-{}", p.name())));
         let spelled: Vec<&str> = off.iter().map(String::as_str).collect();
         let a = parse_args(&args(&spelled)).unwrap();
         let Action::PrintPipeline(opts) = a else { panic!("expected a pipeline dump") };
-        assert!(print_pipeline(&opts).contains("no passes"), "{}", print_pipeline(&opts));
+        let text = print_pipeline(&opts);
+        let left: Vec<&str> =
+            rucc_opt::PASSES.iter().filter(|p| p.required()).map(|p| p.name()).collect();
+        assert_eq!(left, vec!["expect"], "{text}");
+        for (at, name) in left.iter().enumerate() {
+            assert!(text.contains(&format!("{}: {name},", at + 1)), "{text}");
+        }
+        assert!(!text.contains("dce"), "{text}");
     }
 
     #[test]

@@ -348,6 +348,26 @@ pub enum ExprKind {
         /// for a barrier.
         args: ExprList,
     },
+    /// `__builtin_expect` and `__builtin_expect_with_probability`, which say which way a branch goes.
+    ///
+    /// The value of the expression is the first argument and nothing else, so this node could have
+    /// been left out and was, until there was something downstream that could read the rest of it.
+    /// There is now: `rucc_opt::expect` writes what this says onto the arms of the branch the value
+    /// ends up controlling, and takes the node away again in the same walk, so nothing after the
+    /// optimizer's first pass has to step over it. See `check/builtin/expect.rs`.
+    ///
+    /// Both operands have been converted to `long` by the prototype, which is what makes the width
+    /// the comparison happens at a fact the declaration states rather than one this node carries.
+    Expect {
+        /// The value the whole expression has, which is the first argument.
+        value: ExprId,
+        /// What the value is expected to be, which is the second.
+        hint: ExprId,
+        /// How often the expectation holds, in ten thousandths, from the third argument of
+        /// `__builtin_expect_with_probability`. Nothing where the call did not say, which is every
+        /// `__builtin_expect` and every call whose probability would not fold.
+        parts: Option<u16>,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason
