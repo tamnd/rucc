@@ -779,6 +779,16 @@ fn generate(
     // the checks. The IR a person reads should say what the compiler decided, not how it spelled it
     // for the machine.
     if opts.safety.instruments() {
+        // Which calls hand back storage, which the lowering needs and `-O0` has not worked out.
+        // `rucc_opt::pipeline` runs this only when some pass in the run reads the summaries, since a
+        // flag nothing reads is noise in a dump, and at `-O0` nothing did. Something does now: the
+        // capability for a pointer an allocator just returned is the one capability that is exact
+        // and costs a load, and `rucc_safety::slot` finds those sites by the flag. The safety suite
+        // runs at `-O0`, so without this the cheap case would be the one case that never happens.
+        //
+        // Safe to run twice and safe to run late, because it only ever sets the flag and never
+        // clears one, so a build that had it already gets the same module back.
+        rucc_opt::heap::annotate(module, names);
         rucc_safety::lower(module, names);
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors
