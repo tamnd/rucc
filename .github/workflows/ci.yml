@@ -254,6 +254,24 @@ jobs:
       - name: run the same cases against both
         run: cargo xtask builtins-diff
 
+  # The job above is about the routines a 128-bit division calls. This one is about the code that
+  # calls them, and about everything else at that width: the pass in crates/rucc-codegen/src/wide.rs
+  # had nothing but its own tests reading its own output behind it, and no program compiled by it had
+  # ever been run. So the same fixture is compiled by this compiler at three optimization levels and
+  # by gcc, all four are run, and every group of cases has to come out the same.
+  #
+  # Three levels because the one bug this pass has had was an optimization level apart: at -O0 the
+  # order a function holds its blocks in is the order they run in, and above -O0 it is not.
+  wide:
+    name: 128-bit arithmetic held against gcc
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: run the same arithmetic both ways
+        run: cargo xtask wide
+
   # spec/cross-compile/09-libc-stubs.md section 9.8 wants the stub writer's output checked by
   # something that does not share its beliefs. The round trip test in the crate does not qualify,
   # because whoever wrote the writer wrote the reader: both thought a .hash entry was four bytes on

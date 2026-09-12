@@ -30,6 +30,7 @@ mod safety;
 mod size;
 mod stubs;
 mod unwind;
+mod wide;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,6 +61,7 @@ tasks:
   real-libc         hold a stub written from a glibc abilist against this machine's libc.so.6
   dso               build a shared library out of what we emit, link a program against it, run it
   unwind            walk a stack through frames we wrote and count what came back
+  wide              compile 128-bit arithmetic with both compilers, run both, compare
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   fuzz              generate C programs with one memory error each and hold both builds to it
@@ -100,6 +102,7 @@ fn main() -> ExitCode {
         Some("real-libc") => real_libc::real_libc(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
+        Some("wide") => wide::wide(),
         Some("safety") => safety::safety(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
@@ -1358,6 +1361,15 @@ fn ci() -> Result<()> {
     match runner::Runner::find("the unwind table check") {
         Ok(_) => unwind::unwind()?,
         Err(why) => skipped.push(("unwind", why.to_string())),
+    }
+    // The one check here that runs arithmetic this compiler lowered rather than a program it
+    // compiled, and the reason it is not a test in the workspace is the reason the others are not
+    // either: it needs a machine the back end emits code for. What it holds is the 128-bit width,
+    // whose pass had only its own view of its own output behind it before this, at three
+    // optimization levels, because the optimizer is what tamnd/rucc#1054 needed to show up at all.
+    match runner::Runner::find("the wide arithmetic differential") {
+        Ok(_) => wide::wide()?,
+        Err(why) => skipped.push(("wide", why.to_string())),
     }
     match runner::Runner::find("the safety suite") {
         Ok(_) => safety::safety()?,

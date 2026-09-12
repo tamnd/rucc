@@ -304,7 +304,7 @@ pub fn compile_recording(
     // hundred and twenty eight becomes two of sixty four here. Doing this first means a function
     // holding both is one the pass below still works on, since by the time it runs the only widths
     // left are ones it has an answer for.
-    wide::halves(source, machine.conv);
+    wide::halves(source, names, machine.conv);
     // Before everything, because every pass after it is written about widths the machine has and
     // an integer of forty bits is not one of them.
     widths::integers(source);
