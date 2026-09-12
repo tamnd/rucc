@@ -572,6 +572,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // writes it beside the flag that turns it back off for one directory.
             "-fno-omit-frame-pointer" => opts.frame_pointer = true,
             "-fomit-frame-pointer" => opts.frame_pointer = false,
+            // Both directions again, for the same reason, and a third answer for a command line
+            // that wrote neither: see `reorder_blocks` in `rucc_session`.
+            "-freorder-blocks" => opts.reorder_blocks = Some(true),
+            "-fno-reorder-blocks" => opts.reorder_blocks = Some(false),
             "-mno-red-zone" => opts.red_zone = false,
             "-mred-zone" => opts.red_zone = true,
             // Four flags rather than one with an argument, which is how gcc spells them and how

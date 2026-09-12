@@ -137,6 +137,7 @@ dependencies = [
  "rucc-diag",
  "rucc-ir",
  "rucc-mir",
+ "rucc-opt",
  "rucc-regalloc",
  "rucc-rules",
  "rucc-target",

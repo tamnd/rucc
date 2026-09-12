@@ -23,6 +23,10 @@ rucc-base.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-mir.workspace = true
+# The block frequencies, which are worked out over the IR and carried down onto the machine
+# blocks by `crate::weights` so that the layout has something to lay a trace along. Rank 10
+# against this crate's 12, per `xtask/layers.toml`.
+rucc-opt.workspace = true
 rucc-regalloc.workspace = true
 rucc-target.workspace = true
 rucc-tuple.workspace = true

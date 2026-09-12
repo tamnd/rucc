@@ -43,6 +43,7 @@ use crate::retry;
 use crate::split;
 use crate::switch;
 use crate::varargs;
+use crate::weights;
 use crate::wide;
 use crate::widths;
 
@@ -198,12 +199,17 @@ pub struct Flags {
     /// How much room every function opens with for a patcher, which
     /// `-fpatchable-function-entry=` asks for. See [`Room`].
     pub patch: Room,
+    /// Whether the blocks are put in the order the weights say rather than in the order the
+    /// shape of the graph says, which `-freorder-blocks` asks for and every level above `-O0`
+    /// turns on. See [`crate::layout`].
+    pub reorder: bool,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
-    /// no profiling and no room for a patcher, which is what a convention that has a red zone says
-    /// when nobody on the command line has said otherwise.
+    /// no profiling, no room for a patcher and the blocks in the order the graph's shape gives,
+    /// which is what a convention that has a red zone says at `-O0` when nobody on the command
+    /// line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -212,6 +218,7 @@ impl Default for Flags {
             landing: false,
             profile: Profile::No,
             patch: Room::default(),
+            reorder: false,
         }
     }
 }
@@ -309,7 +316,13 @@ pub fn compile_recording(
     varargs::lists(source, machine.conv);
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     fired.merge(&lowered.fired);
-    let lower::Lowered { mut func, mut stack, .. } = lowered;
+    let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
+    // Straight after selection, because this is the last moment the machine blocks and the IR
+    // blocks still stand one for one, and the pass that reads the numbers is the very last one
+    // there is. See `crate::weights`.
+    if flags.reorder {
+        weights::carry(source, &blocks, &mut func);
+    }
     // Two things a frame that grows while it runs cannot be asked for at the same time, both of
     // them refusals rather than wrong code.
     if let Some(inst) = stack.grown_at {
@@ -440,7 +453,7 @@ pub fn compile_recording(
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
-    layout::blocks(&mut func, machine.branch, names, &fusable);
+    layout::blocks(&mut func, machine.branch, names, &fusable, flags.reorder);
     Ok(func)
 }
 

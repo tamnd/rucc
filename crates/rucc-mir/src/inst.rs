@@ -309,6 +309,73 @@ impl Mem {
     }
 }
 
+/// How often something happens, next to once for every time the function is entered.
+///
+/// Ten thousand is once, which is the scale the block frequencies in `rucc_opt` are worked out
+/// in. The numbers here are those carried down rather than worked out again: by the time the
+/// blocks are laid out the loops the frequency came from are branches and there is nothing left
+/// to work one out from.
+///
+/// Nothing keeps these in step with the graph afterwards. A pass that makes a block says how
+/// often the block runs, and a pass that does not is one whose new blocks run as often as the
+/// function does, which is what [`Weight::ONCE`] is and is the only answer available to something
+/// that was never told. They are a layout heuristic, nothing reads them for anything a wrong
+/// answer could make incorrect, and the worst a stale one costs is a jump where a fall-through
+/// would have done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Weight(u64);
+
+impl Weight {
+    /// The scale: how many parts one run of the function is divided into.
+    ///
+    /// Ten thousand rather than one, because a block inside three conditionals runs a fraction of
+    /// a time per call and a fraction is not an integer. It is the same scale `rucc_opt` uses,
+    /// which is what makes carrying a frequency down here a copy rather than a conversion.
+    pub const SCALE: u64 = 10_000;
+
+    /// Once for every time the function is entered.
+    pub const ONCE: Self = Self(Self::SCALE);
+
+    /// Never.
+    pub const NEVER: Self = Self(0);
+
+    /// That many parts of [`Weight::SCALE`].
+    #[must_use]
+    pub const fn parts(parts: u64) -> Self {
+        Self(parts)
+    }
+
+    /// How many parts of [`Weight::SCALE`] it is.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// What fraction of `whole` this is, in parts of [`Weight::SCALE`].
+    ///
+    /// A whole of nothing answers nothing, since a block that never runs has no arm that is taken
+    /// more often than any other and the question has no answer rather than an arbitrary one.
+    #[must_use]
+    pub const fn out_of(self, whole: Self) -> u64 {
+        if whole.0 == 0 {
+            return 0;
+        }
+        // Saturating rather than wrapping, for the same reason a frequency saturates: a nest of
+        // loops multiplies, and a number that wrapped would read as cold where it is hottest.
+        match self.0.checked_mul(Self::SCALE) {
+            Some(scaled) => scaled / whole.0,
+            None => (self.0 / whole.0).saturating_mul(Self::SCALE),
+        }
+    }
+}
+
+impl Default for Weight {
+    /// Once, which is what a block nobody worked a number out for runs as often as.
+    fn default() -> Self {
+        Self::ONCE
+    }
+}
+
 /// One arm of a terminator: where it goes, and what it takes with it.
 ///
 /// The arguments are the values the target block's parameters arrive as, so this is the edge on
@@ -321,19 +388,28 @@ pub struct BlockCall {
     pub block: Block,
     /// What its parameters arrive as, one for one.
     pub args: Vec<Reg>,
+    /// How often the edge is taken, next to how often the function is entered. See [`Weight`].
+    pub weight: Weight,
 }
 
 impl BlockCall {
     /// A jump to that block carrying nothing.
     #[must_use]
     pub const fn to(block: Block) -> Self {
-        Self { block, args: Vec::new() }
+        Self { block, args: Vec::new(), weight: Weight::ONCE }
     }
 
     /// A jump to that block carrying those registers.
     #[must_use]
     pub fn with(block: Block, args: Vec<Reg>) -> Self {
-        Self { block, args }
+        Self { block, args, weight: Weight::ONCE }
+    }
+
+    /// The same arm, taken that often.
+    #[must_use]
+    pub fn taken(mut self, weight: Weight) -> Self {
+        self.weight = weight;
+        self
     }
 }
 
@@ -387,6 +463,8 @@ pub struct BlockData {
     pub params: Vec<Param>,
     /// Where its terminator goes, in the order the terminator's arms run.
     pub succs: Vec<BlockCall>,
+    /// How often the block runs, next to how often the function is entered. See [`Weight`].
+    pub weight: Weight,
     pub(crate) first_inst: Option<Inst>,
     pub(crate) last_inst: Option<Inst>,
     pub(crate) prev: Option<Block>,

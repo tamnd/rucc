@@ -33,7 +33,7 @@ use rucc_target::RegClass;
 
 use crate::inst::{
     Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, InstLayout, Mem, MemRef,
-    Opcode, Operand, OperandList, Param, Reg,
+    Opcode, Operand, OperandList, Param, Reg, Weight,
 };
 
 /// How far a function's name reaches.
@@ -373,6 +373,15 @@ impl Func {
     /// conditional branch takes when its condition holds.
     pub fn succs_mut(&mut self, block: Block) -> &mut Vec<BlockCall> {
         &mut self.blocks[block.index()].succs
+    }
+
+    /// Says how often a block runs, next to how often the function is entered.
+    ///
+    /// A setter rather than a field to write through, because the blocks are indexed for reading
+    /// and not for writing: what a pass is allowed to change about a block is its parameters, its
+    /// arms and now this, and each of them is a call somebody had to write.
+    pub fn set_weight(&mut self, block: Block, weight: Weight) {
+        self.blocks[block.index()].weight = weight;
     }
 
     // Instructions.

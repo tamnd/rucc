@@ -44,9 +44,17 @@ pub fn critical(func: &mut mir::Func) -> usize {
             }
             // The new block is at the end of the layout, which is where a block that is a jump
             // and nothing else does the least harm before the layout pass has an opinion.
+            //
+            // It runs exactly as often as the edge it sits on is taken, and both halves of that
+            // edge are now that edge, which is why the weight is copied onto all three rather
+            // than left at what a block nobody told anything runs. A block on a cold edge that
+            // claimed to run once per call would be one the layout put in the middle of the hot
+            // path.
+            let weight = call.weight;
             let half = func.create_block();
+            func.set_weight(half, weight);
             *func.succs_mut(half) = vec![call];
-            func.succs_mut(block)[index] = mir::BlockCall::to(half);
+            func.succs_mut(block)[index] = mir::BlockCall::to(half).taken(weight);
             split += 1;
         }
     }
@@ -89,8 +97,8 @@ mod tests {
             func.append_param(join, GPR);
         }
         *func.succs_mut(head) = vec![mir::BlockCall::to(left), mir::BlockCall::to(right)];
-        *func.succs_mut(left) = vec![mir::BlockCall { block: join, args: args.clone() }];
-        *func.succs_mut(right) = vec![mir::BlockCall { block: join, args }];
+        *func.succs_mut(left) = vec![mir::BlockCall::with(join, args.clone())];
+        *func.succs_mut(right) = vec![mir::BlockCall::with(join, args)];
         (names, func, [head, left, right, join])
     }
 
@@ -116,7 +124,7 @@ mod tests {
         // Now the head goes straight to the join as well, so both of its arms are critical: it
         // has two ways out and the join has three ways in.
         let arg = func.append_param(head, GPR);
-        func.succs_mut(head).push(mir::BlockCall { block: join, args: vec![arg] });
+        func.succs_mut(head).push(mir::BlockCall::with(join, vec![arg]));
         func.succs_mut(head).swap(1, 2);
 
         assert_eq!(critical(&mut func), 1);
@@ -142,7 +150,7 @@ mod tests {
     fn the_arguments_move_on_to_the_half_that_arrives() {
         let (names, mut func, [head, _, _, join]) = diamond(1);
         let arg = func.append_param(head, GPR);
-        func.succs_mut(head).push(mir::BlockCall { block: join, args: vec![arg] });
+        func.succs_mut(head).push(mir::BlockCall::with(join, vec![arg]));
 
         assert_eq!(critical(&mut func), 1);
         // What the first half carries is nothing, since the block it goes to asks for nothing,
@@ -162,7 +170,7 @@ mod tests {
     fn splitting_twice_is_splitting_once() {
         let (_, mut func, [head, _, _, join]) = diamond(1);
         let arg = func.append_param(head, GPR);
-        func.succs_mut(head).push(mir::BlockCall { block: join, args: vec![arg] });
+        func.succs_mut(head).push(mir::BlockCall::with(join, vec![arg]));
 
         assert_eq!(critical(&mut func), 1);
         assert_eq!(critical(&mut func), 0);

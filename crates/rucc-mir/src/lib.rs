@@ -63,7 +63,7 @@ mod print;
 pub use func::{Binding, CfiOp, Func, InstBuilder, Patch, Visibility, defs};
 pub use inst::{
     Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode, Operand,
-    OperandList, Param, Reg,
+    OperandList, Param, Reg, Weight,
 };
 // An operand's role and its constraint are a target's description of an instruction before they
 // are anything in the machine IR, so they are written down in `rucc-target` where a target
