@@ -634,6 +634,11 @@ impl Checker<'_> {
         if let Some(node) = self.unreachable_builtin(function, span) {
             return node;
         }
+        // The hint about an address, which is one instruction and promises nothing. In
+        // `check/builtin/prefetch.rs`, with why its two optional arguments have to be constants.
+        if let Some(node) = self.prefetch_builtin(function, &args, span) {
+            return node;
+        }
         // Where the running thread's own storage starts, which is a register read and not a call
         // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
         if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {

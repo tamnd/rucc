@@ -945,6 +945,7 @@ impl Opcode {
             Self::VaObject => ExtraKind::VaObject,
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
+            Self::Prefetch => ExtraKind::Prefetch,
             Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
             Self::Switch => ExtraKind::Switch,
             Self::Call | Self::CallIndirect | Self::TailCall => ExtraKind::Call,
@@ -976,6 +977,8 @@ pub enum ExtraKind {
     Rmw,
     /// A barrier's ordering.
     Order,
+    /// What a prefetch is a hint about.
+    Prefetch,
     /// Branch targets.
     Targets,
     /// A call.
@@ -1009,6 +1012,7 @@ impl ExtraKind {
             Self::Mem => "an access",
             Self::Rmw => "a read-modify-write",
             Self::Order => "an ordering",
+            Self::Prefetch => "a prefetch hint",
             Self::Targets => "branch targets",
             Self::Call => "a call",
             Self::Switch => "a switch",

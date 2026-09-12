@@ -588,6 +588,10 @@ impl<'a> Printer<'a> {
             Extra::Order(order) => {
                 let _ = write!(self.out, " {}", order.name());
             }
+            Extra::Prefetch(hint) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", {hint}");
+            }
             Extra::Targets(targets) => {
                 // A conditional branch names its condition first and then both arms. A jump
                 // has no operands at all and is its target.

@@ -1037,10 +1037,11 @@ tests = []
 name = "__builtin_prefetch"
 kind = "builtin"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "implemented"
 signature = "void(const void *, ...)"
 used_by = ["linux", "sqlite"]
-tests = []
+tests = ["rucc-driver::a_prefetch_is_one_of_four_instructions_and_the_locality_is_what_picks"]
+notes = "A hint that an address is about to be used, which is one instruction on x86-64 and promises nothing: a machine that drops it runs the program correctly, because the only thing it can change is how long the program takes. The two arguments behind the address are optional and both have to be constants, since the instruction is chosen by what they say, and check/builtin/prefetch.rs is where that is enforced. The locality picks between prefetchnta, prefetcht2, prefetcht1 and prefetcht0, which is what gcc 16.2.0 writes for the same four programs. The write hint is carried in the IR and not used here, because prefetchw is not in the base instruction set and gcc writes it only when the command line says the part has it."
 
 [[feature]]
 name = "__builtin_return_address"

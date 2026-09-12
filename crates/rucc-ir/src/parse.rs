@@ -49,7 +49,7 @@ use crate::module::{
 };
 use crate::{
     Bounds, Extra, ExtraKind, FORMAT_VERSION, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode,
-    Owner, RmwOp, StorageClass, Type,
+    Owner, PrefetchHint, RmwOp, StorageClass, Type,
 };
 
 /// Why a module could not be read.
@@ -155,6 +155,7 @@ enum PendingExtra<'a> {
     VaObject(MemInfo, Vec<Slot>),
     Rmw(RmwOp, MemInfo),
     Order(MemOrder),
+    Prefetch(PrefetchHint),
     Class(StorageClass),
     Owner(Owner),
     Node(Meta),
@@ -728,6 +729,29 @@ impl<'a, 'n> Parser<'a, 'n> {
                 };
                 PendingExtra::Order(order)
             }
+            // `prefetch %0, read, locality 3`. The address first, because it is the only operand
+            // and the two words after it are about the access rather than about the value.
+            ExtraKind::Prefetch => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                let word = self.word();
+                let write = match word {
+                    "read" => false,
+                    "write" => true,
+                    other => return self.fail(format!("`{other}` is not a read or a write")),
+                };
+                self.expect(",")?;
+                self.expect("locality")?;
+                let word = self.word();
+                let Ok(locality) = word.parse::<u8>() else {
+                    return self.fail(format!("`{word}` is not a locality"));
+                };
+                let hint = PrefetchHint { write, locality };
+                if !hint.is_valid() {
+                    return self.fail(format!("`{locality}` is not a locality"));
+                }
+                PendingExtra::Prefetch(hint)
+            }
             // The plane writes. Each reads its range and then the one thing it needs beyond it,
             // written with a name in front the way the fields of an access are.
             ExtraKind::Class => {
@@ -1204,6 +1228,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             }
             PendingExtra::Rmw(op, info) => Extra::Rmw(*op, func.add_mem(*info)),
             PendingExtra::Order(order) => Extra::Order(*order),
+            PendingExtra::Prefetch(hint) => Extra::Prefetch(*hint),
             PendingExtra::Class(class) => Extra::Class(*class),
             PendingExtra::Owner(owner) => Extra::Owner(*owner),
             PendingExtra::Node(node) => Extra::Node(*node),
@@ -2199,6 +2224,7 @@ global @x : cap = 0, align 8, linkage(internal)
                 Opcode::ICmp => ExtraKind::IntPred,
                 Opcode::FCmp => ExtraKind::FloatPred,
                 Opcode::Fence => ExtraKind::Order,
+                Opcode::Prefetch => ExtraKind::Prefetch,
                 Opcode::AtomicRmw => ExtraKind::Rmw,
                 Opcode::Switch => ExtraKind::Switch,
                 Opcode::InlineAsm => ExtraKind::Asm,

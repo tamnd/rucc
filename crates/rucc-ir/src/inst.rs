@@ -18,7 +18,8 @@ use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_target::Slot;
 
 use crate::{
-    ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, RmwOp, StorageClass, Type,
+    ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, PrefetchHint, RmwOp,
+    StorageClass, Type,
 };
 
 /// One value: the result of an instruction, or a parameter of a block.
@@ -482,6 +483,8 @@ pub enum Extra {
     Rmw(RmwOp, Idx<MemInfo>),
     /// A barrier's ordering, for `fence`.
     Order(MemOrder),
+    /// What a `prefetch` is a hint about, which is a read or a write and how much locality.
+    Prefetch(PrefetchHint),
     /// The targets of a branch, with the default first for a `switch`.
     Targets(BlockCallList),
     /// A call.
@@ -518,6 +521,7 @@ impl Extra {
             Self::Mem(_) => ExtraKind::Mem,
             Self::Rmw(..) => ExtraKind::Rmw,
             Self::Order(_) => ExtraKind::Order,
+            Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Targets(_) => ExtraKind::Targets,
             Self::Call(_) => ExtraKind::Call,
             Self::Switch(_) => ExtraKind::Switch,

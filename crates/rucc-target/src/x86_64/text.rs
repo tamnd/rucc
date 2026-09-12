@@ -590,6 +590,13 @@ static TEXT: &[(&str, &[Written])] = &[
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
     ("ret", &[spell("ret", &[])]),
     ("mfence", &[spell("mfence", &[])]),
+    // The four hints. One operand each and it is the address, the way `fldcw` above has one and it
+    // is the address, and no width in the mnemonic because a hint is about a line rather than about
+    // however many bytes the program was going to read out of it.
+    ("prefetch_nta", &[spell("prefetchnta", &[Mem])]),
+    ("prefetch_t2", &[spell("prefetcht2", &[Mem])]),
+    ("prefetch_t1", &[spell("prefetcht1", &[Mem])]),
+    ("prefetch_t0", &[spell("prefetcht0", &[Mem])]),
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),

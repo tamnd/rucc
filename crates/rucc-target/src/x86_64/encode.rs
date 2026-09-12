@@ -622,6 +622,14 @@ static ENCODINGS: &[Encoding] = &[
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
     // register, and there is nothing here that could choose a different one.
     bytes("mfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF0], NO_MODRM, NO_IMM),
+    // The four hints, which are one opcode told apart by the three spare bits of the addressing
+    // byte, the way the eight instructions sharing `0xFF` are. The size is `Long` because a row has
+    // to name one and there is no prefix to write: the instruction is about a line in the cache and
+    // not about however many bytes a later read will take out of it.
+    bytes("prefetchnta", &M, Long, &[0x0F, 0x18], ext(0, 0), NO_IMM),
+    bytes("prefetcht0", &M, Long, &[0x0F, 0x18], ext(0, 1), NO_IMM),
+    bytes("prefetcht1", &M, Long, &[0x0F, 0x18], ext(0, 2), NO_IMM),
+    bytes("prefetcht2", &M, Long, &[0x0F, 0x18], ext(0, 3), NO_IMM),
     // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
     // the addressing byte at the end of it is part of the opcode. A machine that does not check
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run

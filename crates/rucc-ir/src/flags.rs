@@ -620,6 +620,65 @@ impl fmt::Display for Owner {
     }
 }
 
+/// What a [`crate::Opcode::Prefetch`] says about the access it is a hint for.
+///
+/// Two facts, both of them out of `__builtin_prefetch`'s own arguments, and neither of them a
+/// promise. A prefetch that says the wrong thing, or a target that ignores it, changes how long
+/// the program takes and nothing else, so nothing downstream may read either of these as a fact
+/// about what the program will do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PrefetchHint {
+    /// Whether the access being prepared for will write, which is the second argument.
+    ///
+    /// It matters on a machine that has separate instructions for the two, because a line fetched
+    /// for writing is fetched in a state that does not have to be asked for again when the write
+    /// happens. x86-64 has one for it, `prefetchw`, and only on a processor that says it has it,
+    /// so this reaches the back end and the back end decides.
+    pub write: bool,
+    /// How much of the data will still be wanted after the access, from zero for none of it to
+    /// three for all of it, which is the third argument.
+    ///
+    /// Three is the default and is what a program that writes the one argument form means. Zero is
+    /// the one that is a different instruction rather than a different cache level on x86-64: it
+    /// says the line is wanted once, so `prefetchnta` fetches it in a way that does not push
+    /// anything else out.
+    pub locality: u8,
+}
+
+impl PrefetchHint {
+    /// The highest locality, which is the one the one argument form of the builtin means.
+    pub const MOST: u8 = 3;
+
+    /// The hint a call that said nothing beyond the address means, which is a read that will want
+    /// all of the data afterwards.
+    #[must_use]
+    pub const fn read() -> Self {
+        Self { write: false, locality: Self::MOST }
+    }
+
+    /// The word for which half of the access this is about, which is how it prints.
+    #[must_use]
+    pub const fn access(self) -> &'static str {
+        if self.write { "write" } else { "read" }
+    }
+
+    /// Whether the locality is one of the four the builtin has.
+    ///
+    /// Asked by the verifier. Nothing here clamps an out of range one, because a number this did
+    /// not come from `__builtin_prefetch`'s third argument is a bug in whoever built the
+    /// instruction rather than something a program wrote.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.locality <= Self::MOST
+    }
+}
+
+impl fmt::Display for PrefetchHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}, locality {}", self.access(), self.locality)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

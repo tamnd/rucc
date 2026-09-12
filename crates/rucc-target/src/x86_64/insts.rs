@@ -42,7 +42,7 @@ use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
-    LoadVec, Move, MoveVec, Nop, Pop, PopX87, Probe, Push, PushX87, Ret, RetVal, RetVal2,
+    LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2,
     RetVal2Vec, RetValVec, Rmw, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
     UnaryX87,
 };
@@ -274,6 +274,19 @@ pub enum Form {
     /// the same kind of instruction, and nothing selects either: the only thing that writes one is
     /// a prologue, which is `rucc_codegen::finish`.
     Nop,
+    /// A hint that an address is about to be used, which reads nothing and writes nothing.
+    ///
+    /// What `__builtin_prefetch` asks for. The machine is told to start bringing a line closer, and
+    /// what it does about it is its own business: a processor that ignores the whole instruction is
+    /// running the program correctly, since the only thing one of these can change is how long the
+    /// program takes.
+    ///
+    /// An empty operand list and an addressing mode, which is the shape a probe has and nothing
+    /// else here does. The address is the whole of what the instruction is given, and the registers
+    /// it is built out of arrive through the addressing mode the way they do for a store, so there
+    /// is no end in a register for an operand to point at. Unlike a store there is no value either,
+    /// which is what makes the list empty rather than one long.
+    Prefetch,
     /// A compare and exchange, which is the one instruction here that names four registers and
     /// only two of them by choice.
     ///
@@ -619,6 +632,9 @@ static X87_MEM: [OperandDesc; 0] = [];
 // The one exception, which is the comparison, because a truth value is a byte and a byte is not
 // something the x87 holds. `VEC_TO_ONE` with the two sources gone: they are on the stack, and the
 // stack is not somewhere an operand can point.
+// A hint names nothing either, and for the first half of the reason above rather than the second:
+// the registers its address is built out of are the address's own, and there is no second end.
+static HINT: [OperandDesc; 0] = [];
 static X87_TO_ONE: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static X87_TO_ONE_BOTH: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::write(GPR)];
 
@@ -659,6 +675,7 @@ impl Form {
             Push => &PUSH,
             Pop => &POP,
             Ret | Barrier | Probe | Landing | Nop => &LEAVE,
+            Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
@@ -700,6 +717,7 @@ impl Form {
                 | CmpXchg
                 | Rmw
                 | Probe
+                | Prefetch
         )
     }
 }
@@ -1038,6 +1056,13 @@ pub static INSTS: &[(&str, Form)] = &[
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
+    // The four hints, which are one instruction with four spare bits filled in four ways. Which of
+    // them a program gets is the locality it wrote: none of the data wanted afterwards is the one
+    // that does not keep the line at all, and all of it wanted is the one that brings it closest.
+    ("prefetch_nta", Prefetch),
+    ("prefetch_t2", Prefetch),
+    ("prefetch_t1", Prefetch),
+    ("prefetch_t0", Prefetch),
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),
@@ -1287,7 +1312,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 358);
+        assert_eq!(described, 362);
     }
 
     #[test]
@@ -1342,6 +1367,7 @@ mod tests {
                             | Probe
                             | Landing
                             | Nop
+                            | Prefetch
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1492,7 +1518,10 @@ mod tests {
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty()
-                    == matches!(shape, Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop)
+                    == matches!(
+                        shape,
+                        Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop | Prefetch
+                    )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"
             );
