@@ -210,11 +210,12 @@ pub const HEADER: usize = size_of::<Header>();
 
 /// How many bytes of aux one pointer sized word of payload needs.
 ///
-/// A capability is four words in flight and is squeezed into two here, with `lo` and `ext`
-/// compressed the way CHERI compresses them. The compression scheme is question 5 of document 17
-/// and is not decided, so nothing here writes an aux entry yet. What is decided is how much room
-/// it gets, because that is what fixes the memory overhead and the memory overhead is the number
-/// this design has to defend.
+/// A capability is four words in flight and is squeezed into two here. What goes in the two is
+/// [`crate::aux::Slot`], which says where the object starts and how far it runs exactly rather
+/// than compressed, and sends a reader to the header for an object too long to say that way.
+/// Nothing here writes an aux entry yet, because what writes one is the compiler's `cap_store`.
+/// How much room it gets was fixed before the contents were, because that is what fixes the memory
+/// overhead and the memory overhead is the number this design has to defend.
 pub const AUX_PER_WORD: usize = 16;
 
 /// How many payload bytes one aux entry covers.
