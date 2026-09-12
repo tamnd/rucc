@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `cap_load` and `cap_store` take the operands the aux slot's format turned out to need. The IR has carried them as one operand and two since `spec/safe-memory/06-instrumentation.md` section 6.2.2 was written, which was before there was a decision about what an aux slot holds or where it is, and tamnd/rucc#1068, tamnd/rucc#1071 and tamnd/rucc#1076 made both of those decisions. Neither shape survives them. A slot's address is computed from the base and extent of the object the word lives in, because the aux sits in front of that object, so the capability of that object is an operand now. And a slot says where a pointer's object starts and how far it runs relative to the pointer value beside it rather than absolutely, which is what makes those two numbers fit in 43 bits, so the pointer value is an operand too. Neither is recoverable from the address alone without a shadow lookup, which would be a slow path on the hot one. An instrumented access has both values already: the object's capability is what its own bounds check used, and the pointer is what the store is writing or what the load produced. So it is three operands and four rather than one and two, and the verifier says so. Nothing emits either instruction yet, which is why this is a correction to a shape rather than a fix to a miscompilation, and it is worth making before the lowering in tamnd/rucc#856 is written against the shape that cannot work. tamnd/rucc#431.
+
 ## 0.10.27
 
 ### Changed

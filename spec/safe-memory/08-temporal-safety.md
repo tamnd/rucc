@@ -68,7 +68,7 @@ Under versioning, freed memory is reclaimed immediately and reused. A stale poin
 
 But consider: an object's *aux slots* are freed with it, and a stale pointer to the object might be loaded from a slot that has been recycled into a different object's aux. Loading a capability from a recycled aux slot yields the *new* object's capability paired with the *old* pointer value, which is document 03's C1 in a new guise.
 
-The resolution is that aux slots carry the same version as their object. `cap_load %p` reads the aux slot and checks the aux's version against the plane's version for `p` before believing it; a mismatch yields `⊥`. That is one extra compare on a path that is already loading two words from the same line, and it closes the hole.
+The resolution is that aux slots carry the same version as their object. `cap_load` reads the aux slot and checks the aux's version against the plane's version for `p` before believing it; a mismatch yields `⊥`. That is one extra compare on a path that is already loading two words from the same line, and it closes the hole.
 
 What we still cannot do, and Fil-C can: guarantee that a *report* is produced. Under FUGC the freed object is kept materialized in a free state as long as anything reachable points at it, so the panic message can name the object. Under versioning the storage is gone and the report has only the version, the address and (because we record it in a small ring buffer of recently ended instances, which is a heuristic) probably the allocation and deallocation sites. Document 06 section 6.5's report quality is therefore best-effort for temporal violations in a way it is not for spatial ones. This is a real regression against Fil-C and it is written down rather than glossed.
 

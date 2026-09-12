@@ -175,9 +175,22 @@ pub enum Opcode {
     ///
     /// A pointer written to memory and read again has to bring its capability with it, and where
     /// the capability lives is document 05's question rather than this one's. What this says is
-    /// that a capability comes back from an address, which is enough for every pass above.
+    /// that a capability comes back from an address.
+    ///
+    /// Three operands: the capability of the object the word is in, the address of the word, and
+    /// the pointer that was loaded from it. The first is what says where the slot is, since the
+    /// aux is in front of the object and the arithmetic is over the object's own base and extent,
+    /// and the third is what the slot's two numbers are relative to. Both of those are facts about
+    /// the representation document 05 section 5.2.2 chose, and an instrumented load has both
+    /// values in hand already, since the capability is the one its bounds check used and the
+    /// pointer is what the load produced.
     CapLoad,
     /// The other half of [`Opcode::CapLoad`], writing one into the slot beside a pointer.
+    ///
+    /// Four operands: the capability of the object the word is in, the address of the word, the
+    /// pointer being stored there, and that pointer's capability. The first three are the same
+    /// three [`Opcode::CapLoad`] takes and for the same reasons, and the fourth is what is being
+    /// written down.
     CapStore,
     /// The capability that permits nothing, which is what a null pointer has.
     CapNull,

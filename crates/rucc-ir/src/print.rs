@@ -955,11 +955,12 @@ mod tests {
         let of = b.unary(Opcode::CapOf, p, Type::CAP);
         b.inst(InstData::new(Opcode::CapNull), &[Type::CAP]);
         b.unary(Opcode::CapRecover, p, Type::CAP);
-        b.unary(Opcode::CapLoad, p, Type::CAP);
+        let args = b.func().push_values(&[of, p, p]);
+        b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
         let len = b.iconst(i64_, 8);
         let args = b.func().push_values(&[of, off, len]);
         let narrow = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
-        let args = b.func().push_values(&[p, narrow]);
+        let args = b.func().push_values(&[of, p, p, narrow]);
         b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         // The one capability instruction whose result is not a capability, so it is the one whose
         // type has to be written down for the parser to read it back.

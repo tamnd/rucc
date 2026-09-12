@@ -34,12 +34,14 @@ Nineteen of them. The names are written with underscores because the textual IR 
 
 ```
 %c = cap_of %p                          capability of a pointer value, from the pointer's provenance
-%c = cap_load %p                        capability from the aux slot for the pointer stored at %p
-       cap_store %p, %c                 write a capability into the aux slot for %p
+%c = cap_load %cd, %p, %v               capability of the pointer %v, from the aux slot for the word at %p
+       cap_store %cd, %p, %v, %c        write %c into the aux slot for the word at %p, which holds %v
 %c = cap_null                           ⊥
 %c = cap_narrow %c0, %off, %len         sub-object narrowing; -fsafety-subobject only
 %c = cap_recover %p                     boundary recovery from the shadow planes; document 05 section 5.3
 ```
+
+The aux pair takes more operands than the shape of the question suggests, and both of the extra ones are facts about the representation section 5.2.2 settled rather than conveniences. `%cd` is the capability of the object the word at `%p` lives in, and it is there because the aux sits in front of that object and the slot's address is computed from the object's own base and extent, which is `rucc_safe_rt::aux::address_of`. `%v` is the pointer value in the word, and it is there because the slot holds a displacement and an extent relative to that pointer rather than an absolute base, which is what makes the bounds exact in 43 bits. Neither is recoverable from `%p` alone without a shadow lookup, and an instrumented access has both in hand anyway: `%cd` is the capability its own bounds check used, and `%v` is what the store is writing or what the load produced. This is also what makes the common case cheap, since for a store through a pointer whose object and offset are both known the slot's address folds to one displacement off the base.
 
 **Checks.** Each corresponds to one conjunct of J1 in document 04. They are separate instructions rather than one fused check so that they can be discharged independently, the common case is that bounds survives and everything else is proved.
 

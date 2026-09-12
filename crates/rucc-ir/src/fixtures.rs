@@ -125,10 +125,10 @@ block0(%0: ptr, %1: i64):
     %2 = cap_of %0
     %3 = cap_null
     %4 = cap_recover %0
-    %5 = cap_load %0
+    %5 = cap_load %2, %0, %0
     %6 = iconst.i64 8
     %7 = cap_narrow %2, %1, %6
-    cap_store %0, %7
+    cap_store %2, %0, %0, %7
     %8 = cap_extent.i64 %2, %0, %1
     %9 = ptr_add %0, %1
     check_bounds %2, %0, size 4, align 4

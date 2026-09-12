@@ -354,6 +354,8 @@ mod tests {
         // address the program handed over. `cap_load` does, so it faults like a load.
         let why = asked(|build, [_, _, p], _| {
             let args = build.func().push_values(&[p]);
+            let of = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+            let args = build.func().push_values(&[of, p, p]);
             build.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
         });
         assert_eq!(why, Some(EFFECTS));
