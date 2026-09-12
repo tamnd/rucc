@@ -120,6 +120,12 @@ pub const fn initing(len: usize) -> usize {
 /// a stamp is about the word that was written and a pointer word is eight bytes. It costs a byte
 /// per byte, which is the most expensive of the five spans and is what section 5.2.3 budgeted for
 /// it.
+///
+/// A stamp for every granule of the region, which is more than a stamp for every granule a program
+/// can allocate. A block is the aux, then the header, then the payload, and all three of those are
+/// inside the region, so the aux beside a payload word has a slot of its own here and it is not the
+/// payload word's slot. That is where judgement C1's second stamp goes, and tamnd/rucc#1069 asks
+/// where because the aux slot itself has no room left for one. Nothing writes it yet.
 #[must_use]
 pub const fn epoching(len: usize) -> usize {
     len / crate::epoch::GRANULE * crate::epoch::SLOT
@@ -1217,6 +1223,51 @@ mod tests {
 
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_epoch_plane_covers_the_aux_beside_a_payload_and_not_only_the_payload() {
+        let _turn = turn();
+        // Judgement C1 compares the stamp of a pointer word against the stamp of the aux slot
+        // paired with it, and tamnd/rucc#1069 is open because the aux slot is full and has nowhere
+        // to keep the second stamp. It does not have to keep it. The epoch plane is reserved and
+        // biased over the whole region rather than over the payloads in it, and the aux is inside
+        // the region, so the second stamp already has a slot and the candidate that keeps every
+        // field at full width costs no mapping at all. What it costs is a second write per pointer
+        // store, which is a different argument and is the one still to be had.
+        let want = 4096;
+        let ptr = alloc(want);
+        assert!(!ptr.is_null());
+        let payload = ptr as usize;
+        let region = covering(payload).expect("the allocation above is inside a region");
+
+        // The far end of the aux as well as the near end, since the aux for the last word of a
+        // four kilobyte payload is eight kilobytes below the payload and a plane that only reached
+        // the payloads would miss it by more than a page.
+        let block = crate::layout::block_of(payload, want);
+        let last = block + crate::layout::aux_at(want - crate::layout::WORD);
+        assert!(region.holds(block), "the aux in front of a payload is inside the region");
+        assert!(last < crate::layout::header_of(payload), "the aux stops before the header");
+
+        let word = crate::epoch::stamp(1, 1);
+        let near = crate::epoch::stamp(1, 2);
+        let far = crate::epoch::stamp(1, 3);
+        // SAFETY: all three addresses are inside the region, so the plane covers them, and the
+        // stamps are put back below.
+        unsafe {
+            region.epochs.write(payload, word);
+            region.epochs.write(block, near);
+            region.epochs.write(last, far);
+
+            assert_eq!(region.epochs.read(payload), word, "the pointer word keeps its own stamp");
+            assert_eq!(region.epochs.read(block), near, "and the aux beside it keeps another");
+            assert_eq!(region.epochs.read(last), far, "and so does the aux for the last word");
+
+            region.epochs.write(payload, crate::epoch::NONE);
+            region.epochs.write(block, crate::epoch::NONE);
+            region.epochs.write(last, crate::epoch::NONE);
+            dealloc(ptr);
+        }
     }
 
     #[test]
