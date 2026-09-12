@@ -120,6 +120,27 @@ unsigned long long __fixunsdfdi(double value);
 double __extendsfdf2(float value);
 float __truncdfsf2(double value);
 
+/* And thirteen of them one format further up, where the reason is a different one. These are not what
+ * a target without a floating point unit calls instead of an instruction: no machine has an
+ * instruction at this format at all, so `a + b` on a pair of these is a call on this host as much as
+ * on the smallest target in the matrix. Writing the arithmetic out would reach them, and they are
+ * declared by name anyway, so that the names this harness asks for are the names under test rather
+ * than whatever the host compiler decided to emit.
+ */
+_Float128 __addtf3(_Float128 left, _Float128 right);
+_Float128 __subtf3(_Float128 left, _Float128 right);
+_Float128 __multf3(_Float128 left, _Float128 right);
+_Float128 __divtf3(_Float128 left, _Float128 right);
+_Float128 __negtf2(_Float128 value);
+int __cmptf2(_Float128 left, _Float128 right);
+int __eqtf2(_Float128 left, _Float128 right);
+int __netf2(_Float128 left, _Float128 right);
+int __getf2(_Float128 left, _Float128 right);
+int __gttf2(_Float128 left, _Float128 right);
+int __letf2(_Float128 left, _Float128 right);
+int __lttf2(_Float128 left, _Float128 right);
+int __unordtf2(_Float128 left, _Float128 right);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -1280,6 +1301,177 @@ static void double_corner_cases(int which) {
     say("doublecorner", which, digest);
 }
 
+/* The sign bit at a hundred and twenty eight bits, which the groups below set and clear on operands
+ * of their own.
+ */
+#define QUAD_SIGN ((uwide)1 << 127)
+
+/* A pair of words as the 128-bit pattern they are, which is how the tables below are written: there
+ * is no way to write a literal that wide in C.
+ */
+#define QUAD(high, low) ((((uwide)high##ull) << 64) | (uwide)low##ull)
+
+/* A bit pattern as the quad it is, by memcpy for the reason everything else here uses it. */
+static _Float128 quad_of(uwide pattern) {
+    _Float128 value;
+    memcpy(&value, &pattern, sizeof value);
+    return value;
+}
+
+static unsigned long long mix_quad(unsigned long long digest, _Float128 value) {
+    unsigned char bytes[sizeof value];
+    memcpy(bytes, &value, sizeof value);
+    return mix(digest, bytes, sizeof bytes);
+}
+
+/* One pair through all thirteen routines at this format, which is the same thirteen as the two below
+ * it minus the conversions, since those are not written yet at this width.
+ */
+static unsigned long long thirteen_quad(unsigned long long digest, uwide left, uwide right) {
+    _Float128 one = quad_of(left);
+    _Float128 two = quad_of(right);
+    digest = mix_quad(digest, __addtf3(one, two));
+    digest = mix_quad(digest, __subtf3(one, two));
+    digest = mix_quad(digest, __multf3(one, two));
+    digest = mix_quad(digest, __divtf3(one, two));
+    digest = mix_quad(digest, __negtf2(one));
+    digest = mix_sign(digest, __cmptf2(one, two));
+    digest = mix_sign(digest, __eqtf2(one, two));
+    digest = mix_sign(digest, __netf2(one, two));
+    digest = mix_sign(digest, __getf2(one, two));
+    digest = mix_sign(digest, __gttf2(one, two));
+    digest = mix_sign(digest, __letf2(one, two));
+    digest = mix_sign(digest, __lttf2(one, two));
+    digest = mix_sign(digest, __unordtf2(one, two));
+    cases += 13;
+    return digest;
+}
+
+/* Random bits read as a quad. One pattern in every thirty two thousand seven hundred and sixty eight
+ * lands outside the ordinary numbers at this width, sixteen times rarer than one format down, so the
+ * families that reach the ends of the range on purpose are most of what says anything here.
+ */
+static uwide random_quad(void) {
+    return ((uwide)next_random() << 64) | next_random();
+}
+
+/* A pattern with the fraction and the sign of random bits and the exponent asked for. */
+static uwide quad_at(unsigned long long stored) {
+    uwide kept = random_quad() & ~((uwide)0x7FFFull << 112);
+    return kept | ((uwide)stored << 112);
+}
+
+/* A pattern whose exponent is within four of another's, which is where the additions that say
+ * something are.
+ */
+static uwide near_quad(uwide other) {
+    long long moved = (long long)((other >> 112) & 0x7FFF) + (long long)(next_random() % 9) - 4;
+    if (moved < 0) {
+        moved = 0;
+    }
+    if (moved > 32766) {
+        moved = 32766;
+    }
+    return quad_at((unsigned long long)moved);
+}
+
+#define QUAD_ROUNDS 8
+#define QUAD_CASES 1024
+
+static void quads(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_CASES; i++) {
+        uwide left = random_quad();
+        uwide right = random_quad();
+        uwide close = near_quad(left);
+        digest = thirteen_quad(digest, left, right);
+        digest = thirteen_quad(digest, right, left);
+        digest = thirteen_quad(digest, left, close);
+        digest = thirteen_quad(digest, close, left);
+    }
+    say("quad", round, digest);
+}
+
+/* A value and exactly half the spacing of its own exponent, which is the pair that puts a sum exactly
+ * between two quads, with the lowest kept bit forced each way.
+ */
+static void quad_ties(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_CASES; i++) {
+        /* An exponent with room for half the spacing to be an ordinary number below it and room for
+         * the sum to stay inside the type above it.
+         */
+        unsigned long long stored = 200 + (next_random() % 32000);
+        uwide value = quad_at(stored) & ~QUAD_SIGN;
+        uwide half = (uwide)(stored - 113) << 112;
+        digest = thirteen_quad(digest, value & ~(uwide)1, half);
+        digest = thirteen_quad(digest, value | 1, half);
+        digest = thirteen_quad(digest, (value & ~(uwide)1) | QUAD_SIGN, half);
+        digest = thirteen_quad(digest, half, value | 1);
+    }
+    say("quadtie", round, digest);
+}
+
+/* The bottom of the range and the top of it, which random patterns reach sixteen times less often at
+ * this width than at the last one.
+ */
+static void quad_edges(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_CASES; i++) {
+        uwide small = quad_at(next_random() % 3);
+        uwide other = quad_at(next_random() % 3);
+        uwide large = quad_at(32760 + next_random() % 7);
+        digest = thirteen_quad(digest, small, other);
+        digest = thirteen_quad(digest, small, large);
+        digest = thirteen_quad(digest, large, small);
+        digest = thirteen_quad(digest, large, large);
+    }
+    say("quadedge", round, digest);
+}
+
+/* The patterns worth asking about by name, which is the same list as the two formats below with the
+ * fields at this width.
+ */
+static const uwide QUAD_CORNERS[] = {
+    QUAD(0x0000000000000000, 0x0000000000000000), /* zero */
+    QUAD(0x0000000000000000, 0x0000000000000001), /* the smallest subnormal */
+    QUAD(0x0000000000000000, 0x0000000000000002),
+    QUAD(0x0000FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* the largest subnormal */
+    QUAD(0x0001000000000000, 0x0000000000000000), /* the smallest normal */
+    QUAD(0x0001000000000000, 0x0000000000000001),
+    QUAD(0x3F8E000000000000, 0x0000000000000000), /* 2^-113, half the spacing at one */
+    QUAD(0x3F8F000000000000, 0x0000000000000000), /* 2^-112, the spacing at one */
+    QUAD(0x3FFEFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* one less than one */
+    QUAD(0x3FFF000000000000, 0x0000000000000000), /* one */
+    QUAD(0x3FFF000000000000, 0x0000000000000001), /* one more than one */
+    QUAD(0x4000000000000000, 0x0000000000000000), /* two */
+    QUAD(0x406F000000000000, 0x0000000000000000), /* 2^112, where the spacing reaches one */
+    QUAD(0x4070000000000000, 0x0000000000000000), /* 2^113, where it passes one */
+    QUAD(0x7FFEFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* the largest finite */
+    QUAD(0x7FFF000000000000, 0x0000000000000000), /* an infinity */
+    QUAD(0x7FFF000000000000, 0x0000000000000001), /* a signalling not a number */
+    QUAD(0x7FFF800000000000, 0x0000000000000000), /* a quiet one with an empty payload */
+    QUAD(0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* and one with every bit of payload set */
+};
+
+#define QUAD_CORNER_COUNT ((int)(sizeof QUAD_CORNERS / sizeof QUAD_CORNERS[0]))
+
+/* Every corner against every corner, both ways round and at all four pairs of signs, grouped by which
+ * corner one side was.
+ */
+static void quad_corner_cases(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_CORNER_COUNT; i++) {
+        for (int signs = 0; signs < 4; signs++) {
+            uwide left = QUAD_CORNERS[which] | ((signs & 1) ? QUAD_SIGN : (uwide)0);
+            uwide right = QUAD_CORNERS[i] | ((signs & 2) ? QUAD_SIGN : (uwide)0);
+            digest = thirteen_quad(digest, left, right);
+            digest = thirteen_quad(digest, right, left);
+        }
+    }
+    say("quadcorner", which, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -1337,6 +1529,14 @@ int main(int argc, char **argv) {
     between_corners();
     for (int i = 0; i < BETWEEN_ROUNDS; i++) {
         between(i);
+    }
+    for (int i = 0; i < QUAD_CORNER_COUNT; i++) {
+        quad_corner_cases(i);
+    }
+    for (int i = 0; i < QUAD_ROUNDS; i++) {
+        quads(i);
+        quad_ties(i);
+        quad_edges(i);
     }
     printf("cases %ld\n", cases);
     return 0;

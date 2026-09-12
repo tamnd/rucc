@@ -42,9 +42,13 @@
 //! and two routines that are genuinely new, a product that no longer fits in a word and a division
 //! that cannot be written as a `/`. And so is the pair between the two formats, `__extendsfdf2` and
 //! `__truncdfsf2`, which is the first thing here that needed both of them and is the end of the two
-//! format soft float set. The rest of section 12.8, which is quad soft float, the remaining
-//! `__int128` arithmetic, the eighty bit and quad conversions and the atomics, is not written, and
-//! the set is driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
+//! format soft float set. Quad precision is here now as well, with the four operations, the negation
+//! and the eight comparisons on a `_Float128`, which is not a soft float set in the sense the other
+//! two are: no machine has an instruction at that format, so those thirteen are calls on every target
+//! rather than only on a target with no floating point unit. The rest of section 12.8, which is the
+//! conversions to and from a quad, the remaining `__int128` arithmetic, the eighty bit conversions and
+//! the atomics, is not written, and the set is driven by what the target ladder in
+//! `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with
@@ -58,6 +62,7 @@ pub mod div;
 pub mod double;
 pub mod float;
 pub mod mem;
+pub mod quad;
 
 // The tests allocate and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]

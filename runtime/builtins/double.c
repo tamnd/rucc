@@ -265,9 +265,17 @@ double __adddf3(double left, double right) {
 
 /* Subtraction is addition with the sign of the right operand flipped, which is exact: a sign is a
  * bit and flipping it is the negation of the value it belongs to, at every magnitude.
+ *
+ * A not a number is the one pattern that is not flipped. It is the answer itself rather than a
+ * number being negated, and soft-fp negates after it has dealt with a not a number, so the answer
+ * GCC gives is the one that came in and a flip here would print minus where GCC prints nothing.
  */
 double __subdf3(double left, double right) {
-    return add(pattern_of(left), pattern_of(right) ^ SIGN);
+    u64 right_pattern = pattern_of(right);
+    if (!is_nan(right_pattern)) {
+        right_pattern ^= SIGN;
+    }
+    return add(pattern_of(left), right_pattern);
 }
 
 /* The product of two significands, which does not fit in a word.

@@ -296,9 +296,17 @@ float __addsf3(float left, float right) {
 /* Subtraction is addition with the sign of the right operand flipped, which is exact: a sign is a
  * bit and flipping it is the negation of the value it belongs to, at every magnitude including zero
  * and infinity.
+ *
+ * A not a number is the one pattern that is not flipped. It is the answer itself rather than a
+ * number being negated, and soft-fp negates after it has dealt with a not a number, so the answer
+ * GCC gives is the one that came in and a flip here would print minus where GCC prints nothing.
  */
 float __subsf3(float left, float right) {
-    return add(pattern_of(left), pattern_of(right) ^ SIGN);
+    u32 right_pattern = pattern_of(right);
+    if (!is_nan(right_pattern)) {
+        right_pattern ^= SIGN;
+    }
+    return add(pattern_of(left), right_pattern);
 }
 
 float __mulsf3(float left, float right) {
