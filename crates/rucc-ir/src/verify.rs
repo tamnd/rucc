@@ -1017,7 +1017,8 @@ impl<'a> Verifier<'a> {
             Opcode::GlobalAddr
             | Opcode::StackSave
             | Opcode::FrameAddress
-            | Opcode::ReturnAddress => {
+            | Opcode::ReturnAddress
+            | Opcode::ThreadPointer => {
                 if results == 1 && !res(0).is_ptr() {
                     self.error(format!(
                         "{} produces a pointer and this one produces {}",

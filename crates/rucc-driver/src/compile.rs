@@ -2501,6 +2501,19 @@ decl #0 x : int object external static defined
         assert!(text.contains("%fs:0"), "{text}");
     }
 
+    /// The second half of that on its own, which is what a program asks for when the number it
+    /// wants is the thread rather than anything in it.
+    ///
+    /// rpmalloc writes this to find its per thread cache, and it is the whole of what stood
+    /// between that library and a build. gcc 16 writes the same one instruction.
+    #[test]
+    fn the_address_of_this_thread_s_own_storage_is_read_out_of_the_segment_register() {
+        let text = asm("void *here(void) { return __builtin_thread_pointer(); }\n");
+        assert!(text.contains("movq\t%fs:0, "), "{text}");
+        // No table slot and no addition, because there is no variable to find inside the block.
+        assert!(!text.contains("GOTTPOFF"), "{text}");
+    }
+
     /// Not a rewording of the check above: what the two paths agree about is the point.
     #[test]
     fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {

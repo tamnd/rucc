@@ -355,6 +355,13 @@ pub enum ExprKind {
     /// carries is the promise itself, which the optimizer is where it will pay, and until then
     /// what it costs to honour is nothing at all. See `check/builtin/unreachable.rs`.
     Unreachable,
+    /// `__builtin_thread_pointer()`, the address of the storage the running thread has.
+    ///
+    /// It has no operands, and it is a node rather than a call for the reason the one above it is:
+    /// there is no function of the name anywhere for a call to reach. What it answers is a fact
+    /// about the machine the program is running on rather than anything computed from the program,
+    /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
+    ThreadPointer,
 }
 
 /// Which question one of the bit counting builtins asks.

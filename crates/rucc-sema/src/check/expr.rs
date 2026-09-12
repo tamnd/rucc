@@ -634,6 +634,11 @@ impl Checker<'_> {
         if let Some(node) = self.unreachable_builtin(function, span) {
             return node;
         }
+        // Where the running thread's own storage starts, which is a register read and not a call
+        // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
+        if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {
+            return value;
+        }
         // The absolute value family, whose plain names are the C library's and whose meaning the
         // compiler is allowed to know. In `check/builtin/abs.rs`, with why the declaration is
         // looked at as well as the name.

@@ -1061,6 +1061,16 @@ used_by = ["linux", "glibc"]
 tests = []
 
 [[feature]]
+name = "__builtin_thread_pointer"
+kind = "builtin"
+gcc_version = "11.0"
+status = "implemented"
+signature = "void *(void)"
+used_by = ["rpmalloc"]
+tests = ["rucc-driver::the_address_of_this_thread_s_own_storage_is_read_out_of_the_segment_register"]
+notes = "The address of the block of storage the running thread has, which on x86-64 is one instruction, movq %fs:0. The signature is kept because the call is checked against it, and the node is put in its place after that in check/builtin/thread.rs. What a program does with the answer is its own business, since the layout of what is behind the pointer is the C library's and not the compiler's, which is why an allocator that keeps a cache per thread writes this rather than a thread-local of its own."
+
+[[feature]]
 name = "__builtin_alloca"
 kind = "builtin"
 gcc_version = "2.0"

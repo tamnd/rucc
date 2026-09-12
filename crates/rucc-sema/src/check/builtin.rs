@@ -65,6 +65,7 @@ mod generic;
 mod math;
 mod overflow;
 mod sign;
+mod thread;
 mod unreachable;
 
 /// The name in the object file for a function declared under this spelling, when the two are

@@ -83,6 +83,9 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // A relocation, which is right because of what the linker does rather than because of what
     // any bitvector equals.
     (Opcode::GlobalAddr, "`crate::lower`, a `lea` off the instruction pointer with a name on it"),
+    // The one thing on this machine that no ordinary instruction can work out, which is why it
+    // is built here rather than matched: `%fs` is not a register a rule could name.
+    (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),

@@ -447,6 +447,12 @@ pub enum Opcode {
     FrameAddress,
     /// `__builtin_return_address`.
     ReturnAddress,
+    /// `__builtin_thread_pointer`, the address of the storage the running thread has.
+    ///
+    /// It takes nothing and answers a pointer. Unlike the two above it there is no walk to do and
+    /// no frame to have kept: the machine holds the address in a place of its own, so this is one
+    /// instruction on every target that has the builtin at all.
+    ThreadPointer,
     /// The start of a variable argument list.
     VaStart,
     /// One argument off a variable argument list, which moves the list on as it reads it. Two
@@ -597,6 +603,7 @@ impl Opcode {
             Self::Prefetch => "prefetch",
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
+            Self::ThreadPointer => "thread_pointer",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
             Self::VaObject => "va_object",
@@ -732,6 +739,10 @@ impl Opcode {
                 | Self::Expect
                 | Self::FrameAddress
                 | Self::ReturnAddress
+                // The same address for as long as the thread runs, and a thread cannot change
+                // which one it is part way through a function, so two of these in one function
+                // are the same value and either may be moved to where the other is.
+                | Self::ThreadPointer
                 | Self::MemEntry
                 // Three of the capability instructions are arithmetic on a pointer's
                 // provenance and touch nothing. The other three do: `cap_load` and
@@ -1133,6 +1144,7 @@ static ALL: &[Opcode] = &[
     Opcode::Prefetch,
     Opcode::FrameAddress,
     Opcode::ReturnAddress,
+    Opcode::ThreadPointer,
     Opcode::VaStart,
     Opcode::VaArg,
     Opcode::VaObject,
