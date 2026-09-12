@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.30
+
 ### Added
 
 - A cast between a 128-bit integer and a `float` or a `double` compiles, because the pass that splits the width emits the call the runtime routines were waiting for. The machine's own conversion reaches sixty four bits and no further, so there is nothing to split into and it is a call the way a divide is: going up it hands over the two halves and takes a float back, coming down it hands over the float and takes two halves back, and the sign is in the name because the same hundred and twenty eight bits are two different numbers that round to two different floats. Only a `float` and a `double` have a routine, so an eighty bit float is refused rather than converted, which is a refusal a program reaches without asking for it since `long double` is that type on this target, and it is tamnd/rucc#326 rather than an oversight. `cargo xtask wide` covers the eight at `-O0`, `-O1` and `-O2` against gcc, which took it to 326592 cases in 158 groups, and the new groups are built to stay inside what C defines the way the division groups avoid a zero divisor: the single precision cases drop the top bit of the value, because a value within a rounding step of 2^128 has no float of that format to become, and the floats coming down have bounded exponents, once for the signed type and wider for the unsigned and lower again where a double is narrowed to a float first, since that narrowing is allowed to round up into the value the type cannot hold. The guard that reads the undefined symbols of each object back covers twelve names now instead of four. tamnd/rucc#1064.
