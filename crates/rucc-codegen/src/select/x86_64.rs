@@ -213,6 +213,20 @@ mod tests {
         "jmp",
     ];
 
+    /// The instructions the compare pass writes rather than a rule.
+    ///
+    /// The other half of the argument the comparisons above are here under. A rule selects a
+    /// comparison that keeps its answer in a byte, because that is the shape a value has. What is
+    /// left of one when the machine has already made the comparison is the byte with no comparison
+    /// in front of it, and there is no pattern for that: the term it would compute is the same term
+    /// the full comparison computes, and what makes the short one right is the instruction three
+    /// places back rather than anything about the value. So `crate::compare` writes them by name,
+    /// in place of a comparison it found was already made.
+    const COMPARE: &[&str] = &[
+        "set_e", "set_ne", "set_l", "set_le", "set_g", "set_ge", "set_b", "set_be", "set_a",
+        "set_ae",
+    ];
+
     /// The instruction the memory model writes rather than a rule.
     ///
     /// A barrier computes nothing, so there is no equality for the solver to discharge and no
@@ -468,6 +482,21 @@ mod tests {
         assert_eq!(written, exempt);
     }
 
+    /// The same claim about the compare pass. What it writes is what the flag description says is
+    /// left of a comparison, so the exemption is taken from that rather than typed out twice, and
+    /// an entry added there without a rule to go with it shows up here rather than in a build that
+    /// fails somewhere else.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_the_compare_pass_really_writes() {
+        let mut written: Vec<&str> =
+            x86_64::FLAGS.compares.iter().filter_map(|entry| entry.kept).collect();
+        written.sort_unstable();
+        written.dedup();
+        let mut exempt = COMPARE.to_vec();
+        exempt.sort_unstable();
+        assert_eq!(written, exempt);
+    }
+
     #[test]
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
@@ -479,6 +508,9 @@ mod tests {
                 continue;
             }
             if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
+                continue;
+            }
+            if COMPARE.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

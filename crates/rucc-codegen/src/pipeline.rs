@@ -28,11 +28,12 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64,
+    BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64,
 };
 use rucc_tuple::Arch;
 
 use crate::bits;
+use crate::compare;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
@@ -71,6 +72,8 @@ pub struct Machine {
     pub branch: &'static BranchInsts,
     /// How much of a register each of the machine's instructions reads and writes.
     pub bits: &'static BitInsts,
+    /// What each of the machine's instructions leaves in the condition state.
+    pub flags: &'static FlagInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -123,6 +126,7 @@ impl Machine {
             insts: &x86_64::FRAME,
             branch: &x86_64::BRANCH,
             bits: &x86_64::BITS,
+            flags: &x86_64::FLAGS,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -473,6 +477,12 @@ pub fn compile_recording(
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
     layout::blocks(&mut func, machine.branch, names, &fusable, flags.reorder);
+
+    // After the layout rather than before it, which is the whole of what makes it safe. What a
+    // comparison leaves for the instruction behind it to read is not a register and nothing may
+    // come between the two, and the layout is the other pass that writes such a pair. Running
+    // here means there is nothing left that could put an instruction in the middle of one.
+    compare::redundant(&mut func, machine.flags, names);
     Ok(func)
 }
 

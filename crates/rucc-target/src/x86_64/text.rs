@@ -575,6 +575,19 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_ri_16", &[spell("cmpw", &CMP_ONLY_RI_16)]),
     ("cmp_ri_32", &[spell("cmpl", &CMP_ONLY_RI_32)]),
     ("cmp_ri_64", &[spell("cmpq", &CMP_ONLY_RI_64)]),
+    // And the byte with the comparison gone, which is the same pair cut the other way. It is the
+    // second half of every `cmp_set_` row above, written on its own and with its operand back at
+    // zero, and the assembler spells it the same way whatever width was compared.
+    ("set_e", &[spell("sete", &SET)]),
+    ("set_ne", &[spell("setne", &SET)]),
+    ("set_l", &[spell("setl", &SET)]),
+    ("set_le", &[spell("setle", &SET)]),
+    ("set_g", &[spell("setg", &SET)]),
+    ("set_ge", &[spell("setge", &SET)]),
+    ("set_b", &[spell("setb", &SET)]),
+    ("set_be", &[spell("setbe", &SET)]),
+    ("set_a", &[spell("seta", &SET)]),
+    ("set_ae", &[spell("setae", &SET)]),
     ("jcc_e", &[spell("je", &[Label])]),
     ("jcc_ne", &[spell("jne", &[Label])]),
     ("jcc_l", &[spell("jl", &[Label])]),
