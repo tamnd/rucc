@@ -140,9 +140,20 @@
 //! `aux::address_of` and the `store` and `load` pair over it, and it is arithmetic off the
 //! capability the check in front of the access already holds rather than a lookup in anything. It
 //! answers for allocated storage only, since a local's aux goes beside the frame and a global's
-//! goes in a section of the image and neither of those exists. Nothing calls any of it yet, because
-//! what calls it is a `cap_store` beside every store of a pointer and that opcode has no lowering,
-//! which is tamnd/rucc#856.
+//! goes in a section of the image and neither of those exists.
+//!
+//! [`cap`] is the policy over that format and the pair of names generated code is compiled against,
+//! which document 06 section 6.2.2 calls `cap_store` and `cap_load`. A store with nowhere to put
+//! the capability drops it and says so, since a pointer stored into a local is not a fault. A load
+//! has four answers: a slot that says the whole capability is believed, because the version compare
+//! that would catch a stale one is already in front of the first access through it; a slot that
+//! says to ask the header gets its bounds from the planes and has to find the version it was
+//! written under still there; a slot that says the word holds no pointer refuses; and a word with
+//! no slot at all is recovered from the address and counted with the crossings, which is every
+//! local and every global today. The third and fourth of those are the same bit pattern seen from
+//! two sides and that is tamnd/rucc#1081. Nothing calls any of it yet, because what calls it is a
+//! `cap_store` beside every store of a pointer and that opcode has no lowering, which is
+//! tamnd/rucc#856.
 //!
 //! What is still missing is the `printf` family, which [`wrap`] says why about, and the `ioctl`
 //! and `sockaddr` shaped syscalls, which [`syscall`] does. Everything the C library allocates
@@ -168,6 +179,8 @@ pub mod adopt;
 #[cfg(unix)]
 pub mod alloc;
 pub mod aux;
+#[cfg(unix)]
+pub mod cap;
 #[cfg(unix)]
 pub mod check;
 #[cfg(unix)]
