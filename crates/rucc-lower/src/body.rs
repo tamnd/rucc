@@ -2766,13 +2766,16 @@ impl<'u> Body<'_, 'u> {
                 }
                 self.complex_call(at, op, &halves, ty, span);
             }
-            // `-z`, which is the real negation on each half.
-            ExprKind::Unary { op: UnaryOp::Minus, operand } => {
+            // `-z`, which is the real negation on each half, and `~z`, the conjugate, which is
+            // that negation on the imaginary half and the real half left as it stands.
+            ExprKind::Unary { op: op @ (UnaryOp::Minus | UnaryOp::BitNot), operand } => {
                 let from = self.complex_addr(operand, span);
                 for imag in [false, true] {
-                    let value = self.half(from, imag, part, span);
-                    let out = self.func[value].ty;
-                    let value = self.build(span).unary(Opcode::FNeg, value, out);
+                    let mut value = self.half(from, imag, part, span);
+                    if imag || op == UnaryOp::Minus {
+                        let out = self.func[value].ty;
+                        value = self.build(span).unary(Opcode::FNeg, value, out);
+                    }
                     let into = self.half_place(at, imag, part, span);
                     self.write(into, value, span);
                 }

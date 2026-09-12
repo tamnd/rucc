@@ -1705,6 +1705,94 @@ signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
 tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 
+# The three that name a half of a complex value. These carry a signature because the call is
+# checked against it the way an ordinary call is, and then answered rather than left behind: the
+# operators they stand for are `~`, `__real__` and `__imag__`, which the language already had, and
+# all three functions are in the math library, which a program that wrote one never had a reason to
+# ask for. The rules are in `check/builtin/complex.rs`, along with the plain names.
+
+[[feature]]
+name = "__builtin_conjf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "_Complex float(_Complex float)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_conj"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "_Complex double(_Complex double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_conjl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "_Complex long double(_Complex long double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+notes = "What a value of this width does below the front end is issue 326, the same as every other use of the type."
+
+[[feature]]
+name = "__builtin_crealf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(_Complex float)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_creal"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(_Complex double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_creall"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(_Complex long double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_cimagf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(_Complex float)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_cimag"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(_Complex double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_cimagl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(_Complex long double)"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
+
 # The builtins whose answer is a constant, which are answered in the front end rather than called.
 # A program writes one where nothing may be called at all, since `double x = __builtin_inf();` at
 # file scope is an initializer for an object with static storage duration and has to have a value

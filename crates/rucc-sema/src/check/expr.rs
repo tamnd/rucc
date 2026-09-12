@@ -657,6 +657,12 @@ impl Checker<'_> {
         if let Some(value) = self.sign_library_value(callee, function, &args, span) {
             return value;
         }
+        // The three that name a half of a complex value, whose plain names are what `complex.h`
+        // declares and so the ones programs actually write. In `check/builtin/complex.rs`, with
+        // why the operators these stand for were already in the language.
+        if let Some(value) = self.complex_builtin_value(callee, function, &args, span) {
+            return value;
+        }
         // The six the compiler can answer when it is handed constants, which is what a static
         // initializer written with one needs. In `check/builtin/math.rs`, with why the call is
         // still a call everywhere else and why two of the family are deliberately not there.
@@ -843,10 +849,15 @@ impl Checker<'_> {
                 if self.is_poisoned(operand) {
                     return self.poison(span);
                 }
-                if !is_integer(&self.types, self.lane_of(self.tast[operand].ty)) {
+                let ty = self.tast[operand].ty;
+                // On a complex operand the operator is the conjugate rather than the
+                // complement, which gcc has read it as since it had complex types at all and
+                // which is the only spelling for the operation a program that has not included
+                // `complex.h` has. The answer is the operand's own type either way, so the two
+                // readings differ in what the walk writes out and in nothing here.
+                if !is_complex(&self.types, ty) && !is_integer(&self.types, self.lane_of(ty)) {
                     return self.wrong_operand("bit-complement", span);
                 }
-                let ty = self.tast[operand].ty;
                 self.tast
                     .expr(Expr::new(ExprKind::Unary { op, operand }, ty, Category::Rvalue), span)
             }
@@ -3255,6 +3266,44 @@ mod tests {
             dump(&c, id),
             "unary __real__ : double\n  convert lvalue : double\n    decl #0 x : double lvalue\n"
         );
+    }
+
+    #[test]
+    fn a_complement_of_a_complex_value_is_the_conjugate_and_keeps_its_type() {
+        let mut f = Fixture::new();
+        let z = f.name("z");
+        let use_z = f.expr(ast::Expr::Name(z));
+        let written = f.unary(UnaryOp::BitNot, use_z);
+
+        let mut c = f.checker();
+        let complex = c.types.complex(FloatKind::Float);
+        c.declare_object(z, complex, Span::DUMMY);
+        let id = c.check_expr(written);
+
+        assert!(c.errors.is_empty());
+        assert_eq!(
+            dump(&c, id),
+            "unary ~ : _Complex float\n  convert lvalue : _Complex float\n    \
+             decl #0 z : _Complex float lvalue\n"
+        );
+    }
+
+    #[test]
+    fn a_complement_of_a_real_floating_value_is_still_the_mistake_it_always_was() {
+        // The other reading of the operator is the complement, which wants an integer. gcc 16.2.0
+        // refuses `~x` on a `double` in these words, and reading a complex operand as the
+        // conjugate does not make a real one anything.
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let written = f.unary(UnaryOp::BitNot, use_x);
+
+        let mut c = f.checker();
+        let double = c.types.float(FloatKind::Double);
+        c.declare_object(x, double, Span::DUMMY);
+        c.check_expr(written);
+
+        assert_eq!(message(&c), "wrong type argument to bit-complement");
     }
 
     #[test]
