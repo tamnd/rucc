@@ -419,8 +419,13 @@ pub enum TypeKind {
     Int(IntKind),
     /// One of the real floating types.
     Float(FloatKind),
-    /// `_Complex T` for a real floating `T`.
-    Complex(FloatKind),
+    /// `_Complex T`, holding the type of each half.
+    ///
+    /// `T` is a real floating type in C and may also be an integer one, which is a GNU
+    /// extension gcc has always had and which `_Complex int` is. The half's own type is held
+    /// rather than a floating kind, because the two spellings are the same type in every way
+    /// but what a half is, and a kind could only say the floating half of that.
+    Complex(TypeId),
     /// `_BitInt(N)` and `unsigned _BitInt(N)`.
     ///
     /// A distinct kind rather than an integer type with a width, because these do not take

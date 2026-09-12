@@ -71,21 +71,33 @@ pub fn is_complex(types: &Types, id: TypeId) -> bool {
 #[must_use]
 pub fn real_part(types: &Types, id: TypeId) -> Option<TypeId> {
     match bare(types, id) {
-        TypeKind::Complex(kind) => Some(types.float(kind)),
+        TypeKind::Complex(part) => Some(part),
         _ => None,
     }
 }
 
 /// A floating type, which is the real ones and the complex ones together.
+///
+/// `_Complex int` is not one. That type is gcc's rather than C's and its halves are integers,
+/// so every rule written over the floating types has nothing to say about it, and the question
+/// asked here is what those rules ask.
 #[must_use]
 pub fn is_floating(types: &Types, id: TypeId) -> bool {
-    matches!(bare(types, id), TypeKind::Float(_) | TypeKind::Complex(_))
+    match bare(types, id) {
+        TypeKind::Float(_) => true,
+        TypeKind::Complex(part) => is_real_floating(types, part),
+        _ => false,
+    }
 }
 
 /// An arithmetic type, 6.2.5p18: the integer types and the floating types.
+///
+/// `_Complex int` is here too, although C's list does not have it, because gcc's extension is
+/// an arithmetic type in every way the rest of the compiler asks about: it is added, compared,
+/// converted and initialized like the ones C wrote down.
 #[must_use]
 pub fn is_arithmetic(types: &Types, id: TypeId) -> bool {
-    is_integer(types, id) || is_floating(types, id)
+    is_integer(types, id) || is_floating(types, id) || is_complex(types, id)
 }
 
 /// A real type, 6.2.5p17: the integer types and the real floating types.
@@ -282,7 +294,7 @@ mod tests {
     #[test]
     fn a_complex_type_is_arithmetic_and_is_not_real() {
         let mut types = Types::new();
-        let complex = types.complex(FloatKind::Double);
+        let complex = types.complex_float(FloatKind::Double);
 
         assert!(is_arithmetic(&types, complex));
         assert!(is_floating(&types, complex));
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn the_corresponding_real_type_is_the_type_of_both_halves() {
         let mut types = Types::new();
-        let complex = types.complex(FloatKind::Float);
+        let complex = types.complex_float(FloatKind::Float);
         let qualified = types.qualified(complex, Qualifiers::CONST);
 
         assert_eq!(real_part(&types, complex), Some(types.float(FloatKind::Float)));

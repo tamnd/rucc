@@ -1028,22 +1028,30 @@ impl Unit<'_> {
         let span = self.tast.expr_span(value);
         // Everything below this point answers with something, because the folding reports its own
         // failure and asking for the value a second time would report it twice.
-        let halves = match self.fold(value) {
-            Some(Const::Complex { real, imag }) => [real, imag],
-            Some(_) => {
-                self.unsupported("this complex initializer", span);
-                return Some(Vec::new());
-            }
+        let folded = match self.fold(value) {
+            Some(folded) => folded,
             None => return Some(Vec::new()),
         };
         let Some(ty) = repr::value_type(self.types, self.target, part) else {
             self.unsupported("this complex initializer", span);
             return Some(Vec::new());
         };
+        // Each half goes in as the half's own type would, which is the bits of a floating value
+        // and the number of an integer one.
+        let halves = match folded {
+            Const::Complex { real, imag } => {
+                [real, imag].map(|half| Imm::from_bits(half.to_bits()))
+            }
+            Const::ComplexInt { real, imag } => [real, imag].map(|half| Imm::int(half, ty)),
+            _ => {
+                self.unsupported("this complex initializer", span);
+                return Some(Vec::new());
+            }
+        };
         let data = halves
             .into_iter()
             .map(|half| {
-                let imm = self.module.add_imm(Imm::from_bits(half.to_bits()));
+                let imm = self.module.add_imm(half);
                 Datum::Scalar { ty, value: imm }
             })
             .collect();
@@ -1162,7 +1170,7 @@ impl Unit<'_> {
             }
             // A complex constant is two scalars and this answers with one, so it is not one of
             // these. [`Self::complex_image`] puts one in before this is reached.
-            Const::Complex { .. } => None,
+            Const::Complex { .. } | Const::ComplexInt { .. } => None,
             Const::Address(address) => {
                 let symbol = match address.base {
                     Base::Decl(decl) => {

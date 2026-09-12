@@ -374,12 +374,13 @@ impl Flatten<'_> {
             return Some(());
         }
         match self.types.kind(id) {
-            TypeKind::Complex(kind) => {
-                let format = float_format(kind, self.target);
-                let size = repr::size_of(self.types, self.target, id) / 2;
-                let scalar = Scalar { kind: Kind::Float(format), size, align: size };
+            // The two halves, each at its own offset. A half is a scalar whatever its type is,
+            // so the class comes from the half rather than from the keyword in front of it, and
+            // `_Complex int` is two integers where `_Complex double` is two doubles.
+            TypeKind::Complex(part) => {
+                let scalar = scalar(self.types, self.target, part)?;
                 self.pieces.push(Piece { offset: at, scalar });
-                self.pieces.push(Piece { offset: at + size, scalar });
+                self.pieces.push(Piece { offset: at + scalar.size, scalar });
             }
             // A vector comes apart into its lanes the way an array of them would. That is not
             // the class the psABI gives it, which is SSE on x86-64 and a vector register

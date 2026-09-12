@@ -161,7 +161,12 @@ fn spelling(types: &Types, ty: TypeId) -> Option<Name> {
         // part of the name because a `_BitInt(17)` and a `_BitInt(18)` are two types.
         TypeKind::BitInt { width, .. } => Some(Name::Distinct(format!("_BitInt({width})"))),
         TypeKind::Float(kind) => Some(Name::Distinct(floating(kind).to_string())),
-        TypeKind::Complex(kind) => Some(Name::Distinct(format!("_Complex {}", floating(kind)))),
+        // The half's own name after the keyword, which is what makes `_Complex float` and
+        // `_Complex int` two names rather than one.
+        TypeKind::Complex(part) => match spelling(types, part)? {
+            Name::Distinct(name) => Some(Name::Distinct(format!("_Complex {name}"))),
+            Name::Character => Some(Name::Distinct("_Complex char".to_string())),
+        },
         TypeKind::Pointer(_) => Some(Name::Distinct(POINTER.to_string())),
         // `_Atomic int` is not `int`, and an object of one accessed as the other conflicts, which
         // is what sharing the name says. Whether the access is atomic is a separate field on the

@@ -2712,8 +2712,8 @@ impl<'u> Body<'_, 'u> {
     /// A complex value is a pair of real ones, and nothing in the IR holds a pair, so it lives in
     /// memory the way a vector does and every operator over one is written out as the operators
     /// over its halves. That is close to what the hardware does anyway: no target here has a
-    /// complex add, and the multiply and the divide that no target has either are calls into
-    /// libgcc, which takes its operands apart the same way.
+    /// complex add, and the multiply and the divide that no target has either are a call into
+    /// libgcc or four products written out, both of which take the operands apart the same way.
     ///
     /// Only the shapes that reach it are handled. One that is already an object never arrives,
     /// because [`Self::place`] answers those above without asking, and that is a variable, a
@@ -2725,16 +2725,25 @@ impl<'u> Body<'_, 'u> {
             // A complex constant, which is an imaginary constant or anything the folding made
             // of one. It is two constants here the way it is two of everything else.
             ExprKind::Const(value) => {
-                let Const::Complex { real, imag } = self.tast()[value] else {
-                    self.unsupported("this complex constant", span);
-                    return;
-                };
                 let Some(out) = repr::value_type(self.types(), self.target(), part) else {
                     self.unsupported("this complex constant", span);
                     return;
                 };
-                for (imaginary, half) in [(false, real), (true, imag)] {
-                    let value = self.build(span).fconst(out, half.to_bits());
+                // Each half is built the way its own type is built, which is the bits of a
+                // floating value and the number itself where the halves are integers.
+                let halves = match self.tast()[value] {
+                    Const::Complex { real, imag } => {
+                        [real, imag].map(|half| self.build(span).fconst(out, half.to_bits()))
+                    }
+                    Const::ComplexInt { real, imag } => {
+                        [real, imag].map(|half| self.build(span).iconst(out, half))
+                    }
+                    _ => {
+                        self.unsupported("this complex constant", span);
+                        return;
+                    }
+                };
+                for (imaginary, value) in [false, true].into_iter().zip(halves) {
                     let into = self.half_place(at, imaginary, part, span);
                     self.write(into, value, span);
                 }
@@ -2752,9 +2761,9 @@ impl<'u> Body<'_, 'u> {
                     self.write(into, value, span);
                 }
             }
-            // `z * w` and `z / w`, which are the call the runtime answers rather than the four
-            // products written out. Sema has converted both operands to this type already, the
-            // same way it has for the add.
+            // `z * w` and `z / w`, which are one operation over the whole value rather than one
+            // over each half. Sema has converted both operands to this type already, the same
+            // way it has for the add.
             ExprKind::Binary { op: op @ (BinaryOp::Mul | BinaryOp::Div), lhs, rhs } => {
                 let left = self.complex_addr(lhs, span);
                 let right = self.complex_addr(rhs, span);
@@ -2764,7 +2773,7 @@ impl<'u> Body<'_, 'u> {
                         halves.push(self.half(addr, imag, part, span));
                     }
                 }
-                self.complex_call(at, op, &halves, ty, span);
+                self.complex_product(at, op, &halves, ty, span);
             }
             // `-z`, which is the real negation on each half, and `~z`, the conjugate, which is
             // that negation on the imaginary half and the real half left as it stands.
@@ -2773,8 +2782,9 @@ impl<'u> Body<'_, 'u> {
                 for imag in [false, true] {
                     let mut value = self.half(from, imag, part, span);
                     if imag || op == UnaryOp::Minus {
-                        let out = self.func[value].ty;
-                        value = self.build(span).unary(Opcode::FNeg, value, out);
+                        // The arithmetic negation whichever operator was written, since the
+                        // conjugate negates the imaginary half rather than flipping its bits.
+                        value = self.negate(UnaryOp::Minus, value, part, span);
                     }
                     let into = self.half_place(at, imag, part, span);
                     self.write(into, value, span);
@@ -2849,9 +2859,9 @@ impl<'u> Body<'_, 'u> {
         let right = self.complex_addr(rhs, span);
         // The multiply and the divide are one operation over a whole value rather than one over
         // each half, so there is nothing to do half by half: the four halves are widened, the
-        // routine is asked for the answer, and the answer is narrowed back. Where the two types
-        // are the same the answer is built in the object itself, since the routine reads its
-        // arguments as values and the loads have already happened by the time it writes.
+        // answer is built from all four, and the answer is narrowed back. Where the two types
+        // are the same the answer is built in the object itself, since the four halves are read
+        // as values and the loads have already happened by the time anything is written.
         if matches!(op, BinaryOp::Mul | BinaryOp::Div) {
             let mut halves = Vec::with_capacity(4);
             for imag in [false, true] {
@@ -2869,7 +2879,7 @@ impl<'u> Body<'_, 'u> {
             } else {
                 target
             };
-            self.complex_call(at, op, &halves, computation, span);
+            self.complex_product(at, op, &halves, computation, span);
             if narrows {
                 for imag in [false, true] {
                     let value = self.half(at, imag, wide, span);
@@ -2891,11 +2901,132 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// `z * w` and `z / w`, as the call into the runtime that both of them are.
+    /// `z * w` and `z / w`, written whichever way this type's halves want them written.
     ///
-    /// `halves` is the real and imaginary half of the left operand and then of the right, which is
-    /// the order the routines take their four arguments in, and `ty` is the complex type all four
-    /// have and the answer has.
+    /// `halves` is the real and imaginary half of the left operand and then of the right, and `ty`
+    /// is the complex type all four have and the answer has. A floating pair goes to the runtime
+    /// and an integer pair is written out here, which is the split gcc makes too.
+    fn complex_product(
+        &mut self,
+        at: Value,
+        op: BinaryOp,
+        halves: &[Value],
+        ty: TypeId,
+        span: Span,
+    ) {
+        let part = self.real_part(ty);
+        if rucc_types::is_real_floating(self.types(), part) {
+            self.complex_call(at, op, halves, ty, span);
+        } else {
+            self.complex_integer_product(at, op, halves, part, span);
+        }
+    }
+
+    /// `z * w` and `z / w` where the halves are integers, as the arithmetic both of them are.
+    ///
+    /// Written out rather than called, because there is no routine to call: libgcc's family is
+    /// written over the floating formats and has no member for an integer half. gcc writes both
+    /// of these out too, and what is written is what gcc writes rather than the shortest form of
+    /// it, because an integer divide truncates and a program can see which truncations happened.
+    ///
+    /// The multiply is the four products, `(ac - bd) + (ad + bc)i`. The divide is Smith's method,
+    /// which divides through by whichever half of the divisor is larger so that the square that
+    /// the obvious formula puts underneath is never formed. gcc uses it for an integer divisor as
+    /// well as a floating one, so the ratio it starts from is an integer division of its own and
+    /// is usually zero, and the answer is not the one the obvious formula would have reached.
+    fn complex_integer_product(
+        &mut self,
+        at: Value,
+        op: BinaryOp,
+        halves: &[Value],
+        part: TypeId,
+        span: Span,
+    ) {
+        let [a, b, c, d] = [halves[0], halves[1], halves[2], halves[3]];
+        let (real, imaginary) = if op == BinaryOp::Mul {
+            let ac = self.arithmetic(BinaryOp::Mul, a, c, part, span);
+            let bd = self.arithmetic(BinaryOp::Mul, b, d, part, span);
+            let ad = self.arithmetic(BinaryOp::Mul, a, d, part, span);
+            let bc = self.arithmetic(BinaryOp::Mul, b, c, part, span);
+            let real = self.arithmetic(BinaryOp::Sub, ac, bd, part, span);
+            let imaginary = self.arithmetic(BinaryOp::Add, ad, bc, part, span);
+            (real, imaginary)
+        } else {
+            self.complex_integer_divide(a, b, c, d, part, span)
+        };
+        for (imag, value) in [(false, real), (true, imaginary)] {
+            let into = self.half_place(at, imag, part, span);
+            self.write(into, value, span);
+        }
+    }
+
+    /// `(a + bi) / (c + di)` on integer halves, as the two halves of the answer.
+    ///
+    /// Smith's method, which is the one gcc writes: it looks at which half of the divisor is
+    /// larger, divides the smaller by the larger to get a ratio, and works from there, so that
+    /// `c*c + d*d` is never formed and a divisor with one large half does not overflow on the
+    /// way. Written with a choice of operands rather than the two arms gcc branches into, which
+    /// is the same arithmetic with one copy of it: the two arms differ in which half of each
+    /// operand plays which part and in the sign of the imaginary numerator, and nothing else.
+    ///
+    /// The one division that happens before the choice is made is the ratio, and it is safe for
+    /// the same reason gcc's is: its divisor is the larger half, which is zero only when both
+    /// halves are, and a divisor of zero is undefined anyway.
+    fn complex_integer_divide(
+        &mut self,
+        a: Value,
+        b: Value,
+        c: Value,
+        d: Value,
+        part: TypeId,
+        span: Span,
+    ) -> (Value, Value) {
+        // Which half of the divisor is larger, measured without the sign the way gcc measures
+        // it, and unsigned halves have no sign to take off.
+        let left = self.integer_magnitude(c, part, span);
+        let right = self.integer_magnitude(d, part, span);
+        let swap = self.compare(BinaryOp::Lt, left, right, part, span);
+        let mut build = self.build(span);
+        let small = build.select(swap, c, d);
+        let large = build.select(swap, d, c);
+        let matched = build.select(swap, a, b);
+        let other = build.select(swap, b, a);
+        let ratio = self.arithmetic(BinaryOp::Div, small, large, part, span);
+        let scaled = self.arithmetic(BinaryOp::Mul, small, ratio, part, span);
+        let denominator = self.arithmetic(BinaryOp::Add, scaled, large, part, span);
+        let scaled_matched = self.arithmetic(BinaryOp::Mul, matched, ratio, part, span);
+        let scaled_other = self.arithmetic(BinaryOp::Mul, other, ratio, part, span);
+        let real = self.arithmetic(BinaryOp::Add, scaled_matched, other, part, span);
+        let real = self.arithmetic(BinaryOp::Div, real, denominator, part, span);
+        // The imaginary numerator is the same difference in either arm and the arms disagree
+        // about its sign, so both orders are subtracted and the choice picks one.
+        let forward = self.arithmetic(BinaryOp::Sub, scaled_other, matched, part, span);
+        let backward = self.arithmetic(BinaryOp::Sub, matched, scaled_other, part, span);
+        let imaginary = self.build(span).select(swap, forward, backward);
+        let imaginary = self.arithmetic(BinaryOp::Div, imaginary, denominator, part, span);
+        (real, imaginary)
+    }
+
+    /// An integer with its sign taken off, and the value itself where its type has no sign.
+    ///
+    /// The negation wraps rather than overflowing, because the one value it can overflow on is
+    /// the most negative one and taking the sign off that is what gcc's `ABS_EXPR` does with it.
+    fn integer_magnitude(&mut self, value: Value, part: TypeId, span: Span) -> Value {
+        if !repr::is_signed(self.types(), self.target(), part) {
+            return value;
+        }
+        let out = self.func[value].ty;
+        let mut build = self.build(span);
+        let zero = build.iconst(out, 0);
+        let negated = build.binary(Opcode::Sub, zero, value, Flags::NONE);
+        let below = build.icmp(IntPred::Slt, value, zero);
+        build.select(below, negated, value)
+    }
+
+    /// `z * w` and `z / w` on floating halves, as the call into the runtime that both of them are.
+    ///
+    /// The four halves arrive in the order the routines take their four arguments in, which is the
+    /// order [`Self::complex_product`] reads them out in.
     ///
     /// A call rather than the four products and the two sums written out here, because neither
     /// operator is those. C annex G says what a multiply does when a half is an infinity and the
@@ -3821,7 +3952,7 @@ impl<'u> Body<'_, 'u> {
             Const::Float(number) => Some(self.build(span).fconst(ir, number.to_bits())),
             // A complex constant has no value type, so the line above answered before this was
             // reached. Where one goes is [`Self::complex_into`]'s to say.
-            Const::Complex { .. } => None,
+            Const::Complex { .. } | Const::ComplexInt { .. } => None,
             Const::Address(address) => {
                 let symbol = match address.base {
                     rucc_sema::Base::Decl(decl) => self.unit.symbol_of(decl),

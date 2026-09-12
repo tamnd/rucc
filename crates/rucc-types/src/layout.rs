@@ -113,11 +113,11 @@ fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<La
         TypeKind::Bool => Ok(Layout::scalar(1)),
         TypeKind::Int(kind) => Ok(int_layout(kind, target)),
         TypeKind::Float(kind) => Ok(float_layout(kind, target)),
-        TypeKind::Complex(kind) => {
+        TypeKind::Complex(part) => {
             // Two of the component, adjacent, with the component's own alignment rather than
             // the pair's. `_Complex long double` on SysV x86-64 is thirty two bytes aligned to
             // sixteen, which is what both GCC and clang report.
-            let part = float_layout(kind, target);
+            let part = layout(types, part, target)?;
             Ok(Layout::new(part.size * 2, part.align))
         }
         TypeKind::BitInt { width, .. } => Ok(bit_int_layout(width, target)),

@@ -614,11 +614,11 @@ mod tests {
         // is the case that catches an implementation that aligns the pair to its own size.
         let mut types = Types::new();
         let linux = linux();
-        let cfloat = types.complex(FloatKind::Float);
+        let cfloat = types.complex_float(FloatKind::Float);
         assert_eq!(layout(&types, cfloat, &linux).unwrap(), Layout::new(8, 4));
-        let cdouble = types.complex(FloatKind::Double);
+        let cdouble = types.complex_float(FloatKind::Double);
         assert_eq!(layout(&types, cdouble, &linux).unwrap(), Layout::new(16, 8));
-        let cldouble = types.complex(FloatKind::LongDouble);
+        let cldouble = types.complex_float(FloatKind::LongDouble);
         assert_eq!(layout(&types, cldouble, &linux).unwrap(), Layout::new(32, 16));
         let darwin = target("aarch64-apple-darwin");
         assert_eq!(layout(&types, cldouble, &darwin).unwrap(), Layout::new(16, 8));
@@ -1568,9 +1568,9 @@ mod tests {
     fn a_complex_operand_makes_the_answer_complex_after_the_real_types_have_combined() {
         let mut types = Types::new();
         let linux = linux();
-        let cfloat = types.complex(FloatKind::Float);
-        let cdouble = types.complex(FloatKind::Double);
-        let cldouble = types.complex(FloatKind::LongDouble);
+        let cfloat = types.complex_float(FloatKind::Float);
+        let cdouble = types.complex_float(FloatKind::Double);
+        let cldouble = types.complex_float(FloatKind::LongDouble);
         let double = types.float(FloatKind::Double);
         let long_double = types.float(FloatKind::LongDouble);
         let float = types.float(FloatKind::Float);

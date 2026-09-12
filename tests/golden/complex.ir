@@ -7,6 +7,10 @@ global @pinned : bytes 16 = { f64 0x3ff8000000000000, f64 0x4004000000000000 }, 
 global @small_pinned : bytes 8 = { f32 0x3fc00000, f32 0x40200000 }, align 4, linkage(external)
 global @product : bytes 16 = { f64 0xc022800000000000, f64 0x401d000000000000 }, align 8, linkage(external)
 global @quotient : bytes 16 = { f64 0x3fdc28f5c28f5c29, f64 0x3fb47ae147ae147b }, align 8, linkage(external)
+global @wide_pinned : bytes 16 = { i64 3, i64 4 }, align 8, linkage(external)
+global @integral_pinned : bytes 8 = { i32 3, i32 4 }, align 4, linkage(external)
+global @integral_product : bytes 8 = { i32 -5, i32 10 }, align 4, linkage(external)
+global @integral_quotient : bytes 8 = { i32 2, i32 -1 }, align 4, linkage(external)
 
 func @bare(f64, f64) -> (f64, f64), linkage(external) {
 block0(%0: f64, %1: f64):
@@ -369,8 +373,8 @@ block0(%0: f64, %1: f64):
     %6 = ptr_add %4, %5
     store %1 -> %6, align 8
     %7 = fconst.f64 0x0
-    store %7 -> %2, align 8, tbaa !1
     %8 = fconst.f64 0x4004000000000000
+    store %7 -> %2, align 8, tbaa !1
     %9 = iconst.i64 8
     %10 = ptr_add %2, %9
     store %8 -> %10, align 8, tbaa !1
@@ -486,6 +490,303 @@ block0(%0: f64, %1: f64, %2: f64):
     store %27 -> %29, align 4, tbaa !2
     %30 = load.f64 %4, align 4
     return %30
+}
+
+func @integral(i64, i64) -> i64, linkage(external) {
+block0(%0: i64, %1: i64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 8, align 4
+    %4 = alloca, size 8, align 4
+    store %0 -> %3, align 4
+    store %1 -> %4, align 4
+    %5 = load.i32 %3, align 4, tbaa !3
+    %6 = load.i32 %4, align 4, tbaa !3
+    %7 = add.nsw %5, %6
+    store %7 -> %2, align 4, tbaa !3
+    %8 = iconst.i64 4
+    %9 = ptr_add %3, %8
+    %10 = load.i32 %9, align 4, tbaa !3
+    %11 = iconst.i64 4
+    %12 = ptr_add %4, %11
+    %13 = load.i32 %12, align 4, tbaa !3
+    %14 = add.nsw %10, %13
+    %15 = iconst.i64 4
+    %16 = ptr_add %2, %15
+    store %14 -> %16, align 4, tbaa !3
+    %17 = load.i64 %2, align 4
+    return %17
+}
+
+func @flipped(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    %2 = alloca, size 8, align 4
+    store %0 -> %2, align 4
+    %3 = load.i32 %2, align 4, tbaa !3
+    %4 = iconst.i32 0
+    %5 = sub.nsw %4, %3
+    store %5 -> %1, align 4, tbaa !3
+    %6 = iconst.i64 4
+    %7 = ptr_add %2, %6
+    %8 = load.i32 %7, align 4, tbaa !3
+    %9 = iconst.i32 0
+    %10 = sub.nsw %9, %8
+    %11 = iconst.i64 4
+    %12 = ptr_add %1, %11
+    store %10 -> %12, align 4, tbaa !3
+    %13 = load.i64 %1, align 4
+    return %13
+}
+
+func @mirrored(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    %2 = alloca, size 8, align 4
+    store %0 -> %2, align 4
+    %3 = load.i32 %2, align 4, tbaa !3
+    store %3 -> %1, align 4, tbaa !3
+    %4 = iconst.i64 4
+    %5 = ptr_add %2, %4
+    %6 = load.i32 %5, align 4, tbaa !3
+    %7 = iconst.i32 0
+    %8 = sub.nsw %7, %6
+    %9 = iconst.i64 4
+    %10 = ptr_add %1, %9
+    store %8 -> %10, align 4, tbaa !3
+    %11 = load.i64 %1, align 4
+    return %11
+}
+
+func @scaled_up(i64, i64) -> i64, linkage(external) {
+block0(%0: i64, %1: i64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 8, align 4
+    %4 = alloca, size 8, align 4
+    store %0 -> %3, align 4
+    store %1 -> %4, align 4
+    %5 = load.i32 %3, align 4, tbaa !3
+    %6 = iconst.i64 4
+    %7 = ptr_add %3, %6
+    %8 = load.i32 %7, align 4, tbaa !3
+    %9 = load.i32 %4, align 4, tbaa !3
+    %10 = iconst.i64 4
+    %11 = ptr_add %4, %10
+    %12 = load.i32 %11, align 4, tbaa !3
+    %13 = mul.nsw %5, %9
+    %14 = mul.nsw %8, %12
+    %15 = mul.nsw %5, %12
+    %16 = mul.nsw %8, %9
+    %17 = sub.nsw %13, %14
+    %18 = add.nsw %15, %16
+    store %17 -> %2, align 4, tbaa !3
+    %19 = iconst.i64 4
+    %20 = ptr_add %2, %19
+    store %18 -> %20, align 4, tbaa !3
+    %21 = load.i64 %2, align 4
+    return %21
+}
+
+func @shared(i64, i64) -> i64, linkage(external) {
+block0(%0: i64, %1: i64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 8, align 4
+    %4 = alloca, size 8, align 4
+    store %0 -> %3, align 4
+    store %1 -> %4, align 4
+    %5 = load.i32 %3, align 4, tbaa !3
+    %6 = iconst.i64 4
+    %7 = ptr_add %3, %6
+    %8 = load.i32 %7, align 4, tbaa !3
+    %9 = load.i32 %4, align 4, tbaa !3
+    %10 = iconst.i64 4
+    %11 = ptr_add %4, %10
+    %12 = load.i32 %11, align 4, tbaa !3
+    %13 = iconst.i32 0
+    %14 = sub %13, %9
+    %15 = icmp slt %9, %13
+    %16 = select.i32 %15, %14, %9
+    %17 = iconst.i32 0
+    %18 = sub %17, %12
+    %19 = icmp slt %12, %17
+    %20 = select.i32 %19, %18, %12
+    %21 = icmp slt %16, %20
+    %22 = select.i32 %21, %9, %12
+    %23 = select.i32 %21, %12, %9
+    %24 = select.i32 %21, %5, %8
+    %25 = select.i32 %21, %8, %5
+    %26 = sdiv %22, %23
+    %27 = mul.nsw %22, %26
+    %28 = add.nsw %27, %23
+    %29 = mul.nsw %24, %26
+    %30 = mul.nsw %25, %26
+    %31 = add.nsw %29, %25
+    %32 = sdiv %31, %28
+    %33 = sub.nsw %30, %24
+    %34 = sub.nsw %24, %30
+    %35 = select.i32 %21, %33, %34
+    %36 = sdiv %35, %28
+    store %32 -> %2, align 4, tbaa !3
+    %37 = iconst.i64 4
+    %38 = ptr_add %2, %37
+    store %36 -> %38, align 4, tbaa !3
+    %39 = load.i64 %2, align 4
+    return %39
+}
+
+func @unsigned_shared(i64, i64) -> i64, linkage(external) {
+block0(%0: i64, %1: i64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 8, align 4
+    %4 = alloca, size 8, align 4
+    store %0 -> %3, align 4
+    store %1 -> %4, align 4
+    %5 = load.i32 %3, align 4, tbaa !3
+    %6 = iconst.i64 4
+    %7 = ptr_add %3, %6
+    %8 = load.i32 %7, align 4, tbaa !3
+    %9 = load.i32 %4, align 4, tbaa !3
+    %10 = iconst.i64 4
+    %11 = ptr_add %4, %10
+    %12 = load.i32 %11, align 4, tbaa !3
+    %13 = icmp ult %9, %12
+    %14 = select.i32 %13, %9, %12
+    %15 = select.i32 %13, %12, %9
+    %16 = select.i32 %13, %5, %8
+    %17 = select.i32 %13, %8, %5
+    %18 = udiv %14, %15
+    %19 = mul %14, %18
+    %20 = add %19, %15
+    %21 = mul %16, %18
+    %22 = mul %17, %18
+    %23 = add %21, %17
+    %24 = udiv %23, %20
+    %25 = sub %22, %16
+    %26 = sub %16, %22
+    %27 = select.i32 %13, %25, %26
+    %28 = udiv %27, %20
+    store %24 -> %2, align 4, tbaa !3
+    %29 = iconst.i64 4
+    %30 = ptr_add %2, %29
+    store %28 -> %30, align 4, tbaa !3
+    %31 = load.i64 %2, align 4
+    return %31
+}
+
+func @integral_equal(i64, i64) -> i32, linkage(external) {
+block0(%0: i64, %1: i64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 8, align 4
+    store %0 -> %2, align 4
+    store %1 -> %3, align 4
+    %4 = load.i32 %2, align 4, tbaa !3
+    %5 = load.i32 %3, align 4, tbaa !3
+    %6 = icmp eq %4, %5
+    %7 = iconst.i64 4
+    %8 = ptr_add %2, %7
+    %9 = load.i32 %8, align 4, tbaa !3
+    %10 = iconst.i64 4
+    %11 = ptr_add %3, %10
+    %12 = load.i32 %11, align 4, tbaa !3
+    %13 = icmp eq %9, %12
+    %14 = and %6, %13
+    %15 = zext.i32 %14
+    return %15
+}
+
+func @integral_nonzero(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    store %0 -> %1, align 4
+    %2 = load.i32 %1, align 4, tbaa !3
+    %3 = iconst.i32 0
+    %4 = icmp ne %2, %3
+    %5 = iconst.i64 4
+    %6 = ptr_add %1, %5
+    %7 = load.i32 %6, align 4, tbaa !3
+    %8 = iconst.i32 0
+    %9 = icmp ne %7, %8
+    %10 = or %4, %9
+    br_if %10, block1, block2
+
+block1:
+    %11 = iconst.i32 1
+    jump block3(%11)
+
+block2:
+    %12 = iconst.i32 0
+    jump block3(%12)
+
+block3(%13: i32):
+    return %13
+}
+
+func @widened(i64) -> (f64, f64), linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 16, align 8
+    %2 = alloca, size 8, align 4
+    store %0 -> %2, align 4
+    %3 = load.i32 %2, align 4, tbaa !3
+    %4 = sitofp.f64 %3
+    store %4 -> %1, align 8, tbaa !1
+    %5 = iconst.i64 4
+    %6 = ptr_add %2, %5
+    %7 = load.i32 %6, align 4, tbaa !3
+    %8 = sitofp.f64 %7
+    %9 = iconst.i64 8
+    %10 = ptr_add %1, %9
+    store %8 -> %10, align 8, tbaa !1
+    %11 = load.f64 %1, align 8
+    %12 = iconst.i64 8
+    %13 = ptr_add %1, %12
+    %14 = load.f64 %13, align 8
+    return %11, %14
+}
+
+func @truncated(f64, f64) -> i64, linkage(external) {
+block0(%0: f64, %1: f64):
+    %2 = alloca, size 8, align 4
+    %3 = alloca, size 16, align 8
+    store %0 -> %3, align 8
+    %4 = iconst.i64 8
+    %5 = ptr_add %3, %4
+    store %1 -> %5, align 8
+    %6 = load.f64 %3, align 8, tbaa !1
+    %7 = fptosi.i32 %6
+    store %7 -> %2, align 4, tbaa !3
+    %8 = iconst.i64 8
+    %9 = ptr_add %3, %8
+    %10 = load.f64 %9, align 8, tbaa !1
+    %11 = fptosi.i32 %10
+    %12 = iconst.i64 4
+    %13 = ptr_add %2, %12
+    store %11 -> %13, align 4, tbaa !3
+    %14 = load.i64 %2, align 4
+    return %14
+}
+
+func @narrow(i16, i16) -> i16, linkage(external) {
+block0(%0: i16, %1: i16):
+    %2 = alloca, size 2, align 1
+    %3 = alloca, size 2, align 1
+    %4 = alloca, size 2, align 1
+    store %0 -> %3, align 1
+    store %1 -> %4, align 1
+    %5 = load.i8 %3, align 1, tbaa !0
+    %6 = load.i8 %4, align 1, tbaa !0
+    %7 = add.nsw %5, %6
+    store %7 -> %2, align 1, tbaa !0
+    %8 = iconst.i64 1
+    %9 = ptr_add %3, %8
+    %10 = load.i8 %9, align 1, tbaa !0
+    %11 = iconst.i64 1
+    %12 = ptr_add %4, %11
+    %13 = load.i8 %12, align 1, tbaa !0
+    %14 = add.nsw %10, %13
+    %15 = iconst.i64 1
+    %16 = ptr_add %2, %15
+    store %14 -> %16, align 1, tbaa !0
+    %17 = load.i16 %2, align 1
+    return %17
 }
 
 !0 = tbaa "char", offset 0

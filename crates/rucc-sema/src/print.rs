@@ -405,6 +405,7 @@ impl<'a> Printer<'a> {
                 Const::Complex { real, imag } => {
                     format!("const {} + {}i", real.to_hex(), imag.to_hex())
                 }
+                Const::ComplexInt { real, imag } => format!("const {real} + {imag}i"),
                 Const::Address(address) => {
                     let base = match address.base {
                         Base::Decl(decl) => format!("decl #{}", decl.index()),

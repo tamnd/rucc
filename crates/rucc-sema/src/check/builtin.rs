@@ -237,9 +237,9 @@ impl Checker<'_> {
             // the table uses. The keyword comes first here because that is the order the table
             // writes it in, and a signature is not a declaration, so the order it would be
             // allowed in a program is not the question.
-            "_Complex float" => return Some(self.types.complex(FloatKind::Float)),
-            "_Complex double" => return Some(self.types.complex(FloatKind::Double)),
-            "_Complex long double" => return Some(self.types.complex(FloatKind::LongDouble)),
+            "_Complex float" => return Some(self.types.complex_float(FloatKind::Float)),
+            "_Complex double" => return Some(self.types.complex_float(FloatKind::Double)),
+            "_Complex long double" => return Some(self.types.complex_float(FloatKind::LongDouble)),
             // Not a fixed kind on any target. Whichever unsigned type is wide enough to hold a
             // pointer is what a header would have made `size_t`, and it has to be the one
             // `sizeof` produces or a program that hands one to the other converts for nothing.

@@ -1227,7 +1227,12 @@ mod tests {
 
         fn int(&mut self, value: u128) -> ast::ExprId {
             let ty = IntConstantType::Standard(IntKind::Int);
-            let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
             self.ast.expr(ast::Expr::Int(id), Span::DUMMY)
         }
 

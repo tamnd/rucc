@@ -109,7 +109,12 @@ impl Speller<'_> {
             TypeKind::Bool => String::from("_Bool"),
             TypeKind::Int(kind) => String::from(kind.as_str()),
             TypeKind::Float(kind) => String::from(kind.as_str()),
-            TypeKind::Complex(kind) => format!("_Complex {}", kind.as_str()),
+            // The half's own spelling after the keyword, which is `_Complex double` and is also
+            // `_Complex unsigned int`. A half is always a type with no declarator in it, so
+            // there is nothing to write around the name and the whole of it goes in front.
+            TypeKind::Complex(part) => {
+                format!("_Complex {}", self.declaration(part, Declarator::nothing()))
+            }
             TypeKind::BitInt { signed, width } => {
                 let sign = if signed { "" } else { "unsigned " };
                 format!("{sign}_BitInt({width})")
