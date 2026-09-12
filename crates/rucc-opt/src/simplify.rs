@@ -143,20 +143,27 @@ const CANONICAL: [Plan; 1] = [[Shown::Const, Shown::Var, Shown::Reg]];
 /// never read and say [`Shown::Reg`] because that is what an operand nobody asks about is.
 const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 
-/// How the operands are shown to a comparison rule, which is the one plan tier five is matched
+/// How the operands are shown to a comparison rule, which is the two plans tier five is matched
 /// under.
 ///
 /// Every rule in that tier compares something against a constant, and writes the constant on the
-/// right, so the right operand has to be shown as a number and the left one has to be shown as a
-/// register. That is the first of [`PLANS`] and this is the same triple, spelled again rather than
-/// borrowed, because the tier is matched under one plan and the other two would be tried for
-/// nothing: a comparison with the constant on the left matches no rule here, and neither does one
-/// with no constant at all.
+/// right, so the right operand is shown as a number in both. What differs is the left one. Most of
+/// the tier is about the value itself and shows it as a register, which is the first of [`PLANS`]
+/// spelled again rather than borrowed, because the other two of those would be tried for nothing:
+/// a comparison with the constant on the left matches no rule here, and neither does one with no
+/// constant at all.
+///
+/// The rest of the tier is about a widened boolean compared against zero, which is two
+/// instructions at once, so the left operand is shown as the instruction that computed it the way
+/// tier four shows its one operand. That is the second plan, and it is a plan of its own rather
+/// than a rule in tier four because the instruction that matched is a comparison: the predicate is
+/// not part of the opcode, which is what makes a tier a separate file here.
 ///
 /// The constant on the left is not the missing half of the tier. A comparison is not commutative,
 /// so `0 < x` is not `x < 0` with the operands swapped, it is `x > 0`, and turning the first into
 /// the second is a canonicalisation that belongs in tier three rather than four more rules here.
-const COMPARE: [Plan; 1] = [[Shown::Reg, Shown::Const, Shown::Reg]];
+const COMPARE: [Plan; 2] =
+    [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Expand, Shown::Const, Shown::Reg]];
 
 /// The rule tables, one per tier, in the order they are tried, each with the plans it is matched
 /// under.
@@ -890,8 +897,9 @@ mod tests {
         );
         assert_eq!(
             compare::TABLE.rules.len(),
-            64,
-            "tier five is four predicates against each of four constants at four widths"
+            72,
+            "tier five is four predicates against each of four constants at four widths, and a \
+             widened boolean against zero under two predicates at the same four"
         );
     }
 
@@ -902,12 +910,15 @@ mod tests {
         assert_eq!(PLANS.len(), 3);
     }
 
-    /// Tier four is matched with its operand expanded, and nothing else is.
+    /// Tier four is matched with its operand expanded, and none of the shared plans expands one.
     ///
     /// Every pattern in that tier has an instruction at its second level, so under any of the
     /// plans above it every rule in it would fail at the first node and the whole tier would be a
     /// file nobody matched with. Asserted rather than left to be read, because that failure is
     /// silent.
+    ///
+    /// Tier five expands as well, under the second of its own two plans, which is the half of it
+    /// about a widened boolean compared against zero.
     #[test]
     fn a_width_rule_is_only_matched_with_its_operand_expanded() {
         let (_, plans) = TABLES[2];
@@ -918,6 +929,8 @@ mod tests {
             assert_ne!(plan, plans[0], "no shared plan expands an operand");
         }
         assert_ne!(CANONICAL[0], plans[0]);
+        assert_eq!(COMPARE[1][0], Shown::Expand);
+        assert_eq!(COMPARE[1][1], Shown::Const);
     }
 
     /// Tier three is matched under its own plan and no other.
@@ -940,14 +953,18 @@ mod tests {
     ///
     /// Every rule in it writes the constant there, so under the plan that shows a constant left
     /// operand as a number none of them would match and under the plan that refuses a constant on
-    /// the right none of them would either. One plan, and it is the first of the shared three.
+    /// the right none of them would either. Two plans, differing only in how the left operand is
+    /// shown, which is what the two halves of the tier are about.
     #[test]
     fn a_comparison_rule_is_only_matched_with_the_constant_on_the_right() {
         let (_, plans) = TABLES[3];
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0], COMPARE[0]);
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans, COMPARE);
+        for plan in plans {
+            assert_eq!(plan[1], Shown::Const);
+        }
         assert_eq!(plans[0][0], Shown::Reg);
-        assert_eq!(plans[0][1], Shown::Const);
+        assert_eq!(plans[1][0], Shown::Expand);
     }
 
     /// The edge of a type, at each width, read each way.
@@ -1044,6 +1061,71 @@ mod tests {
                     assert_eq!(func[args[1]].ty, ty, "i{width} {pred:?} {edge} narrowed its bound");
                 }
             }
+        }
+    }
+
+    /// A boolean widened and compared against zero is the boolean.
+    ///
+    /// The shape `if (flag)` and `(long)(a == b)` and every `__builtin_expect` arrive in, since
+    /// each of them widens a comparison and then asks whether the wide value is zero. What the
+    /// test asserts is that the branch ends up on the comparison itself, at one bit, with the
+    /// widening left for dead code elimination.
+    #[test]
+    fn a_widened_boolean_compared_against_zero_is_the_boolean() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            let (_, mut func, block) = blank();
+            let x = func.append_param(block, Type::int(32));
+            let mut build = Builder::new(&mut func, block);
+            let seven = build.iconst(Type::int(32), 7);
+            let flag = build.icmp(IntPred::Eq, x, seven);
+            let wide = build.unary(Opcode::ZExt, flag, ty);
+            let zero = build.iconst(ty, 0);
+            let test = build.icmp(IntPred::Ne, wide, zero);
+            build.ret(&[test]);
+            assert!(simplify(&mut func), "i{width} was left alone");
+            let got = returned(&func, block);
+            assert_eq!(got, flag, "i{width} did not end up on the comparison");
+            assert_eq!(func[got].ty, Type::int(1), "i{width} is a bit");
+        }
+    }
+
+    /// And one compared against zero the other way is that boolean negated.
+    ///
+    /// The rule writes an exclusive or with a one bit one, because what is under the widening is
+    /// whatever produced the bit and there is no predicate to flip in the general case. Where it
+    /// is a comparison, which is this test, the hand written rewrite above the tables turns that
+    /// exclusive or into the opposite comparison, and the pair composes into one instruction.
+    ///
+    /// Two runs, because the walk visits each instruction once and the hand written rewrite is
+    /// tried before the tables are: the exclusive or did not exist when this instruction was
+    /// looked at. Every pipeline above `-O0` names the pass twice, which is where the second run
+    /// comes from in a real compile.
+    #[test]
+    fn a_widened_boolean_that_is_zero_is_the_boolean_negated() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            let (_, mut func, block) = blank();
+            let x = func.append_param(block, Type::int(32));
+            let mut build = Builder::new(&mut func, block);
+            let seven = build.iconst(Type::int(32), 7);
+            let flag = build.icmp(IntPred::Eq, x, seven);
+            let wide = build.unary(Opcode::ZExt, flag, ty);
+            let zero = build.iconst(ty, 0);
+            let test = build.icmp(IntPred::Eq, wide, zero);
+            build.ret(&[test]);
+            assert!(simplify(&mut func), "i{width} was left alone");
+            let got = returned(&func, block);
+            assert_eq!(came_from(&func, got).0, Opcode::Xor, "i{width} is not a negation");
+            assert!(simplify(&mut func), "i{width} kept the exclusive or");
+            assert_eq!(
+                came_from(&func, got),
+                (Opcode::ICmp, Extra::IntPred(IntPred::Ne)),
+                "i{width} did not come out as the opposite comparison"
+            );
+            let args = operands(&func, got);
+            assert_eq!(args[0], x, "i{width} lost its value");
+            assert_eq!(number(&func, args[1]), 7, "i{width} lost its bound");
         }
     }
 
