@@ -140,6 +140,14 @@ int __gttf2(_Float128 left, _Float128 right);
 int __letf2(_Float128 left, _Float128 right);
 int __lttf2(_Float128 left, _Float128 right);
 int __unordtf2(_Float128 left, _Float128 right);
+_Float128 __floatsitf(int value);
+_Float128 __floatunsitf(unsigned int value);
+_Float128 __floatditf(long long value);
+_Float128 __floatunditf(unsigned long long value);
+int __fixtfsi(_Float128 value);
+unsigned int __fixunstfsi(_Float128 value);
+long long __fixtfdi(_Float128 value);
+unsigned long long __fixunstfdi(_Float128 value);
 
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
@@ -1325,7 +1333,7 @@ static unsigned long long mix_quad(unsigned long long digest, _Float128 value) {
 }
 
 /* One pair through all thirteen routines at this format, which is the same thirteen as the two below
- * it minus the conversions, since those are not written yet at this width.
+ * it minus the conversions. Those take one operand and have a family of their own further down.
  */
 static unsigned long long thirteen_quad(unsigned long long digest, uwide left, uwide right) {
     _Float128 one = quad_of(left);
@@ -1472,6 +1480,128 @@ static void quad_corner_cases(int which) {
     say("quadcorner", which, digest);
 }
 
+/* One integer through the four conversions up at this width, read as both widths of integer the way
+ * the two narrower families do it.
+ */
+static unsigned long long up_quad(unsigned long long digest, unsigned long long value) {
+    digest = mix_quad(digest, __floatsitf((int)value));
+    digest = mix_quad(digest, __floatunsitf((unsigned int)value));
+    digest = mix_quad(digest, __floatditf((long long)value));
+    digest = mix_quad(digest, __floatunditf(value));
+    cases += 4;
+    return digest;
+}
+
+/* One pattern through the four conversions down, including the patterns with no answer, for the reason
+ * the narrower families give: both sides of this comparison are implementations of these routines, so
+ * the zero they hand back where C has no answer is a convention they can both be held to.
+ */
+static unsigned long long down_quad(unsigned long long digest, uwide pattern) {
+    _Float128 value = quad_of(pattern);
+    digest = mix_number(digest, __fixtfsi(value));
+    digest = mix_number(digest, (long long)__fixunstfsi(value));
+    digest = mix_number(digest, __fixtfdi(value));
+    digest = mix_wide(digest, (uwide)__fixunstfdi(value));
+    cases += 4;
+    return digest;
+}
+
+/* A pattern whose exponent is spread over the range where going down has an answer to give: from
+ * 2^-27, which truncates to zero, up to 2^67, which is past all four types. The fraction and the sign
+ * are random bits, since a negative value is its own case in each of the four.
+ */
+static uwide quad_in_range(void) {
+    return quad_at(16356 + (next_random() % 95));
+}
+
+/* The patterns exactly at the top of each integer type and the ones either side of them, which is
+ * where the range check in each routine going down gets decided. Unlike the double precision table,
+ * every one of these four tops is a quad exactly and the pattern below it is one step below it, since
+ * the spacing here does not reach one until 2^112.
+ */
+static const uwide QUAD_BOUNDS[] = {
+    QUAD(0x401DFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* either side of 2^31 */
+    QUAD(0x401E000000000000, 0x0000000000000000),
+    QUAD(0x401E000000000000, 0x0000000000000001),
+    QUAD(0x401EFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^32 */
+    QUAD(0x401F000000000000, 0x0000000000000000),
+    QUAD(0x401F000000000000, 0x0000000000000001),
+    QUAD(0x403DFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^63 */
+    QUAD(0x403E000000000000, 0x0000000000000000),
+    QUAD(0x403E000000000000, 0x0000000000000001),
+    QUAD(0x403EFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^64 */
+    QUAD(0x403F000000000000, 0x0000000000000000),
+    QUAD(0x403F000000000000, 0x0000000000000001),
+    QUAD(0x3FFE000000000000, 0x0000000000000000), /* a half */
+    QUAD(0x3FFF000000000000, 0x0000000000000000), /* one */
+    QUAD(0x3FFF800000000000, 0x0000000000000000), /* one and a half */
+    QUAD(0x406F000000000000, 0x0000000000000000), /* 2^112, where the spacing reaches one */
+    QUAD(0x406F000000000000, 0x0000000000000001),
+};
+
+#define QUAD_BOUNDS_COUNT ((int)(sizeof QUAD_BOUNDS / sizeof QUAD_BOUNDS[0]))
+
+/* The integers where a type ends and the ones either side. The narrower tables carry the first
+ * integer their format cannot hold with its neighbours as well, and this one has no such entry: a
+ * quad holds every integer up to 2^113 exactly, so every row here goes up with nothing lost.
+ */
+static const unsigned long long QUAD_INTEGER_EDGES[] = {
+    0ull,
+    1ull,
+    2ull,
+    2147483647ull,
+    2147483648ull,
+    2147483649ull,
+    4294967295ull,
+    4294967296ull,
+    4294967297ull,
+    9223372036854775807ull,
+    9223372036854775808ull,
+    9223372036854775809ull,
+    18446744073709551614ull,
+    18446744073709551615ull,
+};
+
+#define QUAD_INTEGER_EDGES_COUNT ((int)(sizeof QUAD_INTEGER_EDGES / sizeof QUAD_INTEGER_EDGES[0]))
+
+#define QUAD_INT_CASES 1024
+
+static void quad_integers(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_INT_CASES; i++) {
+        unsigned long long value = next_random();
+        digest = up_quad(digest, value);
+        /* The same bits with most of them gone, so that a value the narrow pair of routines can hold
+         * is asked as well as a wide one. The narrower families need a third shape here, just past
+         * where their format stops holding every integer, and this one has nowhere to put it.
+         */
+        digest = up_quad(digest, value >> 40);
+        digest = down_quad(digest, random_quad());
+        digest = down_quad(digest, quad_in_range());
+    }
+    say("quadint", round, digest);
+}
+
+/* The edges by name: every corner pattern down at both signs, every integer edge up with its
+ * negation, and the patterns either side of each type's top down at both signs.
+ */
+static void quad_corner_integers(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < QUAD_CORNER_COUNT; i++) {
+        digest = down_quad(digest, QUAD_CORNERS[i]);
+        digest = down_quad(digest, QUAD_CORNERS[i] | QUAD_SIGN);
+    }
+    for (int i = 0; i < QUAD_INTEGER_EDGES_COUNT; i++) {
+        digest = up_quad(digest, QUAD_INTEGER_EDGES[i]);
+        digest = up_quad(digest, 0ull - QUAD_INTEGER_EDGES[i]);
+    }
+    for (int i = 0; i < QUAD_BOUNDS_COUNT; i++) {
+        digest = down_quad(digest, QUAD_BOUNDS[i]);
+        digest = down_quad(digest, QUAD_BOUNDS[i] | QUAD_SIGN);
+    }
+    say("quadintcorner", 0, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -1533,10 +1663,12 @@ int main(int argc, char **argv) {
     for (int i = 0; i < QUAD_CORNER_COUNT; i++) {
         quad_corner_cases(i);
     }
+    quad_corner_integers();
     for (int i = 0; i < QUAD_ROUNDS; i++) {
         quads(i);
         quad_ties(i);
         quad_edges(i);
+        quad_integers(i);
     }
     printf("cases %ld\n", cases);
     return 0;

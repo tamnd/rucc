@@ -626,6 +626,141 @@ pub extern "C" fn __unordtf2(left: Quad, right: Quad) -> i32 {
     i32::from(is_nan(bits_of(left)) || is_nan(bits_of(right)))
 }
 
+/// The largest magnitude each of the four integer types holds. A signed type holds one more going
+/// down than it does going up, which is why the sign and the magnitude travel separately below.
+const SIGNED_32: u128 = 1 << 31;
+const SIGNED_64: u128 = 1 << 63;
+const UNSIGNED_32: u128 = u32::MAX as u128;
+const UNSIGNED_64: u128 = u64::MAX as u128;
+
+/// The quad nearest an integer, with the sign handed in separately so that the caller can take the
+/// magnitude of the most negative value of its type without overflowing it.
+///
+/// One line, for the reason the two narrower files give: an integer already is a significand and a
+/// scale of zero, and `round_from` turns those into the nearest quad. What is different here is that
+/// the rounding never does anything, since a hundred and thirteen bits hold every sixty four bit
+/// integer exactly, so all four of these are exact where two of the four one format down are not.
+fn quad_from_integer(sign: u128, magnitude: u64) -> u128 {
+    round_from(sign, Wide::narrow(u128::from(magnitude)), 0, false)
+}
+
+/// The part of a quad that is on the integer side of the point, as a sign and a magnitude.
+///
+/// `None` where there is no integer part to hand back at all, which is an infinity, a not a number,
+/// and a magnitude past what the widest of the four types holds. A value below one is not that case:
+/// its integer part is zero, which is an answer.
+fn integer_from_quad(bits: u128) -> Option<(u128, u128)> {
+    if (bits >> FRACTION) & TOP == TOP {
+        return None;
+    }
+    let sign = bits & SIGN;
+    let parts = parts(bits);
+    if parts.significand == 0 {
+        return Some((sign, 0));
+    }
+    // Which power of two the highest bit of the value is worth. Nothing above sixty three has an
+    // answer in any of the four types, and refusing here rather than after the shift is also what
+    // keeps the shift inside a `u128`, since a significand is a hundred and thirteen bits wide and a
+    // scale can take it far past the top of one.
+    let leading = parts.scale + parts.significand.ilog2() as i32;
+    if leading > 63 {
+        return None;
+    }
+    if parts.scale >= 0 {
+        Some((sign, parts.significand << parts.scale))
+    } else if -parts.scale >= 128 {
+        Some((sign, 0))
+    } else {
+        Some((sign, parts.significand >> -parts.scale))
+    }
+}
+
+/// What the two signed routines share: the integer part held to the bounds of the caller's type.
+/// `bound` is the largest magnitude that type holds going down, and one more than the largest it
+/// holds going up.
+///
+/// `None` where the value has no answer that type can hold, which the entry points turn into the zero
+/// that section 12.8 records as the shared convention for a case C leaves undefined.
+fn truncate(bits: u128, bound: u128) -> Option<i128> {
+    let (sign, magnitude) = integer_from_quad(bits)?;
+    let negative = sign != 0 && magnitude != 0;
+    let largest = if negative { bound } else { bound - 1 };
+    if magnitude > largest {
+        return None;
+    }
+    Some(if negative { -(magnitude as i128) } else { magnitude as i128 })
+}
+
+/// What the two unsigned routines share. A negative value is undefined for these in C, so it is the
+/// same zero as the out of range case, and a negative value whose integer part is zero is not that:
+/// the answer there is zero because that is the value.
+fn truncate_unsigned(bits: u128, bound: u128) -> Option<u128> {
+    let (sign, magnitude) = integer_from_quad(bits)?;
+    if sign != 0 && magnitude != 0 {
+        return None;
+    }
+    if magnitude > bound {
+        return None;
+    }
+    Some(magnitude)
+}
+
+/// `_Float128 __floatsitf(int)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatsitf(value: i32) -> Quad {
+    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, u64::from(value.unsigned_abs())))
+}
+
+/// `_Float128 __floatunsitf(unsigned int)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatunsitf(value: u32) -> Quad {
+    quad_of(quad_from_integer(0, u64::from(value)))
+}
+
+/// `_Float128 __floatditf(long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatditf(value: i64) -> Quad {
+    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, value.unsigned_abs()))
+}
+
+/// `_Float128 __floatunditf(unsigned long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatunditf(value: u64) -> Quad {
+    quad_of(quad_from_integer(0, value))
+}
+
+/// `int __fixtfsi(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixtfsi(value: Quad) -> i32 {
+    truncate(bits_of(value), SIGNED_32).map_or(0, |answer| answer as i32)
+}
+
+/// `unsigned int __fixunstfsi(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixunstfsi(value: Quad) -> u32 {
+    truncate_unsigned(bits_of(value), UNSIGNED_32).map_or(0, |answer| answer as u32)
+}
+
+/// `long long __fixtfdi(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixtfdi(value: Quad) -> i64 {
+    truncate(bits_of(value), SIGNED_64).map_or(0, |answer| answer as i64)
+}
+
+/// `unsigned long long __fixunstfdi(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixunstfdi(value: Quad) -> u64 {
+    truncate_unsigned(bits_of(value), UNSIGNED_64).map_or(0, |answer| answer as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use std::vec::Vec;
@@ -1165,6 +1300,362 @@ mod tests {
                 check_comparisons(*left, *right);
             }
         }
+    }
+
+    /// The quads libgcc makes of an integer, for fourteen integers by name and six rounds of random
+    /// ones at two widths, through all four routines going up. `which` is the routine, in the order
+    /// `__floatsitf`, `__floatunsitf`, `__floatditf`, `__floatunditf`, and the integer is carried as
+    /// the bits of it, which each routine reads at its own width and signedness.
+    #[rustfmt::skip]
+    const LIBGCC_UP: &[(u64, u8, u128)] = &[
+        (0x0000000000000000, 0, 0x00000000000000000000000000000000),
+        (0x0000000000000000, 1, 0x00000000000000000000000000000000),
+        (0x0000000000000000, 2, 0x00000000000000000000000000000000),
+        (0x0000000000000000, 3, 0x00000000000000000000000000000000),
+        (0x0000000000000001, 0, 0x3fff0000000000000000000000000000),
+        (0x0000000000000001, 1, 0x3fff0000000000000000000000000000),
+        (0x0000000000000001, 2, 0x3fff0000000000000000000000000000),
+        (0x0000000000000001, 3, 0x3fff0000000000000000000000000000),
+        (0xffffffffffffffff, 0, 0xbfff0000000000000000000000000000),
+        (0xffffffffffffffff, 1, 0x401efffffffe00000000000000000000),
+        (0xffffffffffffffff, 2, 0xbfff0000000000000000000000000000),
+        (0xffffffffffffffff, 3, 0x403efffffffffffffffe000000000000),
+        (0x0000000000000007, 0, 0x4001c000000000000000000000000000),
+        (0x0000000000000007, 1, 0x4001c000000000000000000000000000),
+        (0x0000000000000007, 2, 0x4001c000000000000000000000000000),
+        (0x0000000000000007, 3, 0x4001c000000000000000000000000000),
+        (0x00000000fffffff9, 0, 0xc001c000000000000000000000000000),
+        (0x00000000fffffff9, 1, 0x401efffffff200000000000000000000),
+        (0x00000000fffffff9, 2, 0x401efffffff200000000000000000000),
+        (0x00000000fffffff9, 3, 0x401efffffff200000000000000000000),
+        (0x000000007fffffff, 0, 0x401dfffffffc00000000000000000000),
+        (0x000000007fffffff, 1, 0x401dfffffffc00000000000000000000),
+        (0x000000007fffffff, 2, 0x401dfffffffc00000000000000000000),
+        (0x000000007fffffff, 3, 0x401dfffffffc00000000000000000000),
+        (0x0000000080000000, 0, 0xc01e0000000000000000000000000000),
+        (0x0000000080000000, 1, 0x401e0000000000000000000000000000),
+        (0x0000000080000000, 2, 0x401e0000000000000000000000000000),
+        (0x0000000080000000, 3, 0x401e0000000000000000000000000000),
+        (0x00000000ffffffff, 0, 0xbfff0000000000000000000000000000),
+        (0x00000000ffffffff, 1, 0x401efffffffe00000000000000000000),
+        (0x00000000ffffffff, 2, 0x401efffffffe00000000000000000000),
+        (0x00000000ffffffff, 3, 0x401efffffffe00000000000000000000),
+        (0x7fffffffffffffff, 0, 0xbfff0000000000000000000000000000),
+        (0x7fffffffffffffff, 1, 0x401efffffffe00000000000000000000),
+        (0x7fffffffffffffff, 2, 0x403dfffffffffffffffc000000000000),
+        (0x7fffffffffffffff, 3, 0x403dfffffffffffffffc000000000000),
+        (0x8000000000000000, 0, 0x00000000000000000000000000000000),
+        (0x8000000000000000, 1, 0x00000000000000000000000000000000),
+        (0x8000000000000000, 2, 0xc03e0000000000000000000000000000),
+        (0x8000000000000000, 3, 0x403e0000000000000000000000000000),
+        (0x0123456789abcdef, 0, 0xc01dd950c84400000000000000000000),
+        (0x0123456789abcdef, 1, 0x401e13579bde00000000000000000000),
+        (0x0123456789abcdef, 2, 0x403723456789abcdef00000000000000),
+        (0x0123456789abcdef, 3, 0x403723456789abcdef00000000000000),
+        (0xfedcba9876543210, 0, 0x401dd950c84000000000000000000000),
+        (0xfedcba9876543210, 1, 0x401dd950c84000000000000000000000),
+        (0xfedcba9876543210, 2, 0xc03723456789abcdf000000000000000),
+        (0xfedcba9876543210, 3, 0x403efdb97530eca86420000000000000),
+        (0x0000000100000000, 0, 0x00000000000000000000000000000000),
+        (0x0000000100000000, 1, 0x00000000000000000000000000000000),
+        (0x0000000100000000, 2, 0x401f0000000000000000000000000000),
+        (0x0000000100000000, 3, 0x401f0000000000000000000000000000),
+        (0x001fffffffffffff, 0, 0xbfff0000000000000000000000000000),
+        (0x001fffffffffffff, 1, 0x401efffffffe00000000000000000000),
+        (0x001fffffffffffff, 2, 0x4033fffffffffffff000000000000000),
+        (0x001fffffffffffff, 3, 0x4033fffffffffffff000000000000000),
+        (0x856d9c28a9741a02, 0, 0xc01d5a2f97f800000000000000000000),
+        (0x856d9c28a9741a02, 1, 0x401e52e8340400000000000000000000),
+        (0x856d9c28a9741a02, 2, 0xc03dea498f5d5a2f97f8000000000000),
+        (0x856d9c28a9741a02, 3, 0x403e0adb385152e83404000000000000),
+        (0x0000000042b6ce14, 0, 0x401d0adb385000000000000000000000),
+        (0x0000000042b6ce14, 1, 0x401d0adb385000000000000000000000),
+        (0x0000000042b6ce14, 2, 0x401d0adb385000000000000000000000),
+        (0x0000000042b6ce14, 3, 0x401d0adb385000000000000000000000),
+        (0x86ad14d4430c32b6, 0, 0x401d0c30cad800000000000000000000),
+        (0x86ad14d4430c32b6, 1, 0x401d0c30cad800000000000000000000),
+        (0x86ad14d4430c32b6, 2, 0xc03de54bacaef3cf3528000000000000),
+        (0x86ad14d4430c32b6, 3, 0x403e0d5a29a88618656c000000000000),
+        (0x0000000043568a6a, 0, 0x401d0d5a29a800000000000000000000),
+        (0x0000000043568a6a, 1, 0x401d0d5a29a800000000000000000000),
+        (0x0000000043568a6a, 2, 0x401d0d5a29a800000000000000000000),
+        (0x0000000043568a6a, 3, 0x401d0d5a29a800000000000000000000),
+        (0xc366ae2c20764753, 0, 0x401c03b23a9800000000000000000000),
+        (0xc366ae2c20764753, 1, 0x401c03b23a9800000000000000000000),
+        (0xc366ae2c20764753, 2, 0xc03ce4ca8e9efc4dc568000000000000),
+        (0xc366ae2c20764753, 3, 0x403e86cd5c5840ec8ea6000000000000),
+        (0x0000000061b35716, 0, 0x401d86cd5c5800000000000000000000),
+        (0x0000000061b35716, 1, 0x401d86cd5c5800000000000000000000),
+        (0x0000000061b35716, 2, 0x401d86cd5c5800000000000000000000),
+        (0x0000000061b35716, 3, 0x401d86cd5c5800000000000000000000),
+        (0xce6336ec93771f1d, 0, 0xc01db223838c00000000000000000000),
+        (0xce6336ec93771f1d, 1, 0x401e26ee3e3a00000000000000000000),
+        (0xce6336ec93771f1d, 2, 0xc03c8ce6489b64470718000000000000),
+        (0xce6336ec93771f1d, 3, 0x403e9cc66dd926ee3e3a000000000000),
+        (0x0000000067319b76, 0, 0x401d9cc66dd800000000000000000000),
+        (0x0000000067319b76, 1, 0x401d9cc66dd800000000000000000000),
+        (0x0000000067319b76, 2, 0x401d9cc66dd800000000000000000000),
+        (0x0000000067319b76, 3, 0x401d9cc66dd800000000000000000000),
+        (0x1a79312058b39663, 0, 0x401d62ce598c00000000000000000000),
+        (0x1a79312058b39663, 1, 0x401d62ce598c00000000000000000000),
+        (0x1a79312058b39663, 2, 0x403ba79312058b396630000000000000),
+        (0x1a79312058b39663, 3, 0x403ba79312058b396630000000000000),
+        (0x000000000d3c9890, 0, 0x401aa793120000000000000000000000),
+        (0x000000000d3c9890, 1, 0x401aa793120000000000000000000000),
+        (0x000000000d3c9890, 2, 0x401aa793120000000000000000000000),
+        (0x000000000d3c9890, 3, 0x401aa793120000000000000000000000),
+        (0x3ca10c145535098f, 0, 0x401d54d4263c00000000000000000000),
+        (0x3ca10c145535098f, 1, 0x401d54d4263c00000000000000000000),
+        (0x3ca10c145535098f, 2, 0x403ce50860a2a9a84c78000000000000),
+        (0x3ca10c145535098f, 3, 0x403ce50860a2a9a84c78000000000000),
+        (0x000000001e50860a, 0, 0x401be50860a000000000000000000000),
+        (0x000000001e50860a, 1, 0x401be50860a000000000000000000000),
+        (0x000000001e50860a, 2, 0x401be50860a000000000000000000000),
+        (0x000000001e50860a, 3, 0x401be50860a000000000000000000000),
+    ];
+
+    /// The integers libgcc truncates a quad to, for the values where C defines all four answers,
+    /// which is a magnitude below 2^31 and a value at or above zero.
+    #[rustfmt::skip]
+    const LIBGCC_DOWN: &[(u128, i32, u32, i64, u64)] = &[
+        (0x00000000000000000000000000000001, 0, 0, 0, 0),
+        (0x3ffe0000000000000000000000000000, 0, 0, 0, 0),
+        (0x3fff0000000000000000000000000000, 1, 1, 1, 1),
+        (0x3fff8000000000000000000000000000, 1, 1, 1, 1),
+        (0x401dfffffffffc000000000000000000, 2147483647, 2147483647, 2147483647, 2147483647),
+        (0x401dfffffffffbffffffffffffffffff, 2147483647, 2147483647, 2147483647, 2147483647),
+        (0x401b592f2cfca7a74a65d13977285728, 361951951, 361951951, 361951951, 361951951),
+        (0x4015c8f426bf199df806bab4c3dba0ee, 7486729, 7486729, 7486729, 7486729),
+        (0x400d28cd5306e837aaa36b90c5520827, 18995, 18995, 18995, 18995),
+        (0x4007179b6f92b8bcac7169758f6e32cd, 279, 279, 279, 279),
+        (0x401608c2bd956c136cc0eba0b421220b, 8675678, 8675678, 8675678, 8675678),
+        (0x4009d6415c837c4a3bafc2f2c1082832, 1881, 1881, 1881, 1881),
+        (0x400522d29041888bea384c1f86a6495a, 72, 72, 72, 72),
+        (0x400e100bfa4cc56e2c4637d568ecc764, 34821, 34821, 34821, 34821),
+    ];
+
+    /// The same for a negative value, where C defines the two signed routines and leaves the two
+    /// unsigned ones undefined, so only the two are held to libgcc here.
+    #[rustfmt::skip]
+    const LIBGCC_DOWN_NEGATIVE: &[(u128, i32, i64)] = &[
+        (0x80000000000000000000000000000001, 0, 0),
+        (0xbffe0000000000000000000000000000, 0, 0),
+        (0xbfff0000000000000000000000000000, -1, -1),
+        (0xbfff8000000000000000000000000000, -1, -1),
+        (0xc01e0000000000000000000000000000, -2147483648, -2147483648),
+        (0xc01dffffffffffffffffffffffffffff, -2147483647, -2147483647),
+        (0xc01694c9bbce95e583958bb6aabcd18e, -13264093, -13264093),
+        (0xc0187fe4197e2cfa4510fb83171eae23, -50317362, -50317362),
+        (0xc00d8e2867f03688edd0ee15242974e5, -25482, -25482),
+        (0xc0081a0dff329d32d494d93b92ddf488, -564, -564),
+        (0xc002b278017ab9fbda9a0ae15c795248, -13, -13),
+        (0xc00d5620a2d90189cbadf1249679f1ca, -21896, -21896),
+        (0xc00d1b12adf7be88b1ce5514e578f3f5, -18116, -18116),
+        (0xc01692077a15636c747d3e17788012aa, -13173693, -13173693),
+    ];
+
+    /// And for a magnitude between 2^31 and 2^63, where the two sixty four bit routines are the ones
+    /// with an answer in them.
+    #[rustfmt::skip]
+    const LIBGCC_DOWN_WIDE: &[(u128, i64, u64)] = &[
+        (0x401e0000000000000000000000000000, 2147483648, 2147483648),
+        (0x403dfffffffffffff000000000000000, 9223372036854774784, 9223372036854774784),
+        (0x403dffffffffffffffffffffffffffff, 9223372036854775807, 9223372036854775807),
+        (0x402df0dd51f7663f2e36a4c3b42ce733, 136577082579343, 136577082579343),
+        (0x403bb9a2cd51ff599cfca377b691aae7, 1988951479313340879, 1988951479313340879),
+        (0x4030880c2de0d152d96976e15f450470, 862121734808229, 862121734808229),
+        (0x403687d2d486855c525d88b23e895f56, 55144263062826537, 55144263062826537),
+        (0x4026843291b570d8ea2e100a6fa32c39, 833647860408, 833647860408),
+        (0x401fa15df14988e918115ce22aa401b8, 7002255689, 7002255689),
+        (0x40391ada2137c9348bc5e903f6ed6ba6, 318463118548455983, 318463118548455983),
+        (0x402f2ad794591d80176f6ee191f0cfbb, 328580371914112, 328580371914112),
+    ];
+
+    fn up_ours(which: u8, value: u64) -> u128 {
+        match which {
+            0 => quad_from_integer(
+                if (value as i32) < 0 { SIGN } else { 0 },
+                u64::from((value as i32).unsigned_abs()),
+            ),
+            1 => quad_from_integer(0, u64::from(value as u32)),
+            2 => quad_from_integer(
+                if (value as i64) < 0 { SIGN } else { 0 },
+                (value as i64).unsigned_abs(),
+            ),
+            _ => quad_from_integer(0, value),
+        }
+    }
+
+    #[test]
+    fn the_quads_libgcc_makes_of_an_integer_come_out_bit_for_bit() {
+        for (value, which, wanted) in LIBGCC_UP {
+            assert_eq!(up_ours(*which, *value), *wanted, "routine {which} on 0x{value:016x}");
+        }
+    }
+
+    #[test]
+    fn the_integers_libgcc_truncates_a_quad_to_come_out_the_same() {
+        for (bits, signed_32, unsigned_32, signed_64, unsigned_64) in LIBGCC_DOWN {
+            assert_eq!(
+                truncate(*bits, SIGNED_32).map_or(0, |answer| answer as i32),
+                *signed_32,
+                "int of {bits:032x}"
+            );
+            assert_eq!(
+                truncate_unsigned(*bits, UNSIGNED_32).map_or(0, |answer| answer as u32),
+                *unsigned_32,
+                "unsigned of {bits:032x}"
+            );
+            assert_eq!(
+                truncate(*bits, SIGNED_64).map_or(0, |answer| answer as i64),
+                *signed_64,
+                "long long of {bits:032x}"
+            );
+            assert_eq!(
+                truncate_unsigned(*bits, UNSIGNED_64).map_or(0, |answer| answer as u64),
+                *unsigned_64,
+                "unsigned long long of {bits:032x}"
+            );
+        }
+        for (bits, signed_32, signed_64) in LIBGCC_DOWN_NEGATIVE {
+            assert_eq!(
+                truncate(*bits, SIGNED_32).map_or(0, |answer| answer as i32),
+                *signed_32,
+                "int of {bits:032x}"
+            );
+            assert_eq!(
+                truncate(*bits, SIGNED_64).map_or(0, |answer| answer as i64),
+                *signed_64,
+                "long long of {bits:032x}"
+            );
+        }
+        for (bits, signed_64, unsigned_64) in LIBGCC_DOWN_WIDE {
+            assert_eq!(
+                truncate(*bits, SIGNED_64).map_or(0, |answer| answer as i64),
+                *signed_64,
+                "long long of {bits:032x}"
+            );
+            assert_eq!(
+                truncate_unsigned(*bits, UNSIGNED_64).map_or(0, |answer| answer as u64),
+                *unsigned_64,
+                "unsigned long long of {bits:032x}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_integer_converts_up_exactly_and_comes_back() {
+        // The property that is this format's own: a hundred and thirteen bits hold every sixty four
+        // bit integer, so a conversion up never rounds and the value that comes back down is the one
+        // that went up, for every input rather than for the small ones.
+        let mut stream = Stream(0x5851_f42d_4c95_7f2d);
+        for _ in 0..20_000 {
+            let value = stream.next();
+            let signed = value as i64;
+            let unsigned = quad_from_integer(0, value);
+            assert_eq!(truncate_unsigned(unsigned, UNSIGNED_64), Some(u128::from(value)));
+            let magnitude = signed.unsigned_abs();
+            let quad = quad_from_integer(if signed < 0 { SIGN } else { 0 }, magnitude);
+            assert_eq!(truncate(quad, SIGNED_64), Some(i128::from(signed)));
+            // And the same value one word narrower, which is where the thirty two bit routines live.
+            let narrow = (value >> 32) as u32;
+            assert_eq!(
+                truncate_unsigned(quad_from_integer(0, u64::from(narrow)), UNSIGNED_32),
+                Some(u128::from(narrow))
+            );
+            let narrow = narrow as i32;
+            let quad = quad_from_integer(
+                if narrow < 0 { SIGN } else { 0 },
+                u64::from(narrow.unsigned_abs()),
+            );
+            assert_eq!(truncate(quad, SIGNED_32), Some(i128::from(narrow)));
+        }
+    }
+
+    #[test]
+    fn a_quad_is_the_exact_integer_and_not_a_rounding_of_it() {
+        // Said directly rather than through the round trip: the quad an integer becomes has that
+        // integer as its exact value, which is what `exact_of` reads back out of the pattern.
+        let mut stream = Stream(0x1405_7b7e_f767_814f);
+        for _ in 0..20_000 {
+            let value = stream.next();
+            let (significand, scale) = exact_of(quad_from_integer(0, value));
+            // A significand is a hundred and thirteen bits and the integer is at most sixty four, so
+            // the scale is negative and the integer sits in the top of the significand. Exact means
+            // nothing was dropped on the way, which is every bit below the point being zero.
+            let below = (-scale) as u32;
+            assert_eq!(significand & ((1 << below) - 1), 0, "0x{value:016x} lost bits");
+            assert_eq!(significand >> below, u128::from(value), "0x{value:016x}");
+        }
+    }
+
+    #[test]
+    fn each_type_is_held_to_its_own_bound() {
+        // The edges by name, which is where an off by one lives. A signed type holds one more going
+        // down than going up, and every one of these bounds is a quad exactly at this width, so the
+        // comparison is between two integers and the answers below are arithmetic rather than a
+        // convention.
+        let largest_int = quad_from_integer(0, 2_147_483_647);
+        assert_eq!(truncate(largest_int, SIGNED_32), Some(2_147_483_647));
+        let past_int = quad_from_integer(0, 2_147_483_648);
+        assert_eq!(truncate(past_int, SIGNED_32), None);
+        let most_negative_int = quad_from_integer(SIGN, 2_147_483_648);
+        assert_eq!(truncate(most_negative_int, SIGNED_32), Some(-2_147_483_648));
+        let past_it = quad_from_integer(SIGN, 2_147_483_649);
+        assert_eq!(truncate(past_it, SIGNED_32), None);
+        let largest_unsigned = quad_from_integer(0, 4_294_967_295);
+        assert_eq!(truncate_unsigned(largest_unsigned, UNSIGNED_32), Some(4_294_967_295));
+        assert_eq!(truncate_unsigned(quad_from_integer(0, 4_294_967_296), UNSIGNED_32), None);
+        let largest_long = quad_from_integer(0, i64::MAX as u64);
+        assert_eq!(truncate(largest_long, SIGNED_64), Some(i128::from(i64::MAX)));
+        assert_eq!(truncate(quad_from_integer(0, 1 << 63), SIGNED_64), None);
+        assert_eq!(
+            truncate(quad_from_integer(SIGN, 1 << 63), SIGNED_64),
+            Some(i128::from(i64::MIN))
+        );
+        assert_eq!(
+            truncate_unsigned(quad_from_integer(0, u64::MAX), UNSIGNED_64),
+            Some(u128::from(u64::MAX))
+        );
+        // Two to the sixty four, which is the first value past the widest type and is not an integer
+        // any of the four hold. It cannot be asked for through `quad_from_integer`, so it is built
+        // the way every other value in this file is, out of a significand and a scale.
+        let past_everything = round_from(0, Wide::narrow(1), 64, false);
+        assert_eq!(truncate(past_everything, SIGNED_64), None);
+        assert_eq!(truncate_unsigned(past_everything, UNSIGNED_64), None);
+        // And a value between two integers, where the answer is the truncation and the fraction is
+        // dropped rather than rounded, in both directions of sign.
+        let three_halves = round_from(0, Wide::narrow(3), -1, false);
+        assert_eq!(truncate(three_halves, SIGNED_32), Some(1));
+        assert_eq!(truncate(three_halves | SIGN, SIGNED_32), Some(-1));
+        assert_eq!(truncate_unsigned(three_halves, UNSIGNED_32), Some(1));
+        assert_eq!(truncate_unsigned(three_halves | SIGN, UNSIGNED_32), None);
+    }
+
+    #[test]
+    fn a_value_with_no_integer_in_it_answers_the_convention() {
+        // The four cases C leaves undefined, which these answer with a zero that section 12.8 records
+        // as a convention both implementations keep rather than as a promise to a program.
+        for bits in
+            [infinity(0), infinity(SIGN), EMPTY_NAN, EMPTY_NAN | SIGN, (TOP << FRACTION) | 1]
+        {
+            assert_eq!(truncate(bits, SIGNED_32).map_or(0, |answer| answer as i32), 0);
+            assert_eq!(truncate(bits, SIGNED_64).map_or(0, |answer| answer as i64), 0);
+            assert_eq!(truncate_unsigned(bits, UNSIGNED_32).map_or(0, |answer| answer as u32), 0);
+            assert_eq!(truncate_unsigned(bits, UNSIGNED_64).map_or(0, |answer| answer as u64), 0);
+        }
+        // A subnormal and a value below one, where the answer is zero because that is the value and
+        // not because there is nothing to hand back.
+        for bits in [1u128, SIGN | 1, round_from(0, Wide::narrow(1), -1, false)] {
+            assert_eq!(truncate(bits, SIGNED_64), Some(0));
+            assert_eq!(truncate_unsigned(bits, UNSIGNED_64), Some(0));
+        }
+        // A negative value with an integer part, which the two unsigned routines refuse and the two
+        // signed ones answer.
+        let minus_one = quad_from_integer(SIGN, 1);
+        assert_eq!(truncate(minus_one, SIGNED_32), Some(-1));
+        assert_eq!(truncate_unsigned(minus_one, UNSIGNED_32), None);
+        assert_eq!(truncate_unsigned(minus_one, UNSIGNED_64), None);
     }
 
     #[test]
