@@ -1,6 +1,7 @@
 //! Single precision arithmetic in integers, which is the reference for the entry points in
 //! `runtime/builtins/float.c`: the four operations a target with no floating point unit calls, the
-//! negation, and the eight comparisons, which are calls on such a target too.
+//! negation, the eight comparisons, which are calls on such a target too, and the eight conversions
+//! between a float and an integer, which is what a cast becomes there.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's,
 //! the same as everything else here.
@@ -464,6 +465,133 @@ pub extern "C" fn __unordsf2(left: f32, right: f32) -> i32 {
     i32::from(is_nan(left.to_bits()) || is_nan(right.to_bits()))
 }
 
+/// The largest magnitude each of the four integer types holds. A signed type holds one more going
+/// down than it does going up, which is why the sign and the magnitude travel separately below.
+const SIGNED_32: u128 = 1 << 31;
+const SIGNED_64: u128 = 1 << 63;
+const UNSIGNED_32: u128 = u32::MAX as u128;
+const UNSIGNED_64: u128 = u64::MAX as u128;
+
+/// The float nearest an integer, with the sign handed in separately so that the caller can take the
+/// magnitude of the most negative value of its type without overflowing it.
+///
+/// One line, because an integer is already a significand and a scale of zero, and `round_from` is
+/// the routine that turns those into the nearest float. The shipped C has to do the alignment and
+/// the sticky bit by hand, which is the difference between the two shapes rather than a difference
+/// in what they answer.
+fn float_from_integer(sign: u32, magnitude: u64) -> f32 {
+    round_from(sign, u128::from(magnitude), 0, false)
+}
+
+/// `float __floatsisf(int)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatsisf(value: i32) -> f32 {
+    float_from_integer(if value < 0 { SIGN } else { 0 }, u64::from(value.unsigned_abs()))
+}
+
+/// `float __floatunsisf(unsigned int)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatunsisf(value: u32) -> f32 {
+    float_from_integer(0, u64::from(value))
+}
+
+/// `float __floatdisf(long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatdisf(value: i64) -> f32 {
+    float_from_integer(if value < 0 { SIGN } else { 0 }, value.unsigned_abs())
+}
+
+/// `float __floatundisf(unsigned long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatundisf(value: u64) -> f32 {
+    float_from_integer(0, value)
+}
+
+/// The part of a float that is on the integer side of the point, as a sign and a magnitude.
+///
+/// `None` where there is no integer part to hand back at all, which is an infinity, a not a number,
+/// and a magnitude past what the widest of the four types holds. A value below one is not that case:
+/// its integer part is zero, which is an answer.
+fn integer_from_float(bits: u32) -> Option<(u32, u128)> {
+    if (bits >> FRACTION) & TOP == TOP {
+        return None;
+    }
+    let sign = bits & SIGN;
+    let parts = parts(bits);
+    if parts.scale >= 0 {
+        if parts.scale > 64 {
+            return None;
+        }
+        Some((sign, u128::from(parts.significand) << parts.scale))
+    } else if -parts.scale >= 64 {
+        Some((sign, 0))
+    } else {
+        Some((sign, u128::from(parts.significand >> -parts.scale)))
+    }
+}
+
+/// What the two signed routines share: the integer part held to the bounds of the caller's type.
+/// `bound` is the largest magnitude that type holds going down, and one more than the largest it
+/// holds going up.
+///
+/// `None` where the value has no answer that type can hold, which the entry points turn into the
+/// zero that section 12.8 records as the shared convention for a case C leaves undefined.
+fn truncate(bits: u32, bound: u128) -> Option<i128> {
+    let (sign, magnitude) = integer_from_float(bits)?;
+    let negative = sign != 0 && magnitude != 0;
+    let largest = if negative { bound } else { bound - 1 };
+    if magnitude > largest {
+        return None;
+    }
+    Some(if negative { -(magnitude as i128) } else { magnitude as i128 })
+}
+
+/// What the two unsigned routines share. A negative value is undefined for these in C, so it is the
+/// same zero as the out of range case, and a negative value whose integer part is zero is not that:
+/// the answer there is zero because that is the value.
+fn truncate_unsigned(bits: u32, bound: u128) -> Option<u128> {
+    let (sign, magnitude) = integer_from_float(bits)?;
+    if sign != 0 && magnitude != 0 {
+        return None;
+    }
+    if magnitude > bound {
+        return None;
+    }
+    Some(magnitude)
+}
+
+/// `int __fixsfsi(float)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixsfsi(value: f32) -> i32 {
+    truncate(value.to_bits(), SIGNED_32).map_or(0, |answer| answer as i32)
+}
+
+/// `unsigned int __fixunssfsi(float)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixunssfsi(value: f32) -> u32 {
+    truncate_unsigned(value.to_bits(), UNSIGNED_32).map_or(0, |answer| answer as u32)
+}
+
+/// `long long __fixsfdi(float)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixsfdi(value: f32) -> i64 {
+    truncate(value.to_bits(), SIGNED_64).map_or(0, |answer| answer as i64)
+}
+
+/// `unsigned long long __fixunssfdi(float)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixunssfdi(value: f32) -> u64 {
+    truncate_unsigned(value.to_bits(), UNSIGNED_64).map_or(0, |answer| answer as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -739,6 +867,141 @@ mod tests {
                 check(which, small, large);
                 check(which, large, small);
             }
+        }
+    }
+
+    /// Holds one integer against the float the machine makes of it, which for a value with more
+    /// than twenty four significant bits is a rounding and not a widening.
+    fn check_up_signed(value: i64) {
+        let wanted = black_box(black_box(value) as f32);
+        let sign = if value < 0 { SIGN } else { 0 };
+        let got = float_from_integer(sign, value.unsigned_abs());
+        assert_eq!(
+            got.to_bits(),
+            wanted.to_bits(),
+            "{value} as a float: got {:08x}, the machine says {:08x}",
+            got.to_bits(),
+            wanted.to_bits()
+        );
+    }
+
+    fn check_up_unsigned(value: u64) {
+        let wanted = black_box(black_box(value) as f32);
+        let got = float_from_integer(0, value);
+        assert_eq!(
+            got.to_bits(),
+            wanted.to_bits(),
+            "{value} as a float: got {:08x}, the machine says {:08x}",
+            got.to_bits(),
+            wanted.to_bits()
+        );
+    }
+
+    /// Holds one float against the integers the machine truncates it to, in all four types.
+    ///
+    /// Rust's own conversion saturates and hands back zero for a not a number, where C leaves all
+    /// three of those undefined and these routines answer zero. So the machine is the oracle inside
+    /// the range, and outside it what is checked is the convention both implementations keep.
+    fn check_down(value: f32) {
+        let bits = value.to_bits();
+        let ours = (
+            truncate(bits, SIGNED_32).map_or(0, |answer| answer as i32),
+            truncate(bits, SIGNED_64).map_or(0, |answer| answer as i64),
+            truncate_unsigned(bits, UNSIGNED_32).map_or(0, |answer| answer as u32),
+            truncate_unsigned(bits, UNSIGNED_64).map_or(0, |answer| answer as u64),
+        );
+        if value.is_nan() {
+            assert_eq!(ours, (0, 0, 0, 0), "{:08x} is a not a number", bits);
+            return;
+        }
+        // The integer part, and then the four bounds as floats. Each bound is a power of two and so
+        // is exact, and the test is strict on the way up because the type holds one less there.
+        let whole = black_box(black_box(value).trunc());
+        let inside_signed_32 = (-2147483648.0..2147483648.0).contains(&whole);
+        let inside_signed_64 = (-9223372036854775808.0..9223372036854775808.0).contains(&whole);
+        let inside_unsigned_32 = (0.0..4294967296.0).contains(&whole);
+        let inside_unsigned_64 = (0.0..18446744073709551616.0).contains(&whole);
+        let wanted = (
+            if inside_signed_32 { whole as i32 } else { 0 },
+            if inside_signed_64 { whole as i64 } else { 0 },
+            if inside_unsigned_32 { whole as u32 } else { 0 },
+            if inside_unsigned_64 { whole as u64 } else { 0 },
+        );
+        assert_eq!(ours, wanted, "{:08x} as integers, which truncates to {whole}", bits);
+    }
+
+    #[test]
+    fn an_integer_becomes_the_float_the_machine_makes_of_it() {
+        let mut stream = Stream(0x5DEE_CE66_D000_0005);
+        for _ in 0..60_000 {
+            let wide = stream.next();
+            // Each value at both widths, so that one that fits in thirty two bits is asked of the
+            // thirty two bit routine and of the sixty four bit one as well.
+            check_up_signed(i64::from(wide as i32));
+            check_up_signed(wide as i64);
+            check_up_unsigned(u64::from(wide as u32));
+            check_up_unsigned(wide);
+            // And a value just past 2^24, which is where a float stops holding every integer and
+            // where the rounding starts to matter. Random bits land above it nearly always and
+            // these land just above it, which is a different case.
+            let near = (wide % (1 << 30)) + (1 << 24);
+            check_up_signed(near as i64);
+            check_up_unsigned(near);
+        }
+        for value in [
+            0i64,
+            1,
+            -1,
+            (1 << 24) - 1,
+            1 << 24,
+            (1 << 24) + 1, // the first integer a float cannot hold, which rounds down to 2^24
+            (1 << 24) + 2,
+            (1 << 24) + 3, // exactly between two floats, so the even one wins
+            i64::from(i32::MAX),
+            i64::from(i32::MIN),
+            i64::MAX, // rounds up, and the rounding carries into the exponent
+            i64::MIN,
+        ] {
+            check_up_signed(value);
+            // Wrapping, because the most negative value is in the list and it is its own negation.
+            check_up_signed(value.wrapping_neg());
+            check_up_unsigned(value.unsigned_abs());
+        }
+        check_up_unsigned(u64::MAX);
+        check_up_unsigned(u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn a_float_becomes_the_integer_it_truncates_to_where_the_type_holds_one() {
+        let mut stream = Stream(0xDEAD_BEEF_CAFE_0001);
+        for _ in 0..60_000 {
+            check_down(stream.any());
+            // Random bits are almost never a value with an integer part inside any of the four
+            // ranges, so most of those cases would be the out of range convention and would say
+            // nothing about the shift. This puts the exponent where the shift happens: from 2^-27,
+            // which truncates to zero, to 2^67, which is past all four types.
+            let stored = 100 + (stream.next() % 95) as u32;
+            let fraction = stream.next() as u32 & (SIGN | FRACTION_MASK);
+            check_down(f32::from_bits(fraction | (stored << FRACTION)));
+        }
+        for value in corners() {
+            check_down(value);
+        }
+        for value in [
+            0.5f32,
+            -0.5, // a negative value whose integer part is zero, which is defined for unsigned too
+            1.5,
+            -1.5,
+            2147483648.0,  // one past the largest int, and exactly the most negative one
+            -2147483648.0, // the most negative int, which is the case a negation would overflow
+            4294967296.0,
+            9223372036854775808.0,
+            -9223372036854775808.0,
+            18446744073709551616.0,
+            1e30,
+            -1e30,
+        ] {
+            check_down(value);
         }
     }
 

@@ -32,13 +32,14 @@
 //! instructions over the halves, and the same six at 64 bits, which is what a 32-bit target makes
 //! of a `/` on a `long long` for the same reason one width up. So are the conversions between 128
 //! bits and a `float` or a `double`, which is eight more entry points and the other operation at
-//! that width the machine has no instruction for. Single precision soft float is here as well, the
-//! four operations and the negation a target with no floating point unit calls for a `float`, which
-//! is the first of these where the reference and the shipped C are different algorithms rather than
-//! the same one written twice. The rest of section 12.8, which is the remaining `__int128`
-//! arithmetic, double precision and quad soft float, the eighty bit and quad conversions and the
-//! atomics, is not written, and the set is driven by what the target ladder in
-//! `spec/14-target-ladder.md` actually calls.
+//! that width the machine has no instruction for. Single precision soft float is here as well,
+//! which is everything a target with no floating point unit calls for a `float`: the four
+//! operations and the negation, the eight comparisons, since `a < b` is a call there too, and the
+//! eight conversions to and from an integer, since a cast is. That set is the first of these where
+//! the reference and the shipped C are different algorithms rather than the same one written twice.
+//! The rest of section 12.8, which is the remaining `__int128` arithmetic, double precision and quad
+//! soft float, the eighty bit and quad conversions and the atomics, is not written, and the set is
+//! driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with

@@ -74,6 +74,20 @@ int __lesf2(float left, float right);
 int __ltsf2(float left, float right);
 int __unordsf2(float left, float right);
 
+/* And the eight conversions between a single and an integer, where a cast would again be the host's
+ * own instruction. The four going down have no answer in C for a value the integer type cannot hold,
+ * so what the digests below hold to is the zero both sides agree on there, which is a convention and
+ * is written down as one in section 12.8 rather than as a promise to a program.
+ */
+float __floatsisf(int value);
+float __floatunsisf(unsigned int value);
+float __floatdisf(long long value);
+float __floatundisf(unsigned long long value);
+int __fixsfsi(float value);
+unsigned int __fixunssfsi(float value);
+long long __fixsfdi(float value);
+unsigned long long __fixunssfdi(float value);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -768,6 +782,126 @@ static void single_corner_cases(int which) {
     say("singlecorner", which, digest);
 }
 
+/* One integer through the four conversions up, at both widths and both signednesses. The narrow pair
+ * reads the low half of the same value, which is how a pattern that is a large unsigned number and a
+ * negative signed one gets through both of them.
+ */
+static unsigned long long up_single(unsigned long long digest, unsigned long long value) {
+    digest = mix_float(digest, __floatsisf((int)value));
+    digest = mix_float(digest, __floatunsisf((unsigned int)value));
+    digest = mix_float(digest, __floatdisf((long long)value));
+    digest = mix_float(digest, __floatundisf(value));
+    cases += 4;
+    return digest;
+}
+
+/* One pattern through the four conversions down.
+ *
+ * Every pattern is asked here, unlike the conversions at 128 bits above, where the generator keeps
+ * the value inside the integer it is going to. That is because the two sides of this comparison are
+ * the two implementations of these routines rather than one of them against the host, so the zero
+ * they both hand back where C has no answer is a thing they can be held to. Section 12.8 writes that
+ * down as a convention of the two shapes and not as a promise to a program.
+ */
+static unsigned long long down_single(unsigned long long digest, unsigned int pattern) {
+    float value = single_of(pattern);
+    digest = mix_number(digest, __fixsfsi(value));
+    digest = mix_number(digest, (long long)__fixunssfsi(value));
+    digest = mix_number(digest, __fixsfdi(value));
+    digest = mix_wide(digest, (uwide)__fixunssfdi(value));
+    cases += 4;
+    return digest;
+}
+
+/* A pattern whose exponent is spread over the range where going down has an answer to give: from
+ * 2^-27, which truncates to zero, up to 2^67, which is past all four types. The mantissa is random
+ * bits and so is the sign, since a negative value is its own case in each of the four.
+ */
+static unsigned int single_in_range(void) {
+    unsigned int stored = 100 + (unsigned int)(next_random() % 95);
+    return (random_single() & 0x807FFFFFu) | (stored << 23);
+}
+
+/* The integers where a type ends, the ones either side, and the first integer a single cannot hold
+ * with its neighbours: 2^24 + 1 rounds down to 2^24 and 2^24 + 3 is an exact tie between two floats.
+ */
+static const unsigned long long INTEGER_EDGES[] = {
+    0ull,
+    1ull,
+    2ull,
+    16777215ull,
+    16777216ull,
+    16777217ull,
+    16777218ull,
+    16777219ull,
+    16777220ull,
+    2147483647ull,
+    2147483648ull,
+    2147483649ull,
+    4294967295ull,
+    4294967296ull,
+    4294967297ull,
+    9223372036854775807ull,
+    9223372036854775808ull,
+    9223372036854775809ull,
+    18446744073709551615ull,
+};
+
+#define INTEGER_EDGES_COUNT ((int)(sizeof INTEGER_EDGES / sizeof INTEGER_EDGES[0]))
+
+/* The patterns exactly at the top of each integer type and the ones either side of them, which is
+ * where the range check in each routine going down gets decided. 2^31 is the one to look at: it is
+ * one past the largest `int` and it is also exactly the most negative one.
+ */
+static const unsigned int SINGLE_BOUNDS[] = {
+    0x4EFFFFFFu, 0x4F000000u, 0x4F000001u, /* either side of 2^31 */
+    0x4F7FFFFFu, 0x4F800000u, 0x4F800001u, /* of 2^32 */
+    0x5EFFFFFFu, 0x5F000000u, 0x5F000001u, /* of 2^63 */
+    0x5F7FFFFFu, 0x5F800000u, 0x5F800001u, /* of 2^64 */
+    0x3F000000u, 0x3F800000u, 0x3FC00000u, /* and a half, one, and one and a half */
+};
+
+#define SINGLE_BOUNDS_COUNT ((int)(sizeof SINGLE_BOUNDS / sizeof SINGLE_BOUNDS[0]))
+
+#define SINGLE_INT_CASES 2048
+
+static void single_integers(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_INT_CASES; i++) {
+        unsigned long long value = next_random();
+        digest = up_single(digest, value);
+        /* The same bits with most of them gone, so that a value small enough to convert exactly is
+         * asked as well as one that has to round, and a value just past 2^24, which is where a
+         * single stops holding every integer and where a truncation stops passing.
+         */
+        digest = up_single(digest, value >> 40);
+        digest = up_single(digest, (value % (1ull << 30)) + (1ull << 24));
+        digest = down_single(digest, random_single());
+        digest = down_single(digest, single_in_range());
+    }
+    say("singleint", round, digest);
+}
+
+/* The edges by name: every corner pattern down at both signs, every integer edge up with its
+ * negation, and the patterns either side of each type's top down at both signs.
+ */
+static void single_corner_integers(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        digest = down_single(digest, SINGLE_CORNERS[i]);
+        digest = down_single(digest, SINGLE_CORNERS[i] | SINGLE_SIGN);
+    }
+    for (int i = 0; i < INTEGER_EDGES_COUNT; i++) {
+        digest = up_single(digest, INTEGER_EDGES[i]);
+        digest = up_single(digest, 0ull - INTEGER_EDGES[i]);
+    }
+    for (int i = 0; i < SINGLE_BOUNDS_COUNT; i++) {
+        digest = down_single(digest, SINGLE_BOUNDS[i]);
+        digest = down_single(digest, SINGLE_BOUNDS[i] | SINGLE_SIGN);
+    }
+    say("singleintcorner", 0, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -805,10 +939,12 @@ int main(int argc, char **argv) {
     for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
         single_corner_cases(i);
     }
+    single_corner_integers();
     for (int i = 0; i < SINGLE_ROUNDS; i++) {
         singles(i);
         single_ties(i);
         single_edges(i);
+        single_integers(i);
     }
     printf("cases %ld\n", cases);
     return 0;
