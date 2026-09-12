@@ -4727,6 +4727,82 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
     }
 
+    /// The complex builtins are the halves of the value, and are not a call.
+    ///
+    /// `conj`, `creal` and `cimag` are `~`, `__real__` and `__imag__` under the names `complex.h`
+    /// gives them, so there is nothing for the math library to do that the translation cannot do
+    /// with the object in front of it. Leaving the call behind would not link either, since all
+    /// three are in the math library and a program that wrote one never had a reason to ask for
+    /// `-lm`. Measured against gcc 16.2.0, which emits no call for any of them even at `-O0`.
+    #[test]
+    fn the_complex_builtins_are_the_halves_of_the_value_and_not_a_call() {
+        let text = body("double f(_Complex double z) { return __builtin_creal(z); }\n");
+        assert!(!text.contains("call"), "{text}");
+        let text = body("double f(_Complex double z) { return __builtin_cimag(z); }\n");
+        assert!(!text.contains("call"), "{text}");
+
+        // The conjugate is the imaginary half negated and the real half as it stands, so there is
+        // one negation in it. A complex negation is the one with two.
+        let text = body("_Complex double f(_Complex double z) { return __builtin_conj(z); }\n");
+        assert_eq!(text.matches("fneg").count(), 1, "{text}");
+        assert!(!text.contains("call"), "{text}");
+        let negated = body("_Complex double f(_Complex double z) { return -z; }\n");
+        assert_eq!(negated.matches("fneg").count(), 2, "{negated}");
+
+        // `~` on a complex operand is the same operator, which is the spelling the language has
+        // had all along and the one a program that never included the header writes.
+        let written = body("_Complex double f(_Complex double z) { return ~z; }\n");
+        assert_eq!(written, text, "the name and the operator are the same thing");
+
+        // The plain names, which are the ones the header declares and so the ones programs write.
+        let text = body(concat!(
+            "double creal(_Complex double z);\n",
+            "double f(_Complex double z) { return creal(z); }\n",
+        ));
+        assert!(!text.contains("call"), "{text}");
+        let text = body(concat!(
+            "_Complex float conjf(_Complex float z);\n",
+            "_Complex float f(_Complex float z) { return conjf(z); }\n",
+        ));
+        assert_eq!(text.matches("fneg").count(), 1, "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // A program that took the name means its own function, the same four ways the absolute
+        // value family next door asks it.
+        let taken = concat!(
+            "static double creal(_Complex double z) { return 7; }\n",
+            "double f(_Complex double z) { return creal(z); }\n",
+        );
+        assert!(ir(taken).contains("call @creal"), "a static definition is the program's own");
+        let retyped = concat!("int cimag(int z);\n", "int f(int z) { return cimag(z); }\n");
+        assert!(ir(retyped).contains("call @cimag"), "another type is another function");
+        let plain = concat!(
+            "double cimag(_Complex double z);\n",
+            "double f(_Complex double z) { return cimag(z); }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.builtins = false;
+        assert!(run(&opts, plain).text().contains("call @cimag"), "-fno-builtin");
+        opts.builtins = true;
+        opts.no_builtin = vec!["cimag".to_owned()];
+        assert!(run(&opts, plain).text().contains("call @cimag"), "-fno-builtin-cimag");
+
+        // A constant folds, which is what a static initializer written with one needs.
+        let text = ir(concat!(
+            "double a = __builtin_creal(1.5 + 2.5i);\n",
+            "double b = __builtin_cimag(1.5 + 2.5i);\n",
+            "_Complex double c = __builtin_conj(1.5 + 2.5i);\n",
+        ));
+        assert!(text.contains("global @a : f64 = 0x3ff8000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x4004000000000000,"), "{text}");
+        assert!(
+            text.contains("{ f64 0x3ff8000000000000, f64 0xc004000000000000 }"),
+            "the conjugate of a constant is the constant with the second half negated: {text}"
+        );
+        assert!(!text.contains("call"), "{text}");
+    }
+
     /// A math library builtin handed a constant is the answer, and is not a call.
     ///
     /// This is the reason the family is answered in the front end at all. `double x =

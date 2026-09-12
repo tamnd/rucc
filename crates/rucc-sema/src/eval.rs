@@ -327,6 +327,12 @@ impl<'a> Eval<'a> {
             (UnaryOp::Minus, Const::Complex { real, imag }) => {
                 Ok(Const::Complex { real: real.negated(), imag: imag.negated() })
             }
+            // The conjugate, which is that negation on the imaginary half alone. `~` means this
+            // on a complex operand and the complement on an integer one, and the pair below is
+            // the other reading.
+            (UnaryOp::BitNot, Const::Complex { real, imag }) => {
+                Ok(Const::Complex { real, imag: imag.negated() })
+            }
             (UnaryOp::Minus | UnaryOp::BitNot, Const::Int(value)) => {
                 let Some(info) = self.int_shape(self.tast[operand].ty) else {
                     return Err(self.stop(expr));

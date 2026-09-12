@@ -100,6 +100,63 @@ block0(%0: f64, %1: f64):
     return %14, %17
 }
 
+func @conjugate(f64, f64) -> (f64, f64), linkage(external) {
+block0(%0: f64, %1: f64):
+    %2 = alloca, size 16, align 8
+    %3 = alloca, size 16, align 8
+    store %0 -> %3, align 8
+    %4 = iconst.i64 8
+    %5 = ptr_add %3, %4
+    store %1 -> %5, align 8
+    %6 = load.f64 %3, align 8, tbaa !1
+    store %6 -> %2, align 8, tbaa !1
+    %7 = iconst.i64 8
+    %8 = ptr_add %3, %7
+    %9 = load.f64 %8, align 8, tbaa !1
+    %10 = fneg %9
+    %11 = iconst.i64 8
+    %12 = ptr_add %2, %11
+    store %10 -> %12, align 8, tbaa !1
+    %13 = load.f64 %2, align 8
+    %14 = iconst.i64 8
+    %15 = ptr_add %2, %14
+    %16 = load.f64 %15, align 8
+    return %13, %16
+}
+
+func @named(f64) -> f64, linkage(external) {
+block0(%0: f64):
+    %1 = alloca, size 8, align 4
+    %2 = alloca, size 8, align 4
+    store %0 -> %2, align 4
+    %3 = load.f32 %2, align 4, tbaa !2
+    store %3 -> %1, align 4, tbaa !2
+    %4 = iconst.i64 4
+    %5 = ptr_add %2, %4
+    %6 = load.f32 %5, align 4, tbaa !2
+    %7 = fneg %6
+    %8 = iconst.i64 4
+    %9 = ptr_add %1, %8
+    store %7 -> %9, align 4, tbaa !2
+    %10 = load.f64 %1, align 4
+    return %10
+}
+
+func @halves(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
+    %2 = alloca, size 16, align 8
+    store %0 -> %2, align 8
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 8
+    %5 = load.f64 %2, align 8, tbaa !1
+    %6 = iconst.i64 8
+    %7 = ptr_add %2, %6
+    %8 = load.f64 %7, align 8, tbaa !1
+    %9 = fadd %5, %8
+    return %9
+}
+
 func @compound(f64, f64, f64, f64) -> (f64, f64), linkage(external) {
 block0(%0: f64, %1: f64, %2: f64, %3: f64):
     %4 = alloca, size 16, align 8

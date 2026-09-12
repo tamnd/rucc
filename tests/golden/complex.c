@@ -3,8 +3,7 @@
 // none, so every operator over one comes out as that operator over its two halves and there is
 // no complex anything left in the IR below.
 //
-// The conjugate and `_Complex` on an integer type are not here yet. `tamnd/rucc#201` is where the
-// rest of it lands.
+// `_Complex` on an integer type is not here yet. `tamnd/rucc#201` is where the rest of it lands.
 
 // `_Complex` written on its own, which gcc reads as `_Complex double`. No edition of C wrote a
 // rule for it, so `-pedantic` says so and nothing else does, and the type below is the same one
@@ -30,6 +29,24 @@ _Complex double added(_Complex double a, _Complex double b) {
 // makes and is the same answer a real operand gets.
 _Complex double negated(_Complex double a) {
   return -a;
+}
+
+// The conjugate, which gcc reads `~` as on a complex operand. It is the negation above on the
+// imaginary half and the real half copied, so there is one `fneg` here and two up there.
+_Complex double conjugate(_Complex double a) {
+  return ~a;
+}
+
+// The same operation under the name `complex.h` gives it, and the two halves under theirs. All
+// three are answered here rather than called, because the operators they stand for are in the
+// language already and because the math library is not on the link line of a program that wrote
+// one and nothing else.
+_Complex float named(_Complex float a) {
+  return __builtin_conjf(a);
+}
+
+double halves(_Complex double a) {
+  return __builtin_creal(a) + __builtin_cimag(a);
 }
 
 // The compound form, where the object is read after the right side is worked out.
