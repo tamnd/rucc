@@ -99,18 +99,18 @@ fn one(
 ) -> Inst {
     let data = func[inst];
     let args: Vec<Value> = func[data.args].to_vec();
-    let edges: Vec<(Block, Vec<Value>)> = func
+    let edges: Vec<(BlockCall, Vec<Value>)> = func
         .successors(inst)
         .map(|call| {
             let block = blocks.get(&call.block).copied().unwrap_or(call.block);
-            (block, func[call.args].to_vec())
+            (BlockCall { block, ..call }, func[call.args].to_vec())
         })
         .collect();
     let extra = match data.extra {
         Extra::Targets(_) => {
             let calls: Vec<BlockCall> = edges
                 .iter()
-                .map(|(block, args)| BlockCall { block: *block, args: func.push_values(args) })
+                .map(|(call, args)| BlockCall { args: func.push_values(args), ..*call })
                 .collect();
             Extra::Targets(func.push_block_calls(&calls))
         }

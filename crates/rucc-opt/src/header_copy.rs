@@ -367,8 +367,9 @@ fn apply(func: &mut Func, job: &Job) -> Block {
     }
     clone_branch(func, copy, term, &map);
     for at in func.target_list(entry_term).iter() {
-        if func[at].block == job.header {
-            func.set_block_call(at, BlockCall { block: copy, args: ValueList::EMPTY });
+        let call = func[at];
+        if call.block == job.header {
+            func.set_block_call(at, BlockCall { block: copy, args: ValueList::EMPTY, ..call });
         }
     }
     for &value in &job.carried {
@@ -441,7 +442,7 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
                 continue;
             }
             let args = func.append_arg(call.args, carry);
-            func.set_block_call(at, BlockCall { block: call.block, args });
+            func.set_block_call(at, BlockCall { args, ..call });
         }
     }
     // Everything the header used to reach reads the parameter now. The header itself does not:

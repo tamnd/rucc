@@ -473,6 +473,8 @@ impl<'a> Printer<'a> {
             ExprKind::Atomic { op, order, .. } => {
                 format!("atomic {} {}", op.as_str(), order.as_str())
             }
+            ExprKind::Expect { parts: Some(parts), .. } => format!("expect {parts}"),
+            ExprKind::Expect { parts: None, .. } => "expect".to_owned(),
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
         }
@@ -512,6 +514,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Assign { lhs, rhs, .. }
             | ExprKind::VaCopy { dst: lhs, src: rhs }
+            | ExprKind::Expect { value: lhs, hint: rhs, .. }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

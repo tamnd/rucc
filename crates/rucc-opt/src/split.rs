@@ -1553,7 +1553,7 @@ fn route(func: &mut Func, term: Inst, from: Block, to: Block, first: &[Value]) {
         let mut args = first.to_vec();
         args.extend_from_slice(&func[call.args]);
         let args = func.push_values(&args);
-        func.set_block_call(at, BlockCall { block: to, args });
+        func.set_block_call(at, BlockCall { block: to, args, ..call });
     }
 }
 

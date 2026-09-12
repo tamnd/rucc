@@ -704,7 +704,10 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// A branch target, with the values it passes.
+    /// A branch target, with the values it passes and how often it is the arm taken.
+    ///
+    /// The hint is written only where there is one, which is almost nowhere, so an IR dump of a
+    /// program that never says anything about its branches reads the same as it always did.
     fn block_call(&mut self, func: &Func, call: BlockCall) {
         let _ = write!(self.out, "block{}", self.blocks[call.block.index()]);
         let args = &func[call.args];
@@ -712,6 +715,9 @@ impl<'a> Printer<'a> {
             self.out.push('(');
             self.value_list(args);
             self.out.push(')');
+        }
+        if let Some(parts) = call.hint.taken() {
+            let _ = write!(self.out, " taken {parts}");
         }
     }
 
@@ -1239,9 +1245,9 @@ mod tests {
 
         let mut b = Builder::new(&mut func, middle);
         let cases = b.func().push_imms(&[Imm::int(0, i32_), Imm::int(-1, i32_)]);
-        let default = BlockCall { block: other, args: crate::inst::ValueList::EMPTY };
-        let first = BlockCall { block: exit, args: b.func().push_values(&[n]) };
-        let second = BlockCall { block: other, args: crate::inst::ValueList::EMPTY };
+        let default = BlockCall::to(other);
+        let first = BlockCall::new(exit, b.func().push_values(&[n]));
+        let second = BlockCall::to(other);
         let targets = b.func().push_block_calls(&[default, first, second]);
         let switch = b.func().add_switch(SwitchInfo { targets, cases });
         let args = b.func().push_values(&[n]);
@@ -1258,7 +1264,7 @@ mod tests {
         b.ret(&[taken]);
 
         let mut b = Builder::new(&mut func, arrival);
-        let call = BlockCall { block: exit, args: b.func().push_values(&[n]) };
+        let call = BlockCall::new(exit, b.func().push_values(&[n]));
         let targets = b.func().push_block_calls(&[call]);
         let goto = b.func().add_asm(AsmInfo {
             template: names.intern("jmp %l0"),

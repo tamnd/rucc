@@ -1146,7 +1146,7 @@ fn rewrite(
                 continue;
             }
             let args = func.append_arg(call.args, carry);
-            func.set_block_call(at, BlockCall { block: call.block, args });
+            func.set_block_call(at, BlockCall { args, ..call });
         }
     }
 

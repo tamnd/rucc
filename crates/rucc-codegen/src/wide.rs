@@ -900,7 +900,7 @@ fn edges(func: &mut Func, halves: &Halves, inst: Inst) {
             continue;
         }
         let args = func.push_values(&spread(&args, halves));
-        func.set_block_call(at, BlockCall { block: call.block, args });
+        func.set_block_call(at, BlockCall { args, ..call });
     }
 }
 

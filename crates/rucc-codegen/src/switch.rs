@@ -1017,9 +1017,9 @@ mod tests {
         let first = func.push_values(&[ten]);
         let second = func.push_values(&[twenty]);
         let targets = func.push_block_calls(&[
-            BlockCall { block: default, args: none },
-            BlockCall { block: join, args: first },
-            BlockCall { block: join, args: second },
+            BlockCall::new(default, none),
+            BlockCall::new(join, first),
+            BlockCall::new(join, second),
         ]);
         let cases = func.push_imms(&[Imm::int(1, int), Imm::int(2, int)]);
         let info = func.add_switch(SwitchInfo { targets, cases });

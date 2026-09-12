@@ -106,17 +106,83 @@ fn mask(bits: u32) -> u128 {
     if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 }
 }
 
+/// How often an arm of a branch is the one taken, where something knows.
+///
+/// Parts out of [`Hint::SCALE`], and nothing at all for an arm nobody has said anything about,
+/// which is almost every arm of almost every branch. A hint is what somebody claimed and not what
+/// a heuristic guessed: `__builtin_expect` writes one, a profile will write one, and the ten
+/// static predictors in `rucc_opt::predict` write none, because a guess that was written down
+/// would be indistinguishable afterwards from a fact.
+///
+/// The scale is ten thousandths because that is the scale `rucc_opt::Probability` and
+/// `rucc_mir::Weight` are in, and a number that changed scale on its way through the compiler is a
+/// number somebody will eventually divide twice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Hint(Option<u16>);
+
+impl Hint {
+    /// What a hint is out of.
+    pub const SCALE: u32 = 10_000;
+
+    /// Nothing said about this arm, which is what every arm starts as.
+    pub const NONE: Self = Self(None);
+
+    /// This arm is taken `parts` times in [`Hint::SCALE`].
+    ///
+    /// More than the scale is certainty rather than a mistake worth refusing, because the callers
+    /// that can produce one are doing arithmetic whose answer is certainty, so it is clamped.
+    #[must_use]
+    pub fn parts(parts: u32) -> Self {
+        Self(Some(u16::try_from(parts.min(Self::SCALE)).unwrap_or(u16::MAX)))
+    }
+
+    /// The number, or nothing where nothing was said.
+    #[must_use]
+    pub fn taken(self) -> Option<u32> {
+        self.0.map(u32::from)
+    }
+
+    /// The hint the other arm of a two armed branch carries, so that the two sum to certainty.
+    #[must_use]
+    pub fn complement(self) -> Self {
+        match self.0 {
+            Some(parts) => Self::parts(Self::SCALE - u32::from(parts)),
+            None => Self::NONE,
+        }
+    }
+}
+
 /// A branch target, and the values passed to it.
 ///
 /// This is the whole reason there are no phi nodes. The arguments are here, in the branch,
 /// beside the block they go to, so removing a predecessor is one edit in one place and there
 /// is no second list anywhere that has to be kept in step with this one.
+///
+/// The hint is here for the same reason and not on the instruction: a branch has as many arms as
+/// it has block calls, and a weight held anywhere else would be a second list to keep in step with
+/// this one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockCall {
     /// Where control goes.
     pub block: Block,
     /// What is passed, one for each of the block's parameters.
     pub args: ValueList,
+    /// How often this arm is the one taken, where something said so.
+    pub hint: Hint,
+}
+
+impl BlockCall {
+    /// An arm going to a block with arguments and nothing said about how often it is taken.
+    #[must_use]
+    pub const fn new(block: Block, args: ValueList) -> Self {
+        Self { block, args, hint: Hint::NONE }
+    }
+
+    /// An arm going to a block that takes no arguments.
+    #[must_use]
+    pub const fn to(block: Block) -> Self {
+        Self::new(block, ValueList::EMPTY)
+    }
 }
 
 /// What defines a value.

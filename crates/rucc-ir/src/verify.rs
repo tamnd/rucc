@@ -1474,9 +1474,17 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+            // Two operands, the value and what it is expected to be, and a third holding how often
+            // the expectation holds where `__builtin_expect_with_probability` said. The third is
+            // not asked to agree with the other two: it is a number out of ten thousand rather than
+            // another value of whatever type the program is expecting something about.
             Opcode::Expect => {
-                if self.takes(opcode, arity, 2) {
+                if self.takes_either(opcode, arity, 2, 3) {
+                    self.integer(opcode, arg(0), 0);
                     self.agree(opcode, arg(0), arg(1));
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
                     if results == 1 {
                         self.produces(opcode, res(0), arg(0));
                     }

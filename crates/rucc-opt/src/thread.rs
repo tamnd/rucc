@@ -233,7 +233,7 @@ impl Pass for Thread {
                     break 'blocks;
                 }
                 let args = func.push_values(&args);
-                func.set_block_call(at, BlockCall { block: call.block, args });
+                func.set_block_call(at, BlockCall { args, ..call });
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.

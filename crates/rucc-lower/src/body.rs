@@ -32,7 +32,6 @@ use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
     InstData, IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Signature, Type, VaInfo, Value,
-    ValueList,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
@@ -1625,8 +1624,7 @@ impl<'u> Body<'_, 'u> {
                 }
             }
         }
-        let calls: Vec<BlockCall> =
-            blocks.iter().map(|&block| BlockCall { block, args: ValueList::EMPTY }).collect();
+        let calls: Vec<BlockCall> = blocks.iter().map(|&block| BlockCall::to(block)).collect();
         let targets = self.func.push_block_calls(&calls);
         let info = AsmInfo { template, constraints, clobbers, targets };
         let flags = if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
@@ -3670,6 +3668,7 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
             ExprKind::ByteSwap { operand } => Some(self.byte_swap(operand, span)),
+            ExprKind::Expect { value, hint, parts } => Some(self.expect(value, hint, parts, span)),
             // Counted at the operand's width, which is the question, and answered in `int`, which
             // is what C says every one of these is.
             ExprKind::BitCount { operand, count } => {
@@ -4601,6 +4600,36 @@ impl<'u> Body<'_, 'u> {
         let value = self.value(operand);
         let ty = self.func[value].ty;
         self.build(span).unary(Opcode::Bswap, value, ty)
+    }
+
+    /// `__builtin_expect`, as the value with what it is expected to be tied to it.
+    ///
+    /// The hint is lowered first, so that a side effect written in it runs where it ran before this
+    /// node existed: what this replaced was a comma with the hint on its left.
+    ///
+    /// Two operands of the same type, because the prototype converted both to `long`, and a third
+    /// holding the probability where the call gave one. The answer is the first operand, and
+    /// `rucc_opt::expect` is the pass that says so: it reads the branch this ends up controlling,
+    /// writes the hint onto that branch's arms, and replaces the instruction with its first operand
+    /// everywhere. Nothing after that pass sees one.
+    ///
+    /// Operands that did not come out the same type are a program the front end has already
+    /// refused, and the instruction is left out rather than built malformed for the verifier to
+    /// complain about a second time.
+    fn expect(&mut self, value: ExprId, hint: ExprId, parts: Option<u16>, span: Span) -> Value {
+        let hint = self.value(hint);
+        let value = self.value(value);
+        let ty = self.func[value].ty;
+        if self.func[hint].ty != ty || !ty.is_int() {
+            return value;
+        }
+        let mut operands = vec![value, hint];
+        if let Some(parts) = parts {
+            let parts = self.build(span).iconst(ty, i128::from(parts));
+            operands.push(parts);
+        }
+        let args = self.func.push_values(&operands);
+        self.build(span).value(InstData { args, ..InstData::new(Opcode::Expect) }, ty)
     }
 
     /// One of the bit counting builtins, as the instruction the IR has for it and a narrowing.
@@ -6025,7 +6054,9 @@ impl Scan<'_> {
                 self.expr(operand);
             }
             ExprKind::Unary { operand, .. } => self.expr(operand),
-            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Comma { lhs, rhs } => {
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Expect { value: lhs, hint: rhs, .. }
+            | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);
             }

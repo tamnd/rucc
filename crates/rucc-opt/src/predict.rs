@@ -286,7 +286,7 @@ fn branch(
     let term = func.terminator(block).expect("a block with successors has a terminator");
     let cond = *func[func[term].args].first().expect("a br_if has a condition");
 
-    if let Some(taken) = expect(func, cond) {
+    if let Some(taken) = claimed(func, term) {
         return (taken, Predictor::Expect);
     }
 
@@ -425,20 +425,21 @@ fn hand_out(budget: u64, weight: &[u64], gone: &[bool], side: bool, parts: &mut 
     }
 }
 
-/// The prediction a `__builtin_expect` on the condition makes, if there is one.
+/// What the branch itself says about how often its first arm is taken, if anything does.
 ///
-/// Nothing emits [`Opcode::Expect`] today: `crates/rucc-sema/src/check/builtin/expect.rs` replaces
-/// the call with its first argument and drops the hint, and it says why, which is that a node
-/// every pass has to step over is a cost with no consumer. This is the consumer, so the hint has
-/// somewhere to arrive.
-fn expect(func: &Func, cond: Value) -> Option<Probability> {
-    let Def::Result { inst, .. } = func[cond].def else { return None };
-    if func[inst].opcode != Opcode::Expect {
-        return None;
-    }
-    let hint = *func[func[inst].args].get(1)?;
-    let (value, ty) = constant(func, hint)?;
-    Some(toward(value.signed(ty) != 0, PREDICT_EXPECT))
+/// This is where `__builtin_expect` arrives. The front end writes an [`Opcode::Expect`] holding the
+/// value and what the program says it will be, and `crate::expect` moves the claim onto the arms of
+/// the branch and takes the instruction away, so by the time anything predicts anything the hint is
+/// a number on the edge rather than a node to chase the condition back to. A profile will write the
+/// same number in the same place, which is the point of it being there.
+///
+/// The quality is [`Quality::Guessed`] because a hint is what somebody expected and not what
+/// anybody measured. Section 11.2 says the same thing about the number itself, which is ninety
+/// percent rather than certainty: the other arm still has to run correctly.
+fn claimed(func: &Func, term: Inst) -> Option<Probability> {
+    let at = func.target_list(term).iter().next()?;
+    let parts = func[at].hint.taken()?;
+    Some(Probability::new(parts, Quality::Guessed))
 }
 
 /// The prediction a comparison of a pointer against null makes, if that is what the condition is.
@@ -614,7 +615,7 @@ fn returning(func: &Func, cfg: &Cfg) -> Vec<bool> {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        AttrSet, Attrs, Block, Builder, Func, InstData, IntPred, Opcode, Signature, Type,
+        AttrSet, Attrs, Block, BlockCall, Builder, Func, Hint, IntPred, Opcode, Signature, Type,
     };
 
     use super::{Callees, Predictions, Predictor};
@@ -891,6 +892,17 @@ mod tests {
         assert!(!seen.taken(at[0], 0).is_predictable());
     }
 
+    /// Writes a hint onto the arms of a branch, which is what `crate::expect` does to a
+    /// `__builtin_expect` before anything gets here.
+    fn hinted(func: &mut Func, block: Block, parts: u32) {
+        let term = func.terminator(block).expect("a branch");
+        let hint = Hint::parts(parts);
+        for (at, hint) in func.target_list(term).iter().zip([hint, hint.complement()]) {
+            let call = func[at];
+            func.set_block_call(at, BlockCall { hint, ..call });
+        }
+    }
+
     #[test]
     fn a_builtin_expect_wins_over_every_predictor_after_it() {
         // The arm the user named is also the arm that aborts, and the user wins. This is the one
@@ -898,15 +910,13 @@ mod tests {
         // and it would answer the other way round.
         let (_, mut func, at) = blank(3);
         let mut build = Builder::new(&mut func, at[0]);
-        let value = build.iconst(Type::int(1), 1);
-        let hint = build.iconst(Type::int(1), 1);
-        let args = build.func().push_values(&[value, hint]);
-        let cond = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, Type::int(1));
+        let cond = build.iconst(Type::int(1), 1);
         build.br_if(cond, at[1], &[], at[2], &[]);
         Builder::new(&mut func, at[1]).unreachable();
         let mut build = Builder::new(&mut func, at[2]);
         let zero = build.iconst(Type::int(32), 0);
         build.ret(&[zero]);
+        hinted(&mut func, at[0], 9_000);
 
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::Expect);
@@ -917,16 +927,14 @@ mod tests {
     fn a_builtin_expect_of_zero_names_the_other_arm() {
         let (_, mut func, at) = blank(3);
         let mut build = Builder::new(&mut func, at[0]);
-        let value = build.iconst(Type::int(1), 1);
-        let hint = build.iconst(Type::int(1), 0);
-        let args = build.func().push_values(&[value, hint]);
-        let cond = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, Type::int(1));
+        let cond = build.iconst(Type::int(1), 1);
         build.br_if(cond, at[1], &[], at[2], &[]);
         for block in [at[1], at[2]] {
             let mut build = Builder::new(&mut func, block);
             let zero = build.iconst(Type::int(32), 0);
             build.ret(&[zero]);
         }
+        hinted(&mut func, at[0], 1_000);
 
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::Expect);

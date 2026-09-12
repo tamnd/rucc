@@ -341,7 +341,7 @@ fn pass_it_on(func: &mut Func, params: &HashMap<Block, Value>, ends: &HashMap<Bl
             // The memory parameter was appended last, so the argument goes last too, which is
             // the same rule the operand follows and for the same reason.
             let args = func.append_arg(call.args, value);
-            func.set_block_call(at, BlockCall { block: call.block, args });
+            func.set_block_call(at, BlockCall { args, ..call });
         }
     }
 }
