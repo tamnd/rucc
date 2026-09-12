@@ -309,7 +309,7 @@ impl Preprocessor {
             let found = cx.search.resolve(cx.fs, &file.name, form, Some(here), 0);
             let Some(found) = found else {
                 let tried = cx.search.tried(&file.name, form, Some(here), 0);
-                self.not_found(&file.name, at, &tried);
+                self.not_found(&file.name, at, &tried, cx.search.missing_system());
                 continue;
             };
             let mut discarded = Vec::new();
@@ -694,14 +694,19 @@ impl Preprocessor {
         let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
         let Some(found) = found else {
             let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
-            self.not_found(&header.name, hash, &tried);
+            self.not_found(&header.name, hash, &tried, cx.search.missing_system());
             return;
         };
         self.read(found, hash, out, cx, names);
     }
 
     /// Reports an include of a file that is not anywhere the search looked.
-    fn not_found(&mut self, name: &str, at: Span, tried: &[PathBuf]) {
+    ///
+    /// `why` is whatever the driver left on the search path about the target's own directories being
+    /// absent, which is the other half of the answer when the path is empty. It is a note rather
+    /// than the message because the message is about this include and the reason is about the
+    /// machine, and a program that includes nothing never asks.
+    fn not_found(&mut self, name: &str, at: Span, tried: &[PathBuf], why: Option<&str>) {
         // Two ways to have looked nowhere. An absolute name is opened and not searched for,
         // and a search path with nothing on it has nowhere to look. Saying the first when it
         // was the second sends the reader after a path that is not there.
@@ -714,11 +719,13 @@ impl Preprocessor {
                 tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
             format!("searched: {}", list.join(", "))
         };
-        self.diagnostics.push(
-            Diagnostic::error(format!("`{name}` file not found"), at)
-                .with_code("E0341")
-                .note(where_looked, at),
-        );
+        let mut said = Diagnostic::error(format!("`{name}` file not found"), at)
+            .with_code("E0341")
+            .note(where_looked, at);
+        if let Some(why) = why {
+            said = said.note(why, at);
+        }
+        self.diagnostics.push(said);
     }
 
     /// Reads the file a finished search named, appending what it produces to `out`.
@@ -3018,6 +3025,29 @@ mod tests {
         assert_eq!(diagnostics[0].code, Some("E0341"));
         assert_eq!(diagnostics[0].message, "`nope.h` file not found");
         assert!(diagnostics[0].children[0].message.contains("/dir"));
+    }
+
+    /// And says why there was nowhere to look, when the driver left a reason on the path.
+    ///
+    /// What the reason is for is `rucc_sysroot::Wall`: a target whose system headers nobody may
+    /// redistribute has no directories of its own on the path, and an include that failed is the one
+    /// moment where saying so helps. It is a second note rather than the message, because the
+    /// message is about this include and the reason is about the machine.
+    #[test]
+    fn a_header_that_is_not_there_says_why_the_system_directories_are_missing() {
+        let mut run = Run::new();
+        run.search.explain_missing_system("aarch64-macos needs a macOS SDK and there is none here");
+        run.go("#include <stdio.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "`stdio.h` file not found");
+        assert!(diagnostics[0].children[0].message.contains("search path is empty"));
+        assert!(diagnostics[0].children[1].message.contains("needs a macOS SDK"));
+        // And a run with nothing left on the path keeps the one note it had.
+        let mut run = Run::new();
+        run.dir("/dir");
+        run.go("#include <nope.h>\n");
+        assert_eq!(run.pp.take_diagnostics()[0].children.len(), 1);
     }
 
     #[test]

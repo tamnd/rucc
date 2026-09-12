@@ -104,8 +104,9 @@ fn linux(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// There is no `/usr/include` on a Mac since the command line tools stopped installing one,
 /// and the headers live inside the SDK that Xcode or the command line tools brought with
 /// them. Nothing is offered when there is no SDK, because a guess at a path that is not there
-/// only makes the diagnostic longer, and the diagnostic is `rucc_sysroot::Wall::no_headers`:
-/// an Apple target with no SDK anywhere is Apple's licence wall rather than a missing directory.
+/// only makes the diagnostic longer, and the diagnostic is `rucc_sysroot::Wall::no_headers`,
+/// which the driver leaves on the search path: an Apple target with no SDK anywhere is Apple's
+/// licence wall rather than a missing directory, and the include that failed is where it is said.
 fn darwin(sdk: Option<&Path>) -> Vec<PathBuf> {
     sdk.map(|sdk| vec![sdk.join("usr/include")]).unwrap_or_default()
 }
