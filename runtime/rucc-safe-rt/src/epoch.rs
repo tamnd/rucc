@@ -53,18 +53,19 @@
 //! which is judgement J9 and is document 03's C2 and C3. C4 is in too, and it is not a check of its
 //! own: an instance ending stamps its bytes with the freeing thread, so the refusal
 //! [`crate::check::live`] already made for a use after free can say the free was another thread's
-//! and nothing ordered it against the access. What is left of the four classes is C1, the torn
-//! store, which [`torn`] is the arithmetic of and which nothing can call yet: it compares a pointer
-//! word's stamp against the stamp its aux slot was written at, and the aux slot is the part of
-//! milestone S5 that does not exist.
+//! and nothing ordered it against the access. C1, the torn store, is in as well: [`torn`] is the
+//! arithmetic and [`crate::cap::pair`] and [`crate::cap::torn`] are the two ends of it, one
+//! stamping a pointer word and the capability beside it with a single stamp and the other reading
+//! both back. So all four classes are here, and what is left of C1 is generated code emitting the
+//! pair, which is tamnd/rucc#856.
 //!
-//! Where that second stamp goes is settled even though nothing writes it, and it goes here rather
-//! than in the aux slot. This plane is reserved and biased over a whole region, and a block is the
-//! aux, then the header, then the payload, all three inside the region, so the aux beside a pointer
-//! word already has a slot of its own and it is not the pointer word's slot. That was the candidate
-//! that gives up no bits, the half of its cost that was taken for new mapping turned out to be none,
-//! and it is what `spec/safe-memory/09-type-init-and-races.md` section 9.5 now says. What it costs
-//! is a second write on the path a pointer store takes, and section 9.5 has the bounds on that.
+//! The second of those two stamps lives here rather than in the aux slot. This plane is reserved and
+//! biased over a whole region, and a block is the aux, then the header, then the payload, all three
+//! inside the region, so the aux beside a pointer word already has a slot of its own and it is not
+//! the pointer word's slot. That was the candidate that gives up no bits, the half of its cost that
+//! was taken for new mapping turned out to be none, and it is what
+//! `spec/safe-memory/09-type-init-and-races.md` section 9.5 says. What it costs is a second write on
+//! the path a pointer store takes, and section 9.5 has the bounds on that.
 //!
 //! The edges are all in. [`sync`] is what an interposed primitive calls and [`crate::sync`] is the
 //! table of them, so a lock given up and taken, a thread created, a thread joined, a condition
@@ -80,6 +81,11 @@
 //! nowhere to be interposed. A bare `atomic_thread_fence` gets the same pair with no key, because
 //! it orders against every thread rather than against an object, and the runtime keeps one clock
 //! for all of them.
+//!
+//! What is not emitted yet is C1's pair. A store that writes an aux slot takes
+//! `__rucc_meta_epoch_pair` in place of `__rucc_meta_epoch`, not as well as it, because a second
+//! stamp would move the word's half of the pair away from the slot's and read as a tear on the very
+//! store that wrote both.
 
 #[cfg(unix)]
 use core::sync::atomic::AtomicBool;

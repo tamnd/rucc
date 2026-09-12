@@ -10,7 +10,9 @@
 //! one on its own is a number rather than a fact. A refused race gets a line naming both threads and
 //! where each of them stood, which is not on section 6.5's list because that list was written for
 //! judgements about one operation and this one is about two. So does a use after free of storage
-//! another thread ended, which is the same line for the same reason.
+//! another thread ended, which is the same line for the same reason. A torn store gets a line of
+//! its own rather than that one, because neither of the two threads it names is the thread asking
+//! and a sentence about a reader and a writer would be describing something else.
 //!
 //! The other three are named here rather than left to be noticed missing. The source location comes
 //! from DWARF through the `pc` field of the descriptor, and nothing fills that field in yet, because
@@ -235,6 +237,30 @@ pub fn extent(addr: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// A pair of stamps and what the pair is about.
+///
+/// Two stamps turn up in reports for two different reasons and they want two different sentences,
+/// which is the whole of why this is an enum rather than a tuple. A stranger is one thread against
+/// another and the question is the ordering between them. A tear is two halves of one pointer that
+/// were written by different stores, and the reader wants to know that both halves are real and
+/// that they do not belong together, which a sentence about ordering does not say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Witness {
+    /// What another thread did to these bytes last, and where the asking thread stood.
+    ///
+    /// Judgement J9 for a word another thread wrote, and J1 for storage another thread freed, which
+    /// is document 03's C4. The other thread's number and the point in its own counting it had
+    /// reached, which together with the asking thread's is the whole of why the monitor called the
+    /// pair concurrent.
+    Stranger(crate::epoch::Stamp, crate::epoch::Stamp),
+    /// The stamp the pointer word was written at, and the stamp the capability beside it was.
+    ///
+    /// Document 03's C1, specified in document 09 section 9.5. Neither of the two threads did
+    /// anything wrong on its own and there is no ordering to report, so the sentence names the two
+    /// stores rather than a reader and a writer.
+    Tear(crate::epoch::Stamp, crate::epoch::Stamp),
+}
+
 /// Everything a report carries beyond the descriptor.
 ///
 /// A struct rather than four arguments because they are all optional and all of them are absent
@@ -258,14 +284,11 @@ pub struct Facts<'a> {
     /// stayed in and how far short of it the derivation fell is the sentence somebody can act on,
     /// and until this line existed getting it took a debugger.
     pub base: Option<usize>,
-    /// The stamp of whatever another thread did to these bytes last, and the asking thread's own.
+    /// The two stamps a report about the epoch plane carries, and which sort of pair they are.
     ///
-    /// Two judgements have a report about two threads and the address alone names neither of them.
-    /// For J9 the first stamp is a write of the word, and for J1 it is the free of the storage,
-    /// which is document 03's C4. What this carries is the other thread's number and the point in
-    /// its own counting it stood at, which together with the asking thread's is the whole of why
-    /// the monitor called the pair concurrent.
-    pub witness: Option<(crate::epoch::Stamp, crate::epoch::Stamp)>,
+    /// Three of document 03's four race classes have a report about two stores and the address
+    /// alone names neither of them. [`Witness`] is the two shapes that takes.
+    pub witness: Option<Witness>,
 }
 
 /// Writes the report for one refused judgement.
@@ -286,11 +309,20 @@ pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
 
     // Before the address rather than after it, because it is the half of a race report that does
     // not depend on there being an address to print and the other lines all do.
-    if let Some((found, mine)) = witness {
-        out.text("  last touched by thread ").dec(crate::epoch::thread(found));
-        out.text(" at its step ").dec(crate::epoch::clock(found));
-        out.text(", reached by thread ").dec(crate::epoch::thread(mine));
-        out.text(" at its step ").dec(crate::epoch::clock(mine)).text("\n");
+    match witness {
+        Some(Witness::Stranger(found, mine)) => {
+            out.text("  last touched by thread ").dec(crate::epoch::thread(found));
+            out.text(" at its step ").dec(crate::epoch::clock(found));
+            out.text(", reached by thread ").dec(crate::epoch::thread(mine));
+            out.text(" at its step ").dec(crate::epoch::clock(mine)).text("\n");
+        }
+        Some(Witness::Tear(word, paired)) => {
+            out.text("  the pointer was stored by thread ").dec(crate::epoch::thread(word));
+            out.text(" at its step ").dec(crate::epoch::clock(word));
+            out.text(", the capability beside it by thread ").dec(crate::epoch::thread(paired));
+            out.text(" at its step ").dec(crate::epoch::clock(paired)).text("\n");
+        }
+        None => {}
     }
 
     // Nothing decides the class yet, so this line is normally absent rather than saying zero.
@@ -566,7 +598,9 @@ mod tests {
             site: Some("memcpy, over its dst argument"),
             addr: Some(base - usize::from(u16::MAX)),
             base: Some(base),
-            witness: Some((
+            // The tear rather than the stranger, because its sentence is the longer of the two and
+            // this test is about the longest thing the buffer has to hold.
+            witness: Some(Witness::Tear(
                 crate::epoch::stamp(crate::epoch::THREADS, crate::epoch::CLOCKS),
                 crate::epoch::stamp(crate::epoch::THREADS, crate::epoch::CLOCKS),
             )),
@@ -588,13 +622,37 @@ mod tests {
             site: None,
             addr: None,
             base: None,
-            witness: Some((crate::epoch::stamp(2, 12), crate::epoch::stamp(1, 10))),
+            witness: Some(Witness::Stranger(
+                crate::epoch::stamp(2, 12),
+                crate::epoch::stamp(1, 10),
+            )),
         };
         assert_eq!(
             from(&row, &facts),
             "rucc: memory safety violation\n  judgement J9, a word another thread wrote with \
              nothing ordering that against this one\n  last touched by thread 2 at its step 12, \
              reached by thread 1 at its step 10\n"
+        );
+    }
+
+    #[test]
+    fn a_torn_store_names_the_two_stores_rather_than_a_reader_and_a_writer() {
+        let _turn = turn();
+        // Document 03's C1, which is the one report about two threads where neither of them is the
+        // thread asking. Both halves are real and each was written correctly, and what is wrong is
+        // that they are beside each other, so the sentence has to name the two stores.
+        let row = Descriptor { judgement: 9, class: 0, size: 8, pc: 0 };
+        let facts = Facts {
+            site: None,
+            addr: None,
+            base: None,
+            witness: Some(Witness::Tear(crate::epoch::stamp(5, 3), crate::epoch::stamp(6, 9))),
+        };
+        assert_eq!(
+            from(&row, &facts),
+            "rucc: memory safety violation\n  judgement J9, a word another thread wrote with \
+             nothing ordering that against this one\n  the pointer was stored by thread 5 at its \
+             step 3, the capability beside it by thread 6 at its step 9\n"
         );
     }
 
@@ -610,7 +668,7 @@ mod tests {
             site: None,
             addr: None,
             base: None,
-            witness: Some((crate::epoch::stamp(4, 7), crate::epoch::stamp(3, 2))),
+            witness: Some(Witness::Stranger(crate::epoch::stamp(4, 7), crate::epoch::stamp(3, 2))),
         };
         assert_eq!(
             from(&row, &facts),

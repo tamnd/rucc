@@ -170,7 +170,13 @@ pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
     let found = unsafe { region.epochs.read(addr) };
     if mine != crate::epoch::NONE && crate::epoch::unordered(found, mine) {
         // SAFETY: as in `bounds`, and neither stamp is an address.
-        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
+        unsafe {
+            crate::fail::report_witness(
+                descriptor,
+                addr,
+                crate::report::Witness::Stranger(found, mine),
+            );
+        }
         return;
     }
     // SAFETY: as in `bounds`.
@@ -494,7 +500,13 @@ pub unsafe fn raced(addr: *const c_void, size: usize, descriptor: *const Descrip
     let found = unsafe { region.epochs.stranger(addr, clipped(&region, addr, size), mine) };
     if found != crate::epoch::NONE {
         // SAFETY: as in `bounds`, and neither stamp is an address.
-        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
+        unsafe {
+            crate::fail::report_witness(
+                descriptor,
+                addr,
+                crate::report::Witness::Stranger(found, mine),
+            );
+        }
     }
 }
 
