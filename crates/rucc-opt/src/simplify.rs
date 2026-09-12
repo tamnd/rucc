@@ -33,7 +33,10 @@
 //! extension of an extension is one extension. This is the tier
 //! the specification says pays on real C, and the reason is C rather than anything about this
 //! compiler: the integer promotions widen nearly every operand of nearly every expression, and
-//! most of those widenings compute something the instruction after them throws away.
+//! most of those widenings compute something the instruction after them throws away. The widest
+//! of those promotions starts at one bit, because a comparison answers in one and everything done
+//! with the answer is done at the width of an `int` or wider, so the tier is written over that
+//! source as well as over the four a machine computes in.
 //!
 //! Tier three is the canonicalisations, which put the constant of a commutative operation on the
 //! right. They make nothing smaller and nothing faster. What they do is halve how many ways a term
@@ -892,8 +895,9 @@ mod tests {
         );
         assert_eq!(
             width::TABLE.rules.len(),
-            44,
-            "tier four is the truncation and extension algebra over four widths"
+            66,
+            "tier four is the truncation and extension algebra over four widths, and the three \
+             shapes of it that exist over the one bit a comparison answers in"
         );
         assert_eq!(
             compare::TABLE.rules.len(),

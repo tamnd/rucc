@@ -45,6 +45,13 @@
 ;; by oversight: the sign bits it copied are bits of the value now, and nothing above them is a
 ;; function of the source alone.
 ;;
+;; The source of an extension can be one bit, and the last section is the tier over that source.
+;; It is a section of its own rather than four more lines in each of the ones above because the
+;; four shapes do not all exist at this width: there is no width below one to truncate to, and
+;; there is no sign extension from one bit for anything to be written about. What is left is the
+;; three that do exist, and they are the shapes real C reaches most often, because the one bit a
+;; comparison produces is widened by the integer promotions the moment anything is done with it.
+;;
 ;; Section 13.5 asks a rule to strictly decrease a cost measure. Every rule here does, once
 ;; `crate::dce` has run. The conversion under the one that matched is left where it was, and it is
 ;; read by nothing when the rule that matched was its only reader, which is the same litter every
@@ -250,3 +257,109 @@
 (rule (simplify (sext.i32.i64 (zext.i16.i32 (value.i16 x))))
       (zext.i16.i64 (value.i16 x))
       (spec (= (zero_extend 16 64 x) (result))))
+
+
+;; The same tier over a one bit source, which is the width a comparison answers in.
+;;
+;; Widening the bit and taking it back, which is the bit. The truncation here is the one that
+;; narrows to a single bit rather than the one C writes, and what it says is that the bottom of
+;; the widened value is the whole of it, which is what the widening left there.
+
+(rule (simplify (trunc.i8.i1 (zext.i1.i8 (value.i1 x))))
+      (value.i1 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i16.i1 (zext.i1.i16 (value.i1 x))))
+      (value.i1 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i32.i1 (zext.i1.i32 (value.i1 x))))
+      (value.i1 x)
+      (spec (= x (result))))
+
+(rule (simplify (trunc.i64.i1 (zext.i1.i64 (value.i1 x))))
+      (value.i1 x)
+      (spec (= x (result))))
+
+
+;; Widening the bit and truncating to a width still above it, which is the same widening stopping
+;; earlier. This is the shape a comparison assigned to a `char` or a `short` comes out as: the
+;; promotions widen the bit to an `int` and the assignment takes it back down again.
+
+(rule (simplify (trunc.i16.i8 (zext.i1.i16 (value.i1 x))))
+      (zext.i1.i8 (value.i1 x))
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (simplify (trunc.i32.i8 (zext.i1.i32 (value.i1 x))))
+      (zext.i1.i8 (value.i1 x))
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (simplify (trunc.i32.i16 (zext.i1.i32 (value.i1 x))))
+      (zext.i1.i16 (value.i1 x))
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (simplify (trunc.i64.i8 (zext.i1.i64 (value.i1 x))))
+      (zext.i1.i8 (value.i1 x))
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (simplify (trunc.i64.i16 (zext.i1.i64 (value.i1 x))))
+      (zext.i1.i16 (value.i1 x))
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (simplify (trunc.i64.i32 (zext.i1.i64 (value.i1 x))))
+      (zext.i1.i32 (value.i1 x))
+      (spec (= (zero_extend 1 32 x) (result))))
+
+
+;; Widening the bit twice, which is one widening. The second extension can be either kind, because
+;; the first one left every bit above the bottom clear and a sign extension of something whose top
+;; bit is clear is a zero extension. This is the shape a comparison assigned to a `long` comes out
+;; as, where the promotions widen to an `int` and the conversion widens again.
+
+(rule (simplify (zext.i8.i16 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i16 (value.i1 x))
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (simplify (zext.i8.i32 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i32 (value.i1 x))
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (simplify (zext.i8.i64 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
+
+(rule (simplify (zext.i16.i32 (zext.i1.i16 (value.i1 x))))
+      (zext.i1.i32 (value.i1 x))
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (simplify (zext.i16.i64 (zext.i1.i16 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
+
+(rule (simplify (zext.i32.i64 (zext.i1.i32 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
+
+(rule (simplify (sext.i8.i16 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i16 (value.i1 x))
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (simplify (sext.i8.i32 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i32 (value.i1 x))
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (simplify (sext.i8.i64 (zext.i1.i8 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
+
+(rule (simplify (sext.i16.i32 (zext.i1.i16 (value.i1 x))))
+      (zext.i1.i32 (value.i1 x))
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (simplify (sext.i16.i64 (zext.i1.i16 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
+
+(rule (simplify (sext.i32.i64 (zext.i1.i32 (value.i1 x))))
+      (zext.i1.i64 (value.i1 x))
+      (spec (= (zero_extend 1 64 x) (result))))
