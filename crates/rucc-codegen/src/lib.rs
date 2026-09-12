@@ -110,6 +110,14 @@
 //! analysis. `spec/optimizer/37-machine-level-optimization.md` section 37.4 is the entry it comes
 //! from and says what is still left of it.
 //!
+//! [`bits`] is the other entry in that section, and it is the same question asked about a register
+//! rather than about an address: how much of one anything reads. C promotes every narrow operand
+//! to `int` before doing anything with it, so a program full of `char` arithmetic is a program
+//! full of moves between widths, and a move whose result nothing reads more of than its source
+//! already held is a move that can go. What the rewrite rules take is the pair that sits next to
+//! itself in one block; what this takes is the rest, which is the ones with a block boundary in
+//! the middle and the ones the selector wrote itself.
+//!
 //! What is not here yet is the rest of the optimizing path: no scheduling, and a block order from
 //! the shape of the control flow rather than from how often each block runs.
 //!
@@ -120,6 +128,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-codegen/0.10.34")]
 
 pub mod abi;
+pub mod bits;
 pub mod coverage;
 pub mod elsewhere;
 pub mod expand;

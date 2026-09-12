@@ -848,6 +848,42 @@ pub fn written(name: &str) -> Option<&'static [Written]> {
     TEXT.iter().find(|(known, _)| *known == name).map(|&(_, insts)| insts)
 }
 
+/// How many bits of the operand at that index the instruction of that name uses.
+///
+/// `None` for all of it, which is the answer whenever the table above does not name the operand
+/// at a width. That is an operand inside an addressing mode, since the registers an address is
+/// made of are read whole and are written as part of the mode rather than one at a time; an
+/// operand of an opcode that is written as no instruction at all, such as the three that hold a
+/// value in a register until something reads it; an operand in the other register file, which has
+/// one name per register and so nothing for a width to pick between; and a name this target does
+/// not have.
+///
+/// The widest, where an instruction names the same operand more than once. A shift reads its
+/// count as a byte and an eight bit multiply is done thirty two bits at a time, so an operand
+/// named twice is named at the width of the widest reader of it and that is what is live.
+///
+/// This is [`crate::BitInsts::width`] for this target, and it is derived from the table the
+/// assembly listing and the encoder are both generated from rather than written a second time.
+/// A width here that disagreed with the instruction would be a listing that disagreed with the
+/// bytes next to it, which section 11.1 already rules out.
+#[must_use]
+pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
+    let mut found: Option<u32> = None;
+    for spelling in written(name)? {
+        for arg in spelling.args {
+            match *arg {
+                Reg(at, width) if at == operand => {
+                    let bits = 8 << width.index();
+                    found = Some(found.map_or(bits, |had: u32| had.max(bits)));
+                }
+                Xmm(at) if at == operand => return None,
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
 /// The four spellings of each general purpose register, narrowest first.
 ///
 /// In the order the registers are numbered, which is the encoding's order, so the row a register
@@ -1080,5 +1116,77 @@ mod tests {
             ["movzbl", "divb", "movb"]
         );
         assert_eq!(remainder[2].args, [Named("ah"), Reg(0, Byte)]);
+    }
+
+    /// The width of an operand is the width the instruction names it at, which is the whole of
+    /// what the bit group liveness of `spec/optimizer/37-machine-level-optimization.md` section
+    /// 37.4 asks a target for.
+    #[test]
+    fn an_operand_is_as_wide_as_the_instruction_names_it() {
+        // A widening: eight bits in and thirty two out, which is the pair the pass is about.
+        assert_eq!(operand_width("movzx_8_32", 1), Some(8));
+        assert_eq!(operand_width("movzx_8_32", 0), Some(32));
+
+        // A narrowing, where the two widths are the same because the machine writes the low byte
+        // of the destination and reads the low byte of the source.
+        assert_eq!(operand_width("low_8", 1), Some(8));
+        assert_eq!(operand_width("low_8", 0), Some(8));
+
+        // The sign extension the machine spells with its own mnemonic.
+        assert_eq!(operand_width("movsxd_32_64", 1), Some(32));
+        assert_eq!(operand_width("movsxd_32_64", 0), Some(64));
+    }
+
+    /// An instruction that is two, whose two halves name their operands at two widths. The answer
+    /// is the width each operand is named at rather than the width of the instruction, because
+    /// there is no one width of it.
+    #[test]
+    fn a_comparison_reads_two_words_and_writes_a_byte() {
+        assert_eq!(operand_width("cmp_set_e_64", 1), Some(64));
+        assert_eq!(operand_width("cmp_set_e_64", 2), Some(64));
+        assert_eq!(operand_width("cmp_set_e_64", 0), Some(8));
+    }
+
+    /// An operand named twice at two widths is as wide as the wider of the two, since the bits the
+    /// wider reader reads are bits that have to be there.
+    #[test]
+    fn an_operand_named_twice_is_as_wide_as_the_widest_that_names_it() {
+        let remainder = written("div_rem_8").expect("an opcode this target has");
+        let widest = remainder
+            .iter()
+            .flat_map(|inst| inst.args)
+            .filter_map(|arg| match *arg {
+                Reg(0, width) => Some(8u32 << width.index()),
+                _ => None,
+            })
+            .max();
+        assert_eq!(operand_width("div_rem_8", 0), widest);
+    }
+
+    /// Three ways of not having an answer, all of which mean the whole register rather than none
+    /// of it. An address is made of registers the mode names rather than the arguments, a vector
+    /// register has one spelling and so nothing for a width to pick between, and a name this
+    /// target does not have is a name this table says nothing about.
+    #[test]
+    fn an_operand_the_description_does_not_name_has_no_width() {
+        assert_eq!(operand_width("mov_rm_32", 1), None, "an address register");
+        assert_eq!(operand_width("addsd_rr", 2), None, "the other register file");
+        assert_eq!(operand_width("no_such_instruction", 0), None, "a name this target lacks");
+    }
+
+    /// Every operand of every instruction, so that a row added later with a width nobody meant is
+    /// caught here rather than by the program it compiles. What is checked is that an answer, when
+    /// there is one, is one of the four widths a general purpose register has.
+    #[test]
+    fn every_width_this_target_answers_is_one_the_register_file_has() {
+        for &(name, insts) in TEXT {
+            for at in named(insts) {
+                let Some(bits) = operand_width(name, at) else { continue };
+                assert!(
+                    [8, 16, 32, 64].contains(&bits),
+                    "{name} names operand {at} at {bits} bits, which is no width this machine has"
+                );
+            }
+        }
     }
 }
