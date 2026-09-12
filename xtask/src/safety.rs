@@ -82,7 +82,7 @@ pub(crate) const OPTIMIZED: &str = "-O2";
 /// way. A pass left off the list is a pass whose work is in both builds, and a comparison of two
 /// builds that both did the thing has nothing to say about whether the thing was right.
 pub(crate) const NO_ELIMINATION: &[&str] =
-    &["-fdisable-discharge", "-fdisable-hoist", "-fdisable-coalesce"];
+    &["-fdisable-discharge", "-fdisable-hoist", "-fdisable-coalesce", "-fdisable-dead-plane"];
 
 /// The line every report starts with, which is what says one happened at all.
 pub(crate) const BANNER: &str = "rucc: memory safety violation";

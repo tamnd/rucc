@@ -95,6 +95,7 @@ pub mod cfg;
 pub mod coalesce;
 pub(crate) mod copy;
 pub mod dce;
+pub mod dead_plane;
 pub mod discharge;
 pub mod dom;
 pub mod extents;
