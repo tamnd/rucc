@@ -318,10 +318,13 @@ impl Conv<'_> {
 
     /// Writes one conversion node over an operand.
     fn write(&mut self, kind: Conversion, operand: ExprId, ty: TypeId) -> ExprId {
-        if kind == Conversion::Arithmetic
-            && let Some(folded) = self.saturated(operand, ty)
-        {
-            return folded;
+        // Nested rather than one `&&` chain, because a `let` in the middle of a condition is
+        // Rust 1.88 and the workspace's floor is 1.85. It reads better as a chain and that is not
+        // a reason to ask people on an older toolchain to go away.
+        if kind == Conversion::Arithmetic {
+            if let Some(folded) = self.saturated(operand, ty) {
+                return folded;
+            }
         }
         let span = self.tast.expr_span(operand);
         let node = Expr::new(ExprKind::Convert { kind, operand }, ty, Category::Rvalue);
