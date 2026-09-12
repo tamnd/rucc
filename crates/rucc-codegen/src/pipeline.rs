@@ -203,7 +203,9 @@ pub struct Flags {
     pub red_zone: bool,
     /// Whether a frame is taken a page at a time, which `-fstack-clash-protection` asks for.
     pub stack_clash: bool,
-    /// Whether every function opens with a landing pad, which `-fcf-protection=branch` asks for.
+    /// Whether every address an indirect branch may arrive at opens with a landing pad, which
+    /// `-fcf-protection=branch` asks for. That is every function, and every label of a function
+    /// whose address the program took.
     pub landing: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
@@ -249,9 +251,11 @@ impl Default for Flags {
 ///
 /// # Errors
 ///
-/// The first thing in it this cannot lower, which is what [`lower::func`] reports and is the only
-/// pass here that can refuse a function. Everything after lowering works on machine instructions
-/// that exist, so it either runs or it is a bug in this crate.
+/// The first thing in it this cannot lower, which is what [`lower::func`] reports, and one thing
+/// after it that is about the shape of the function rather than about an instruction, which is a
+/// frame that grows while it runs in a function whose flags say no frame may. Everything else after
+/// lowering works on machine instructions that exist, so it either runs or it is a bug in this
+/// crate.
 pub fn compile(
     source: &mut ir::Func,
     names: &mut Interner,
@@ -414,6 +418,21 @@ pub fn compile_recording(
     // answer.
     let fusable = layout::fusable(&func, machine.branch, names);
 
+    // In front of the splitting below, because what it does is take the values off the edges out of
+    // a computed `goto` and the splitting has no answer for one of those: the block they leave ends
+    // in a jump already, so neither end of the edge is somewhere a move can go.
+    split::indirect(&mut func, machine.branch, machine.insts, names);
+
+    // And after it, because what it puts a pad at is the block an address names and the pass above
+    // is what settles which block that is. The pad the prologue opens with is written much later,
+    // with the rest of the prologue, since the address it answers for is the function's own.
+    //
+    // Nothing at all on a target with nothing that marks an address as one an indirect branch may
+    // arrive at, which is the same answer the stack protector gives on a target with nowhere to
+    // keep its word, and the driver refuses the command line over it before any of this runs.
+    let landing = flags.landing.then_some(machine.insts.landing).flatten();
+    split::pads(&mut func, machine.insts, landing, names);
+
     // Before allocation, because an edge that carries values into a block arrived at more than
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those
     // values turn into, and the allocator asserts rather than guessing.
@@ -439,10 +458,6 @@ pub fn compile_recording(
         .then_some(machine.insts.probe.as_ref())
         .flatten()
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
-    // The same answer for a target with nothing that marks an address as one an indirect branch
-    // may arrive at, and the driver refuses the command line for the same reason it refuses the
-    // other two before any of this runs.
-    let landing = flags.landing.then_some(machine.insts.landing).flatten();
     let trace = machine.conv.trace.and_then(|trace| match profile {
         Profile::No => None,
         Profile::Early => Some(Tracing { name: trace.early, early: true }),
