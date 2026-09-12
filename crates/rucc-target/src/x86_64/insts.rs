@@ -43,8 +43,8 @@ use Form::{
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
     LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2,
-    RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
-    UnaryX87,
+    RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Test, TestCmov,
+    UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -288,6 +288,22 @@ pub enum Form {
     /// the same kind of instruction, and nothing selects either: the only thing that writes one is
     /// a prologue, which is `rucc_codegen::finish`.
     Nop,
+    /// A hint that the loop this is in is waiting for another thread, which reads nothing and
+    /// writes nothing.
+    ///
+    /// What `pause` is, and what a spin lock writes between one read of the lock word and the
+    /// next. The machine is told that the read it is about to do is the same read it just did, so
+    /// it can stop guessing ahead and can let the other thread have the bus, and the loop leaves
+    /// far less of a mess behind when the lock does come free. Like the hint below it, a processor
+    /// that ignores the whole instruction is running the program correctly.
+    ///
+    /// Not a barrier, though it sits next to one in every spin loop ever written. It orders
+    /// nothing, and a program that needs an ordering writes the ordering as well.
+    ///
+    /// The same empty operand list as [`Form::Nop`] and a form of its own for the same reason. No
+    /// rule selects one: the only thing that writes one is an `asm` statement that asked for it by
+    /// name.
+    Spin,
     /// A hint that an address is about to be used, which reads nothing and writes nothing.
     ///
     /// What `__builtin_prefetch` asks for. The machine is told to start bringing a line closer, and
@@ -693,7 +709,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe | Landing | Nop => &LEAVE,
+            Ret | Barrier | Probe | Landing | Nop | Spin => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -1108,6 +1124,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // something else can be written over it while the program runs. A prologue writes them and
     // nothing else produces one.
     ("nop", Nop),
+    // The hint a spin loop writes, which is the first instruction here that only an `asm`
+    // statement can reach. Nothing the front end reads asks for one and no rule selects one.
+    ("pause", Spin),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -1350,7 +1369,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 375);
+        assert_eq!(described, 376);
     }
 
     #[test]
@@ -1405,6 +1424,7 @@ mod tests {
                             | Probe
                             | Landing
                             | Nop
+                            | Spin
                             | Prefetch
                     ),
                 "{name} writes nothing and does nothing"
@@ -1558,7 +1578,7 @@ mod tests {
                 shape.operands().is_empty()
                     == matches!(
                         shape,
-                        Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop | Prefetch
+                        Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop | Spin | Prefetch
                     )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"

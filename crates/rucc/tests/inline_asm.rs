@@ -1,11 +1,14 @@
-//! Inline assembly with an empty template, end to end.
+//! Inline assembly end to end.
 //!
 //! Design: `spec/11-asm-objects-debug.md` section 11.2.
 //!
 //! An `asm` whose template has no instructions in it is most of the inline assembly in a test
 //! suite, and it is not an accident of one. A program that wants a value computed where it stands,
 //! or a loop nothing may touch, writes `asm volatile ("" : : : "memory")`, and what it is asking
-//! for is the barrier and the places the operands share rather than any instruction.
+//! for is the barrier and the places the operands share rather than any instruction. A template
+//! that does name an instruction gets that instruction, looked up in the same description of the
+//! machine the listing is written from, so what is checked here is that the name a program wrote
+//! and the name the listing carries are the same one.
 //!
 //! The unit tests in `rucc-ir` cover reading a constraint list back, and the ones in `rucc-codegen`
 //! cover what each shape lowers to. What is left is the trip itself, which is only visible from the
@@ -95,11 +98,31 @@ fn an_operand_in_memory_is_the_object_it_names() {
 }
 
 #[test]
-fn a_template_with_instructions_in_it_says_what_is_missing() {
-    // Refused rather than dropped. A template nothing assembles is a program this compiler cannot
-    // build, and a template quietly left out is a program that builds and does the wrong thing.
-    let (ok, _, said) = run("real", "int f(int x) { asm (\"nop\"); return x; }\n");
-    assert!(!ok, "a template nothing assembles was accepted");
+fn a_template_with_an_instruction_in_it_is_that_instruction() {
+    let text = asm("real", "int f(int x) { asm volatile (\"pause\"); return x; }\n");
+    let body = body(&text, "f");
+    assert!(body.contains("pause"), "the template never reached the listing:\n{body}");
+}
+
+#[test]
+fn a_template_that_reads_a_segment_is_the_load_it_names() {
+    // What rpmalloc writes to find the block its own thread owns. The instruction it asks for is
+    // the one a thread local variable already compiles to, reached this time through the template.
+    let source = "long f(void) { long t; asm (\"movq %%fs:0, %0\" : \"=r\" (t)); return t; }\n";
+    let text = asm("segment", source);
+    let body = body(&text, "f");
+    assert!(body.contains("%fs:0"), "the segment never reached the listing:\n{body}");
+}
+
+#[test]
+fn a_template_this_cannot_place_still_says_what_is_missing() {
+    // Refused rather than dropped. A template nothing here can place is a program this compiler
+    // cannot build, and a template quietly left out is a program that builds and does the wrong
+    // thing. A two address instruction is spelled with one of its operands unnamed, so there is
+    // nowhere for this statement's second operand to go that is not a guess.
+    let source = "int f(int x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
+    let (ok, _, said) = run("two-address", source);
+    assert!(!ok, "a template nothing here places was accepted");
     assert!(said.contains("has instructions in its template"), "{said}");
 }
 
