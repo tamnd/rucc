@@ -368,6 +368,25 @@ pub enum ExprKind {
         /// `__builtin_expect` and every call whose probability would not fold.
         parts: Option<u16>,
     },
+    /// `__builtin_prefetch`, which asks for an address to be brought closer before it is used.
+    ///
+    /// It answers nothing and it promises nothing. A prefetch does not read the memory it names,
+    /// so nothing after it sees anything it would not have seen, and a target that writes no
+    /// instruction for it has implemented it correctly. What it changes is how long the program
+    /// takes. See `check/builtin/prefetch.rs`.
+    ///
+    /// The two facts beside the address were the second and third arguments, and they are numbers
+    /// here rather than expressions because the instruction is chosen by what they say and a call
+    /// that wrote something that would not fold has already been refused.
+    Prefetch {
+        /// The address, which is the first argument.
+        address: ExprId,
+        /// Whether the access this is a hint for will write, which is the second.
+        write: bool,
+        /// How much of the data will still be wanted afterwards, from zero to three, which is the
+        /// third. Three is what a call that wrote neither of them means.
+        locality: u8,
+    },
     /// `__builtin_unreachable()`, which is the program promising control does not get here.
     ///
     /// It has no operands and no value, and it is a node rather than a call for the reason

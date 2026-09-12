@@ -2514,6 +2514,36 @@ decl #0 x : int object external static defined
         assert!(!text.contains("GOTTPOFF"), "{text}");
     }
 
+    /// The four hints and the one thing that decides between them, which is the locality.
+    ///
+    /// A prefetch promises nothing, so what is checked here is the instruction rather than any
+    /// effect: the program runs the same whichever of the four it gets, and the whole point of
+    /// writing one is which. The four spellings are what gcc 16.2.0 writes for the same four
+    /// programs, measured on x86-64 rather than read off a manual.
+    ///
+    /// The write hint is not one of them. `prefetchw` is not in the base instruction set and gcc
+    /// writes it only when the command line says the part has it, so a prefetch for a write is the
+    /// same instruction as a prefetch for a read, which is the fourth line here.
+    #[test]
+    fn a_prefetch_is_one_of_four_instructions_and_the_locality_is_what_picks() {
+        for (locality, wanted) in
+            [(0, "prefetchnta"), (1, "prefetcht2"), (2, "prefetcht1"), (3, "prefetcht0")]
+        {
+            let source =
+                format!("void warm(void *p) {{ __builtin_prefetch(p, 0, {locality}); }}\n");
+            let text = asm(&source);
+            assert!(text.contains(&format!("\t{wanted}\t")), "locality {locality}: {text}");
+        }
+        // The one argument form, which means a read that wants all of the data afterwards.
+        let text = asm("void warm(void *p) { __builtin_prefetch(p); }\n");
+        assert!(text.contains("\tprefetcht0\t"), "{text}");
+        // A prefetch for a write, which on a part nobody said has `prefetchw` is the same
+        // instruction as the read above.
+        let text = asm("void warm(void *p) { __builtin_prefetch(p, 1); }\n");
+        assert!(text.contains("\tprefetcht0\t"), "{text}");
+        assert!(!text.contains("prefetchw"), "{text}");
+    }
+
     /// Not a rewording of the check above: what the two paths agree about is the point.
     #[test]
     fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {

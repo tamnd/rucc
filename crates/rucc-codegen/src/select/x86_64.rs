@@ -221,6 +221,20 @@ mod tests {
     /// one that costs anything here.
     const BARRIER: &[&str] = &["mfence"];
 
+    /// The instructions that are a hint rather than a computation.
+    ///
+    /// The same shape of exemption the barrier gets and for a reason one step further out. A
+    /// barrier computes nothing and still has to be where it is, so there is at least a claim about
+    /// the program around it. A prefetch does not even have that: a machine that drops the whole
+    /// instruction runs the program correctly, because the only thing it can change is how long the
+    /// program takes.
+    ///
+    /// So there is no equality for the solver and no pattern for a rule, and which of the four a
+    /// program gets is decided by a number in the builtin's own arguments rather than by anything
+    /// about the value being prefetched. `crate::lower` writes them by name, out of the hint the IR
+    /// carries beside the instruction.
+    const HINT: &[&str] = &["prefetch_nta", "prefetch_t0", "prefetch_t1", "prefetch_t2"];
+
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
     /// A rule replaces a term with a term, and a term is the value one instruction computes. A
@@ -463,7 +477,7 @@ mod tests {
             if NARROW.contains(&opcode) || BARRIER.contains(&opcode) || X87.contains(&opcode) {
                 continue;
             }
-            if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) {
+            if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -483,6 +497,18 @@ mod tests {
         for &opcode in BARRIER {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+        }
+    }
+
+    /// The same claim about the hints, with the one difference between them written down. A hint is
+    /// given an address and nothing else, so it has no operands for the reason a barrier has none
+    /// and it does carry an addressing mode, which is what a rule would have had to match on.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_it_is_a_hint_is_given_only_an_address() {
+        for &opcode in HINT {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+            assert!(form.takes_mem(), "{opcode} is a hint about an address and is given none");
         }
     }
 

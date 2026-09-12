@@ -49,7 +49,7 @@ use crate::inst::{
     Abi, Block, CallInfo, Def, Inst, MetaNode, Param, PlaneNode, Signature, VaInfo, Value,
 };
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
-use crate::{Extra, MemOrder, Meta, Opcode, Type};
+use crate::{Extra, MemOrder, Meta, Opcode, PrefetchHint, Type};
 
 /// One thing wrong with a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -679,6 +679,16 @@ impl<'a> Verifier<'a> {
             Extra::Order(order) => {
                 if !order.is_valid_for_rmw() {
                     self.error("a fence is not a fence unless it orders something");
+                }
+                return;
+            }
+            Extra::Prefetch(hint) => {
+                if !hint.is_valid() {
+                    self.error(format!(
+                        "a locality is nothing above {} and this is {}",
+                        PrefetchHint::MOST,
+                        hint.locality
+                    ));
                 }
                 return;
             }

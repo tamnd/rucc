@@ -475,6 +475,9 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Expect { parts: Some(parts), .. } => format!("expect {parts}"),
             ExprKind::Expect { parts: None, .. } => "expect".to_owned(),
+            ExprKind::Prefetch { write, locality, .. } => {
+                format!("prefetch {} {locality}", if write { "write" } else { "read" })
+            }
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
         }
@@ -501,6 +504,7 @@ impl<'a> Printer<'a> {
             | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
+            | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

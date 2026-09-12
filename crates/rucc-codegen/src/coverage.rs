@@ -86,6 +86,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // The one thing on this machine that no ordinary instruction can work out, which is why it
     // is built here rather than matched: `%fs` is not a register a rule could name.
     (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
+    // A hint, which is built here for a reason of the same shape and one step stronger: which of
+    // the four instructions it is comes out of a number in the builtin's arguments, and a pattern
+    // matches on an opcode and a type and could not see it.
+    (Opcode::Prefetch, "`crate::lower`, as one of the four `prefetch` instructions"),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),
@@ -236,7 +240,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#226",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
-    (Opcode::Prefetch, "one instruction, once the hints have somewhere to go", "tamnd/rucc#313"),
     (Opcode::FrameAddress, "a walk up the frame pointers", "tamnd/rucc#312"),
     (Opcode::ReturnAddress, "the same walk, one word further along", "tamnd/rucc#312"),
     (

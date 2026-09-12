@@ -38,7 +38,7 @@ use crate::inst::{
     Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
-use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, RmwOp, Type};
+use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
 
 /// One function.
 #[derive(Debug)]
@@ -1087,6 +1087,20 @@ impl<'a> Builder<'a> {
     /// A barrier, which touches no address and is its ordering and nothing else.
     pub fn fence(&mut self, order: MemOrder) -> Inst {
         self.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[])
+    }
+
+    /// A hint that an address is about to be read or written, which produces nothing.
+    ///
+    /// It reads the address rather than the memory at it, in the sense that nothing after this
+    /// sees anything it did not see before. What it is allowed to do is take time, so it is on the
+    /// memory chain anyway: a prefetch of an address a store is about to write to has to stay on
+    /// the side of that store it was written on, or it is a hint about the wrong thing.
+    pub fn prefetch(&mut self, address: Value, hint: PrefetchHint) -> Inst {
+        let args = self.func.push_values(&[address]);
+        self.inst(
+            InstData { args, extra: Extra::Prefetch(hint), ..InstData::new(Opcode::Prefetch) },
+            &[],
+        )
     }
 
     /// An unconditional branch.

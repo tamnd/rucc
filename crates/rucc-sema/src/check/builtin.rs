@@ -64,6 +64,7 @@ mod expect;
 mod generic;
 mod math;
 mod overflow;
+mod prefetch;
 mod sign;
 mod thread;
 mod unreachable;

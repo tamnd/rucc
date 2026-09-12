@@ -31,7 +31,8 @@ use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
-    InstData, IntPred, MemInfo, MemOrder, Opcode, Restrict, RmwOp, Signature, Type, VaInfo, Value,
+    InstData, IntPred, MemInfo, MemOrder, Opcode, PrefetchHint, Restrict, RmwOp, Signature, Type,
+    VaInfo, Value,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
@@ -3700,6 +3701,14 @@ impl<'u> Body<'_, 'u> {
             ExprKind::ThreadPointer => {
                 Some(self.build(span).value(InstData::new(Opcode::ThreadPointer), Type::PTR))
             }
+            // A hint, so the address under it is lowered for its value and nothing is read through
+            // it. It produces nothing, which is why the whole of it answers `None`: a prefetch is
+            // void and a program that used it for a value did not get past the checker.
+            ExprKind::Prefetch { address, write, locality } => {
+                let address = self.value(address);
+                self.build(span).prefetch(address, PrefetchHint { write, locality });
+                None
+            }
         }
     }
 
@@ -6037,7 +6046,9 @@ impl Scan<'_> {
                     self.taken.push(label);
                 }
             }
-            ExprKind::Member { base, .. } => self.expr(base),
+            ExprKind::Member { base, .. } | ExprKind::Prefetch { address: base, .. } => {
+                self.expr(base);
+            }
             ExprKind::Subscript { base, index } => {
                 self.expr(base);
                 self.expr(index);

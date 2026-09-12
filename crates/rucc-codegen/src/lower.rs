@@ -82,7 +82,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
-    RmwOp, Type, Value, Visibility,
+    PrefetchHint, RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -822,6 +822,14 @@ impl<'a> Lowering<'a> {
                 // way there is nothing to prove about the address of a symbol.
                 Opcode::Fence => {
                     self.barrier(inst)?;
+                    continue;
+                }
+                // A hint, written by name for the reason a barrier is and one step further: not
+                // only is there no equality for a proof to discharge, there is nothing about the
+                // program around it either. Which of the four instructions it is comes out of the
+                // number the builtin was given, which is beside the instruction rather than in it.
+                Opcode::Prefetch => {
+                    self.hint(inst)?;
                     continue;
                 }
                 // A compare and exchange, which is written by name because it produces two values
@@ -2005,6 +2013,53 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         let fence = mir::Opcode::new(self.names.intern("x64.mfence"));
         self.out.build(block, fence).at(span).finish();
+        Ok(())
+    }
+
+    /// One hint that an address is about to be used, which is one instruction and no promise.
+    ///
+    /// Four instructions on this machine and the locality picks between them, which is what the
+    /// number means: how much of the data will still be wanted after the access. None of it wanted
+    /// is `prefetchnta`, which brings the line in without keeping it, and all of it wanted is
+    /// `prefetcht0`, which brings it as close as the machine can. The two in between are the levels
+    /// between those. Measured against gcc 16.2.0 on x86-64 rather than read off the manual: zero
+    /// gives `prefetchnta`, one `prefetcht2`, two `prefetcht1` and three `prefetcht0`.
+    ///
+    /// Whether the access will write is not read here, and that is this machine rather than an
+    /// omission. The write hint is `prefetchw`, which is not in the base instruction set, and gcc
+    /// writes it only when the command line said the part has it. So a prefetch for a write is the
+    /// same instruction as a prefetch for a read, which is what gcc 16.2.0 writes without
+    /// `-mprfchw`, and the difference is carried in the IR for a target that can use it.
+    ///
+    /// The address goes in the addressing mode rather than in an operand, the way a store's does.
+    /// It is built here as the plainest one there is, a register and nothing else, because what
+    /// arrives is a value and folding an addition into the mode is a rule's job and no rule reaches
+    /// this instruction. An address the program computed is therefore one `lea` or one add in front
+    /// of this, which is what it would have been for the load the hint is about anyway.
+    fn hint(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::Prefetch(hint) = self.source[inst].extra else {
+            return Err(self.unsupported(inst));
+        };
+        let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let [address] = args[..] else { return Err(self.unsupported(inst)) };
+        let name = match hint.locality {
+            0 => "prefetch_nta",
+            1 => "prefetch_t2",
+            2 => "prefetch_t1",
+            PrefetchHint::MOST => "prefetch_t0",
+            // Nothing else exists. The checker reads a locality outside the range as zero and the
+            // verifier refuses one that got here another way, so this is a hint that was built
+            // rather than checked, and the safe answer for a hint is to write no instruction.
+            _ => return Err(self.unsupported(inst)),
+        };
+        let base = self.reg_of(address)?;
+        let block = self.at.expect("a block is being filled");
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        self.out
+            .build(block, opcode)
+            .at(self.source.span(inst))
+            .mem(mir::Mem::at(mir::Operand::read(base, self.gpr)))
+            .finish();
         Ok(())
     }
 
@@ -3868,18 +3923,20 @@ mod tests {
         let (mut names, mut source, block, args) = blank(&[Type::PTR]);
         let mut build = Builder::new(&mut source, block);
         let operands = build.func().push_values(&[args[0]]);
-        build.inst(InstData { args: operands, ..InstData::new(Opcode::Prefetch) }, &[]);
+        build.inst(InstData { args: operands, ..InstData::new(Opcode::LongjmpMarker) }, &[]);
 
-        // A hint about an address, which nothing writes an instruction for yet. Nothing about it
-        // is a width or a register, so there is nothing for the message to add beyond the name.
+        // The mark that a jump goes back through here, which nothing writes an instruction for
+        // yet: what it needs is for the allocator to be told a block can be arrived at twice, and
+        // that is `tamnd/rucc#223`. Nothing about it is a width or a register, so there is nothing
+        // for the message to add beyond the name.
         let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("no rule writes a prefetch");
-        assert_eq!(failed.to_string(), "no rule lowers a `prefetch`");
+            .expect_err("no rule writes a longjmp marker");
+        assert_eq!(failed.to_string(), "no rule lowers a `longjmp_marker`");
 
-        // A `prefetch` produces nothing, so there is no type in the message and nothing invents
-        // one, and the instruction comes back so a caller can ask the function where it was.
+        // It produces nothing, so there is no type in the message and nothing invents one, and the
+        // instruction comes back so a caller can ask the function where it was.
         let inst = failed.inst().expect("the instruction it is about");
-        assert_eq!(source[inst].opcode, Opcode::Prefetch);
+        assert_eq!(source[inst].opcode, Opcode::LongjmpMarker);
     }
 
     /// A barrier is written by name here, and what it is depends on the ordering and on nothing
