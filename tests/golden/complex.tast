@@ -189,3 +189,65 @@ decl #38 shifted : _Complex double(_Complex double) function external defined
           convert lvalue : _Complex double
             decl #37 z : _Complex double lvalue
           const 0x0p+0 + 0x14p-3i : _Complex double
+decl #41 multiplied : _Complex double(_Complex double, _Complex double) function external defined
+  params
+    decl #39 a : _Complex double object automatic defined
+    decl #40 b : _Complex double object automatic defined
+  body
+    block
+      return
+        binary * : _Complex double
+          convert lvalue : _Complex double
+            decl #39 a : _Complex double lvalue
+          convert lvalue : _Complex double
+            decl #40 b : _Complex double lvalue
+decl #44 divided : _Complex float(_Complex float, _Complex float) function external defined
+  params
+    decl #42 a : _Complex float object automatic defined
+    decl #43 b : _Complex float object automatic defined
+  body
+    block
+      return
+        binary / : _Complex float
+          convert lvalue : _Complex float
+            decl #42 a : _Complex float lvalue
+          convert lvalue : _Complex float
+            decl #43 b : _Complex float lvalue
+decl #47 scaled : _Complex float(_Complex float, _Complex double) function external defined
+  params
+    decl #45 a : _Complex float object automatic defined
+    decl #46 b : _Complex double object automatic defined
+  body
+    block
+      expr
+        assign *= in _Complex double : _Complex float
+          decl #45 a : _Complex float lvalue
+          convert lvalue : _Complex double
+            decl #46 b : _Complex double lvalue
+      return
+        convert lvalue : _Complex float
+          decl #45 a : _Complex float lvalue
+decl #48 product : _Complex double object external static defined
+  init
+    +0
+      binary * : _Complex double
+        binary + : _Complex double
+          convert arithmetic : _Complex double
+            const 0x18p-4 : double
+          const 0x0p+0 + 0x14p-3i : _Complex double
+        binary + : _Complex double
+          convert arithmetic : _Complex double
+            const 0x1p-1 : double
+          const 0x0p+0 + 0x1p+2i : _Complex double
+decl #49 quotient : _Complex double object external static defined
+  init
+    +0
+      binary / : _Complex double
+        binary + : _Complex double
+          convert arithmetic : _Complex double
+            const 0x1p+0 : double
+          const 0x0p+0 + 0x1p+1i : _Complex double
+        binary + : _Complex double
+          convert arithmetic : _Complex double
+            const 0x18p-3 : double
+          const 0x0p+0 + 0x1p+2i : _Complex double

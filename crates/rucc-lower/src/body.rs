@@ -2753,6 +2753,20 @@ impl<'u> Body<'_, 'u> {
                     self.write(into, value, span);
                 }
             }
+            // `z * w` and `z / w`, which are the call the runtime answers rather than the four
+            // products written out. Sema has converted both operands to this type already, the
+            // same way it has for the add.
+            ExprKind::Binary { op: op @ (BinaryOp::Mul | BinaryOp::Div), lhs, rhs } => {
+                let left = self.complex_addr(lhs, span);
+                let right = self.complex_addr(rhs, span);
+                let mut halves = Vec::with_capacity(4);
+                for addr in [left, right] {
+                    for imag in [false, true] {
+                        halves.push(self.half(addr, imag, part, span));
+                    }
+                }
+                self.complex_call(at, op, &halves, ty, span);
+            }
             // `-z`, which is the real negation on each half.
             ExprKind::Unary { op: UnaryOp::Minus, operand } => {
                 let from = self.complex_addr(operand, span);
@@ -2831,6 +2845,39 @@ impl<'u> Body<'_, 'u> {
         let part = self.real_part(ty);
         let wide = self.real_part(computation);
         let right = self.complex_addr(rhs, span);
+        // The multiply and the divide are one operation over a whole value rather than one over
+        // each half, so there is nothing to do half by half: the four halves are widened, the
+        // routine is asked for the answer, and the answer is narrowed back. Where the two types
+        // are the same the answer is built in the object itself, since the routine reads its
+        // arguments as values and the loads have already happened by the time it writes.
+        if matches!(op, BinaryOp::Mul | BinaryOp::Div) {
+            let mut halves = Vec::with_capacity(4);
+            for imag in [false, true] {
+                let a = self.half(target, imag, part, span);
+                halves.push(self.coerce(a, part, wide, span));
+            }
+            for imag in [false, true] {
+                halves.push(self.half(right, imag, wide, span));
+            }
+            let narrows = wide != part;
+            let at = if narrows {
+                let size = repr::size_of(self.types(), self.target(), computation);
+                let align = repr::align_of(self.types(), self.target(), computation);
+                self.scratch(size, align, span)
+            } else {
+                target
+            };
+            self.complex_call(at, op, &halves, computation, span);
+            if narrows {
+                for imag in [false, true] {
+                    let value = self.half(at, imag, wide, span);
+                    let value = self.coerce(value, wide, part, span);
+                    let slot = self.half_place(target, imag, part, span);
+                    self.write(slot, value, span);
+                }
+            }
+            return;
+        }
         for imag in [false, true] {
             let a = self.half(target, imag, part, span);
             let a = self.coerce(a, part, wide, span);
@@ -2840,6 +2887,88 @@ impl<'u> Body<'_, 'u> {
             let slot = self.half_place(target, imag, part, span);
             self.write(slot, value, span);
         }
+    }
+
+    /// `z * w` and `z / w`, as the call into the runtime that both of them are.
+    ///
+    /// `halves` is the real and imaginary half of the left operand and then of the right, which is
+    /// the order the routines take their four arguments in, and `ty` is the complex type all four
+    /// have and the answer has.
+    ///
+    /// A call rather than the four products and the two sums written out here, because neither
+    /// operator is those. C annex G says what a multiply does when a half is an infinity and the
+    /// other operand has a NaN in it, and what a divide does when the obvious formula overflows in
+    /// the middle and the answer it was heading for would have fit, and the naive form gets both
+    /// wrong. The routines are libgcc's, libgcc is already on the link line, and gcc compiles the
+    /// same two operators into calls to the same names, so an object rucc compiled and an object
+    /// gcc compiled agree about the awkward values rather than each having their own opinion.
+    ///
+    /// The ABI is asked about the call rather than assumed, because a complex value does not travel
+    /// the same way in every place one can be written: `_Complex float` is one SSE register on
+    /// x86-64 and two halves of one on AArch64, and a `_Complex long double` comes back in memory
+    /// on some targets and in registers on others. That is [`abi::plan`]'s question and the
+    /// arguments and the answer are moved with the same two helpers a call written in the program
+    /// uses.
+    fn complex_call(&mut self, at: Value, op: BinaryOp, halves: &[Value], ty: TypeId, span: Span) {
+        let part = self.real_part(ty);
+        let Some(routine) = self.complex_routine(op, part) else {
+            self.unsupported("this complex operator on this type", span);
+            return;
+        };
+        let params = [part; 4];
+        let plan = match abi::plan(self.types(), self.target(), ty, &params, &params, false) {
+            Ok(plan) => plan,
+            Err(what) => {
+                self.unsupported(what, span);
+                return;
+            }
+        };
+        let mut values = Vec::with_capacity(halves.len() + 1);
+        if plan.returns_through_memory() {
+            values.push(at);
+        }
+        values.extend_from_slice(halves);
+        let symbol = self.unit.names.intern(&routine);
+        let sig = self.func.add_signature(plan.signature.clone());
+        let inst = self.build(span).call_varargs(symbol, sig, &values, &[]);
+        if plan.returns_through_memory() {
+            return;
+        }
+        let results: Vec<Value> = self.func[inst].results().collect();
+        match plan.ret.pass {
+            // One register holding the whole value, which is what a target that has no way to
+            // take a small object apart says about one.
+            Pass::Direct => {
+                if let Some(&value) = results.first() {
+                    let info = self.piece_info(plan.ret.align, 0);
+                    self.build(span).store(value, at, info, Flags::NONE);
+                }
+            }
+            _ => self.store_slots(at, &plan.ret, &results, span),
+        }
+    }
+
+    /// The runtime routine one complex operator on one real part goes to.
+    ///
+    /// The names are libgcc's and are spelled after the machine mode of the half rather than after
+    /// the C type it was written as, so `long double` is `__mulxc3` where it is the x87 format and
+    /// `__multc3` where it is the quadruple one, and the two are different routines on targets that
+    /// have both. [`None`] for a format the runtime has no routine for, which is `__bf16` and the
+    /// double-double, and neither is a type a complex value can have here anyway.
+    fn complex_routine(&self, op: BinaryOp, part: TypeId) -> Option<String> {
+        let what = match op {
+            BinaryOp::Mul => "mul",
+            _ => "div",
+        };
+        let mode = match repr::float_format_of(self.types(), self.target(), part)? {
+            Format::Half => "h",
+            Format::Single => "s",
+            Format::Double => "d",
+            Format::X87Extended => "x",
+            Format::Quad => "t",
+            Format::BFloat16 | Format::DoubleDouble => return None,
+        };
+        Some(format!("__{what}{mode}c3"))
     }
 
     /// `z == w` and `z != w`, as one bit.
