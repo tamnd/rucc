@@ -1,233 +1,241 @@
-decl #1 built : _Complex double(double) function external defined
+decl #1 bare : _Complex double(_Complex double) function external defined
   params
-    decl #0 x : double object automatic defined
+    decl #0 a : _Complex double object automatic defined
+  body
+    block
+      return
+        convert lvalue : _Complex double
+          decl #0 a : _Complex double lvalue
+decl #3 built : _Complex double(double) function external defined
+  params
+    decl #2 x : double object automatic defined
   body
     block
       decls
-        decl #2 a : _Complex double object automatic defined
+        decl #4 a : _Complex double object automatic defined
           init
             +0
               convert arithmetic : _Complex double
                 convert lvalue : double
-                  decl #0 x : double lvalue
+                  decl #2 x : double lvalue
       decls
-        decl #3 b : _Complex double object automatic defined
+        decl #5 b : _Complex double object automatic defined
           init
             +0
               convert lvalue : _Complex double
-                decl #2 a : _Complex double lvalue
+                decl #4 a : _Complex double lvalue
       return
         convert lvalue : _Complex double
-          decl #3 b : _Complex double lvalue
-decl #6 added : _Complex double(_Complex double, _Complex double) function external defined
+          decl #5 b : _Complex double lvalue
+decl #8 added : _Complex double(_Complex double, _Complex double) function external defined
   params
-    decl #4 a : _Complex double object automatic defined
-    decl #5 b : _Complex double object automatic defined
+    decl #6 a : _Complex double object automatic defined
+    decl #7 b : _Complex double object automatic defined
   body
     block
       return
         binary + : _Complex double
           convert lvalue : _Complex double
-            decl #4 a : _Complex double lvalue
+            decl #6 a : _Complex double lvalue
           convert lvalue : _Complex double
-            decl #5 b : _Complex double lvalue
-decl #8 negated : _Complex double(_Complex double) function external defined
+            decl #7 b : _Complex double lvalue
+decl #10 negated : _Complex double(_Complex double) function external defined
   params
-    decl #7 a : _Complex double object automatic defined
+    decl #9 a : _Complex double object automatic defined
   body
     block
       return
         unary - : _Complex double
           convert lvalue : _Complex double
-            decl #7 a : _Complex double lvalue
-decl #11 compound : _Complex double(_Complex double, _Complex double) function external defined
+            decl #9 a : _Complex double lvalue
+decl #13 compound : _Complex double(_Complex double, _Complex double) function external defined
   params
-    decl #9 a : _Complex double object automatic defined
-    decl #10 b : _Complex double object automatic defined
+    decl #11 a : _Complex double object automatic defined
+    decl #12 b : _Complex double object automatic defined
   body
     block
       expr
         assign -= : _Complex double
-          decl #9 a : _Complex double lvalue
+          decl #11 a : _Complex double lvalue
           convert lvalue : _Complex double
-            decl #10 b : _Complex double lvalue
+            decl #12 b : _Complex double lvalue
       return
         convert lvalue : _Complex double
-          decl #9 a : _Complex double lvalue
-decl #13 real_half : double(_Complex double) function external defined
-  params
-    decl #12 a : _Complex double object automatic defined
-  body
-    block
-      return
-        convert lvalue : double
-          unary __real__ : double lvalue
-            decl #12 a : _Complex double lvalue
-decl #15 imaginary_half : double(_Complex double) function external defined
+          decl #11 a : _Complex double lvalue
+decl #15 real_half : double(_Complex double) function external defined
   params
     decl #14 a : _Complex double object automatic defined
   body
     block
       return
         convert lvalue : double
-          unary __imag__ : double lvalue
+          unary __real__ : double lvalue
             decl #14 a : _Complex double lvalue
-decl #18 assembled : _Complex double(double, double) function external defined
+decl #17 imaginary_half : double(_Complex double) function external defined
   params
-    decl #16 x : double object automatic defined
-    decl #17 y : double object automatic defined
+    decl #16 a : _Complex double object automatic defined
+  body
+    block
+      return
+        convert lvalue : double
+          unary __imag__ : double lvalue
+            decl #16 a : _Complex double lvalue
+decl #20 assembled : _Complex double(double, double) function external defined
+  params
+    decl #18 x : double object automatic defined
+    decl #19 y : double object automatic defined
   body
     block
       decls
-        decl #19 z : _Complex double object automatic defined
+        decl #21 z : _Complex double object automatic defined
       expr
         assign = : double
           unary __real__ : double lvalue
-            decl #19 z : _Complex double lvalue
+            decl #21 z : _Complex double lvalue
           convert lvalue : double
-            decl #16 x : double lvalue
+            decl #18 x : double lvalue
       expr
         assign = : double
           unary __imag__ : double lvalue
-            decl #19 z : _Complex double lvalue
+            decl #21 z : _Complex double lvalue
           convert lvalue : double
-            decl #17 y : double lvalue
+            decl #19 y : double lvalue
       return
         convert lvalue : _Complex double
-          decl #19 z : _Complex double lvalue
-decl #22 equal : int(_Complex double, _Complex double) function external defined
+          decl #21 z : _Complex double lvalue
+decl #24 equal : int(_Complex double, _Complex double) function external defined
   params
-    decl #20 a : _Complex double object automatic defined
-    decl #21 b : _Complex double object automatic defined
+    decl #22 a : _Complex double object automatic defined
+    decl #23 b : _Complex double object automatic defined
   body
     block
       return
         binary == : int
           convert lvalue : _Complex double
-            decl #20 a : _Complex double lvalue
+            decl #22 a : _Complex double lvalue
           convert lvalue : _Complex double
-            decl #21 b : _Complex double lvalue
-decl #24 nonzero : int(_Complex float) function external defined
+            decl #23 b : _Complex double lvalue
+decl #26 nonzero : int(_Complex float) function external defined
   params
-    decl #23 a : _Complex float object automatic defined
+    decl #25 a : _Complex float object automatic defined
   body
     block
       return
         cond : int
           convert bool : _Bool
             convert lvalue : _Complex float
-              decl #23 a : _Complex float lvalue
+              decl #25 a : _Complex float lvalue
           const 1 : int
           const 0 : int
-decl #26 narrowed : _Complex float(_Complex double) function external defined
-  params
-    decl #25 a : _Complex double object automatic defined
-  body
-    block
-      return
-        convert arithmetic : _Complex float
-          convert lvalue : _Complex double
-            decl #25 a : _Complex double lvalue
-decl #28 dropped : double(_Complex double) function external defined
+decl #28 narrowed : _Complex float(_Complex double) function external defined
   params
     decl #27 a : _Complex double object automatic defined
   body
     block
       return
-        cast : double
+        convert arithmetic : _Complex float
           convert lvalue : _Complex double
             decl #27 a : _Complex double lvalue
-decl #31 small : _Complex float(_Complex float, _Complex float) function external defined
+decl #30 dropped : double(_Complex double) function external defined
   params
-    decl #29 a : _Complex float object automatic defined
-    decl #30 b : _Complex float object automatic defined
+    decl #29 a : _Complex double object automatic defined
+  body
+    block
+      return
+        cast : double
+          convert lvalue : _Complex double
+            decl #29 a : _Complex double lvalue
+decl #33 small : _Complex float(_Complex float, _Complex float) function external defined
+  params
+    decl #31 a : _Complex float object automatic defined
+    decl #32 b : _Complex float object automatic defined
   body
     block
       return
         binary + : _Complex float
           convert lvalue : _Complex float
-            decl #29 a : _Complex float lvalue
+            decl #31 a : _Complex float lvalue
           convert lvalue : _Complex float
-            decl #30 b : _Complex float lvalue
-decl #33 tagged : struct wrapped(_Complex double) function external defined
+            decl #32 b : _Complex float lvalue
+decl #35 tagged : struct wrapped(_Complex double) function external defined
   params
-    decl #32 z : _Complex double object automatic defined
+    decl #34 z : _Complex double object automatic defined
   body
     block
       decls
-        decl #34 w : struct wrapped object automatic defined
+        decl #36 w : struct wrapped object automatic defined
           init
             +0
               convert lvalue : _Complex double
-                decl #32 z : _Complex double lvalue
+                decl #34 z : _Complex double lvalue
             +16
               const 1 : int
       return
         convert lvalue : struct wrapped
-          decl #34 w : struct wrapped lvalue
-decl #35 pinned : _Complex double object external static defined
+          decl #36 w : struct wrapped lvalue
+decl #37 pinned : _Complex double object external static defined
   init
     +0
       binary + : _Complex double
         convert arithmetic : _Complex double
           const 0x18p-4 : double
         const 0x0p+0 + 0x14p-3i : _Complex double
-decl #36 small_pinned : _Complex float object external static defined
+decl #38 small_pinned : _Complex float object external static defined
   init
     +0
       binary + : _Complex float
         convert arithmetic : _Complex float
           const 0xcp-3 : float
         const 0x0p+0 + 0xap-2i : _Complex float
-decl #38 shifted : _Complex double(_Complex double) function external defined
+decl #40 shifted : _Complex double(_Complex double) function external defined
   params
-    decl #37 z : _Complex double object automatic defined
+    decl #39 z : _Complex double object automatic defined
   body
     block
       return
         binary + : _Complex double
           convert lvalue : _Complex double
-            decl #37 z : _Complex double lvalue
+            decl #39 z : _Complex double lvalue
           const 0x0p+0 + 0x14p-3i : _Complex double
-decl #41 multiplied : _Complex double(_Complex double, _Complex double) function external defined
+decl #43 multiplied : _Complex double(_Complex double, _Complex double) function external defined
   params
-    decl #39 a : _Complex double object automatic defined
-    decl #40 b : _Complex double object automatic defined
+    decl #41 a : _Complex double object automatic defined
+    decl #42 b : _Complex double object automatic defined
   body
     block
       return
         binary * : _Complex double
           convert lvalue : _Complex double
-            decl #39 a : _Complex double lvalue
+            decl #41 a : _Complex double lvalue
           convert lvalue : _Complex double
-            decl #40 b : _Complex double lvalue
-decl #44 divided : _Complex float(_Complex float, _Complex float) function external defined
+            decl #42 b : _Complex double lvalue
+decl #46 divided : _Complex float(_Complex float, _Complex float) function external defined
   params
-    decl #42 a : _Complex float object automatic defined
-    decl #43 b : _Complex float object automatic defined
+    decl #44 a : _Complex float object automatic defined
+    decl #45 b : _Complex float object automatic defined
   body
     block
       return
         binary / : _Complex float
           convert lvalue : _Complex float
-            decl #42 a : _Complex float lvalue
+            decl #44 a : _Complex float lvalue
           convert lvalue : _Complex float
-            decl #43 b : _Complex float lvalue
-decl #47 scaled : _Complex float(_Complex float, _Complex double) function external defined
+            decl #45 b : _Complex float lvalue
+decl #49 scaled : _Complex float(_Complex float, _Complex double) function external defined
   params
-    decl #45 a : _Complex float object automatic defined
-    decl #46 b : _Complex double object automatic defined
+    decl #47 a : _Complex float object automatic defined
+    decl #48 b : _Complex double object automatic defined
   body
     block
       expr
         assign *= in _Complex double : _Complex float
-          decl #45 a : _Complex float lvalue
+          decl #47 a : _Complex float lvalue
           convert lvalue : _Complex double
-            decl #46 b : _Complex double lvalue
+            decl #48 b : _Complex double lvalue
       return
         convert lvalue : _Complex float
-          decl #45 a : _Complex float lvalue
-decl #48 product : _Complex double object external static defined
+          decl #47 a : _Complex float lvalue
+decl #50 product : _Complex double object external static defined
   init
     +0
       binary * : _Complex double
@@ -239,7 +247,7 @@ decl #48 product : _Complex double object external static defined
           convert arithmetic : _Complex double
             const 0x1p-1 : double
           const 0x0p+0 + 0x1p+2i : _Complex double
-decl #49 quotient : _Complex double object external static defined
+decl #51 quotient : _Complex double object external static defined
   init
     +0
       binary / : _Complex double

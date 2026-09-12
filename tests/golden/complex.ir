@@ -8,6 +8,20 @@ global @small_pinned : bytes 8 = { f32 0x3fc00000, f32 0x40200000 }, align 4, li
 global @product : bytes 16 = { f64 0xc022800000000000, f64 0x401d000000000000 }, align 8, linkage(external)
 global @quotient : bytes 16 = { f64 0x3fdc28f5c28f5c29, f64 0x3fb47ae147ae147b }, align 8, linkage(external)
 
+func @bare(f64, f64) -> (f64, f64), linkage(external) {
+block0(%0: f64, %1: f64):
+    %2 = alloca, size 16, align 8
+    store %0 -> %2, align 8
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 8
+    %5 = load.f64 %2, align 8
+    %6 = iconst.i64 8
+    %7 = ptr_add %2, %6
+    %8 = load.f64 %7, align 8
+    return %5, %8
+}
+
 func @built(f64) -> (f64, f64), linkage(external) {
 block0(%0: f64):
     %1 = alloca, size 16, align 8

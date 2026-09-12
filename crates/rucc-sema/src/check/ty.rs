@@ -242,7 +242,22 @@ impl Checker<'_> {
                 self.int()
             }
             TypeSpec::Builtin(builtin) => match builtin.resolve() {
-                Some(basic) => self.basic_type(basic.scalar, basic.complexity, span),
+                Some(basic) => {
+                    // `_Complex` on its own means `_Complex double`, which is gcc's reading and
+                    // not a reading any edition of C wrote down, so `-pedantic` says so in the
+                    // words gcc says it in.
+                    if self.cx.pedantic && builtin.is_bare_complexity() {
+                        self.report(
+                            Diagnostic::warning(
+                                "ISO C does not support plain 'complex' meaning 'double complex'"
+                                    .to_string(),
+                                span,
+                            )
+                            .with_code("E0703"),
+                        );
+                    }
+                    self.basic_type(basic.scalar, basic.complexity, span)
+                }
                 None => {
                     self.report(
                         Diagnostic::error(
@@ -1466,10 +1481,18 @@ mod tests {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
 
-        /// The same under `-fshort-enums`, which is the only flag any of these tests turns on.
+        /// The same under `-fshort-enums`, which changes what type an enumeration gets.
         pub(super) fn checker_with_short_enums(&self) -> Checker<'_> {
             let mut cx = Context::new(&self.names, &self.target, Std::C23);
             cx.short_enums = true;
+            Checker::new(&self.ast, cx)
+        }
+
+        /// The same under `-pedantic`, which is where what gcc takes but ISO C never wrote down
+        /// is said out loud.
+        pub(super) fn checker_with_pedantic(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.pedantic = true;
             Checker::new(&self.ast, cx)
         }
     }
@@ -1556,6 +1579,27 @@ mod tests {
         }
         assert_eq!(built(&mut checker, float80, plain), "long double");
         assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn complex_written_on_its_own_is_a_complex_double() {
+        // gcc's reading of `_Complex x;`, which no edition of C wrote a rule for and which enough
+        // programs use that refusing it is refusing them. `-pedantic` is the only place it is
+        // mentioned, and the words there are gcc's.
+        let mut fixture = Fixture::new();
+        let bare = fixture.keywords(&[BuiltinSet::COMPLEX]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, bare, plain), "_Complex double");
+        assert!(messages(&checker).is_empty());
+
+        let mut pedantic = fixture.checker_with_pedantic();
+        assert_eq!(built(&mut pedantic, bare, plain), "_Complex double");
+        assert_eq!(
+            message(&pedantic),
+            "ISO C does not support plain 'complex' meaning 'double complex'"
+        );
     }
 
     #[test]

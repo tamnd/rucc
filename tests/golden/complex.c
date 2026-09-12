@@ -6,6 +6,13 @@
 // The conjugate and `_Complex` on an integer type are not here yet. `tamnd/rucc#201` is where the
 // rest of it lands.
 
+// `_Complex` written on its own, which gcc reads as `_Complex double`. No edition of C wrote a
+// rule for it, so `-pedantic` says so and nothing else does, and the type below is the same one
+// the rest of this file is about.
+_Complex bare(_Complex a) {
+  return a;
+}
+
 // The two ways one is given a value: a real one, which fills the real half and zeroes the other,
 // and another complex one, which is a copy.
 _Complex double built(double x) {
