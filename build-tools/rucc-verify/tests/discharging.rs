@@ -202,20 +202,25 @@ fn a_model_that_is_not_a_model_says_so() {
 /// The rule a bounded proof exists for.
 ///
 /// Division and multiplication in one claim is the shape a bitvector solver does not settle:
-/// this one is answered in hundredths of a second at eight bits and not in five seconds at
-/// sixteen, let alone at the sixty four it will run in. It is also true, which is the point of
-/// using it here rather than something contrived.
+/// this one is answered in tenths of a second at four bits and in a second or two at eight, and
+/// at the sixty four it will run in it is not answered in thirty seconds. It is also true, which
+/// is the point of using it here rather than something contrived.
 const HARD: &str = "\
 (rule (lower (udiv.i64 (value x) (value y)))
       (x64.udiv x y)
       (spec (= (bvmul (result) y) (bvsub x (bvurem x y))))
       (bounded \"division against multiplication is out of reach at sixty four bits\"))";
 
-/// Enough for the narrow widths and not enough for the real one, which is the whole point of
-/// the rule above. The budget a run of the gate uses is five minutes, and five minutes is a long
-/// time for a test to wait for a shrug it is asking for on purpose.
+/// Enough for the narrow widths and not enough for the real one, which is the whole point of the
+/// rule above. Thirty, against the five minutes a run of the gate uses, because five minutes is a
+/// long time for a test to wait for a shrug it is asking for on purpose. Thirty rather than the
+/// two it was for a worse reason: two was a guess, and on eight cores with sixteen solvers sharing
+/// them the eight bit question took four and a half seconds, so the narrow widths came back a
+/// shrug of their own and a rule that is proved read as a rule nobody has proved. That is
+/// tamnd/rucc#1123, and it failed only on a machine that was busy. Waiting at the real width does
+/// not cost thirty either way, because a rule carrying a written reason is given ten there.
 fn quick_solver() -> Option<Solver> {
-    solver().map(|solver| solver.within(2))
+    solver().map(|solver| solver.within(30))
 }
 
 #[test]
@@ -249,7 +254,11 @@ fn a_rule_the_solver_gives_up_on_gets_a_bounded_proof_if_it_asked_for_one() {
 /// it. Without the clause the same rule is a shrug, and a shrug is not a pass.
 #[test]
 fn a_rule_that_did_not_ask_for_a_bounded_proof_is_left_unknown() {
-    let Some(solver) = quick_solver() else {
+    // Two seconds here rather than the thirty above, because with the clause gone there is no
+    // written reason and the rule is given the whole budget at its own width instead of the ten a
+    // signed off one gets. Two is enough to watch it give up, since the question does not settle
+    // in thirty, and there are no narrow widths to reach in this one.
+    let Some(solver) = solver().map(|solver| solver.within(2)) else {
         return;
     };
     let text = HARD.replace(
