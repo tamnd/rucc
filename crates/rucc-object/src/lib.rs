@@ -30,7 +30,7 @@
 //! and the loader reads out of the result, which is why a file that says nothing about it turns
 //! the check off for the whole program rather than only for itself.
 //!
-//! [`defines`] says which names a linker can find in what [`write`] wrote, which is what the symbol
+//! [`defines`] says which names a linker can find in what [`write()`] wrote, which is what the symbol
 //! index of an archive is built from. It is here rather than worked out by whoever writes the
 //! archive because the index has to agree with the member, and the writer is the only thing that
 //! knows what it put in one.

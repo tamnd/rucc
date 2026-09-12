@@ -353,7 +353,7 @@ pub fn write(
     Ok(bytes)
 }
 
-/// Every name a linker can find in the object [`write`] would write from the same input.
+/// Every name a linker can find in the object [`write()`] would write from the same input.
 ///
 /// What asks for this is the archive writer. A static link resolves through the symbol index, so an
 /// index entry has to name a symbol the member really defines: an entry for a name that is not in
@@ -367,14 +367,14 @@ pub fn write(
 /// why it asks about the target it otherwise would not have to.
 ///
 /// Order is the functions, then the variables, then the aliases, each in the order the module held
-/// them, which is the order [`write`] adds the symbols in. A `static` is left out: it is a name the
+/// them, which is the order [`write()`] adds the symbols in. A `static` is left out: it is a name the
 /// link has already finished with by the time an archive is searched, and an index entry for one
 /// would offer the linker a definition it is not allowed to use.
 ///
 /// # Errors
 ///
 /// [`Error::Format`] for a machine or a platform this does not write, which is the same refusal
-/// [`write`] gives and is here for the same reason: a list of undecorated names for a format whose
+/// [`write()`] gives and is here for the same reason: a list of undecorated names for a format whose
 /// symbols carry an underscore is worse than no list at all.
 pub fn defines(
     text: &Text,
