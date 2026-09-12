@@ -1494,9 +1494,23 @@ impl<'a> Verifier<'a> {
             // the pointer it describes are two operands and never one, so an instruction that
             // took the same value twice, or took them the other way round, is caught here rather
             // than becoming a check that passes because it compared a pointer with itself.
-            Opcode::CapOf | Opcode::CapRecover | Opcode::CapLoad => {
+            Opcode::CapOf | Opcode::CapRecover => {
                 if self.takes(opcode, arity, 1) {
                     self.pointer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            // The aux pair. Three operands and four rather than one and two, because the slot is
+            // found from the object the word is in and says its two numbers relative to the
+            // pointer beside it, and neither of those is recoverable from an address alone. See
+            // `spec/safe-memory/06-instrumentation.md` section 6.2.2.
+            Opcode::CapLoad => {
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
                     if results == 1 {
                         self.produces(opcode, res(0), Type::CAP);
                     }
@@ -1508,9 +1522,11 @@ impl<'a> Verifier<'a> {
                 }
             }
             Opcode::CapStore => {
-                if self.takes(opcode, arity, 2) {
-                    self.pointer(opcode, arg(0), 0);
-                    self.capability(opcode, arg(1), 1);
+                if self.takes(opcode, arity, 4) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
+                    self.capability(opcode, arg(3), 3);
                 }
             }
             Opcode::CapExtent | Opcode::CapExtentBack => {
@@ -3061,12 +3077,12 @@ block1(%3: cap):
             "(ptr) -> i32",
             "block0(%0: ptr):
     %1 = cap_of %0
-    %2 = cap_store %1, %1
-    %3 = iconst.i32 0
-    return %3
+    cap_store %1, %1, %0, %1
+    %2 = iconst.i32 0
+    return %2
 ",
         );
-        reports(&text, "operand 1 of cap_store is a pointer and this one is cap");
+        reports(&text, "operand 2 of cap_store is a pointer and this one is cap");
     }
 
     #[test]
@@ -3074,12 +3090,12 @@ block1(%3: cap):
         let text = wrap(
             "(ptr) -> i32",
             "block0(%0: ptr):
-    %1 = cap_store %0, %0
-    %2 = iconst.i32 0
-    return %2
+    cap_store %0, %0, %0, %0
+    %1 = iconst.i32 0
+    return %1
 ",
         );
-        reports(&text, "operand 2 of cap_store is a capability and this one is ptr");
+        reports(&text, "operand 1 of cap_store is a capability and this one is ptr");
     }
 
     #[test]
