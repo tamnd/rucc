@@ -46,7 +46,7 @@
 // a call to `memcpy`, which would be this function calling itself forever. This is the attribute
 // that says the names in this crate are the implementations rather than uses.
 #![no_builtins]
-#![doc(html_root_url = "https://docs.rs/rucc-builtins/0.10.33")]
+#![doc(html_root_url = "https://docs.rs/rucc-builtins/0.10.34")]
 
 pub mod convert;
 pub mod div;
