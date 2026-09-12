@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The repository can be cloned on Windows again. `runtime/rucc-safe-rt/src/aux.rs` is now `aux_slot.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it, so git will not write the path and `git clone` ends with `error: invalid path` having written nothing. That is not a test failing, it is the checkout failing, which means the Windows job of every run since the file landed had one line of log in it and nothing else could be true about that platform. The same bug landed once before, as `xtask/src/aux.rs`, and the fix then was the rename and no guard, which is why there was a second one. So there is a guard now: `cargo xtask paths` reads `git ls-files` and refuses a reserved device stem, a character no Windows path component may hold, a component ending in a dot or a space, and two paths that differ only in case, and it runs first in `cargo xtask ci` and first in the quick CI job. It has to run somewhere that is not Windows, since every other check there needs a working tree before it can say anything. The word `aux` is the spec's and stays, in the module's name and on the `cargo xtask aux` command line. tamnd/rucc#1118.
+
 ## 0.10.32
 
 ### Added
@@ -39,8 +43,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A compile for an Apple target finds an SDK that is on the machine, in the two cases where it used to look straight past one. Cross compiling from a mac to another Apple architecture asked the cache for a bundled tree, which for this target can never exist because nobody may publish one, so an aarch64 mac building for x86_64 macOS got no library headers at all while the same compile for its own architecture worked. And `SDKROOT` could not reach a Darwin target from a host that is not a mac, because the search gave up on the operating systems not matching before it looked at what the environment had said. An SDK is now a source of its own in the header search, `rucc_sysroot::Origin::Sdk`, separate from a sysroot because nobody named it on the command line and separate from the host's directories because what is inside it describes the target rather than this machine, which is the whole point: one installed SDK holds every Apple architecture, so finding it answers for all of them. A target behind a licence wall is never handed a tree of ours now either, which closes the cache lookup that could not have succeeded. The `xcrun` that finds it is asked once per process rather than once per target, since it is a subprocess and the answer does not change. tamnd/rucc#979.
-
-- The repository can be cloned on Windows again. `runtime/rucc-safe-rt/src/aux.rs` is now `aux_slot.rs`, because `AUX` is a reserved device name on Windows whatever extension follows it, so git will not write the path and `git clone` ends with `error: invalid path` having written nothing. That is not a test failing, it is the checkout failing, which means the Windows job of every run since the file landed had one line of log in it and nothing else could be true about that platform. The same bug landed once before, as `xtask/src/aux.rs`, and the fix then was the rename and no guard, which is why there was a second one. So there is a guard now: `cargo xtask paths` reads `git ls-files` and refuses a reserved device stem, a character no Windows path component may hold, a component ending in a dot or a space, and two paths that differ only in case, and it runs first in `cargo xtask ci` and first in the quick CI job. It has to run somewhere that is not Windows, since every other check there needs a working tree before it can say anything. The word `aux` is the spec's and stays, in the module's name and on the `cargo xtask aux` command line. tamnd/rucc#1118.
 
 ## 0.10.30
 
