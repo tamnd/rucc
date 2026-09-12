@@ -112,7 +112,10 @@ __attribute__((constructor)) void elsewhere(void);
 int calls(void) { return 0; }
 ",
     );
-    assert!(!text.contains(".init_array"), "an entry for something this file defines nothing of:\n{text}");
+    assert!(
+        !text.contains(".init_array"),
+        "an entry for something this file defines nothing of:\n{text}"
+    );
 }
 
 #[test]
