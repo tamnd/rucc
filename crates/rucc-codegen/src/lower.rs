@@ -767,6 +767,15 @@ impl<'a> Lowering<'a> {
                     self.address_of(inst)?;
                     continue;
                 }
+                // Where this thread's own storage starts, built here for a reason of the same
+                // shape: what it reads is `%fs`, which is not a register the rule language can
+                // bind and not one a proof over bitvectors could say anything about, because what
+                // makes the load the right answer is an agreement between the loader and the C
+                // library rather than any arithmetic.
+                Opcode::ThreadPointer => {
+                    self.thread_pointer(inst)?;
+                    continue;
+                }
                 // Built from the frame for the reason an `alloca` is, and from the convention for
                 // the reason a call is: three of the four fields it writes are distances that do
                 // not exist until the frame does, and the fourth is where the walk over the
@@ -1916,6 +1925,24 @@ impl<'a> Lowering<'a> {
             .operand(mir::Operand::read(offset, gpr))
             .operand(mir::Operand::read(pointer, gpr))
             .finish();
+        Ok(())
+    }
+
+    /// `__builtin_thread_pointer`, which is the front of the block [`Self::thread_address`] adds
+    /// an offset to.
+    ///
+    /// The same one instruction, on its own this time and with nothing to add to it. A program
+    /// writes this when what it wants is a number that is different in every thread and cheap to
+    /// come by, rather than a variable of its own in the block, so there is no relocation here and
+    /// no name for the link to resolve.
+    fn thread_pointer(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let reg = self.new_reg(result);
+        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{GOT_LOAD}")));
+        let at = mir::Mem::in_segment(Segment::Fs, 0);
+        self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
         Ok(())
     }
 
@@ -4183,6 +4210,23 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [thread @own]\n    \
              %1:gpr = x64.mov_rm_64 [fs:0]\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
              x64.ret_val_64 %2($rax)\n}\n"
+        );
+    }
+
+    /// The same load with nothing added to it, which is the whole of `__builtin_thread_pointer`.
+    #[test]
+    fn the_start_of_this_thread_s_own_storage_is_the_one_load_and_no_arithmetic() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let here =
+            Builder::new(&mut source, block).value(InstData::new(Opcode::ThreadPointer), Type::PTR);
+        Builder::new(&mut source, block).ret(&[here]);
+
+        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+        assert_eq!(
+            mir::print_func(&out.func, &names, &REGS),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [fs:0]\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
         );
     }
 

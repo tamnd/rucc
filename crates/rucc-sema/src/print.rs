@@ -466,6 +466,7 @@ impl<'a> Printer<'a> {
                 format!("atomic {} {}", op.as_str(), order.as_str())
             }
             ExprKind::Unreachable => "unreachable".to_owned(),
+            ExprKind::ThreadPointer => "thread-pointer".to_owned(),
         }
     }
 
@@ -477,7 +478,8 @@ impl<'a> Printer<'a> {
             | ExprKind::Str(_)
             | ExprKind::Decl(_)
             | ExprKind::LabelAddr(_)
-            | ExprKind::Unreachable => {}
+            | ExprKind::Unreachable
+            | ExprKind::ThreadPointer => {}
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.
             ExprKind::CompoundLiteral(decl) => self.decl(decl),

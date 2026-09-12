@@ -3696,6 +3696,11 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
                 None
             }
+            // A fact about the machine rather than about the program, so there is nothing under it
+            // to lower first and the whole of it is the one instruction the back end writes.
+            ExprKind::ThreadPointer => {
+                Some(self.build(span).value(InstData::new(Opcode::ThreadPointer), Type::PTR))
+            }
         }
     }
 
@@ -5996,7 +6001,8 @@ impl Scan<'_> {
             | ExprKind::Const(_)
             | ExprKind::Str(_)
             | ExprKind::Decl(_)
-            | ExprKind::Unreachable => {}
+            | ExprKind::Unreachable
+            | ExprKind::ThreadPointer => {}
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {
                     self.taken.push(label);
