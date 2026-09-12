@@ -28,13 +28,18 @@
 //!
 //! # Why the divisions and the conversions are guarded the other way round
 //!
-//! The same hazard is there for the 128-bit division and modulo, and for the conversions between
-//! that width and a float, and reading undefined symbols will not catch it. gcc puts libgcc on every
-//! link line, libgcc is a static archive, and a link that found `__udivti3` there instead of in the
-//! archive under test has the routine inside the program rather than undefined outside it, so both
-//! sides would quietly agree about libgcc's answer. What can be read instead is the archive: the
-//! script lists what each one defines and reports a name that is not in there, which is the case
+//! The same hazard is there for the division and modulo at both widths, and for the conversions
+//! between 128 bits and a float, and reading undefined symbols will not catch it. gcc puts libgcc on
+//! every link line, libgcc is a static archive, and a link that found `__udivti3` there instead of
+//! in the archive under test has the routine inside the program rather than undefined outside it, so
+//! both sides would quietly agree about libgcc's answer. What can be read instead is the archive:
+//! the script lists what each one defines and reports a name that is not in there, which is the case
 //! that would have the link reach past it.
+//!
+//! That guard matters more at 64 bits than anywhere else, because the host divides at that width in
+//! an instruction. `__udivdi3` and its five relatives are reached by saying their names rather than
+//! by writing a `/`, so a link that quietly resolved them in libgcc would be two programs agreeing
+//! about libgcc while this machine's own divide sat beside them unused.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -162,6 +167,7 @@ for side in ours reference; do
     nm -g --defined-only \"$lib\" | awk '$2 == \"T\" { print $3 }' > \"$out/$side.names\"
     for name in memcpy memmove memset memcmp \\
         __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4 \\
+        __udivdi3 __umoddi3 __udivmoddi4 __divdi3 __moddi3 __divmoddi4 \\
         __floattidf __floattisf __floatuntidf __floatuntisf \\
         __fixdfti __fixsfti __fixunsdfti __fixunssfti; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"

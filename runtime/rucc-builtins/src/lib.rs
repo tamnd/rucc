@@ -29,11 +29,13 @@
 //! `rucc-codegen` calls when a structure copy or a fill is too big to open up into moves. The
 //! 128-bit division and modulo are here too, which is the six entry points a `/` or a `%` on an
 //! `__int128` becomes, since that is the one arithmetic `rucc-codegen` cannot split into
-//! instructions over the halves. So are the conversions between that width and a `float` or a
-//! `double`, which is eight more entry points and the other operation at this width the machine has
-//! no instruction for. The rest of section 12.8, which is the remaining `__int128` arithmetic, the
-//! eighty bit and quad conversions, the soft float and the atomics, is not written, and the set is
-//! driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
+//! instructions over the halves, and the same six at 64 bits, which is what a 32-bit target makes
+//! of a `/` on a `long long` for the same reason one width up. So are the conversions between 128
+//! bits and a `float` or a `double`, which is eight more entry points and the other operation at
+//! that width the machine has no instruction for. The rest of section 12.8, which is the remaining
+//! `__int128` arithmetic, the eighty bit and quad conversions, the soft float and the atomics, is
+//! not written, and the set is driven by what the target ladder in `spec/14-target-ladder.md`
+//! actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with
