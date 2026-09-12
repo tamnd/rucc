@@ -21,16 +21,21 @@
 //! careful.
 //!
 //! The first is a piece that cannot be split, which is a macro or a directive continued with a
-//! backslash. `norm::pieces` is what makes that impossible: the smallest thing the merge can put a
-//! conditional between is a logical line.
+//! backslash, or a line whose trailing comment closes further down. `norm::pieces` is what makes
+//! that impossible: the smallest thing the merge can put a conditional between is a logical line.
 //!
 //! The second is a piece that is part of the file's own conditional. A region that contains an
 //! `#endif` whose `#if` is above it, or an `#else` belonging to an `#if` above it, cannot be wrapped
-//! in `#if` of ours: our `#endif` would close theirs, or their `#else` would become ours. There is
-//! no clever fix, so the merge checks every branch it is about to write and escalates the whole file
-//! to one branch per release when a branch does not stand on its own. That is bigger and it is
-//! always right, and the report says how often it happens so the number is a fact rather than a
-//! worry.
+//! in an `#if` of ours: our `#endif` would close theirs, or their `#else` would become ours.
+//!
+//! The answer to the second one is to make the region bigger until it holds the whole of whatever it
+//! was reaching into, and the region says which way to grow rather than being searched for. A branch
+//! that closes an `#if` from above needs the text above it, a branch that leaves an `#if` of its own
+//! open needs the text below it, and growing stops as soon as no branch reaches out. Growing
+//! upward takes back a region already decided, which is the one place a decision here is
+//! reconsidered. A file where the region grows to the whole file is one copy per release, which is
+//! how this started and is still the answer for a file whose releases disagree about where their own
+//! conditionals are.
 //!
 //! # Why it reads its own output back
 //!
@@ -53,8 +58,8 @@ pub enum Kind {
     Same,
     /// Conditionals inside the file, around the parts that differ.
     Conditional,
-    /// One branch holding the whole file per release, because a branch inside it would have landed
-    /// in the middle of the file's own conditional.
+    /// One branch holding the whole file per release, because every smaller region grew until it
+    /// was the file: the releases disagree about where the file's own conditionals begin or end.
     PerRelease,
 }
 
@@ -132,66 +137,104 @@ pub fn one(releases: &Releases, path: &str, texts: &[Option<&str>]) -> Result<Me
         at.push(pairs.iter().map(|&(_, y)| y).collect());
         spine = kept;
     }
-    let newest_row = at.len() - 1;
 
-    // The text between two spine lines, which is where everything a release changed ends up.
-    let mut body = String::new();
-    let mut branches = 0;
-    let mut unsplittable = false;
-    for gap in 0..=spine.len() {
-        let groups = grouped(&have, |j, r| {
+    // The file as slots. An even slot is the text between two spine lines, which is where a
+    // difference lives, and an odd slot is a spine line, which every release has.
+    let slots = 2 * spine.len() + 1;
+    let by_slot: Vec<Vec<String>> = have
+        .iter()
+        .enumerate()
+        .map(|(j, &r)| {
             let items = &pieces(r).items;
-            let from = if gap == 0 { 0 } else { at[j][gap - 1] + 1 };
-            let to = if gap == spine.len() { items.len() } else { at[j][gap] };
-            let mut text: String = items[from..to].iter().map(|i| i.text.as_str()).collect();
-            if gap == spine.len() {
-                // The comments after the last line of code belong to the last gap.
-                text.push_str(&pieces(r).tail);
+            (0..slots)
+                .map(|slot| {
+                    if slot % 2 == 1 {
+                        return items[at[j][slot / 2]].text.clone();
+                    }
+                    let gap = slot / 2;
+                    let from = if gap == 0 { 0 } else { at[j][gap - 1] + 1 };
+                    let to = if gap == spine.len() { items.len() } else { at[j][gap] };
+                    let mut text: String =
+                        items[from..to].iter().map(|i| i.text.as_str()).collect();
+                    if gap == spine.len() {
+                        // The comments after the last line of code belong to the last gap.
+                        text.push_str(&pieces(r).tail);
+                    }
+                    text
+                })
+                .collect()
+        })
+        .collect();
+    let region = |lo: usize, hi: usize| grouped(&have, |j, _| by_slot[j][lo..=hi].concat());
+    // Which slots have anything in them at all, so that a region holding all of them can be
+    // reported as what it is, one copy of the file per release, however many empty slots the
+    // alignment left around it.
+    let content: Vec<bool> =
+        (0..slots).map(|slot| by_slot.iter().any(|row| !row[slot].is_empty())).collect();
+    let whole_file =
+        |lo: usize, hi: usize| !content[..lo].contains(&true) && !content[hi + 1..].contains(&true);
+
+    // What gets a conditional around it. A slot every release agrees about is written as it stands,
+    // and a slot they do not agree about is wrapped together with as few of its neighbours as it
+    // takes for every branch to stand on its own. Growing is not a search: a branch that reaches an
+    // `#endif` whose `#if` is above it needs the text above it, and a branch that leaves an `#if`
+    // open needs the text below it, so the branch says which way to grow and the region stops as
+    // soon as nothing is reaching out of it.
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    let mut slot = 0;
+    while slot < slots {
+        let (mut lo, mut hi) = (slot, slot);
+        loop {
+            let groups = region(lo, hi);
+            let reach =
+                groups.iter().fold(Reach::default(), |all, (_, _, text)| all.with(&needs(text)));
+            if groups.len() == 1 || !reach.out_of_it() {
+                break;
             }
-            text
-        });
-        if let [(_, _, only)] = &groups[..] {
-            body.push_str(only);
-        } else {
-            // A group with nothing in it gets no branch. The releases in it are the ones that have
-            // nothing here, and an empty `#if` would say that in three lines instead of none.
-            let said: Vec<&(String, Vec<usize>, String)> =
-                groups.iter().filter(|(_, _, text)| !text.is_empty()).collect();
-            branches += 1;
-            for (n, (_, members, text)) in said.iter().enumerate() {
-                line_end(&mut body);
-                body.push_str(&cond::directive(
-                    if n == 0 { "if" } else { "elif" },
-                    Some(&condition(releases, members)),
-                ));
-                body.push_str(text);
-                if !stands_alone(text) {
-                    unsplittable = true;
-                }
+            // Growing below takes a slot this loop had not reached yet; growing above takes back a
+            // region already decided, which is the one case where a decision is reconsidered.
+            let below = reach.below && hi + 1 < slots;
+            let above = reach.above && lo > 0;
+            if below {
+                hi += 1;
+            } else if above {
+                lo = regions.pop().expect("a region above to take back").0;
+            } else if hi + 1 < slots {
+                hi += 1;
+            } else if lo > 0 {
+                lo = regions.pop().expect("a region above to take back").0;
+            } else {
+                // The whole file, and its own conditionals do not balance. The branch is written
+                // anyway and the check below is what says so.
+                break;
             }
-            line_end(&mut body);
-            body.push_str(&cond::directive("endif", None));
         }
-        if gap < spine.len() {
-            body.push_str(&pieces(newest).items[at[newest_row][gap]].text);
-        }
+        regions.push((lo, hi));
+        slot = hi + 1;
     }
 
-    // A branch that would have closed one of the file's own conditionals, so the file gets one
-    // branch per release instead and the conditionals inside it are left alone.
-    let mut kind = if branches == 0 { Kind::Same } else { Kind::Conditional };
-    if unsplittable {
-        kind = Kind::PerRelease;
-        branches = 1;
-        body.clear();
-        let groups = grouped(&have, |_, r| want[r].unwrap_or_default().to_owned());
-        for (n, (_, members, text)) in groups.iter().enumerate() {
+    let mut body = String::new();
+    let mut branches = 0;
+    let mut kind = Kind::Same;
+    for &(lo, hi) in &regions {
+        let groups = region(lo, hi);
+        if let [(_, _, only)] = &groups[..] {
+            body.push_str(only);
+            continue;
+        }
+        // A group with nothing in it gets no branch. The releases in it are the ones that have
+        // nothing here, and an empty `#if` would say that in three lines instead of none.
+        let said: Vec<&(String, Vec<usize>, String)> =
+            groups.iter().filter(|(_, _, text)| !text.is_empty()).collect();
+        branches += 1;
+        kind = if whole_file(lo, hi) { Kind::PerRelease } else { Kind::Conditional };
+        for (n, (_, members, text)) in said.iter().enumerate() {
+            line_end(&mut body);
             body.push_str(&cond::directive(
                 if n == 0 { "if" } else { "elif" },
                 Some(&condition(releases, members)),
             ));
             body.push_str(text);
-            line_end(&mut body);
             if !stands_alone(text) {
                 problems.push(format!(
                     "{path}: the copies for {} do not have balanced conditionals, so no branch \
@@ -200,6 +243,7 @@ pub fn one(releases: &Releases, path: &str, texts: &[Option<&str>]) -> Result<Me
                 ));
             }
         }
+        line_end(&mut body);
         body.push_str(&cond::directive("endif", None));
     }
 
@@ -303,9 +347,41 @@ fn spelled(releases: &Releases, members: &[usize]) -> String {
 ///
 /// It can when its own conditional directives balance and none of them continues one from outside
 /// it. An `#endif` with nothing above it would close ours, and so would an `#else`, which is the
-/// second of the two hazards in the module documentation.
+/// second of the hazards in the module documentation.
 fn stands_alone(text: &str) -> bool {
+    !needs(text).out_of_it()
+}
+
+/// Which way a text reaches out of itself, which is which way a region around it has to grow.
+#[derive(Debug, Default, Clone, Copy)]
+struct Reach {
+    /// It closes or continues a conditional opened above it, so the region has to start higher up.
+    above: bool,
+    /// It leaves a conditional of its own open, so the region has to end further down.
+    below: bool,
+}
+
+impl Reach {
+    /// Both of them, because a region is as big as its neediest branch.
+    fn with(self, other: &Reach) -> Self {
+        Self { above: self.above || other.above, below: self.below || other.below }
+    }
+
+    /// Whether it reaches out at all, which is the same question `stands_alone` asks.
+    fn out_of_it(self) -> bool {
+        self.above || self.below
+    }
+}
+
+/// What this text would need around it before a conditional of ours could wrap it.
+///
+/// The walk is over the code, so a directive inside a comment is not one. An `#endif` that takes the
+/// depth below zero is closing somebody else's `#if` and so is an `#else` at depth zero, and both
+/// are answered by starting the region higher up. Depth left above zero at the end is an `#if` of
+/// the file's own that nothing here closes, and that is answered by ending the region further down.
+fn needs(text: &str) -> Reach {
     let mut depth = 0i32;
+    let mut reach = Reach::default();
     for line in norm::code(text).lines() {
         let Some(rest) = line.trim_start().strip_prefix('#') else { continue };
         let rest = rest.trim_start();
@@ -314,13 +390,17 @@ fn stands_alone(text: &str) -> bool {
         } else if rest.starts_with("endif") {
             depth -= 1;
             if depth < 0 {
-                return false;
+                reach.above = true;
+                depth = 0;
             }
         } else if (rest.starts_with("else") || rest.starts_with("elif")) && depth == 0 {
-            return false;
+            reach.above = true;
         }
     }
-    depth == 0
+    if depth > 0 {
+        reach.below = true;
+    }
+    reach
 }
 
 /// glibc's own definition of the version macro, replaced by the check that there is one.
@@ -501,16 +581,36 @@ mod tests {
         }
     }
 
+    /// A condition the releases changed cannot be wrapped on its own, because the branch holding
+    /// the old `#if` leaves it open. The region grows until it holds the block and stops there,
+    /// which is the whole point of growing rather than escalating.
     #[test]
-    fn a_region_holding_a_stray_endif_escalates_to_one_branch_per_release() {
-        // The releases disagree about where the file's own conditional ends, so every way of
-        // cutting this finer than the whole file leaves an `#endif` with no `#if`.
-        let old = "#ifdef A\nint f (void);\n#endif\nint tail (void);\n";
-        let new = "#ifdef A\nint f (void);\nint tail (void);\n#endif\n";
+    fn a_changed_condition_takes_its_block_with_it_and_not_the_file() {
+        let old = "int before (void);\n#ifdef A\nint f (void);\n#endif\nint after (void);\n";
+        let new = "int before (void);\n#if defined A || defined B\nint f (void);\n#endif\n\
+                   int after (void);\n";
         let out = merged(&[Some(old), Some(old), Some(new)]);
-        assert_eq!(out.kind, Kind::PerRelease);
+        assert_eq!(out.kind, Kind::Conditional);
+        assert_eq!(out.branches, 1);
+        // The lines either side of the block are written once, so the region was the block.
+        assert_eq!(out.text.matches("int before (void);").count(), 1, "{}", out.text);
+        assert_eq!(out.text.matches("int after (void);").count(), 1, "{}", out.text);
+        assert_eq!(out.text.matches("int f (void);").count(), 2, "{}", out.text);
+    }
+
+    /// And when growing cannot stop short of the file, it does not: these two releases disagree
+    /// about which of their own conditionals contains the other, so no region inside the file has
+    /// branches that stand on their own.
+    #[test]
+    fn a_file_whose_conditionals_nest_differently_is_one_copy_per_release() {
+        let old = "#if A\nint f (void);\n#endif\n#if B\nint g (void);\n#endif\n";
+        let new = "#if A\nint f (void);\n#if B\nint g (void);\n#endif\n#endif\n";
+        let out = merged(&[Some(old), Some(old), Some(new)]);
+        assert_eq!(out.kind, Kind::PerRelease, "{}", out.text);
         assert_eq!(out.branches, 1);
         assert!(out.text.starts_with("#if __GLIBC_MINOR__ < 34 /* rucc */"), "{}", out.text);
+        assert_eq!(out.text.matches("int f (void);").count(), 2, "{}", out.text);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
     }
 
     #[test]
@@ -576,6 +676,17 @@ mod tests {
         for line in out.text.lines() {
             assert!(!line.contains("#endif") || line.trim_start().starts_with('#'), "{line}");
         }
+    }
+
+    #[test]
+    fn which_way_a_branch_reaches_out_of_itself() {
+        assert!(needs("#endif\n").above);
+        assert!(needs("#else\nint f (void);\n").above);
+        assert!(needs("#ifdef A\nint f (void);\n").below);
+        assert!(!needs("#ifdef A\nint f (void);\n#endif\n").out_of_it());
+        // An `#endif` that closes somebody else's and then an `#if` of its own reaches both ways.
+        let both = needs("#endif\n#ifdef A\nint f (void);\n");
+        assert!(both.above && both.below);
     }
 
     #[test]
