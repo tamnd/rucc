@@ -120,6 +120,23 @@ impl Meta {
     /// running from one object in that mapping into the next.
     pub const WIDE: u8 = 2;
 
+    /// Flag: nothing here is watched, so the bounds are all of address space.
+    ///
+    /// Always set with [`Meta::RECOVERED`] and [`Meta::WIDE`], never on its own. The two wide
+    /// capabilities are otherwise identical, since both are `Class::Mapped`, both carry
+    /// `plane::FOREIGN` and both are recovered, and they mean opposite things. A boundary
+    /// capability says there is a mapping here and an instance somewhere in it that could not be
+    /// found, so an access may still be caught. This one says no allocator ever told the runtime
+    /// about this address, so nothing was recorded and nothing will be caught, which is the answer
+    /// a local, a global and storage from an allocator nobody mentioned all get.
+    ///
+    /// The difference is not decoration. Anything that reads bounds off a capability to decide how
+    /// much of a loop needs no checks has to answer the whole of what it was asked for in this case
+    /// and nothing at all in the other, per `spec/safe-memory/07-check-elimination.md` section 7.4,
+    /// and telling the two apart by their numbers rather than by a bit would be a coincidence
+    /// rather than a rule. See tamnd/rucc#1085.
+    pub const UNWATCHED: u8 = 4;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {
