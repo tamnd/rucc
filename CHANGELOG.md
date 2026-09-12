@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Recovering a capability for a pointer to the base of an object reads the object's header instead of walking the lifetime plane. The walk in `rucc_safe_rt::recover` steps a granule at a time in both directions until the version changes, which is linear in the size of the object the address landed in, and for a megabyte buffer that is sixty five thousand plane reads to answer a question the thirty two bytes in front of the payload already answer. That header is where it is for exactly this reason, per `spec/safe-memory/05-representation.md` section 5.2.3. What makes it safe to read is a test the walk was doing anyway: an address whose own granule is owned and whose neighbour below is not is the first granule of a run, and the only thing that sits between two payloads is a header and an aux, so those thirty two bytes are the runtime's storage rather than the program's. If the granule below has the same version then the address is in the middle of an object, the bytes in front of it are that object's own payload, and the walk runs as before. The header is believed only when it says the version the plane is holding, which is what makes an unused block and a block that has been given back say nothing. A region this crate's allocator did not lay out is left alone entirely, because an adopted arena's blocks are laid out by whoever adopted them and something header shaped in one of those is a number the program chose, so regions now carry whether they were carved here. The answers are identical to the walk's, which the tests check over a spread of sizes. tamnd/rucc#1085.
+
 ## 0.10.28
 
 ### Added

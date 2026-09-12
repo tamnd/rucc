@@ -126,6 +126,8 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
         base: lo,
         end: hi,
         class,
+        // Somebody else's arena, laid out however they lay blocks out. See `Watch::carved`.
+        carved: false,
     };
     // SAFETY: the mapping is writable and is never handed back, its five spans are laid out by
     // the arithmetic just above, and all four biases were solved from the same `lo` the bounds
