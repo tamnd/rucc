@@ -1222,6 +1222,44 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_emmintrin_defines_both_sse2_types_and_the_operations_over_them() {
+        let text = shipped(concat!(
+            "#include <emmintrin.h>\n",
+            "__m128i add(__m128i a, __m128i b) { return _mm_add_epi64(a, b); }\n",
+            "__m128i wide(__m128i a, __m128i b) { return _mm_mul_epu32(a, b); }\n",
+            "__m128i pick(__m128i a) { return _mm_shuffle_epi32(a, _MM_SHUFFLE(0,1,2,3)); }\n",
+            "__m128i up(__m128i a) { return _mm_slli_epi64(a, 13); }\n",
+            "__m128i down(__m128i a) { return _mm_srli_si128(a, 3); }\n",
+            "__m128i pack(__m128i a, __m128i b) { return _mm_packus_epi16(a, b); }\n",
+            "int bits(__m128i a) { return _mm_movemask_epi8(a); }\n",
+            "__m128d sum(__m128d a, __m128d b) { return _mm_add_sd(a, b); }\n",
+            "__m128d mask(__m128d a, __m128d b) { return _mm_cmpunord_pd(a, b); }\n",
+            "__m128i near(__m128d a) { return _mm_cvtpd_epi32(a); }\n",
+            "__m128d over(__m128 a) { return _mm_cvtps_pd(a); }\n",
+            "__m128i half(__m64 a) { return _mm_movpi64_epi64(a); }\n",
+            "__m128i grab(void const *p) { return _mm_loadu_si128(p); }\n",
+            "void wall(void) { _mm_lfence(); _mm_mfence(); }\n",
+        ));
+        assert!(text.contains("wide"), "{text}");
+        assert!(text.contains("pack"), "{text}");
+        assert!(text.contains("near"), "{text}");
+        assert!(text.contains("half"), "{text}");
+    }
+
+    /// The float header omits four square roots and SSE2 omits the matching two, for the reason
+    /// both headers write down. A later change that quietly defines one as an approximation
+    /// would be a wrong answer nobody sees, so the absence is held in place here.
+    #[test]
+    fn the_shipped_emmintrin_leaves_out_the_two_square_roots() {
+        let text = rucc_session::runtime::header("emmintrin.h").expect("emmintrin.h is shipped");
+        for absent in ["_mm_sqrt_pd", "_mm_sqrt_sd"] {
+            let defined = text.contains(&format!("{absent}("));
+            assert!(!defined, "{absent} is defined and the header says it is not");
+            assert!(text.contains(absent), "{absent} is absent and unexplained");
+        }
+    }
+
+    #[test]
     fn the_three_formality_headers_still_have_to_work() {
         let text = shipped(concat!(
             "#include <stdbool.h>\n",
