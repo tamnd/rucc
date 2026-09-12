@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The single precision comparisons in the builtins, which is `__cmpsf2`, `__eqsf2`, `__nesf2`, `__gesf2`, `__gtsf2`, `__lesf2`, `__ltsf2` and `__unordsf2`: what `a < b` on two floats becomes on a target where a comparison is not an instruction, which is the same target the arithmetic routines are for. There is one comparison behind the eight and one number that differs between them, which is what to answer when an operand is a not a number, and it has to be whichever sign makes the caller's own test come out false, since only the sign of the answer is specified and the caller tests it against zero. `__nesf2` is the same work as `__eqsf2` because a caller testing for inequality tests the same answer the other way round, and it is a second function rather than an alias because an alias is a linker feature and `runtime/builtins/float.c` is meant to compile with nothing underneath it. The C reads the two patterns as unsigned integers, which works because the format was laid out so that two floats of the same sign order the way their patterns do, and the reference in `runtime/rucc-builtins/src/float.rs` deliberately does not use that: it asks which power of two each value's highest bit is worth and lines the two significands up where those agree, so it checks the property instead of being a second user of it. An infinity needs no case in either, since its stored exponent puts its highest bit one power of two above the largest finite value's. `cargo xtask builtins-diff` runs the eight beside the five in the families that were already there, so it is 3861756 cases in the same 570 groups, and what it digests is the sign of an answer rather than the answer, the way it does for `memcmp`. The archive-defines guard is thirty seven names. Part of tamnd/rucc#1064.
+
 ## 0.10.33
 
 ### Added
