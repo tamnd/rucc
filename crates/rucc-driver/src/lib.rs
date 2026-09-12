@@ -28,7 +28,6 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.10.31")]
 
-pub mod artifact;
 pub mod cache;
 pub mod compile;
 pub mod deps;
@@ -98,10 +97,10 @@ pub enum Action {
     /// machine, which is `spec/cross-compile/13-distribution.md` section 13.8's rule rather than a
     /// property of how this happens to be written: a compilation has no branch that reaches it.
     Fetch {
-        /// The artifact, from the table in [`crate::artifact`]. Resolved here rather than where the
+        /// The artifact, from the table in [`rucc_sysroot::artifact`]. Resolved here rather than where the
         /// work happens, so that a target nothing is pinned for is a refusal from the parser like
         /// every other thing a command line can ask for and not have.
-        what: &'static artifact::Pinned,
+        what: &'static rucc_sysroot::Pinned,
         /// The target, which names the directory under the cache the tree is installed at and is
         /// checked against the record inside the artifact.
         target: TargetTuple,
@@ -1847,7 +1846,7 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
     if let Some(wall) = rucc_sysroot::Wall::of(target) {
         return Err(err(format!("--fetch {tuple}: {}", wall.no_fetch(&tuple))));
     }
-    let Some(what) = artifact::pinned_for(&tuple) else {
+    let Some(what) = rucc_sysroot::pinned_for(&tuple) else {
         return Err(err(unpinned(&tuple)));
     };
     Ok(Action::Fetch { what, target, cache: cache::dir() })
@@ -1860,7 +1859,7 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
 /// situations, and a message that did not tell them apart would send somebody looking for a typo in
 /// their tuple when the answer is that this work is not finished.
 fn unpinned(tuple: &str) -> String {
-    let pinned = artifact::pinned_targets();
+    let pinned = rucc_sysroot::pinned_targets();
     if pinned.is_empty() {
         return format!(
             "this release pins no sysroot for {tuple}, and it pins none for any target yet. A \
@@ -1883,7 +1882,7 @@ fn unpinned(tuple: &str) -> String {
 /// and the check is ours, so a person reading this wants to know which downloader ran, that the
 /// bytes matched, how many files the record named and where the tree ended up. A fetch of something
 /// that is already there says that instead and moves nothing.
-fn fetch_sysroot(what: &artifact::Pinned, target: TargetTuple, cache: &std::path::Path) -> i32 {
+fn fetch_sysroot(what: &rucc_sysroot::Pinned, target: TargetTuple, cache: &std::path::Path) -> i32 {
     let tuple = target.to_canonical_string();
     let archive = what.archive_in(cache);
     let say = |line: &str| println!("rucc: {tuple}: {line}");

@@ -1,0 +1,47 @@
+rucc distribution manifest 1
+release	0.10.31
+producer	https://github.com/tamnd/rucc-cross
+payload	rucc	apache-2.0
+targets	42
+target	x86_64-linux-gnu	unpublished
+target	x86_64-linux-musl	unpublished
+target	aarch64-linux-gnu	unpublished
+target	aarch64-linux-musl	unpublished
+target	riscv64-linux-gnu	unpublished
+target	riscv64-linux-musl	unpublished
+target	i686-linux-gnu	unpublished
+target	armv7-linux-gnueabihf	unpublished
+target	armv7-linux-musleabihf	unpublished
+target	loongarch64-linux-gnu	unpublished
+target	powerpc64le-linux-gnu	unpublished
+target	s390x-linux-gnu	unpublished
+target	aarch64-linux-android	unpublished
+target	x86_64-linux-android	unpublished
+target	riscv64-linux-android	unpublished
+target	x86_64-linux-gnux32	unpublished
+target	aarch64-macos	wall	apple-sdk
+target	x86_64-macos	wall	apple-sdk
+target	aarch64-ios	wall	apple-sdk
+target	aarch64-ios-simulator	wall	apple-sdk
+target	aarch64-ios-macabi	wall	apple-sdk
+target	x86_64-windows-gnu	unpublished
+target	x86_64-windows-msvc	wall	microsoft-sdk
+target	aarch64-windows-gnu	unpublished
+target	aarch64-windows-msvc	wall	microsoft-sdk
+target	arm64ec-windows-msvc	wall	microsoft-sdk
+target	i686-windows-gnu	unpublished
+target	x86_64-freebsd	unpublished
+target	aarch64-freebsd	unpublished
+target	x86_64-netbsd	unpublished
+target	aarch64-netbsd	unpublished
+target	x86_64-openbsd	unpublished
+target	x86_64-illumos	unpublished
+target	x86_64-none	included
+target	aarch64-none	included
+target	riscv64-none	included
+target	i686-none	included
+target	armv7-none-eabi	included
+target	armv7m-none-eabi	included
+target	wasm32-wasip1	unpublished
+target	wasm32-wasip3	unpublished
+target	wasm32-none	included
