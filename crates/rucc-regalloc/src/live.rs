@@ -38,12 +38,19 @@
 //! a loop carries a value from the end of a block round to a block in front of it. The pieces then
 //! come from one walk over the instructions, a block at a time.
 //!
+//! What each block arrives holding is kept as the register numbers rather than as a bit each, and
+//! `Rows` in this module says why. The short of it is that a block is live in a handful of values
+//! whatever the function has in it, so a bit per value per block is the size of the function
+//! squared for an answer that is not.
+//!
 //! Inside one block a value's live points are one stretch and never two, because the machine IR is
 //! in SSA form and a value is written once. The stretch runs from the start of the block if the
 //! value arrives live and from where it is written otherwise, and to the end of the block if it
 //! leaves live and to its last read otherwise. Two stretches join into one piece when the blocks
 //! they are in are next to each other in the line, which is what makes a value carried round a loop
 //! one piece over the whole loop rather than one per block in it.
+
+use std::cmp::Ordering;
 
 use rucc_mir::{Block, Func, Reg, Role};
 
@@ -319,113 +326,207 @@ fn note(here: &mut [Option<Range>], touched: &mut Vec<usize>, reg: Reg, point: P
 /// The first is read backwards, because a value a block writes and then reads is one it does not
 /// want from anybody, while one it reads and then writes is.
 fn exposed(func: &Func, order: &Order) -> (Rows, Rows) {
-    let mut used = Rows::new(func.block_count(), func.vregs());
-    let mut defined = Rows::new(func.block_count(), func.vregs());
+    let vregs = func.vregs();
+    let mut used = Rows::new(func.block_count());
+    let mut defined = Rows::new(func.block_count());
+    let mut reads = Building::new(vregs);
+    let mut writes = Building::new(vregs);
     for &block in order.blocks() {
         let row = block.index();
         for call in &func[block].succs {
             for &arg in &call.args {
-                used.insert(row, arg);
+                reads.insert(arg);
             }
         }
         let insts: Vec<_> = func.insts(block).collect();
         for &inst in insts.iter().rev() {
             let operands = &func[func[inst].operands];
             for operand in operands.iter().filter(|operand| operand.role.is_def()) {
-                used.remove(row, operand.reg);
-                defined.insert(row, operand.reg);
+                reads.remove(operand.reg);
+                writes.insert(operand.reg);
             }
             for operand in operands.iter().filter(|operand| !operand.role.is_def()) {
-                used.insert(row, operand.reg);
+                reads.insert(operand.reg);
             }
         }
         for param in &func[block].params {
-            used.remove(row, param.reg);
-            defined.insert(row, param.reg);
+            reads.remove(param.reg);
+            writes.insert(param.reg);
         }
+        used.set(row, &reads.take());
+        defined.set(row, &writes.take());
     }
     (used, defined)
 }
 
 /// The fixpoint: what arrives live in each block, and what leaves live.
 fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows) {
-    let mut live_in = Rows::new(func.block_count(), func.vregs());
-    let mut live_out = Rows::new(func.block_count(), func.vregs());
-    let width = live_in.width;
-    let mut next = vec![0u64; width];
+    let mut live_in = Rows::new(func.block_count());
+    let mut live_out = Rows::new(func.block_count());
+    let (mut out, mut scratch, mut rest, mut next) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut changed = true;
     while changed {
         changed = false;
         for &block in order.blocks().iter().rev() {
             let row = block.index();
+            out.clear();
             for call in &func[block].succs {
-                let successor = call.block.index();
-                for (word, &incoming) in
-                    live_out.row_mut(row).iter_mut().zip(live_in.row(successor))
-                {
-                    *word |= incoming;
-                }
+                union(&out, live_in.row(call.block.index()), &mut scratch);
+                std::mem::swap(&mut out, &mut scratch);
             }
-            for (index, word) in next.iter_mut().enumerate() {
-                *word =
-                    used.row(row)[index] | (live_out.row(row)[index] & !defined.row(row)[index]);
-            }
+            without(&out, defined.row(row), &mut rest);
+            union(used.row(row), &rest, &mut next);
             if live_in.row(row) != next.as_slice() {
-                live_in.row_mut(row).copy_from_slice(&next);
+                live_in.set(row, &next);
                 changed = true;
             }
+            live_out.set(row, &out);
         }
     }
     (live_in, live_out)
 }
 
-/// A set of virtual registers for each block.
+/// Everything in either list, in order, into a buffer the caller keeps.
+///
+/// Both are sorted and neither holds a number twice, so this is one walk of the two together
+/// rather than a concatenation and a sort.
+fn union(one: &[u32], two: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    let (mut here, mut there) = (0, 0);
+    while here < one.len() && there < two.len() {
+        match one[here].cmp(&two[there]) {
+            Ordering::Less => {
+                out.push(one[here]);
+                here += 1;
+            }
+            Ordering::Greater => {
+                out.push(two[there]);
+                there += 1;
+            }
+            Ordering::Equal => {
+                out.push(one[here]);
+                here += 1;
+                there += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&one[here..]);
+    out.extend_from_slice(&two[there..]);
+}
+
+/// Everything in the first list that is not in the second, in order.
+fn without(one: &[u32], two: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    let mut there = 0;
+    for &number in one {
+        while there < two.len() && two[there] < number {
+            there += 1;
+        }
+        if there < two.len() && two[there] == number {
+            continue;
+        }
+        out.push(number);
+    }
+}
+
+/// A set of virtual registers for each block, held as the numbers in it.
+///
+/// A bit per register per block is the obvious way to hold this and is what it was. The trouble is
+/// that a row is then as wide as the function has values however few of them the block is about,
+/// and every step of the fixpoint reads and writes every word of every row. A function with a lot
+/// of values in it has a lot of blocks too, so that is the size of the function squared, in memory
+/// as well as in time: jtckdint from the real corpus has one function with 190084 instructions and
+/// 22000 blocks, and four of these rows came to about two gigabytes of the compiler's footprint,
+/// with the fixpoint over them taking a third of the whole compile at `-O1`.
+///
+/// What is actually true of the answer is that a block is live in a handful of values and not in
+/// the other two hundred thousand, so the numbers themselves are smaller than the bits. They are
+/// kept in order, which is what makes the union and the difference the fixpoint needs one walk of
+/// two lists rather than a search per element, and it is the order a register number sorts in
+/// rather than any order of the program. tamnd/rucc#1072.
 #[derive(Debug, Clone)]
 struct Rows {
-    words: Vec<u64>,
-    /// How many words one row is, which is at least one so that a row is a slice rather than
-    /// nothing.
-    width: usize,
+    rows: Vec<Vec<u32>>,
 }
 
 impl Rows {
-    fn new(rows: usize, columns: usize) -> Self {
-        let width = columns.div_ceil(64).max(1);
-        Self { words: vec![0; rows * width], width }
+    fn new(rows: usize) -> Self {
+        Self { rows: vec![Vec::new(); rows] }
     }
 
-    fn row(&self, row: usize) -> &[u64] {
-        &self.words[row * self.width..(row + 1) * self.width]
+    fn row(&self, row: usize) -> &[u32] {
+        &self.rows[row]
     }
 
-    fn row_mut(&mut self, row: usize) -> &mut [u64] {
-        &mut self.words[row * self.width..(row + 1) * self.width]
-    }
-
-    /// The column a register is, or nothing for a physical one, which this does not track.
-    fn column(&self, reg: Reg) -> Option<usize> {
-        let number = usize::try_from(reg.number()?).ok()?;
-        (number < self.width * 64).then_some(number)
-    }
-
-    fn insert(&mut self, row: usize, reg: Reg) {
-        if let Some(column) = self.column(reg) {
-            self.row_mut(row)[column / 64] |= 1 << (column % 64);
-        }
-    }
-
-    fn remove(&mut self, row: usize, reg: Reg) {
-        if let Some(column) = self.column(reg) {
-            self.row_mut(row)[column / 64] &= !(1 << (column % 64));
-        }
+    /// Puts the numbers in the row, keeping whatever the row had already allocated, since the
+    /// fixpoint writes every row once a round and a set that grew by one would otherwise be a set
+    /// that allocated again.
+    fn set(&mut self, row: usize, numbers: &[u32]) {
+        let row = &mut self.rows[row];
+        row.clear();
+        row.extend_from_slice(numbers);
     }
 
     fn iter(&self, row: usize) -> impl Iterator<Item = Reg> + '_ {
-        self.row(row).iter().enumerate().flat_map(|(word, &bits)| {
-            (0..64).filter(move |bit| bits & (1 << bit) != 0).map(move |bit| {
-                Reg::virtual_reg(u32::try_from(word * 64 + bit).expect("a register number"))
-            })
-        })
+        self.rows[row].iter().copied().map(Reg::virtual_reg)
+    }
+}
+
+/// One block's set while it is being worked out, as a flag per register and a list of which to
+/// look at.
+///
+/// A row is held as the numbers in it, so putting a register into one twice would be a search and
+/// a shift of everything above it, and taking one out again would be another. Here both are a load
+/// and a store. What makes it affordable is the clear: the flags are as many as the function has
+/// values and the blocks are as many as it has blocks, so clearing all of the first for each of
+/// the second would be the cost this whole representation is here to avoid, and instead only what
+/// was set is walked. tamnd/rucc#1072.
+struct Building {
+    flags: Vec<bool>,
+    /// Every number set since the last [`Building::take`], which may name one twice when a
+    /// register was taken out and put back. The take drops the repeat rather than the caller
+    /// having to care.
+    touched: Vec<u32>,
+}
+
+impl Building {
+    fn new(vregs: usize) -> Self {
+        Self { flags: vec![false; vregs], touched: Vec::new() }
+    }
+
+    /// The register's number, or nothing for a physical register, which this does not track, and
+    /// nothing for a number this function has no value at, which cannot happen and is not worth a
+    /// panic if it does.
+    fn number(&self, reg: Reg) -> Option<usize> {
+        let number = usize::try_from(reg.number()?).ok()?;
+        (number < self.flags.len()).then_some(number)
+    }
+
+    fn insert(&mut self, reg: Reg) {
+        let Some(number) = self.number(reg) else { return };
+        if !self.flags[number] {
+            self.flags[number] = true;
+            self.touched.push(u32::try_from(number).expect("a register number"));
+        }
+    }
+
+    fn remove(&mut self, reg: Reg) {
+        if let Some(number) = self.number(reg) {
+            self.flags[number] = false;
+        }
+    }
+
+    /// What is in the set, in order, leaving it empty for the next block.
+    fn take(&mut self) -> Vec<u32> {
+        let flags = &mut self.flags;
+        let mut out: Vec<u32> = self
+            .touched
+            .drain(..)
+            .filter(|&number| std::mem::replace(&mut flags[number as usize], false))
+            .collect();
+        out.sort_unstable();
+        out
     }
 }
 
