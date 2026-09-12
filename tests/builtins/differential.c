@@ -1,4 +1,4 @@
-/* The block routines, run over the same cases as whatever is linked beside this file.
+/* The runtime support routines, run over the same cases as whatever is linked beside this file.
  *
  * Design: spec/12-abi-and-runtime.md section 12.8, which asks for the library to be held against a
  * reference over randomized inputs rather than against numbers written down somewhere. The program
@@ -20,6 +20,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef unsigned __int128 uwide;
+typedef __int128 wide;
+
+/* The two entry points ordinary C does not reach. A / or a % on a 128-bit value becomes a call to
+ * one of the other four, and these two hand back the quotient and the remainder together, which is
+ * what a compiler emits when it wants both and what libgcc's own __udivti3 is written over. Nothing
+ * in this file would call them unless it says their names, so it says their names.
+ */
+unsigned __int128 __udivmodti4(unsigned __int128 top, unsigned __int128 bottom,
+                               unsigned __int128 *rest);
+__int128 __divmodti4(__int128 top, __int128 bottom, __int128 *rest);
 
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
@@ -91,6 +103,14 @@ static unsigned long long mix_number(unsigned long long digest, long long value)
     unsigned char bytes[8];
     for (int i = 0; i < 8; i++) {
         bytes[i] = (unsigned char)((unsigned long long)value >> (8 * i));
+    }
+    return mix(digest, bytes, sizeof bytes);
+}
+
+static unsigned long long mix_wide(unsigned long long digest, uwide value) {
+    unsigned char bytes[16];
+    for (int i = 0; i < 16; i++) {
+        bytes[i] = (unsigned char)(value >> (8 * i));
     }
     return mix(digest, bytes, sizeof bytes);
 }
@@ -229,6 +249,126 @@ static void comparisons(int length) {
     say("memcmp", length, digest);
 }
 
+/* A value whose width is itself random, because the implementations branch on how many digits an
+ * operand has: a pair that both fit in sixty four bits goes one way, a pair that does not goes
+ * another, and a dividend shorter than its divisor goes a third. A stream of full width values
+ * would only ever ask about one of those.
+ */
+static uwide random_wide(void) {
+    int width = (int)(next_random() % 129);
+    if (width == 0) {
+        return 0;
+    }
+    uwide whole = ((uwide)next_random() << 64) | (uwide)next_random();
+    return whole >> (128 - width);
+}
+
+/* The places a 128-bit value is worth asking about by name rather than by luck: the two ends of the
+ * type, the digit boundaries whatever base an implementation works in, and the values either side
+ * of each.
+ */
+static const int CORNER_SHIFTS[] = {0, 1, 31, 32, 33, 63, 64, 65, 95, 96, 97, 126, 127};
+
+#define CORNER_SHIFT_COUNT ((int)(sizeof CORNER_SHIFTS / sizeof CORNER_SHIFTS[0]))
+#define CORNERS (3 * CORNER_SHIFT_COUNT + 2)
+
+/* Volatile, which is the only part of this file that is about the compiler reading it rather than
+ * about the routines under test. These are the operands a compiler can work out for itself, and a
+ * division it works out for itself is a division it does at compile time with its own arithmetic.
+ * That would be a test of gcc.
+ */
+static volatile uwide corners[CORNERS];
+
+static void make_corners(void) {
+    int at = 0;
+    for (int i = 0; i < CORNER_SHIFT_COUNT; i++) {
+        uwide one = (uwide)1 << CORNER_SHIFTS[i];
+        corners[at++] = one - 1;
+        corners[at++] = one;
+        corners[at++] = one + 1;
+    }
+    corners[at++] = ~(uwide)0;
+    corners[at++] = ~(uwide)0 - 1;
+}
+
+/* One pair through all six entry points: unsigned, then the same bits read as signed, which is
+ * where truncation towards zero and the sign of a remainder get decided.
+ */
+static unsigned long long pair(unsigned long long digest, uwide top, uwide bottom) {
+    if (bottom == 0) {
+        /* Dividing by zero is undefined and the machine traps on it, so there is no answer here for
+         * two sides to agree about. One instead, which keeps the dividend rather than dropping the
+         * case.
+         */
+        bottom = 1;
+    }
+    uwide rest;
+    digest = mix_wide(digest, top / bottom);
+    digest = mix_wide(digest, top % bottom);
+    digest = mix_wide(digest, __udivmodti4(top, bottom, &rest));
+    digest = mix_wide(digest, rest);
+    cases += 4;
+
+    wide signed_top = (wide)top;
+    wide signed_bottom = (wide)bottom;
+    /* Every pair but the most negative value over minus one, whose quotient is one past the type.
+     * That is an overflow, and a program that is the reference for what the library does is not the
+     * place to find out what this one's compiler makes of one.
+     */
+    if (!(signed_top == (wide)((uwide)1 << 127) && signed_bottom == -1)) {
+        wide signed_rest;
+        digest = mix_wide(digest, (uwide)(signed_top / signed_bottom));
+        digest = mix_wide(digest, (uwide)(signed_top % signed_bottom));
+        digest = mix_wide(digest, (uwide)__divmodti4(signed_top, signed_bottom, &signed_rest));
+        digest = mix_wide(digest, (uwide)signed_rest);
+        cases += 4;
+    }
+    return digest;
+}
+
+/* How many rounds of random pairs, and how many pairs in each. A round is a group, so the number of
+ * rounds is how finely a disagreement gets located and the number of cases is how likely it is to
+ * be found at all.
+ */
+#define DIVISION_ROUNDS 8
+#define DIVISION_CASES 2048
+
+static void divisions(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DIVISION_CASES; i++) {
+        digest = pair(digest, random_wide(), random_wide());
+    }
+    say("divide", round, digest);
+}
+
+/* One less than the divisor, and one more, which is the pair that makes a long division in any base
+ * estimate a quotient digit one too big and then have to take it back. The estimate looks at the top
+ * digits only, and here they are equal while the whole values are not. It is rare enough among random
+ * pairs not to come up at all, which was measured rather than assumed: with the add back in the
+ * reference taken out by hand, every group of random pairs still agreed and what differed was these
+ * and the corner groups, where one less than a power of two sits next to it in the table.
+ */
+static void near_misses(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DIVISION_CASES; i++) {
+        uwide bottom = random_wide() | 1;
+        digest = pair(digest, bottom - 1, bottom);
+        digest = pair(digest, bottom, bottom - 1);
+        digest = pair(digest, bottom + 1, bottom);
+    }
+    say("divnear", round, digest);
+}
+
+/* Every corner against every corner, both ways round, grouped by which corner one side was. */
+static void corner_divisions(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < CORNERS; i++) {
+        digest = pair(digest, corners[which], corners[i]);
+        digest = pair(digest, corners[i], corners[which]);
+    }
+    say("divcorner", which, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -242,6 +382,14 @@ int main(int argc, char **argv) {
         moves(length);
         fills(length);
         comparisons(length);
+    }
+    make_corners();
+    for (int i = 0; i < CORNERS; i++) {
+        corner_divisions(i);
+    }
+    for (int i = 0; i < DIVISION_ROUNDS; i++) {
+        divisions(i);
+        near_misses(i);
     }
     printf("cases %ld\n", cases);
     return 0;
