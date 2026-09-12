@@ -191,6 +191,10 @@ name = "rucc-gnu"
 version = "0.10.26"
 
 [[package]]
+name = "rucc-headers"
+version = "0.10.26"
+
+[[package]]
 name = "rucc-ir"
 version = "0.10.26"
 dependencies = [

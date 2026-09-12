@@ -1,0 +1,22 @@
+[package]
+name = "rucc-headers"
+description = "Derives a multi-version libc header tree from real installed header sets, for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Build tooling, outside the layer stack, and with no dependencies at all. What it reads is
+# header text and what it writes is header text, so the compiler's own crates have nothing to
+# say about it, and it is a separate binary from `xtask` because `xtask` is the thing that has
+# to keep working when everything else is broken.
+[dependencies]
