@@ -52,12 +52,12 @@ use rucc_session::{
     SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
-use rucc_target::Triple;
+use rucc_target::{ObjectFormat, Triple};
 
 use crate::link::LinkOptions;
 
 pub use crate::compile::{Artifact, Compiled, Temps, compile, compile_ir};
-pub use crate::phase::{Input, InputKind, Job, LinkJob, Output, Phase, Plan};
+pub use crate::phase::{ArchiveJob, Input, InputKind, Job, LinkJob, Output, Phase, Plan};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
 
@@ -236,7 +236,7 @@ options:
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
   --target=<triple>      generate code for <triple>
-  --emit=<kind>          exe, obj, asm, preprocessed, tast, ir, mir-final,
+  --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
   --version              print the version and exit
@@ -2206,7 +2206,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             if opts.deps.emit {
                 failed |= !write_deps(opts, plan, job, &result.deps, &mut stderr);
             }
-            if !matches!(result.artifact, Artifact::Object(_)) {
+            if !matches!(result.artifact, Artifact::Object { .. }) {
                 // Worth saying rather than writing whatever it is and letting the linker read it.
                 // An empty file is a valid empty linker script, so a link handed one gets as far
                 // as reporting every symbol of this file undefined, which is a page of messages
@@ -2271,6 +2271,133 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         // linking failed would only push its message further up the screen.
         Err(link::Error::Refused { .. }) => 1,
         Err(why) => complain(why),
+    }
+}
+
+/// Compiles everything and writes the objects into one static library.
+///
+/// No temporary directory and no second program. The objects never reach the file system at all:
+/// they go from the compiler into the archive writer, which is both faster than writing a directory
+/// of files for an `ar` to read back and the reason the symbol index can be written at all. A
+/// member's index entries are the names the object writer says it wrote, and the only thing that
+/// knows those is the run that wrote it.
+///
+/// `-save-temps` is the exception. It asked for the objects to be kept, the plan gave them names a
+/// person can find, and they are written there as well as put in the archive.
+fn archive_all(opts: &Options, plan: &Plan) -> i32 {
+    let Some(job) = &plan.archive else {
+        // Every path into here comes from a plan whose last phase is the archive, and such a plan
+        // has an archive job. Saying so is cheaper than an unwrap that would have to be explained.
+        return complain("there is nothing to put in an archive");
+    };
+    // Before anything is compiled, because a format this has no container for is worth knowing
+    // about in the second it takes to look rather than after the whole compilation.
+    let flavour = match opts.target.os.object_format() {
+        ObjectFormat::Elf => rucc_archive::Flavour::Gnu,
+        ObjectFormat::Coff => rucc_archive::Flavour::Coff,
+        // Mach-O wants the BSD flavour, whose index is a different member under a different name,
+        // and wasm has no archives of its own at all. Neither has an object writer either, so a
+        // command line reaching this would have failed in the next step regardless.
+        format @ (ObjectFormat::MachO | ObjectFormat::Wasm) => {
+            return complain(format!(
+                "there is no archive format for {} objects in this compiler yet",
+                format.as_str()
+            ));
+        }
+    };
+
+    let fs = OsFileSystem::new();
+    let mut failed = false;
+    let mut members: Vec<rucc_archive::Member> = Vec::with_capacity(plan.jobs.len());
+    let mut names = job.members.iter();
+    let mut fired = Fired::new();
+    let mut pressure = Pressure::new();
+    {
+        let mut stderr = std::io::stderr().lock();
+        let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
+        failed |= !ok;
+        for plan_job in &plan.jobs {
+            // What the plan called this member. The two lists are walked together rather than the
+            // name being worked out again here, so that what `-###` printed and what goes in the
+            // file cannot come apart.
+            let Some(member) = names.next() else {
+                return complain("the plan asks the archive for a member nothing produced");
+            };
+            if !plan_job.phases.contains(&Phase::Compile) {
+                // Assembly, which enters the pipeline after the compile phase. There is no
+                // assembler for a file of text in this compiler, so there is no object to put in,
+                // and an archive quietly missing one is worse than a message about it.
+                let _ = writeln!(
+                    &mut stderr,
+                    "rucc: error: {}: this compiler has no assembler for a file of assembly yet, \
+                     so it cannot go into an archive",
+                    plan_job.input
+                );
+                failed = true;
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let result = if plan_job.kind == InputKind::Ir {
+                compile_ir(opts, &plan_job.input, &fs)
+            } else {
+                compile(opts, &plan_job.input, &fs)
+            };
+            if opts.time {
+                say_time(&plan_job.input, started.elapsed(), &mut stderr);
+            }
+            fired.merge(&result.fired);
+            pressure.merge(&result.pressure);
+            failed |= !write_dumps(&plan_job.input, &result.dumps, &mut stderr);
+            failed |= !remarks.write(&result.remarks, &mut stderr);
+            for message in &result.messages {
+                let _ = writeln!(stderr, "{message}");
+            }
+            failed |= !write_temps(plan_job, &result.temps, &mut stderr);
+            if result.failed() {
+                failed = true;
+                continue;
+            }
+            if opts.deps.emit {
+                failed |= !write_deps(opts, plan, plan_job, &result.deps, &mut stderr);
+            }
+            let Artifact::Object { bytes, defines } = result.artifact else {
+                let _ = writeln!(
+                    stderr,
+                    "rucc: internal error: {}: no object file was produced for the archive",
+                    plan_job.input
+                );
+                failed = true;
+                continue;
+            };
+            // Under `-save-temps` the plan gave the object a name a person can find, so it is
+            // written there too. Otherwise it is only ever a member and never a file.
+            if let Output::File(path) = &plan_job.output {
+                if let Err(e) = std::fs::write(path, &bytes) {
+                    let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+                    failed = true;
+                }
+            }
+            members.push(rucc_archive::Member { name: member.clone(), body: bytes, defines });
+        }
+        failed |= !write_coverage(opts, &fired, &mut stderr);
+        failed |= !write_pressure(opts, &pressure, &mut stderr);
+    }
+    if failed {
+        // Nothing is written from a compilation that did not finish, for the reason the link gives:
+        // an archive missing the file that failed is one a link reports every name of as undefined,
+        // which is a page of messages about a mistake already reported once.
+        return 1;
+    }
+
+    let bytes = match rucc_archive::write(flavour, &members) {
+        Ok(bytes) => bytes,
+        // Every one of these is a bug here rather than a program's mistake: the names came from the
+        // object writer and the bodies came from this process.
+        Err(why) => return complain(format!("the archive could not be written: {why}")),
+    };
+    match std::fs::write(&job.output, &bytes) {
+        Ok(()) => 0,
+        Err(e) => complain(format!("{}: {e}", job.output)),
     }
 }
 
@@ -2514,6 +2641,9 @@ pub fn run(args: &[String]) -> i32 {
             }
             if opts.emit == EmitKind::Preprocessed {
                 return preprocess_all(&opts, &plan);
+            }
+            if opts.emit == EmitKind::Archive {
+                return archive_all(&opts, &plan);
             }
             if opts.emit != EmitKind::Executable {
                 return compile_all(&opts, &plan);

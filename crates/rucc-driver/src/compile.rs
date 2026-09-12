@@ -44,8 +44,20 @@ pub enum Artifact {
     Nothing,
     /// Text, which is every kind up to and including assembly.
     Text(String),
-    /// An object file, which is `-c`.
-    Object(Vec<u8>),
+    /// An object file, which is `-c`, and the names a linker can find in it.
+    ///
+    /// The names travel with the bytes rather than beside them because what wants them is the
+    /// archive step, and an index entry that does not match the member is worse than no archive:
+    /// the linker searches the index, pulls the member out, and still reports the name undefined.
+    /// One value holding both is one value the two cannot disagree in.
+    Object {
+        /// The file.
+        bytes: Vec<u8>,
+        /// Every name another object can reach, as the object writer wrote them. Empty is a real
+        /// answer: a translation unit of nothing but `static` functions is a member an archive
+        /// carries and nothing ever pulls out.
+        defines: Vec<String>,
+    },
 }
 
 impl Artifact {
@@ -55,7 +67,7 @@ impl Artifact {
         match self {
             Artifact::Nothing => &[],
             Artifact::Text(text) => text.as_bytes(),
-            Artifact::Object(bytes) => bytes,
+            Artifact::Object { bytes, .. } => bytes,
         }
     }
 }
@@ -294,6 +306,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 | EmitKind::MirFinal
                 | EmitKind::Asm
                 | EmitKind::Object
+                | EmitKind::Archive
                 | EmitKind::Executable
                 | EmitKind::SafetySummary => {
                     // What a `.incbin` in an `asm` at file scope names is read through the same
@@ -811,7 +824,7 @@ fn generate(
     // The second names go the same way and for the same reason, and they are neither a function
     // nor a variable: an alias is an entry in the symbol table and no bytes of anything.
     let (globals, aliases) = match opts.emit {
-        EmitKind::Asm | EmitKind::Object | EmitKind::Executable => (
+        EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => (
             rucc_asm::globals(module, names).map_err(refused)?,
             rucc_asm::aliases(module, names).map_err(refused)?,
         ),
@@ -828,8 +841,9 @@ fn generate(
                 .map_err(refused)
         }
         // An executable is an object as far as this gets: one is what each file of a link
-        // contributes, and the linker is what turns them into the other.
-        EmitKind::Object | EmitKind::Executable => {
+        // contributes, and the linker is what turns them into the other. An archive is the same
+        // again, with the archive writer in place of the linker.
+        EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
             if opts.save_temps.wanted() {
                 let listing = rucc_asm::print(
                     &funcs,
@@ -846,12 +860,14 @@ fn generate(
             let data = globals.image();
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            rucc_object::write(&text, &data, &aliases, target, output(opts, target))
-                .map(Artifact::Object)
-                .map_err(|why| match why {
-                    rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
-                    rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
-                })
+            let bytes = rucc_object::write(&text, &data, &aliases, target, output(opts, target))
+                .map_err(wrote)?;
+            // Asked of the writer rather than worked out from the same three values here, so that
+            // what the archive's index says and what is in the member cannot come apart. It is
+            // wanted only by `--emit=archive` and is cheap enough that the other two kinds are not
+            // worth a second path.
+            let defines = rucc_object::defines(&text, &data, &aliases, target).map_err(wrote)?;
+            Ok(Artifact::Object { bytes, defines })
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
@@ -884,6 +900,18 @@ fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
             data: opts.data_sections,
         },
         property: rucc_object::Property { features },
+    }
+}
+
+/// What the object writer said, as the kind of news it is.
+///
+/// A format with no writer is a target this compiler is behind on, which is a program nobody can
+/// compile today and not a mistake in the one being compiled. Anything else it refused is a bug
+/// here, because every value it was handed came out of this compiler.
+fn wrote(why: rucc_object::Error) -> Vec<Diagnostic> {
+    match why {
+        rucc_object::Error::Format { .. } => vec![unsupported(&why.to_string())],
+        rucc_object::Error::Refused { .. } => vec![internal(&why.to_string())],
     }
 }
 
@@ -2323,7 +2351,7 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         match result.artifact {
-            Artifact::Object(bytes) => bytes,
+            Artifact::Object { bytes, .. } => bytes,
             other => panic!("expected an object, got {other:?}"),
         }
     }
@@ -2484,7 +2512,7 @@ decl #0 x : int object external static defined
         let result = run(&opts, "int main(void) { return 0; }\n");
         assert_eq!(result.messages, Vec::<String>::new());
         match result.artifact {
-            Artifact::Object(bytes) => assert_eq!(&bytes[..4], b"\x7fELF"),
+            Artifact::Object { bytes, .. } => assert_eq!(&bytes[..4], b"\x7fELF"),
             other => panic!("expected an object, got {other:?}"),
         }
     }
@@ -6249,7 +6277,7 @@ away:
         assert!(text.starts_with("# 1 \"/main.c\""), "{text}");
         let asm = result.temps.assembly.expect("the assembly");
         assert!(asm.contains("a:"), "{asm}");
-        assert!(matches!(result.artifact, Artifact::Object(_)), "{:?}", result.artifact);
+        assert!(matches!(result.artifact, Artifact::Object { .. }), "{:?}", result.artifact);
     }
 
     #[test]

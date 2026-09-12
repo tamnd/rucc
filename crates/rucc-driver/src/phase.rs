@@ -29,6 +29,13 @@ pub enum Phase {
     Compile,
     /// Assemble, producing an object file.
     Assemble,
+    /// Collect the objects into a static library.
+    ///
+    /// In front of the link rather than after it because the derived `Ord` is what truncates a
+    /// sequence, and every phase an archive needs is a phase a link needs too. No input's sequence
+    /// has this in it: an archive is one step for the whole command line, the way a link is, and
+    /// what each input contributes to it is an object.
+    Archive,
     /// Link the objects into an executable or a shared library.
     Link,
 }
@@ -41,6 +48,7 @@ impl Phase {
             Phase::Preprocess => "preprocess",
             Phase::Compile => "compile",
             Phase::Assemble => "assemble",
+            Phase::Archive => "archive",
             Phase::Link => "link",
         }
     }
@@ -318,6 +326,20 @@ pub struct LinkJob {
     pub output: String,
 }
 
+/// The archive step, when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveJob {
+    /// What the members are called inside the archive, in command line order.
+    ///
+    /// Command line order is the order they are written in, which is the stated order
+    /// `spec/cross-compile/13-distribution.md` section 13.6 asks for: the caller chose it and the
+    /// same command line produces the same archive. The names are the object file names, because
+    /// that is what `ar t` over anybody else's archive shows.
+    pub members: Vec<String>,
+    /// The archive.
+    pub output: String,
+}
+
 /// The whole plan for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -325,6 +347,9 @@ pub struct Plan {
     pub jobs: Vec<Job>,
     /// The link step, or `None` when a mode flag stopped short of it.
     pub link: Option<LinkJob>,
+    /// The archive step, which is there only under `--emit=archive` and is never there beside a
+    /// link: one command line produces one of the two.
+    pub archive: Option<ArchiveJob>,
     /// Things worth saying under `-v` that are not errors, such as an object file passed on a
     /// command line that is not linking.
     pub notes: Vec<String>,
@@ -370,6 +395,7 @@ pub fn last_phase(emit: EmitKind) -> Phase {
         | EmitKind::SafetySummary
         | EmitKind::TypeGranules => Phase::Compile,
         EmitKind::Object => Phase::Assemble,
+        EmitKind::Archive => Phase::Archive,
         EmitKind::Executable => Phase::Link,
     }
 }
@@ -416,17 +442,20 @@ fn stem(path: &str) -> &str {
 /// command line that links has one output for however many inputs, so the input's own name goes
 /// on the end and `a.c` under `-o out/prog` becomes `out/prog-a`. `-save-temps=cwd` is the same
 /// name with the directory taken off, which is the only thing the two spellings disagree about.
-fn aux_base(opts: &Options, input: &str, output: Option<&str>, linking: bool) -> String {
+///
+/// `collecting` is that one output, which is the link and the archive both. The archive always has
+/// an `-o`, so the default below is the link's.
+fn aux_base(opts: &Options, input: &str, output: Option<&str>, collecting: bool) -> String {
     let named = match output {
         Some(o) => without_extension(o),
         // No `-o`, so the job worked its own name out, and a worked out name has no directory in
         // it: the object of `sub/a.c` is `a.o` in the working directory, so what is kept beside
         // it is in the working directory too.
-        None if linking => stem(default_exe(opts)),
+        None if collecting => stem(default_exe(opts)),
         None => stem(input),
     };
     let named = if opts.save_temps == SaveTemps::Cwd { file_part(named) } else { named };
-    if linking { format!("{named}-{}", stem(input)) } else { named.to_owned() }
+    if collecting { format!("{named}-{}", stem(input)) } else { named.to_owned() }
 }
 
 /// The suffix a phase's output carries, for this target.
@@ -458,7 +487,9 @@ fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
                 "o"
             }
         }
-        Phase::Link => "",
+        // Neither of the last two is a suffix anything derives: both write one file for the whole
+        // command line and both take its name from `-o`, and the archive requires one.
+        Phase::Archive | Phase::Link => "",
     }
 }
 
@@ -482,6 +513,16 @@ impl Plan {
         }
         let last = last_phase(opts.emit);
         let linking = last == Phase::Link;
+        let archiving = last == Phase::Archive;
+        // An archive has no default name. `a.out` is a convention old enough that a build which
+        // gets one knows what happened, and a `libwhatever.a` this made up would be a file the
+        // build then fails to find under the name it asked for.
+        if archiving && output.is_none() {
+            return Err(plan_err("an archive has no default name, so `--emit=archive` needs `-o`"));
+        }
+        // One output for however many inputs, which both of the collecting steps are. What it
+        // decides below is that no input names the output and that the objects are temporary.
+        let collecting = linking || archiving;
 
         let mut kinds = Vec::with_capacity(inputs.len());
         for input in inputs {
@@ -492,7 +533,7 @@ impl Plan {
         // produces nothing, and neither does a `.s` on an `-E` line, so neither may count
         // toward the `-o` check below. When linking there is exactly one output and it is the
         // executable, so nothing counts.
-        let producing = if linking {
+        let producing = if collecting {
             0
         } else {
             kinds
@@ -501,13 +542,14 @@ impl Plan {
                 .filter(|k| k.full_sequence().iter().any(|p| *p <= last))
                 .count()
         };
-        if output.is_some() && !linking && producing > 1 {
+        if output.is_some() && !collecting && producing > 1 {
             return Err(plan_err("cannot specify -o with multiple inputs when not linking"));
         }
 
         let mut notes = Vec::new();
         let mut jobs = Vec::with_capacity(inputs.len());
         let mut link_inputs = Vec::new();
+        let mut members = Vec::new();
 
         for (input, kind) in inputs.iter().zip(kinds) {
             // An object, an archive or a shared library has nothing done to it. It reaches the
@@ -515,6 +557,25 @@ impl Plan {
             // anything, which is why this case is separate rather than falling out of the
             // sequence below. Deriving it would rewrite `libm.a` into `libm.o`.
             if kind == InputKind::LinkerInput {
+                // An object, an archive or a library on an archive command line is refused rather
+                // than noted and dropped. The symbol index is why: it needs the names each member
+                // defines, and this compiler knows those for a file it compiled and not for one it
+                // was handed, since nothing here reads an object file back. Carrying on and
+                // leaving the file out would be an archive that is quietly missing half of what
+                // was asked for, which a link finds out about much later.
+                if archiving {
+                    let named = if input.library {
+                        format!("-l{}", input.path)
+                    } else {
+                        input.path.clone()
+                    };
+                    return Err(plan_err(format!(
+                        "{named}: an archive is written from the objects this command line \
+                         compiles, and the symbol index in it needs the names each member \
+                         defines, which this compiler knows for a file it compiled and not for \
+                         one it was handed"
+                    )));
+                }
                 if linking {
                     link_inputs.push(if input.library {
                         Item::Library(input.path.clone())
@@ -574,9 +635,9 @@ impl Plan {
             // what it writes. Everything past it does: the text and, once there is a back end
             // step after it, the assembly.
             let aux = (opts.save_temps.wanted() && final_phase > Phase::Preprocess)
-                .then(|| aux_base(opts, &input.path, output, linking));
-            let out = if final_phase == Phase::Link {
-                // The job stops at the object, and the link step below takes it from here. Under
+                .then(|| aux_base(opts, &input.path, output, collecting));
+            let out = if final_phase == Phase::Link || archiving {
+                // The job stops at the object, and the step below takes it from here. Under
                 // `-save-temps` the object is one of the files being kept, so it is written where
                 // the person can see it rather than in a directory that goes away.
                 let ext = suffix_for(Phase::Assemble, opts);
@@ -615,6 +676,16 @@ impl Plan {
                     link_inputs.push(Item::File(p.to_owned()));
                 }
             }
+            if archiving {
+                // The name inside the archive rather than the path the object is written to, which
+                // under `-save-temps` is a path with a directory on it and otherwise is a
+                // temporary. What `ar t` shows is a file name, so that is what goes in.
+                members.push(format!(
+                    "{}.{}",
+                    stem(&input.path),
+                    suffix_for(Phase::Assemble, opts)
+                ));
+            }
             jobs.push(Job { input: input.path.clone(), kind, phases, output: out, aux_base: aux });
         }
 
@@ -622,8 +693,14 @@ impl Plan {
             inputs: link_inputs,
             output: output.unwrap_or(default_exe(opts)).to_owned(),
         });
+        let archive = archiving.then(|| ArchiveJob {
+            members,
+            // Checked at the top, so there is an `-o` here. Saying so is cheaper than an unwrap
+            // that would have to be explained.
+            output: output.unwrap_or_default().to_owned(),
+        });
 
-        Ok(Plan { jobs, link, notes, output: output.map(str::to_owned) })
+        Ok(Plan { jobs, link, archive, notes, output: output.map(str::to_owned) })
     }
 
     /// Renders the plan the way `-###` prints it.
@@ -657,6 +734,9 @@ impl Plan {
         if let Some(link) = &self.link {
             let names: Vec<String> = link.inputs.iter().map(ToString::to_string).collect();
             let _ = writeln!(out, "link: {} -> {}", names.join(" "), link.output);
+        }
+        if let Some(archive) = &self.archive {
+            let _ = writeln!(out, "archive: {} -> {}", archive.members.join(" "), archive.output);
         }
         out
     }
@@ -871,6 +951,66 @@ mod tests {
         let p = plan(&o, &["a.c"], None);
         assert_eq!(p.jobs[0].output, Output::Temporary("a.obj".into()));
         assert_eq!(p.link.expect("expected a link step").output, "a.exe");
+    }
+
+    /// The archive is the link's shape rather than `-c`'s: one file out of however many inputs.
+    #[test]
+    fn an_archive_is_one_file_however_many_inputs_there_are() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let p = plan(&o, &["a.c", "sub/b.c"], Some("out/libx.a"));
+        assert_eq!(p.jobs.len(), 2);
+        for job in &p.jobs {
+            // Each input stops at its object, which is where `-c` stops, and the object is a file
+            // nobody asked for and nobody sees: what was asked for is the archive.
+            assert_eq!(job.phases.last(), Some(&Phase::Assemble), "{}", job.input);
+            assert!(matches!(job.output, Output::Temporary(_)), "{:?}", job.output);
+        }
+        let archive = p.archive.expect("an archive step");
+        assert_eq!(archive.members, ["a.o", "b.o"]);
+        assert_eq!(archive.output, "out/libx.a");
+        assert!(p.link.is_none(), "one command line produces one of the two and not both");
+    }
+
+    #[test]
+    fn a_member_is_called_what_an_object_is_called_on_this_target() {
+        let mut o = opts("x86_64-pc-windows-msvc");
+        o.emit = EmitKind::Archive;
+        let p = plan(&o, &["a.c"], Some("x.lib"));
+        assert_eq!(p.archive.expect("an archive step").members, ["a.obj"]);
+    }
+
+    /// `a.out` is a convention old enough that a build which gets one knows what happened. A
+    /// `libsomething.a` invented here would be a file the build then fails to find.
+    #[test]
+    fn an_archive_has_no_default_name() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let inputs = [Input::new("a.c")];
+        let error = Plan::new(&o, &inputs, None).expect_err("no name for the archive");
+        assert!(error.message.contains("needs `-o`"), "{error}");
+    }
+
+    /// An `ar` would take these. This cannot, and says so rather than writing an archive with
+    /// half of what was asked for in it.
+    #[test]
+    fn something_this_compilation_did_not_produce_cannot_go_into_an_archive() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        for handed in [Input::new("b.o"), Input::library("m")] {
+            let inputs = [Input::new("a.c"), handed];
+            let error = Plan::new(&o, &inputs, Some("libx.a")).expect_err("not ours to index");
+            assert!(error.message.contains("names each member"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_plan_says_what_goes_into_the_archive() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let text = plan(&o, &["a.c", "b.c"], Some("libx.a")).render();
+        assert!(text.contains("archive: a.o b.o -> libx.a"), "{text}");
+        assert!(!text.contains("link:"), "{text}");
     }
 
     #[test]

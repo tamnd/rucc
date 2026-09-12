@@ -353,6 +353,59 @@ pub fn write(
     Ok(bytes)
 }
 
+/// Every name a linker can find in the object [`write`] would write from the same input.
+///
+/// What asks for this is the archive writer. A static link resolves through the symbol index, so an
+/// index entry has to name a symbol the member really defines: an entry for a name that is not in
+/// the member is an archive the linker searches, pulls the member out of, and then still reports
+/// the name undefined. So the list comes from the writer rather than from the caller, because the
+/// writer is the only thing that knows what it wrote.
+///
+/// The names are as the C program spelled them, with nothing in front of them, which is what ELF
+/// has and what this writer writes. Mach-O puts an underscore there and COFF on a 32-bit machine
+/// does too, and when either of those is written this is the function that has to say so, which is
+/// why it asks about the target it otherwise would not have to.
+///
+/// Order is the functions, then the variables, then the aliases, each in the order the module held
+/// them, which is the order [`write`] adds the symbols in. A `static` is left out: it is a name the
+/// link has already finished with by the time an archive is searched, and an index entry for one
+/// would offer the linker a definition it is not allowed to use.
+///
+/// # Errors
+///
+/// [`Error::Format`] for a machine or a platform this does not write, which is the same refusal
+/// [`write`] gives and is here for the same reason: a list of undecorated names for a format whose
+/// symbols carry an underscore is worse than no list at all.
+pub fn defines(
+    text: &Text,
+    data: &Data,
+    aliases: &[Alias],
+    target: &TargetInfo,
+) -> Result<Vec<String>, Error> {
+    if target.tuple.arch() != Arch::X86_64 || target.object_format != ObjectFormat::Elf {
+        return Err(Error::Format { triple: target.tuple.to_string() });
+    }
+    let names = text
+        .funcs
+        .iter()
+        .filter(|func| func.binding != Binding::Local)
+        .map(|func| func.name.clone())
+        .chain(
+            data.objects
+                .iter()
+                .filter(|object| object.binding != Binding::Local)
+                .map(|object| object.name.clone()),
+        )
+        .chain(
+            aliases
+                .iter()
+                .filter(|alias| alias.binding != Binding::Local)
+                .map(|alias| alias.name.clone()),
+        )
+        .collect();
+    Ok(names)
+}
+
 /// What a record of where a patcher's room is is called.
 const PATCHABLE: &str = "__patchable_function_entries";
 
@@ -1451,6 +1504,64 @@ mod tests {
             let error =
                 write(&text, &Data::default(), &[], &TargetInfo::new(triple), Output::default())
                     .expect_err("no writer");
+            assert!(matches!(error, Error::Format { .. }), "{error:?}");
+        }
+    }
+
+    /// What the archive's symbol index is built from is what the linker can find in the member.
+    ///
+    /// Written against the object rather than against the list, because the two agreeing is the
+    /// whole point: a list that says more than the file does is an archive that promises a
+    /// definition it does not have, and a list that says less is a member nothing pulls out.
+    #[test]
+    fn the_names_a_linker_can_find_are_the_names_the_list_gives() {
+        let mut text = calling("puts");
+        text.funcs.push(extent("hidden".to_owned(), 16, 1, Binding::Local));
+        text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
+        text.bytes.resize(33, 0x90);
+        let data = Data {
+            objects: vec![variable("seen", Place::Written), {
+                let mut quiet = variable("quiet", Place::Zero);
+                quiet.binding = Binding::Local;
+                quiet
+            }],
+        };
+        let aliases = [Alias {
+            name: "second".to_owned(),
+            target: "f".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+        }];
+
+        let names = defines(&text, &data, &aliases, &target()).expect("a list");
+        assert_eq!(names, ["f", "shared", "seen", "second"]);
+
+        let bytes = write(&text, &data, &aliases, &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let found: Vec<String> = file
+            .symbols()
+            .filter(|symbol| symbol.is_global() && symbol.is_definition())
+            .map(|symbol| symbol.name().unwrap_or_default().to_owned())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        let mut theirs = found;
+        theirs.sort();
+        assert_eq!(sorted, theirs, "the list and the file have to say the same thing");
+    }
+
+    /// The same refusal the writer gives, for the reason the function says: an undecorated name is
+    /// the wrong answer for a format whose symbols carry an underscore, and a wrong index entry is
+    /// worse than no archive.
+    #[test]
+    fn a_platform_this_does_not_write_has_no_list_of_names_either() {
+        let text = calling("puts");
+        for triple in [
+            Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu),
+            Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
+        ] {
+            let error = defines(&text, &Data::default(), &[], &TargetInfo::new(triple))
+                .expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }
     }
