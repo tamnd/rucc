@@ -33,6 +33,21 @@ unsigned __int128 __udivmodti4(unsigned __int128 top, unsigned __int128 bottom,
                                unsigned __int128 *rest);
 __int128 __divmodti4(__int128 top, __int128 bottom, __int128 *rest);
 
+/* And all six at sixty four bits, every one of them by name.
+ *
+ * A / on a long long is a call only on a target whose registers are narrower than that, and this
+ * harness runs on the host. So none of these six can be reached by writing arithmetic here, and the
+ * machine's own instruction is not a stand-in for them: what is under test is the routine a 32-bit
+ * target will call, and a program that divided with the instruction would be a test of the host.
+ */
+unsigned long long __udivdi3(unsigned long long top, unsigned long long bottom);
+unsigned long long __umoddi3(unsigned long long top, unsigned long long bottom);
+unsigned long long __udivmoddi4(unsigned long long top, unsigned long long bottom,
+                                unsigned long long *rest);
+long long __divdi3(long long top, long long bottom);
+long long __moddi3(long long top, long long bottom);
+long long __divmoddi4(long long top, long long bottom, long long *rest);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -369,6 +384,103 @@ static void corner_divisions(int which) {
     say("divcorner", which, digest);
 }
 
+/* The same three families one width down, for the six routines a 32-bit target calls.
+ *
+ * Random widths for the same reason: the C branches on whether both operands fit in thirty two bits
+ * and the reference branches on how many base 2^32 digits the divisor has, and a stream of full
+ * width values would only ever ask about one side of each.
+ */
+static unsigned long long random_long(void) {
+    int width = (int)(next_random() % 65);
+    if (width == 0) {
+        return 0;
+    }
+    return next_random() >> (64 - width);
+}
+
+/* The ends of the narrower type, the boundary between its halves, and the digit boundaries of the
+ * reference, with the values either side of each.
+ */
+static const int CORNER_SHIFTS_LONG[] = {0, 1, 15, 16, 17, 31, 32, 33, 62, 63};
+
+#define CORNER_SHIFT_LONG_COUNT ((int)(sizeof CORNER_SHIFTS_LONG / sizeof CORNER_SHIFTS_LONG[0]))
+#define CORNERS_LONG (3 * CORNER_SHIFT_LONG_COUNT + 2)
+
+/* Volatile for the reason the wider table is, and it costs nothing to keep the same rule here. The
+ * divisions below are opaque calls rather than arithmetic, so there is nothing for a compiler to
+ * work out in advance, but the table is also read as signed and that is arithmetic.
+ */
+static volatile unsigned long long corners_long[CORNERS_LONG];
+
+static void make_corners_long(void) {
+    int at = 0;
+    for (int i = 0; i < CORNER_SHIFT_LONG_COUNT; i++) {
+        unsigned long long one = 1ull << CORNER_SHIFTS_LONG[i];
+        corners_long[at++] = one - 1;
+        corners_long[at++] = one;
+        corners_long[at++] = one + 1;
+    }
+    corners_long[at++] = ~0ull;
+    corners_long[at++] = ~0ull - 1;
+}
+
+/* One pair through all six, unsigned and then the same bits read as signed. */
+static unsigned long long pair_long(unsigned long long digest, unsigned long long top,
+                                    unsigned long long bottom) {
+    if (bottom == 0) {
+        bottom = 1;
+    }
+    unsigned long long rest;
+    digest = mix_number(digest, (long long)__udivdi3(top, bottom));
+    digest = mix_number(digest, (long long)__umoddi3(top, bottom));
+    digest = mix_number(digest, (long long)__udivmoddi4(top, bottom, &rest));
+    digest = mix_number(digest, (long long)rest);
+    cases += 4;
+
+    long long signed_top = (long long)top;
+    long long signed_bottom = (long long)bottom;
+    /* Every pair but the most negative value over minus one, whose quotient is one past the type,
+     * which is the same case the wider width leaves out and for the same reason.
+     */
+    if (!(signed_top == (long long)(1ull << 63) && signed_bottom == -1)) {
+        long long signed_rest;
+        digest = mix_number(digest, __divdi3(signed_top, signed_bottom));
+        digest = mix_number(digest, __moddi3(signed_top, signed_bottom));
+        digest = mix_number(digest, __divmoddi4(signed_top, signed_bottom, &signed_rest));
+        digest = mix_number(digest, signed_rest);
+        cases += 4;
+    }
+    return digest;
+}
+
+static void divisions_long(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DIVISION_CASES; i++) {
+        digest = pair_long(digest, random_long(), random_long());
+    }
+    say("divide64", round, digest);
+}
+
+static void near_misses_long(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DIVISION_CASES; i++) {
+        unsigned long long bottom = random_long() | 1;
+        digest = pair_long(digest, bottom - 1, bottom);
+        digest = pair_long(digest, bottom, bottom - 1);
+        digest = pair_long(digest, bottom + 1, bottom);
+    }
+    say("divnear64", round, digest);
+}
+
+static void corner_divisions_long(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < CORNERS_LONG; i++) {
+        digest = pair_long(digest, corners_long[which], corners_long[i]);
+        digest = pair_long(digest, corners_long[i], corners_long[which]);
+    }
+    say("divcorner64", which, digest);
+}
+
 /* The eight conversions between a 128-bit integer and a float.
  *
  * Nothing here says their names, because a cast is what a program writes and a call is what the
@@ -486,8 +598,12 @@ int main(int argc, char **argv) {
         comparisons(length);
     }
     make_corners();
+    make_corners_long();
     for (int i = 0; i < CORNERS; i++) {
         corner_divisions(i);
+    }
+    for (int i = 0; i < CORNERS_LONG; i++) {
+        corner_divisions_long(i);
     }
     for (int i = 0; i < CORNERS; i++) {
         corner_conversions(i);
@@ -495,6 +611,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < DIVISION_ROUNDS; i++) {
         divisions(i);
         near_misses(i);
+        divisions_long(i);
+        near_misses_long(i);
     }
     for (int i = 0; i < CONVERSION_ROUNDS; i++) {
         conversions(i);

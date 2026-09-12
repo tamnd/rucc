@@ -1,11 +1,11 @@
-/* Dividing an integer wider than a register, which is the one arithmetic a 64-bit target cannot
- * do in instructions at all.
+/* Dividing an integer wider than a register, which is the one arithmetic a target cannot do in
+ * instructions at all.
  *
  * Design: spec/12-abi-and-runtime.md section 12.8 and spec/cross-compile/10-runtime.md section
  * 10.2. The backend splits a 128-bit add or shift into two instructions over the halves, which
  * crates/rucc-codegen/src/wide.rs does, and there is no such rewrite for a divide: a quotient is
- * not a function of the halves of its operands taken apart. So the divide becomes a call, and
- * these six names are what it calls. They are libgcc's names because an object we produced gets
+ * not a function of the halves of its operands taken apart. So the divide becomes a call, and the
+ * names below are what it calls. They are libgcc's names because an object we produced gets
  * linked against objects GCC produced, which is the same reason the block routines next door are
  * called memcpy and memmove.
  *
@@ -24,13 +24,29 @@
  * The reference implementation in runtime/rucc-builtins is the base 2^32 version, which is on
  * purpose: two algorithms that agree on millions of randomized pairs is the point of holding one
  * against the other at all.
+ *
+ * Two widths, and the second one is the same work one width down. A 32-bit target divides two
+ * sixty four bit values with a call for the same reason a 64-bit target divides two 128-bit ones
+ * with a call, so i686, armv7 and wasm32 need the six names below with di in them the way every
+ * 64-bit row needs the six with ti. They are a second copy of the loop rather than one loop behind
+ * a macro, because what this file is for is being read against the routine it stands in for, and a
+ * macro that expands into two divisions is read twice and checked neither time.
  */
 
 typedef unsigned __int128 uwide;
 typedef __int128 wide;
 
+/* The narrower pair. libgcc spells this width di, for double integer, because it is two of the
+ * sixteen bit ints the naming scheme was written around.
+ */
+typedef unsigned long long ulong;
+typedef long long slong;
+
 /* How many bits a half is, which is also the width the machine divides in. */
 #define HALF 64
+
+/* And the same for the narrower pair, where a half is a register on the targets that need it. */
+#define HALF_LONG 32
 
 /* The quotient, with the remainder written through `rest` when it is asked for.
  *
@@ -128,4 +144,91 @@ __int128 __modti3(__int128 top, __int128 bottom) {
 __int128 __divmodti4(__int128 top, __int128 bottom, __int128 *rest) {
     *rest = __modti3(top, bottom);
     return __divti3(top, bottom);
+}
+
+/* The same division at sixty four bits, for a target whose registers are thirty two.
+ *
+ * Nothing here is allowed to write a / or a % on a value of this width, because that is a call to
+ * __udivdi3 on the target this code is for and __udivdi3 is the function below. The shortcut is on
+ * unsigned int instead, which is a register on such a target and is either one instruction or a
+ * call to a narrower routine, and either way it is not this one.
+ */
+static ulong divide_long(ulong top, ulong bottom, ulong *rest) {
+    ulong quotient = 0;
+    ulong remainder = 0;
+    int at;
+
+    if ((top >> HALF_LONG) == 0 && (bottom >> HALF_LONG) == 0) {
+        unsigned int small = (unsigned int)top;
+        unsigned int by = (unsigned int)bottom;
+        if (rest != 0) {
+            *rest = small % by;
+        }
+        return small / by;
+    }
+
+    for (at = 2 * HALF_LONG - 1; at >= 0; at -= 1) {
+        remainder = (remainder << 1) | ((top >> at) & 1);
+        quotient = quotient << 1;
+        if (remainder >= bottom) {
+            remainder = remainder - bottom;
+            quotient = quotient | 1;
+        }
+    }
+    if (rest != 0) {
+        *rest = remainder;
+    }
+    return quotient;
+}
+
+static ulong magnitude_long(slong value, int *negative) {
+    *negative = value < 0;
+    if (value < 0) {
+        return -(ulong)value;
+    }
+    return (ulong)value;
+}
+
+unsigned long long __udivdi3(unsigned long long top, unsigned long long bottom) {
+    return divide_long(top, bottom, 0);
+}
+
+unsigned long long __umoddi3(unsigned long long top, unsigned long long bottom) {
+    ulong rest;
+    divide_long(top, bottom, &rest);
+    return rest;
+}
+
+unsigned long long __udivmoddi4(unsigned long long top, unsigned long long bottom,
+                                unsigned long long *rest) {
+    return divide_long(top, bottom, rest);
+}
+
+long long __divdi3(long long top, long long bottom) {
+    int top_negative;
+    int bottom_negative;
+    ulong top_magnitude = magnitude_long(top, &top_negative);
+    ulong bottom_magnitude = magnitude_long(bottom, &bottom_negative);
+    ulong quotient = divide_long(top_magnitude, bottom_magnitude, 0);
+    if (top_negative != bottom_negative) {
+        return (slong)(-quotient);
+    }
+    return (slong)quotient;
+}
+
+long long __moddi3(long long top, long long bottom) {
+    int top_negative;
+    int bottom_negative;
+    ulong rest;
+    divide_long(magnitude_long(top, &top_negative), magnitude_long(bottom, &bottom_negative),
+                &rest);
+    if (top_negative) {
+        return (slong)(-rest);
+    }
+    return (slong)rest;
+}
+
+long long __divmoddi4(long long top, long long bottom, long long *rest) {
+    *rest = __moddi3(top, bottom);
+    return __divdi3(top, bottom);
 }

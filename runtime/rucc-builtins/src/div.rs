@@ -1,5 +1,6 @@
-//! Dividing a 128-bit integer, which is the reference for the six entry points in
-//! `runtime/builtins/div.c`.
+//! Dividing an integer the machine has no instruction for, which is the reference for the twelve
+//! entry points in `runtime/builtins/div.c`: six at 128 bits, which every 64-bit target reaches
+//! from ordinary C, and six at 64 bits, which a 32-bit target reaches the same way.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's,
 //! the same as everything else here.
@@ -200,6 +201,41 @@ pub fn divide_signed(top: i128, bottom: i128) -> (i128, i128) {
     (quotient, rest)
 }
 
+/// The quotient and the remainder at the width libgcc calls `di`, which is the same division one
+/// width down and is what a 32-bit target calls for a `long long`.
+///
+/// The long division above, run over values that happen to fit in 64 bits. That is not laziness
+/// about the reference, it is what keeps the two sides different: the C at this width is the bit at
+/// a time loop with a 32-bit shortcut, and this is base 2^32 with Knuth's normalization and his add
+/// back, which is the same split as at 128 bits. Narrowing is exact, because the quotient and the
+/// remainder of two values that fit in 64 bits both fit in 64 bits.
+///
+/// A divisor below 2^32 takes the single-digit path up there, which is the machine's own 64-bit
+/// divide, and that is the best reference this width has.
+pub fn divide_long(top: u64, bottom: u64) -> (u64, u64) {
+    let (quotient, rest) = divide(u128::from(top), u128::from(bottom));
+    (quotient as u64, rest as u64)
+}
+
+/// The same for two signed values, with C's truncation towards zero.
+///
+/// The sign rules and the reason the magnitudes are taken as unsigned are [`divide_signed`]'s, one
+/// width down.
+pub fn divide_long_signed(top: i64, bottom: i64) -> (i64, i64) {
+    let (top_negative, bottom_negative) = (top < 0, bottom < 0);
+    let magnitude = |value: i64| {
+        if value < 0 { (value as u64).wrapping_neg() } else { value as u64 }
+    };
+    let (quotient, rest) = divide_long(magnitude(top), magnitude(bottom));
+    let quotient = if top_negative == bottom_negative {
+        quotient as i64
+    } else {
+        (quotient.wrapping_neg()) as i64
+    };
+    let rest = if top_negative { (rest.wrapping_neg()) as i64 } else { rest as i64 };
+    (quotient, rest)
+}
+
 // The C names. Not compiled under `cargo test`, where a `/` on a 128-bit value in the tests
 // themselves is a call to these, and the host's own copies are the ones that should answer it.
 
@@ -260,6 +296,68 @@ pub unsafe extern "C" fn __divmodti4(top: i128, bottom: i128, rest: *mut i128) -
     quotient
 }
 
+// And the same six at sixty four bits. These are defined here on every host, including the ones
+// whose instructions divide at this width, because the harness calls them by name: what is under
+// test is the routine a 32-bit target will call, and the only way to ask it anything on a machine
+// that has the instruction is to say its name.
+
+/// `unsigned long long __udivdi3(unsigned long long, unsigned long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __udivdi3(top: u64, bottom: u64) -> u64 {
+    divide_long(top, bottom).0
+}
+
+/// `unsigned long long __umoddi3(unsigned long long, unsigned long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __umoddi3(top: u64, bottom: u64) -> u64 {
+    divide_long(top, bottom).1
+}
+
+/// `unsigned long long __udivmoddi4(unsigned long long, unsigned long long, unsigned long long *)`.
+///
+/// # Safety
+///
+/// `rest` must be writable, which the C contract says it is. Unlike libgcc's own routine of this
+/// name it is never null.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __udivmoddi4(top: u64, bottom: u64, rest: *mut u64) -> u64 {
+    let (quotient, remainder) = divide_long(top, bottom);
+    // SAFETY: the caller promises somewhere to write the remainder.
+    unsafe { rest.write(remainder) };
+    quotient
+}
+
+/// `long long __divdi3(long long, long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __divdi3(top: i64, bottom: i64) -> i64 {
+    divide_long_signed(top, bottom).0
+}
+
+/// `long long __moddi3(long long, long long)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __moddi3(top: i64, bottom: i64) -> i64 {
+    divide_long_signed(top, bottom).1
+}
+
+/// `long long __divmoddi4(long long, long long, long long *)`.
+///
+/// # Safety
+///
+/// `rest` must be writable, which the C contract says it is.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __divmoddi4(top: i64, bottom: i64, rest: *mut i64) -> i64 {
+    let (quotient, remainder) = divide_long_signed(top, bottom);
+    // SAFETY: the caller promises somewhere to write the remainder.
+    unsafe { rest.write(remainder) };
+    quotient
+}
+
 #[cfg(test)]
 mod tests {
     use std::vec::Vec;
@@ -288,6 +386,16 @@ mod tests {
             }
             let whole = u128::from(self.next()) << 64 | u128::from(self.next());
             whole >> (128 - width)
+        }
+
+        /// The same at sixty four bits, which is the width where the shortcut in the C and the
+        /// single-digit path in here are each reached by half the pairs.
+        fn long(&mut self) -> u64 {
+            let width = (self.next() % 65) as u32;
+            if width == 0 {
+                return 0;
+            }
+            self.next() >> (64 - width)
         }
     }
 
@@ -405,6 +513,74 @@ mod tests {
         assert_eq!(divide(0, 0), (0, 0));
         assert_eq!(divide(u128::MAX, 0), (0, 0));
         assert_eq!(divide_signed(-5, 0), (0, 0));
+    }
+
+    /// The corners of the narrower type, which are its ends and the boundaries of both the 32-bit
+    /// half the C's shortcut tests and the digits this file works in.
+    fn long_corners() -> Vec<u64> {
+        let mut out = Vec::new();
+        for shift in [0, 1, 15, 16, 17, 31, 32, 33, 62, 63] {
+            let at = 1u64 << shift;
+            out.push(at);
+            out.push(at - 1);
+            out.push(at + 1);
+        }
+        out.push(u64::MAX);
+        out.push(u64::MAX - 1);
+        out
+    }
+
+    #[test]
+    fn the_narrower_division_agrees_with_the_machine_over_random_pairs() {
+        let mut stream = Stream(0x1064_0003_0000_0005);
+        for _ in 0..200_000 {
+            let (top, bottom) = (stream.long(), stream.long());
+            if bottom == 0 {
+                continue;
+            }
+            assert_eq!(divide_long(top, bottom), (top / bottom, top % bottom), "{top} by {bottom}");
+        }
+    }
+
+    #[test]
+    fn the_corners_of_the_narrower_type_divide_the_way_the_machine_says_too() {
+        for top in long_corners() {
+            for bottom in long_corners() {
+                if bottom == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    divide_long(top, bottom),
+                    (top / bottom, top % bottom),
+                    "{top} by {bottom}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_narrower_signs_are_the_ones_c_asks_for_and_the_ends_behave_the_same_way() {
+        let mut stream = Stream(0x1064_0004_ab01_cd02);
+        for _ in 0..100_000 {
+            let (top, bottom) = (stream.long() as i64, stream.long() as i64);
+            if bottom == 0 || (top == i64::MIN && bottom == -1) {
+                continue;
+            }
+            assert_eq!(
+                divide_long_signed(top, bottom),
+                (top / bottom, top % bottom),
+                "{top} {bottom}"
+            );
+        }
+        // The same two cases the wider width is pinned on: the quotient that is one past the type,
+        // which C leaves undefined and libgcc hands back as the wrap, and a divisor of zero, which
+        // has to come back rather than loop in a crate with no unwinder.
+        assert_eq!(divide_long_signed(i64::MIN, -1), (i64::MIN, 0));
+        assert_eq!(divide_long(7, 0), (0, 0));
+        assert_eq!(divide_long_signed(-5, 0), (0, 0));
+        assert_eq!(divide_long_signed(-7, 2), (-3, -1));
+        assert_eq!(divide_long_signed(7, -2), (-3, 1));
+        assert_eq!(divide_long_signed(-7, -2), (3, -1));
     }
 
     #[test]
