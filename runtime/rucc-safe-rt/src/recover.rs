@@ -43,6 +43,15 @@
 //! program that passes the address of a local across the boundary, and a monitor that reports
 //! correct programs is a monitor that gets turned off. This is the count that says how much of a
 //! build the boundary is actually covering.
+//!
+//! # The second way in
+//!
+//! A pointer does not have to arrive in a register to arrive without a capability. Code this build
+//! did not compile can store one straight into an instrumented object, through a callback or
+//! through a pointer it was handed earlier, and the word lands in the payload with nothing written
+//! beside it. That is the same missing capability and it takes the same recovery, so [`unwritten`]
+//! is [`recover`] under a second name and a second count. What decides whether a load takes it is
+//! [`Meta::HANDED`] on the instance, which [`mark_handed`] sets and `crate::cap::load` reads.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -82,10 +91,22 @@ pub struct Counts {
     pub nobody: u64,
     /// Recoveries over an address nothing watches.
     pub unwatched: u64,
+    /// Recoveries that happened because an aux slot said nothing inside an instance that had been
+    /// handed out.
+    ///
+    /// Not a fifth origin. Every one of these is also counted under whichever of the four above it
+    /// turned out to be, and this says how many of them arrived by [`unwritten`] rather than at a
+    /// boundary. It is the number that says how much of a build's class Y1 coverage is real, since
+    /// each one is a word the monitor chose not to refuse without knowing whether it held a
+    /// pointer.
+    pub handed: u64,
 }
 
 impl Counts {
     /// Every recovery, however much it found.
+    ///
+    /// The four origins and not [`Counts::handed`], which is a tag on some of them rather than a
+    /// kind of its own and would be counted twice.
     #[must_use]
     pub const fn total(self) -> u64 {
         self.planes + self.mapping + self.nobody + self.unwatched
@@ -104,6 +125,12 @@ impl Counts {
 /// The tally itself, in the order [`Origin`] declares.
 static TALLY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
+/// How many recoveries [`unwritten`] has done, which is [`Counts::handed`].
+///
+/// Its own counter rather than a fifth entry above, because [`Origin`]'s discriminants index that
+/// array and this is not one of them.
+static UNWRITTEN: AtomicU64 = AtomicU64::new(0);
+
 /// Every recovery this program has done so far.
 ///
 /// Read with `Relaxed`, because the four are read one after another and a summary printed while
@@ -116,6 +143,7 @@ pub fn counts() -> Counts {
         mapping: TALLY[Origin::Mapping as usize].load(Ordering::Relaxed),
         nobody: TALLY[Origin::Nobody as usize].load(Ordering::Relaxed),
         unwatched: TALLY[Origin::Unwatched as usize].load(Ordering::Relaxed),
+        handed: UNWRITTEN.load(Ordering::Relaxed),
     }
 }
 
@@ -163,6 +191,61 @@ pub fn recover(addr: *const c_void) -> Cap {
     let meta = word(region.class, Meta::RECOVERED | Meta::WIDE);
     let ext = (region.end - region.base) as u64;
     tally(Origin::Mapping, Cap::new(region.base as u64, ext, plane::FOREIGN, meta))
+}
+
+/// The capability for a pointer that was in memory and whose capability was not.
+///
+/// [`recover`] with a second count on top, for the one caller that reaches it from inside the
+/// program rather than from the boundary. `crate::cap::load` calls this when the aux slot beside a
+/// word says nothing and the instance the word is in has been handed out, which is the situation
+/// tamnd/rucc#1081 decided: the slot cannot tell a forged pointer from one a foreign writer stored
+/// without knowing the slot was there, so an instance that crossed the boundary answers with the
+/// permissive one and every other instance keeps refusing.
+///
+/// The origin count goes up as well, because the recovery really did happen and a summary that
+/// left it out would understate the boundary. What the second count says is why.
+#[must_use]
+pub fn unwritten(addr: *const c_void) -> Cap {
+    UNWRITTEN.fetch_add(1, Ordering::Relaxed);
+    recover(addr)
+}
+
+/// Marks the instance whose payload begins at `payload` as one whose aux may be incomplete.
+///
+/// Nothing at all unless the header in front of the payload is one to believe, which rules out an
+/// adopted arena, a block the allocator has finished with, and an address that is not the base of
+/// an instance. There is nowhere else to keep the bit: it has to be per instance,
+/// it has to be cleared when the storage is reused, and the header is the only per instance record
+/// the allocator already rewrites on every allocation.
+///
+/// Not atomic, for the reason the planes are not. A second thread setting the same bit at the same
+/// time writes the same value, and a second thread rewriting the header for another reason is the
+/// allocator, which does not run against a live instance.
+pub fn mark_handed(region: &Region, payload: usize, version: Version) {
+    if stated(region, payload, version).is_none() {
+        return;
+    }
+    let header = layout::header_of(payload) as *mut Header;
+    // SAFETY: `stated` just read this header and found a live allocated instance of this region
+    // whose version is the plane's, so the thirty two bytes are the runtime's own storage.
+    unsafe {
+        let meta = (*header).meta;
+        (*header).meta = meta.with_flags(meta.flags() | Meta::HANDED);
+    }
+}
+
+/// Whether the instance whose payload begins at `payload` carries [`Meta::HANDED`].
+///
+/// False for a header there is no reason to believe, which is the safe direction: it means the
+/// instance keeps class Y1 rather than losing it on the strength of bits nobody wrote.
+#[must_use]
+pub fn was_handed(region: &Region, payload: usize, version: Version) -> bool {
+    if stated(region, payload, version).is_none() {
+        return false;
+    }
+    // SAFETY: as `mark_handed`.
+    let header = unsafe { (layout::header_of(payload) as *const Header).read() };
+    header.meta.flags() & Meta::HANDED != 0
 }
 
 /// Which of the four situations `addr` is in, without working out any bounds.

@@ -170,7 +170,13 @@ pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
     let found = unsafe { region.epochs.read(addr) };
     if mine != crate::epoch::NONE && crate::epoch::unordered(found, mine) {
         // SAFETY: as in `bounds`, and neither stamp is an address.
-        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
+        unsafe {
+            crate::fail::report_witness(
+                descriptor,
+                addr,
+                crate::report::Witness::Stranger(found, mine),
+            );
+        }
         return;
     }
     // SAFETY: as in `bounds`.
@@ -377,6 +383,12 @@ pub unsafe fn wrote(addr: *const c_void, size: usize) {
 /// and it is the same trade [`carry`] makes for the same reason: the alternative is a region lookup
 /// per byte on the path every `memcpy` in the program goes down.
 ///
+/// The init plane and no other. A copy moves the pointers in a structure as well as its bytes and
+/// their capabilities stay where they were, so the destination's aux is stale afterwards, and this
+/// is not the bit [`handed`] sets: the runtime is the one doing the writing here and it has both
+/// ranges, so the answer is to copy the aux too. That is tamnd/rucc#1148 and it waits on something
+/// writing a slot in the first place.
+///
 /// # Safety
 ///
 /// Neither address is read through. They may overlap, and the answer is the same either way.
@@ -406,8 +418,17 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
 /// it went. That is the permissive direction, which is the one section 9.2 says this plane thins
 /// in, and what it costs is every uninitialized read of an instance that was ever handed out.
 ///
+/// The aux is marked as well, for the same reason and with the same reach. A callee that fills a
+/// structure fills the pointers in it too, and it writes them without touching the slots beside
+/// them, so the aux of an instance that has been out there says less than the payload does. The
+/// bit that records that is [`crate::layout::Meta::HANDED`] in the header, and what it costs is class Y1 over this
+/// instance for the rest of its life. `crate::cap::load` is the reader and tamnd/rucc#1081 is why
+/// it is one bit per instance rather than something finer.
+///
 /// Nothing happens for an address outside every region, or one in an arena whose allocator has said
-/// nothing, since there is no instance there to say anything about.
+/// nothing, since there is no instance there to say anything about. The aux half needs one thing
+/// more than the init half does, which is a header to believe, so an adopted arena's storage is
+/// marked written and not marked handed: it has no aux of ours in front of it to be incomplete.
 ///
 /// # Safety
 ///
@@ -418,6 +439,9 @@ pub unsafe fn handed(addr: *const c_void) {
     let Some((lo, len)) = crate::recover::extent(&region, addr) else { return };
     // SAFETY: the run came out of the plane over this region, so the init plane covers it too.
     unsafe { region.init.set(lo, len) }
+    // SAFETY: the address is inside the region, which is what reading its plane asks for.
+    let version = unsafe { region.plane.version(addr) };
+    crate::recover::mark_handed(&region, lo, version);
 }
 
 /// The judgement a store through a pointer shaped slot makes: this thread wrote these bytes, now.
@@ -494,7 +518,13 @@ pub unsafe fn raced(addr: *const c_void, size: usize, descriptor: *const Descrip
     let found = unsafe { region.epochs.stranger(addr, clipped(&region, addr, size), mine) };
     if found != crate::epoch::NONE {
         // SAFETY: as in `bounds`, and neither stamp is an address.
-        unsafe { crate::fail::report_witness(descriptor, addr, found, mine) }
+        unsafe {
+            crate::fail::report_witness(
+                descriptor,
+                addr,
+                crate::report::Witness::Stranger(found, mine),
+            );
+        }
     }
 }
 

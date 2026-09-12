@@ -35,7 +35,7 @@
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
-#![doc(html_root_url = "https://docs.rs/rucc-target/0.10.33")]
+#![doc(html_root_url = "https://docs.rs/rucc-target/0.10.35")]
 
 use std::fmt;
 use std::str::FromStr;
@@ -45,6 +45,7 @@ use rucc_base::float::Format;
 use rucc_tuple::{self as tuple, TargetTuple};
 
 mod abi;
+mod bits;
 mod branch;
 mod frame;
 mod operand;
@@ -52,6 +53,7 @@ mod regs;
 pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion};
 pub use crate::frame::{ClassMoves, FrameInsts, Probe};
 pub use crate::operand::{Constraint, OperandDesc, Role};

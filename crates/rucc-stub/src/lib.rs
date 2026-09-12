@@ -242,7 +242,7 @@
 //! assert_eq!(api.dll(), "api-ms-win-core-apiquery-l2-1-0.dll");
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.33")]
+#![doc(html_root_url = "https://docs.rs/rucc-stub/0.10.35")]
 // Every public item here is read by somebody bringing up a target who has an ELF reference open
 // beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]

@@ -1127,6 +1127,46 @@ mod tests {
         assert!(text.contains("decl #2 c : long"), "{text}");
     }
 
+    /// `<mmintrin.h>` is the base of the vector header chain and the first one whose contents
+    /// are C rather than declarations, so what this checks is that the C in it compiles: a
+    /// header that is nothing but definitions fails as a whole or not at all.
+    ///
+    /// What the intrinsics answer is not checked here and cannot be, because the answer is
+    /// only interesting next to another compiler's. Every intrinsic in the header was built
+    /// and run against GCC 16.2.0 on the same inputs, at `-O0`, `-O1`, `-O2` and `-Os`, and
+    /// gave the same bytes in all four. Carrying that comparison rather than repeating it by
+    /// hand needs a facet in `tamnd/rucc-corpus` that works out the expected bytes itself,
+    /// which is a second implementation of MMX and is `tamnd/rucc#1150`.
+    #[test]
+    fn the_shipped_mmintrin_defines_the_mmx_type_and_the_operations_over_it() {
+        let text = shipped(concat!(
+            "#include <mmintrin.h>\n",
+            "__m64 add(__m64 a, __m64 b) { return _mm_add_pi16(a, b); }\n",
+            "__m64 pack(__m64 a, __m64 b) { return _m_packsswb(a, b); }\n",
+            "__m64 shift(__m64 a) { return _mm_srai_pi32(a, 3); }\n",
+            "int low(__m64 a) { return _mm_cvtsi64_si32(a); }\n",
+            "void done(void) { _mm_empty(); }\n",
+        ));
+        assert!(text.contains("add"), "{text}");
+        assert!(text.contains("pack"), "{text}");
+        assert!(text.contains("shift"), "{text}");
+    }
+
+    /// The allocator beside the vector headers, which is the one piece of the family that is
+    /// not a vector operation. It reaches for `<stddef.h>` and for three names out of the
+    /// library, and the point of the test is that the reach resolves with nothing on the
+    /// search path but the compiler's own directory.
+    #[test]
+    fn the_shipped_mm_malloc_asks_for_aligned_memory_and_gives_it_back() {
+        let text = shipped(concat!(
+            "#include <mm_malloc.h>\n",
+            "void *get(void) { return _mm_malloc(64, 16); }\n",
+            "void put(void *p) { _mm_free(p); }\n",
+        ));
+        assert!(text.contains("get"), "{text}");
+        assert!(text.contains("put"), "{text}");
+    }
+
     #[test]
     fn the_three_formality_headers_still_have_to_work() {
         let text = shipped(concat!(
@@ -1144,17 +1184,19 @@ mod tests {
 
     /// Including everything twice has to change nothing, because that is what happens in any
     /// program large enough to matter and a guard that is wrong shows up nowhere else.
+    ///
+    /// Stated as the two trees being the same rather than as a fact about what is in either
+    /// one. A header that carries definitions puts them in the tree and moves everything
+    /// after them along, so an assertion about where the program's own declaration landed is
+    /// an assertion about how much `<mmintrin.h>` defines, which is not what is being asked.
     #[test]
     fn every_shipped_header_can_be_included_twice() {
-        let mut source = String::new();
-        for _ in 0..2 {
-            for name in rucc_session::runtime::names() {
-                source.push_str(&format!("#include <{name}>\n"));
-            }
-        }
-        source.push_str("int x;\n");
-        let text = shipped(&source);
-        assert!(text.starts_with("decl #0 x : int"), "{text}");
+        let once: String = rucc_session::runtime::names()
+            .iter()
+            .map(|name| format!("#include <{name}>\n"))
+            .collect();
+        let twice = once.repeat(2);
+        assert_eq!(shipped(&format!("{once}int x;\n")), shipped(&format!("{twice}int x;\n")));
     }
 
     #[test]

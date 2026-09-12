@@ -88,6 +88,38 @@ unsigned int __fixunssfsi(float value);
 long long __fixsfdi(float value);
 unsigned long long __fixunssfdi(float value);
 
+/* And the same twenty one one format up, which is the same arrangement: a target with no floating
+ * point unit calls these for a `double` and the host would use an instruction, so the only way to
+ * reach them is by name.
+ */
+double __adddf3(double left, double right);
+double __subdf3(double left, double right);
+double __muldf3(double left, double right);
+double __divdf3(double left, double right);
+double __negdf2(double value);
+int __cmpdf2(double left, double right);
+int __eqdf2(double left, double right);
+int __nedf2(double left, double right);
+int __gedf2(double left, double right);
+int __gtdf2(double left, double right);
+int __ledf2(double left, double right);
+int __ltdf2(double left, double right);
+int __unorddf2(double left, double right);
+double __floatsidf(int value);
+double __floatunsidf(unsigned int value);
+double __floatdidf(long long value);
+double __floatundidf(unsigned long long value);
+int __fixdfsi(double value);
+unsigned int __fixunsdfsi(double value);
+long long __fixdfdi(double value);
+unsigned long long __fixunsdfdi(double value);
+
+/* And the pair between the two formats, which is the only thing in the soft float set that needs both
+ * of them. A cast either way is an instruction on this host, so these are by name like the rest.
+ */
+double __extendsfdf2(float value);
+float __truncdfsf2(double value);
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -644,8 +676,8 @@ static unsigned long long mix_sign(unsigned long long digest, int answer) {
 /* One pair through all thirteen routines. The negation takes one operand, so it is the left one here
  * and every pair below is also run the other way round, which is what gets the right one through it.
  */
-static unsigned long long thirteen(unsigned long long digest, unsigned int left,
-                                   unsigned int right) {
+static unsigned long long thirteen_single(unsigned long long digest, unsigned int left,
+                                         unsigned int right) {
     float one = single_of(left);
     float two = single_of(right);
     digest = mix_float(digest, __addsf3(one, two));
@@ -697,10 +729,10 @@ static void singles(int round) {
         unsigned int left = random_single();
         unsigned int right = random_single();
         unsigned int close = near_single(left);
-        digest = thirteen(digest, left, right);
-        digest = thirteen(digest, right, left);
-        digest = thirteen(digest, left, close);
-        digest = thirteen(digest, close, left);
+        digest = thirteen_single(digest, left, right);
+        digest = thirteen_single(digest, right, left);
+        digest = thirteen_single(digest, left, close);
+        digest = thirteen_single(digest, close, left);
     }
     say("single", round, digest);
 }
@@ -720,10 +752,10 @@ static void single_ties(int round) {
         unsigned int stored = 30 + (unsigned int)(next_random() % 200);
         unsigned int value = (random_single() & 0x007FFFFFu) | (stored << 23);
         unsigned int half = (stored - 24) << 23;
-        digest = thirteen(digest, value & ~1u, half);
-        digest = thirteen(digest, value | 1u, half);
-        digest = thirteen(digest, (value & ~1u) | SINGLE_SIGN, half);
-        digest = thirteen(digest, half, value | 1u);
+        digest = thirteen_single(digest, value & ~1u, half);
+        digest = thirteen_single(digest, value | 1u, half);
+        digest = thirteen_single(digest, (value & ~1u) | SINGLE_SIGN, half);
+        digest = thirteen_single(digest, half, value | 1u);
     }
     say("singletie", round, digest);
 }
@@ -744,10 +776,10 @@ static void single_edges(int round) {
                              | ((unsigned int)(next_random() % 3) << 23);
         unsigned int large = (random_single() & 0x807FFFFFu)
                              | ((unsigned int)(248 + next_random() % 7) << 23);
-        digest = thirteen(digest, small, other);
-        digest = thirteen(digest, small, large);
-        digest = thirteen(digest, large, small);
-        digest = thirteen(digest, large, large);
+        digest = thirteen_single(digest, small, other);
+        digest = thirteen_single(digest, small, large);
+        digest = thirteen_single(digest, large, small);
+        digest = thirteen_single(digest, large, large);
     }
     say("singleedge", round, digest);
 }
@@ -775,8 +807,8 @@ static void single_corner_cases(int which) {
         for (int signs = 0; signs < 4; signs++) {
             unsigned int left = SINGLE_CORNERS[which] | ((signs & 1) ? SINGLE_SIGN : 0u);
             unsigned int right = SINGLE_CORNERS[i] | ((signs & 2) ? SINGLE_SIGN : 0u);
-            digest = thirteen(digest, left, right);
-            digest = thirteen(digest, right, left);
+            digest = thirteen_single(digest, left, right);
+            digest = thirteen_single(digest, right, left);
         }
     }
     say("singlecorner", which, digest);
@@ -902,6 +934,352 @@ static void single_corner_integers(void) {
     say("singleintcorner", 0, digest);
 }
 
+/* The sign bit of a double, which the groups below set and clear on operands of their own. */
+#define DOUBLE_SIGN 0x8000000000000000ull
+
+/* A bit pattern as the double it is, by memcpy for the reason everything else here uses it. */
+static double double_of(unsigned long long pattern) {
+    double value;
+    memcpy(&value, &pattern, sizeof value);
+    return value;
+}
+
+/* One pair through all thirteen routines one format up, which is the same thirteen: the four
+ * operations, the negation and the eight comparisons. The negation takes one operand, so it is the
+ * left one here and every pair below is also run the other way round.
+ */
+static unsigned long long thirteen_double(unsigned long long digest, unsigned long long left,
+                                          unsigned long long right) {
+    double one = double_of(left);
+    double two = double_of(right);
+    digest = mix_double(digest, __adddf3(one, two));
+    digest = mix_double(digest, __subdf3(one, two));
+    digest = mix_double(digest, __muldf3(one, two));
+    digest = mix_double(digest, __divdf3(one, two));
+    digest = mix_double(digest, __negdf2(one));
+    digest = mix_sign(digest, __cmpdf2(one, two));
+    digest = mix_sign(digest, __eqdf2(one, two));
+    digest = mix_sign(digest, __nedf2(one, two));
+    digest = mix_sign(digest, __gedf2(one, two));
+    digest = mix_sign(digest, __gtdf2(one, two));
+    digest = mix_sign(digest, __ledf2(one, two));
+    digest = mix_sign(digest, __ltdf2(one, two));
+    digest = mix_sign(digest, __unorddf2(one, two));
+    cases += 13;
+    return digest;
+}
+
+/* Random bits read as a double, which is how the infinities, the not a numbers and the subnormals get
+ * in without a generator for each. One pattern in every two thousand and forty eight lands outside
+ * the ordinary numbers here, which is eight times rarer than one format down, so the families with
+ * the ends of the range in them matter more at this width rather than less.
+ */
+static unsigned long long random_double(void) {
+    return next_random();
+}
+
+/* A pattern whose exponent is within four of another's, which is where the additions that say
+ * something are.
+ */
+static unsigned long long near_double(unsigned long long other) {
+    long long moved = (long long)((other >> 52) & 0x7FF) + (long long)(next_random() % 9) - 4;
+    if (moved < 0) {
+        moved = 0;
+    }
+    if (moved > 2046) {
+        moved = 2046;
+    }
+    return (random_double() & 0x800FFFFFFFFFFFFFull) | ((unsigned long long)moved << 52);
+}
+
+#define DOUBLE_ROUNDS 8
+#define DOUBLE_CASES 2048
+
+static void doubles(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_CASES; i++) {
+        unsigned long long left = random_double();
+        unsigned long long right = random_double();
+        unsigned long long close = near_double(left);
+        digest = thirteen_double(digest, left, right);
+        digest = thirteen_double(digest, right, left);
+        digest = thirteen_double(digest, left, close);
+        digest = thirteen_double(digest, close, left);
+    }
+    say("double", round, digest);
+}
+
+/* A value and exactly half the spacing of its own exponent, which is the pair that puts a sum exactly
+ * between two doubles, with the lowest kept bit forced each way.
+ */
+static void double_ties(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_CASES; i++) {
+        /* An exponent with room for half the spacing to be an ordinary number below it and room for
+         * the sum to stay inside the type above it.
+         */
+        unsigned long long stored = 60 + (next_random() % 1900);
+        unsigned long long value = (random_double() & 0x000FFFFFFFFFFFFFull) | (stored << 52);
+        unsigned long long half = (stored - 53) << 52;
+        digest = thirteen_double(digest, value & ~1ull, half);
+        digest = thirteen_double(digest, value | 1ull, half);
+        digest = thirteen_double(digest, (value & ~1ull) | DOUBLE_SIGN, half);
+        digest = thirteen_double(digest, half, value | 1ull);
+    }
+    say("doubletie", round, digest);
+}
+
+/* The bottom of the range and the top of it, which random patterns reach eight times less often at
+ * this width than at the last one.
+ */
+static void double_edges(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_CASES; i++) {
+        unsigned long long small = (random_double() & 0x800FFFFFFFFFFFFFull)
+                                   | ((next_random() % 3) << 52);
+        unsigned long long other = (random_double() & 0x800FFFFFFFFFFFFFull)
+                                   | ((next_random() % 3) << 52);
+        unsigned long long large = (random_double() & 0x800FFFFFFFFFFFFFull)
+                                   | ((2040 + next_random() % 7) << 52);
+        digest = thirteen_double(digest, small, other);
+        digest = thirteen_double(digest, small, large);
+        digest = thirteen_double(digest, large, small);
+        digest = thirteen_double(digest, large, large);
+    }
+    say("doubleedge", round, digest);
+}
+
+/* The patterns worth asking about by name, which is the same list one format up. */
+static const unsigned long long DOUBLE_CORNERS[] = {
+    0x0000000000000000ull, 0x0000000000000001ull, 0x0000000000000002ull, 0x000FFFFFFFFFFFFEull,
+    0x000FFFFFFFFFFFFFull, 0x0010000000000000ull, 0x0010000000000001ull, 0x3CA0000000000000ull,
+    0x3CB0000000000000ull, 0x3FEFFFFFFFFFFFFFull, 0x3FF0000000000000ull, 0x3FF0000000000001ull,
+    0x4000000000000000ull, 0x4330000000000000ull, 0x4340000000000000ull, 0x7FEFFFFFFFFFFFFFull,
+    0x7FF0000000000000ull, 0x7FF0000000000001ull, 0x7FF8000000000000ull, 0x7FFFFFFFFFFFFFFFull,
+};
+
+#define DOUBLE_CORNER_COUNT ((int)(sizeof DOUBLE_CORNERS / sizeof DOUBLE_CORNERS[0]))
+
+/* One integer through the four conversions up at this width. The narrow pair reads the low half of the
+ * same value, the way the single precision family does, which is how one pattern gets through both a
+ * large unsigned conversion and a negative signed one.
+ */
+static unsigned long long up_double(unsigned long long digest, unsigned long long value) {
+    digest = mix_double(digest, __floatsidf((int)value));
+    digest = mix_double(digest, __floatunsidf((unsigned int)value));
+    digest = mix_double(digest, __floatdidf((long long)value));
+    digest = mix_double(digest, __floatundidf(value));
+    cases += 4;
+    return digest;
+}
+
+/* One pattern through the four conversions down. Every pattern is asked, including the ones with no
+ * answer, for the reason the single precision family gives: both sides of this comparison are
+ * implementations of these routines rather than one of them against the host, so the zero they hand
+ * back where C has no answer is a convention they can both be held to.
+ */
+static unsigned long long down_double(unsigned long long digest, unsigned long long pattern) {
+    double value = double_of(pattern);
+    digest = mix_number(digest, __fixdfsi(value));
+    digest = mix_number(digest, (long long)__fixunsdfsi(value));
+    digest = mix_number(digest, __fixdfdi(value));
+    digest = mix_wide(digest, (uwide)__fixunsdfdi(value));
+    cases += 4;
+    return digest;
+}
+
+/* A pattern whose exponent is spread over the range where going down has an answer to give: from
+ * 2^-27, which truncates to zero, up to 2^67, which is past all four types. The fraction is random
+ * bits and so is the sign, since a negative value is its own case in each of the four.
+ */
+static unsigned long long double_in_range(void) {
+    unsigned long long stored = 996 + (next_random() % 95);
+    return (random_double() & 0x800FFFFFFFFFFFFFull) | (stored << 52);
+}
+
+/* The patterns exactly at the top of each integer type and the ones either side of them, which is
+ * where the range check in each routine going down gets decided. Two of these are a case the single
+ * precision table does not have: 2^63 and 2^64 are not where a double's neighbours are one apart, so
+ * the value just below 2^63 is 2^63 - 1024 and the largest `long long` is not a double at all.
+ */
+static const unsigned long long DOUBLE_BOUNDS[] = {
+    0x41DFFFFFFFFFFFFFull, 0x41E0000000000000ull, 0x41E0000000000001ull, /* either side of 2^31 */
+    0x41EFFFFFFFFFFFFFull, 0x41F0000000000000ull, 0x41F0000000000001ull, /* of 2^32 */
+    0x43DFFFFFFFFFFFFFull, 0x43E0000000000000ull, 0x43E0000000000001ull, /* of 2^63 */
+    0x43EFFFFFFFFFFFFFull, 0x43F0000000000000ull, 0x43F0000000000001ull, /* of 2^64 */
+    0x3FE0000000000000ull, 0x3FF0000000000000ull, 0x3FF8000000000000ull, /* a half, one, one and a
+                                                                         * half */
+    0x4330000000000000ull, 0x4330000000000001ull, /* 2^52, where the spacing reaches one */
+};
+
+#define DOUBLE_BOUNDS_COUNT ((int)(sizeof DOUBLE_BOUNDS / sizeof DOUBLE_BOUNDS[0]))
+
+/* The integers where a type ends, the ones either side, and the first integer a double cannot hold
+ * with its neighbours: 2^53 + 1 rounds down to 2^53 and 2^53 + 3 is an exact tie between two doubles.
+ */
+static const unsigned long long DOUBLE_INTEGER_EDGES[] = {
+    0ull,
+    1ull,
+    2ull,
+    4294967295ull,
+    4294967296ull,
+    4294967297ull,
+    9007199254740991ull,
+    9007199254740992ull,
+    9007199254740993ull,
+    9007199254740994ull,
+    9007199254740995ull,
+    9007199254740996ull,
+    2147483647ull,
+    2147483648ull,
+    2147483649ull,
+    9223372036854775807ull,
+    9223372036854775808ull,
+    9223372036854775809ull,
+    18446744073709551615ull,
+};
+
+#define DOUBLE_INTEGER_EDGES_COUNT                                                                 \
+    ((int)(sizeof DOUBLE_INTEGER_EDGES / sizeof DOUBLE_INTEGER_EDGES[0]))
+
+#define DOUBLE_INT_CASES 2048
+
+static void double_integers(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_INT_CASES; i++) {
+        unsigned long long value = next_random();
+        digest = up_double(digest, value);
+        /* The same bits with most of them gone, so that a value small enough to convert exactly is
+         * asked as well as one that has to round, and a value just past 2^53, which is where a double
+         * stops holding every integer and where a truncation stops passing.
+         */
+        digest = up_double(digest, value >> 40);
+        digest = up_double(digest, (value % (1ull << 59)) + (1ull << 53));
+        digest = down_double(digest, random_double());
+        digest = down_double(digest, double_in_range());
+    }
+    say("doubleint", round, digest);
+}
+
+/* The edges by name: every corner pattern down at both signs, every integer edge up with its
+ * negation, and the patterns either side of each type's top down at both signs.
+ */
+static void double_corner_integers(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        digest = down_double(digest, DOUBLE_CORNERS[i]);
+        digest = down_double(digest, DOUBLE_CORNERS[i] | DOUBLE_SIGN);
+    }
+    for (int i = 0; i < DOUBLE_INTEGER_EDGES_COUNT; i++) {
+        digest = up_double(digest, DOUBLE_INTEGER_EDGES[i]);
+        digest = up_double(digest, 0ull - DOUBLE_INTEGER_EDGES[i]);
+    }
+    for (int i = 0; i < DOUBLE_BOUNDS_COUNT; i++) {
+        digest = down_double(digest, DOUBLE_BOUNDS[i]);
+        digest = down_double(digest, DOUBLE_BOUNDS[i] | DOUBLE_SIGN);
+    }
+    say("doubleintcorner", 0, digest);
+}
+
+/* The pair between the two formats. One group of its own rather than a pair of calls added to the
+ * families above, because every digest up there would have changed and none of them would have been
+ * saying anything new: these two take one operand and the families above are built around pairs.
+ */
+#define BETWEEN_ROUNDS 8
+#define BETWEEN_CASES 2048
+
+/* A double whose exponent is somewhere around the narrow format's range, from below the smallest
+ * subnormal float to above the largest finite one, which is the only place the narrowing has a
+ * decision to make. Random bits land outside it nearly always.
+ */
+static unsigned long long double_near_single(void) {
+    unsigned long long stored = 870 + (next_random() % 290);
+    return (random_double() & 0x800FFFFFFFFFFFFFull) | (stored << 52);
+}
+
+static void between(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < BETWEEN_CASES; i++) {
+        digest = mix_double(digest, __extendsfdf2(single_of(random_single())));
+        /* And a float subnormal, which is the one input to the widening that is not a field move,
+         * since it is a normal double. One pattern in two hundred and fifty six is one of those and
+         * this is one every time.
+         */
+        digest = mix_double(digest, __extendsfdf2(single_of(random_single() & 0x807FFFFFu)));
+        digest = mix_float(digest, __truncdfsf2(double_of(random_double())));
+        digest = mix_float(digest, __truncdfsf2(double_of(double_near_single())));
+        cases += 4;
+    }
+    say("between", round, digest);
+}
+
+/* The doubles at the ends of the narrow format's range, which is where the narrowing chooses between
+ * a finite answer and an infinity and between a subnormal and a zero.
+ */
+static const unsigned long long BETWEEN_EDGES[] = {
+    0x47EFFFFFE0000000ull, /* the largest finite float, exactly */
+    0x47EFFFFFEFFFFFFFull, /* just under halfway to 2^128, so the largest float again */
+    0x47EFFFFFF0000000ull, /* exactly halfway, so the even neighbour wins and it is an infinity */
+    0x47EFFFFFF0000001ull, /* a hair past halfway, which is an infinity for the ordinary reason */
+    0x4800000000000000ull, /* 2^128, past the format */
+    0x3810000000000000ull, /* 2^-126, the smallest normal float */
+    0x380FFFFFFFFFFFFFull, /* just under it, so the largest subnormal rounded up to it */
+    0x36A0000000000000ull, /* 2^-149, the smallest subnormal float */
+    0x3690000000000000ull, /* 2^-150, exactly half of it, so a zero by the tie to the even one */
+    0x3690000000000001ull, /* a hair more than half, so the smallest subnormal */
+    0x3698000000000000ull, /* three quarters of it, which rounds up for the same reason */
+    0x7FF0000000000001ull, /* a not a number whose payload is only in the bits the narrowing loses */
+    0x7FF8000000000000ull, /* a quiet one with an empty payload */
+    0x7FF0000000000000ull, /* an infinity */
+    0x0000000000000001ull, /* the smallest subnormal double, far below anything the format holds */
+    0x3FF0000000000000ull, /* one, which both directions leave alone */
+};
+
+#define BETWEEN_EDGES_COUNT ((int)(sizeof BETWEEN_EDGES / sizeof BETWEEN_EDGES[0]))
+
+/* The edges by name, and the round trip. A float widened and narrowed again is the float it started
+ * as, because the widening loses nothing for the narrowing to round, and a not a number comes back
+ * with its quiet bit set whether it went in with one or not. That is a property of the pair rather
+ * than of either routine, so it is digested here rather than checked with an `if`: a `1` that both
+ * sides agree on says nothing, while the value that came back says what went wrong.
+ */
+static void between_corners(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < SINGLE_CORNER_COUNT; i++) {
+        digest = mix_double(digest, __extendsfdf2(single_of(SINGLE_CORNERS[i])));
+        digest = mix_double(digest, __extendsfdf2(single_of(SINGLE_CORNERS[i] | SINGLE_SIGN)));
+        digest = mix_float(digest, __truncdfsf2(__extendsfdf2(single_of(SINGLE_CORNERS[i]))));
+        cases += 3;
+    }
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        digest = mix_float(digest, __truncdfsf2(double_of(DOUBLE_CORNERS[i])));
+        digest = mix_float(digest, __truncdfsf2(double_of(DOUBLE_CORNERS[i] | DOUBLE_SIGN)));
+        cases += 2;
+    }
+    for (int i = 0; i < BETWEEN_EDGES_COUNT; i++) {
+        digest = mix_float(digest, __truncdfsf2(double_of(BETWEEN_EDGES[i])));
+        digest = mix_float(digest, __truncdfsf2(double_of(BETWEEN_EDGES[i] | DOUBLE_SIGN)));
+        cases += 2;
+    }
+    say("betweencorner", 0, digest);
+}
+
+/* Every corner against every corner, both ways round and at all four pairs of signs, grouped by which
+ * corner one side was.
+ */
+static void double_corner_cases(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        for (int signs = 0; signs < 4; signs++) {
+            unsigned long long left = DOUBLE_CORNERS[which] | ((signs & 1) ? DOUBLE_SIGN : 0ull);
+            unsigned long long right = DOUBLE_CORNERS[i] | ((signs & 2) ? DOUBLE_SIGN : 0ull);
+            digest = thirteen_double(digest, left, right);
+            digest = thirteen_double(digest, right, left);
+        }
+    }
+    say("doublecorner", which, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -945,6 +1323,20 @@ int main(int argc, char **argv) {
         single_ties(i);
         single_edges(i);
         single_integers(i);
+    }
+    for (int i = 0; i < DOUBLE_CORNER_COUNT; i++) {
+        double_corner_cases(i);
+    }
+    double_corner_integers();
+    for (int i = 0; i < DOUBLE_ROUNDS; i++) {
+        doubles(i);
+        double_ties(i);
+        double_edges(i);
+        double_integers(i);
+    }
+    between_corners();
+    for (int i = 0; i < BETWEEN_ROUNDS; i++) {
+        between(i);
     }
     printf("cases %ld\n", cases);
     return 0;
