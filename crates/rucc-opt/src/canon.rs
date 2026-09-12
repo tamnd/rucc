@@ -41,13 +41,18 @@
 //! the moment it makes the first one. GCC patches the forest as it goes, which is faster and is
 //! where
 //! its loop bugs live. Section 26.8 has rucc rebuilding instead, per document 06.5's rule that a
-//! stale analysis is worse than an absent one, so each of the four steps works out one edit from a
-//! forest it just asked for, makes it, throws the cache away and asks again.
+//! stale analysis is worse than an absent one, so each of the four steps works out what it wants
+//! from a forest it just asked for, makes those edits, throws the cache away and asks again.
 //!
 //! Throwing it away is the part that is easy to leave out and is not optional. The cache hands back
 //! whatever it computed last time until somebody clears it, so a step that made an edit and asked
 //! again without clearing would be reading the graph as it was before its own edit, which either
 //! makes the same edit for ever or stops after the first one.
+//!
+//! What it asks for is a round rather than one edit, and `wanted` in this module carries the
+//! argument for why that is allowed. It comes down to the edit being harmless whether or not the
+//! forest still describes the function, which is not true of most passes and is true of this one
+//! because the only thing it ever does is put an empty block on a set of edges.
 //!
 //! # Irreducible regions are left exactly alone
 //!
@@ -130,26 +135,27 @@ impl Pass for Canon {
 /// buy
 /// nothing.
 fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    while let Some((header, from)) = wanted(func, an, |loops, cfg, id| {
-        let header = loops.header(id);
-        if loops.preheader(cfg, id).is_some() {
-            return None;
+    loop {
+        let jobs = wanted(func, an, |loops, cfg, id| {
+            let header = loops.header(id);
+            if loops.preheader(cfg, id).is_some() {
+                return None;
+            }
+            let outside: Vec<Block> = cfg
+                .predecessors(header)
+                .iter()
+                .copied()
+                .filter(|&pred| !loops.contains(id, pred))
+                .collect();
+            (!outside.is_empty()).then_some((header, outside))
+        });
+        if jobs.is_empty() {
+            return true;
         }
-        let outside: Vec<Block> = cfg
-            .predecessors(header)
-            .iter()
-            .copied()
-            .filter(|&pred| !loops.contains(id, pred))
-            .collect();
-        (!outside.is_empty()).then_some((header, outside))
-    }) {
-        if !fuel.take() {
+        if !apply(func, an, fuel, stats, jobs, PREHEADER) {
             return false;
         }
-        apply(func, an, &from, header);
-        stats.optimized(PREHEADER);
     }
-    true
 }
 
 /// Section 26.3. Routes every back edge through one block, so "the back edge" means something.
@@ -159,19 +165,20 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
 /// here: several back edges to one header become one latch by an edit, which is always right, and
 /// what stays refused is a loop with several headers, which is irreducibility and is not a loop.
 fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    while let Some((header, from)) = wanted(func, an, |loops, cfg, id| {
-        let header = loops.header(id);
-        let from = loops.latches(id).to_vec();
-        let single = from.len() == 1 && cfg.successors(from[0]).len() == 1 && from[0] != header;
-        (!from.is_empty() && !single).then_some((header, from))
-    }) {
-        if !fuel.take() {
+    loop {
+        let jobs = wanted(func, an, |loops, cfg, id| {
+            let header = loops.header(id);
+            let from = loops.latches(id).to_vec();
+            let single = from.len() == 1 && cfg.successors(from[0]).len() == 1 && from[0] != header;
+            (!from.is_empty() && !single).then_some((header, from))
+        });
+        if jobs.is_empty() {
+            return true;
+        }
+        if !apply(func, an, fuel, stats, jobs, LATCH) {
             return false;
         }
-        apply(func, an, &from, header);
-        stats.optimized(LATCH);
     }
-    true
 }
 
 /// Section 26.5. Gives an exit block predecessors only from the loop it leaves.
@@ -182,33 +189,34 @@ fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stat
 /// preheader
 /// pointed the other way.
 fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    while let Some((to, from)) = wanted(func, an, |loops, cfg, id| {
-        for exit in loops.exits(id) {
-            let outside: Vec<Block> = cfg
-                .predecessors(exit.to)
-                .iter()
-                .copied()
-                .filter(|&pred| !loops.contains(id, pred))
-                .collect();
-            if !outside.is_empty() {
-                let inside: Vec<Block> = cfg
+    loop {
+        let jobs = wanted(func, an, |loops, cfg, id| {
+            for exit in loops.exits(id) {
+                let outside: Vec<Block> = cfg
                     .predecessors(exit.to)
                     .iter()
                     .copied()
-                    .filter(|&pred| loops.contains(id, pred))
+                    .filter(|&pred| !loops.contains(id, pred))
                     .collect();
-                return Some((exit.to, inside));
+                if !outside.is_empty() {
+                    let inside: Vec<Block> = cfg
+                        .predecessors(exit.to)
+                        .iter()
+                        .copied()
+                        .filter(|&pred| loops.contains(id, pred))
+                        .collect();
+                    return Some((exit.to, inside));
+                }
             }
+            None
+        });
+        if jobs.is_empty() {
+            return true;
         }
-        None
-    }) {
-        if !fuel.take() {
+        if !apply(func, an, fuel, stats, jobs, EXIT) {
             return false;
         }
-        apply(func, an, &from, to);
-        stats.optimized(EXIT);
     }
-    true
 }
 
 /// Section 26.4. A use outside a loop names a parameter of the exit rather than the definition.
@@ -449,31 +457,80 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
     }
 }
 
-/// The next edit one step wants, from a forest it asks for itself.
+/// The edits one step wants that do not tread on each other, from a forest it asks for itself.
 ///
 /// The closure gets the forest, the graph and one loop, and answers with a block and the
-/// predecessors of it to route through a new one, or nothing. One edit rather than a list, because
-/// the edit invalidates the forest the closure was reading, so the caller applies it and asks
-/// again. [`closed`] is written the same way against its own kind of job.
+/// predecessors of it to route through a new one, or nothing. It is asked about every loop and the
+/// answers come back together, less any whose blocks another answer already named.
+///
+/// A round rather than one edit at a time, and the reason is what one edit costs. The forest, the
+/// graph and both trees are the size of the function and are thrown away after every edit, so a
+/// function with n loops in it paid for n of each, and the loop headers of a program are not a
+/// small number: jtckdint from the corpus has 1600 of them and this pass was building 5200 forests
+/// to canonicalize it. Most of those edits have nothing to do with each other. A preheader made in
+/// front of one header does not change which blocks reach another, and what a round costs is one
+/// forest however many loops are in it. tamnd/rucc#1045.
+///
+/// What makes it safe is that [`route`] is right on its own terms whatever else has happened.
+/// Putting a block on a set of edges changes no value and no order, so the worst an edit made
+/// against a forest that has moved under it can be is an edit nothing needed, and an empty block
+/// with one predecessor is what [`crate::simplify_cfg`] exists to take back out. The batch is not
+/// relying on the answers still being true, only on them still being harmless.
+///
+/// Two jobs naming a block between them are not both taken, and that is the whole of the filter.
+/// It costs a round per level of nesting, since an inner loop's header is reached from the outer
+/// loop's and the outer job claims that block first, which is where the count comes down to: the
+/// number of forests is the depth of the deepest nest rather than the number of loops.
 fn wanted(
     func: &mut Func,
     an: &mut Analyses,
     mut ask: impl FnMut(&Loops, &Cfg, LoopId) -> Option<(Block, Vec<Block>)>,
-) -> Option<(Block, Vec<Block>)> {
+) -> Vec<(Block, Vec<Block>)> {
     let cfg = an.cfg(func);
     let loops = an.loops(func);
-    loops.all().find_map(|id| ask(loops, cfg, id))
+    let mut claimed: HashSet<Block> = HashSet::new();
+    let mut jobs: Vec<(Block, Vec<Block>)> = Vec::new();
+    for id in loops.all() {
+        let Some((to, from)) = ask(loops, cfg, id) else { continue };
+        if claimed.contains(&to) || from.iter().any(|block| claimed.contains(block)) {
+            continue;
+        }
+        claimed.insert(to);
+        claimed.extend(from.iter().copied());
+        jobs.push((to, from));
+    }
+    jobs
 }
 
-/// Makes one edit and throws the analyses away, so the next question is asked of the graph as it is.
+/// Makes a round of edits and throws the analyses away once, at the end of it.
 ///
 /// The cache hands back whatever it computed last time until somebody clears it, and every edit here
 /// moves edges. Without the clear a step would ask a stale forest the same question, get the same
 /// answer, and route the same edge for ever. [`closed`] does not need this because adding a block
 /// parameter leaves the graph alone.
-fn apply(func: &mut Func, an: &mut Analyses, from: &[Block], to: Block) {
-    route(func, from, to);
+///
+/// Fuel is taken per edit rather than per round, because fuel is the bisection interface and what it
+/// has to be able to name is the edit somebody is looking for. A round that runs out part way
+/// through still clears, since the edits before the one that stopped have already happened.
+fn apply(
+    func: &mut Func,
+    an: &mut Analyses,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+    jobs: Vec<(Block, Vec<Block>)>,
+    what: &'static str,
+) -> bool {
+    let mut out = true;
+    for (to, from) in jobs {
+        if !fuel.take() {
+            out = false;
+            break;
+        }
+        route(func, &from, to);
+        stats.optimized(what);
+    }
     an.clear();
+    out
 }
 
 /// Puts a new block between the given predecessors and the block, carrying the same arguments.
