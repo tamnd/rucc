@@ -111,7 +111,7 @@ use crate::live::{Area, Live, Range};
 use crate::order::{Order, Point};
 
 /// Where a value lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Place {
     /// In a register, for the whole of its range.
     Reg(PhysReg),
