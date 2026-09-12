@@ -21,7 +21,7 @@ use std::time::Instant;
 use std::{fs, io};
 
 use rucc_rules::{Matcher, parse};
-use rucc_verify::{Model, Solver, Unverified, admit, difference, listed, render};
+use rucc_verify::{Ask, Model, Solver, Unverified, admit, difference, listed, render};
 
 const USAGE: &str = "\
 usage: rucc-verify [--report FILE [--check]] <path>...
