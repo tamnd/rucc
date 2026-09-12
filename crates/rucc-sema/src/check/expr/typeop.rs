@@ -131,6 +131,11 @@ impl Checker<'_> {
             return self.conv().to_void(operand);
         }
         self.cast_warnings(target, operand, span);
+        // After the warnings, since a conversion that is folded here is still one the program
+        // wrote and the warnings are about what it wrote.
+        if let Some(folded) = self.conv().saturated(operand, target) {
+            return folded;
+        }
         self.tast.expr(Expr::new(ExprKind::Cast(operand), target, Category::Rvalue), span)
     }
 
@@ -1048,6 +1053,68 @@ mod tests {
         let id = c.check_expr(cast);
 
         assert_eq!(dump(&c, id), "cast : long\n  const 1 : int\n");
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_of_a_float_that_is_out_of_range_is_left_to_the_hardware_by_default() {
+        let mut f = Fixture::new();
+        let big = f.float("2147483648.0");
+        let int = int_name(&mut f);
+        let cast = f.expr(ast::Expr::Cast { ty: int, operand: big });
+
+        let mut c = f.checker();
+        let id = c.check_expr(cast);
+
+        assert!(matches!(c.tast[id].kind, ExprKind::Cast(_)));
+        assert_eq!(typed(&c, id), "int");
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_of_a_float_that_is_out_of_range_saturates_without_trapping_math() {
+        let mut f = Fixture::new();
+        let big = f.float("2147483648.0");
+        let int = int_name(&mut f);
+        let cast = f.expr(ast::Expr::Cast { ty: int, operand: big });
+
+        let mut c = f.checker_without_trapping_math();
+        let id = c.check_expr(cast);
+
+        assert_eq!(folded(&c, id), 2_147_483_647);
+        assert_eq!(typed(&c, id), "int");
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_cast_of_a_float_that_fits_is_the_same_node_whichever_way_the_flag_is_set() {
+        let mut f = Fixture::new();
+        let small = f.float("2.5");
+        let int = int_name(&mut f);
+        let cast = f.expr(ast::Expr::Cast { ty: int, operand: small });
+
+        let mut c = f.checker_without_trapping_math();
+        let id = c.check_expr(cast);
+
+        assert!(matches!(c.tast[id].kind, ExprKind::Cast(_)));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn the_operand_of_a_saturating_cast_is_folded_rather_than_looked_at() {
+        let mut f = Fixture::new();
+        let max = f.int(2_147_483_647, IntKind::Int);
+        let float = named(&mut f, &[BuiltinSet::FLOAT], &[]);
+        let widened = f.expr(ast::Expr::Cast { ty: float, operand: max });
+        let int = int_name(&mut f);
+        let cast = f.expr(ast::Expr::Cast { ty: int, operand: widened });
+
+        let mut c = f.checker_without_trapping_math();
+        let id = c.check_expr(cast);
+
+        // `(float)2147483647` rounds up to a number an `int` no longer holds, which is what the
+        // torture program this came from is about.
+        assert_eq!(folded(&c, id), 2_147_483_647);
         assert!(messages(&c).is_empty());
     }
 

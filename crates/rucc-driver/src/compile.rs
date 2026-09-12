@@ -279,6 +279,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 builtins: opts.builtins && opts.hosted,
                 no_builtin: &opts.no_builtin,
                 short_enums: opts.short_enums,
+                trapping_math: opts.trapping_math,
             },
         );
         checker.check_unit();

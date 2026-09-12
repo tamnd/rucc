@@ -103,6 +103,13 @@ pub struct Context<'a> {
     /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
     /// integer type that holds it, which is `-fshort-enums`.
     pub short_enums: bool,
+    /// Whether an operation may raise an exception the program then looks at, which is
+    /// `-ftrapping-math` and is on by default.
+    ///
+    /// It is here rather than in the optimizer because the one thing it licenses is a fold the
+    /// front end does, and because gcc folds under it at `-O0` as well, where there is no
+    /// optimizer to do it. [`crate::convert::Conv`] is where it is read.
+    pub trapping_math: bool,
 }
 
 impl<'a> Context<'a> {
@@ -121,6 +128,7 @@ impl<'a> Context<'a> {
             builtins: true,
             no_builtin: &[],
             short_enums: false,
+            trapping_math: true,
         }
     }
 
@@ -390,7 +398,9 @@ impl<'a> Checker<'a> {
         // The target is copied out first because it is a shared reference living as long as the
         // context, so taking it does not borrow the checker the two mutable ones are taken from.
         let target = self.cx.target;
-        Conv { tast: &mut self.tast, types: &mut self.types, target }
+        let names = self.cx.names;
+        let trapping_math = self.cx.trapping_math;
+        Conv { tast: &mut self.tast, types: &mut self.types, target, names, trapping_math }
     }
 
     /// The constant folding, over this tree and these types.

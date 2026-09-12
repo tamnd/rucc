@@ -1808,10 +1808,23 @@ pub struct Options {
     pub strict_aliasing: bool,
     /// How far a multiply and an addition may be fused into one rounding, from `-ffp-contract=`.
     ///
-    /// See [`Contract`]. This is the only one of the floating point flags with anywhere to be kept,
-    /// because it is the only one this compiler could act on: the rest of that group withdraw
-    /// licences that nothing here takes in the first place.
+    /// See [`Contract`]. Most of the floating point flags have nowhere to be kept, because they
+    /// withdraw licences that nothing here takes in the first place: no arithmetic in a function
+    /// body is folded at any level, so a flag saying the rounding mode may have changed describes
+    /// what already happens. This one and [`Options::trapping_math`] are the two that have
+    /// somewhere to go.
     pub fp_contract: Contract,
+    /// Whether an operation may raise an exception the program then looks at, from
+    /// `-ftrapping-math` and `-fno-trapping-math`.
+    ///
+    /// On, which is gcc's default. What clearing it licenses here is one thing: the conversion of
+    /// a constant floating value to an integer type it does not fit in. Left to the hardware that
+    /// conversion is one instruction and the answer is the integer indefinite value, which is what
+    /// both compilers give by default. gcc folds it under this flag instead, to the nearest end of
+    /// the integer's range, and the difference is visible because the conversion is undefined
+    /// behaviour rather than a value, so neither answer is wrong and the one a program was written
+    /// against is gcc's.
+    pub trapping_math: bool,
     /// What a path is rewritten by before it is written into the output, from the
     /// `-f*-prefix-map=` family.
     ///
@@ -2069,6 +2082,7 @@ impl Options {
             short_enums: false,
             strict_aliasing: true,
             fp_contract: Contract::Off,
+            trapping_math: true,
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,

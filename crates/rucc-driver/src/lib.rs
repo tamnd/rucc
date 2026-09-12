@@ -223,7 +223,7 @@ options:
   -ftrapv                signed overflow stops the program instead
   -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
   -ffp-contract=<how>    fuse a multiply and an addition: fast, on or off
-  -fexcess-precision=<how>, -f[no-]rounding-math, -f[no-]trapping-math   what it does anyway
+  -fexcess-precision=<how>, -f[no-]rounding-math, -f[no-]trapping-math   what may be folded
   -ffile-prefix-map=<old>=<new>   rewrite that front of every path we put in the output
   -fmacro-prefix-map= -fdebug-prefix-map= -fprofile-prefix-map=   the same, one output each
   -pthread               build for more than one thread, and link the library for it
@@ -850,12 +850,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // for an answer. `-fno-rounding-math` says the rounding mode is the default one and
             // `-fno-trapping-math` says nothing looks at the exceptions, which together are
             // permission to fold. Not folding is the conservative side of that permission and is
-            // what a program is entitled to whichever was written, so the flag costs speed and not
-            // correctness, which is the test section 4.1 puts a licence through. `-ftrapping-math`
-            // is also gcc's default, so a build spelling it out is a build asking for what it
-            // already has.
+            // what a program is entitled to whichever was written, so `-fno-rounding-math` costs
+            // speed and not correctness, which is the test section 4.1 puts a licence through.
             "-frounding-math" | "-fno-rounding-math" => {}
-            "-ftrapping-math" | "-fno-trapping-math" => {}
+            // `-fno-trapping-math` is the one of the four that is kept, because there is one
+            // conversion this compiler does not fold and gcc folds under it, and the two answers
+            // differ. Converting a constant floating value to an integer type it does not fit in
+            // is undefined behaviour rather than a value: left to the hardware it is one
+            // instruction and the answer is the integer indefinite value, and folded it is the
+            // nearest end of the integer's range. Both compilers leave it to the instruction by
+            // default and gcc folds it under this flag, so a program built with it and compiled
+            // without it gets a different number rather than a slower one. `-ftrapping-math` is
+            // gcc's default, so a build spelling it out is asking for what it already has.
+            "-ftrapping-math" => opts.trapping_math = true,
+            "-fno-trapping-math" => opts.trapping_math = false,
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
@@ -2876,8 +2884,6 @@ mod tests {
             "-fno-delete-null-pointer-checks",
             "-frounding-math",
             "-fno-rounding-math",
-            "-ftrapping-math",
-            "-fno-trapping-math",
             "-fexcess-precision=standard",
             "-fexcess-precision=fast",
             "-fexcess-precision=16",
@@ -2891,6 +2897,20 @@ mod tests {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
         }
+    }
+
+    #[test]
+    fn whether_an_exception_is_looked_at_is_kept_and_defaults_to_gccs_answer() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.trapping_math, "the default was not gcc's");
+        let (opts, _) = compile(&["-c", "-fno-trapping-math", "a.c"]);
+        assert!(!opts.trapping_math);
+        let (opts, _) = compile(&["-c", "-ftrapping-math", "a.c"]);
+        assert!(opts.trapping_math, "spelling out the default turned it off");
+        // The last one written wins, which is how a build line that inherits a flag from one
+        // place and overrides it in another is read.
+        let (opts, _) = compile(&["-c", "-fno-trapping-math", "-ftrapping-math", "a.c"]);
+        assert!(opts.trapping_math);
     }
 
     /// The flags a torture program writes on its own `dg-options` line, which is where most of
