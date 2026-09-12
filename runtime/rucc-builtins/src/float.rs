@@ -1,8 +1,8 @@
 //! Single precision arithmetic in integers, which is the reference for the entry points in
 //! `runtime/builtins/float.c`: the four operations a target with no floating point unit calls, the
 //! negation, the eight comparisons, which are calls on such a target too, the eight conversions
-//! between a float and an integer, which is what a cast becomes there, and the pair at the bottom that
-//! crosses between this format and the next one up.
+//! between a float and an integer, which is what a cast becomes there, and the two pairs at the bottom,
+//! which cross between this format and each of the two wider ones.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's,
 //! the same as everything else here.
@@ -44,9 +44,16 @@
 //! a zero times an infinity, or a zero over a zero, gives the quiet not a number with an empty
 //! payload and a clear sign, which is this library's rule for the same reason.
 
-// The pair of routines at the bottom of this file crosses between the two formats, so it reads the
-// wider format's fields and its rounding from next door rather than writing a second copy of either.
+// The two entry points here that take or hand back a quad are not FFI-safe as far as rustc is
+// concerned, for the reason `quad.rs` gives where it allows the same lint: the type has no layout the
+// language promises, and all either of these does with one is move sixteen bytes.
+#![allow(improper_ctypes_definitions)]
+
+// The pairs of routines at the bottom of this file cross between this format and the two wider ones,
+// so they read the wider format's fields and its rounding from next door rather than writing a second
+// copy of either.
 use crate::double;
+use crate::quad;
 
 /// How many bits of the significand the format writes down, the other one being implied.
 const FRACTION: u32 = 23;
@@ -665,6 +672,60 @@ fn narrow(bits: u64) -> f32 {
     round_from(sign, u128::from(taken.significand), taken.scale, false)
 }
 
+/// How far a fraction moves between this format and binary128.
+///
+/// The quiet bit needs no case of its own here either: this format's is bit twenty two, that format's
+/// is bit a hundred and eleven, and the distance between the two fractions is eighty nine.
+const BETWEEN_QUAD: u32 = quad::FRACTION - FRACTION;
+
+/// `_Float128 __extendsftf2(float)`, the widening, which is the pair above one format wider.
+///
+/// The two lines are the same two lines, because `round_from` over there takes a significand and a
+/// scale and does not care which format they came from. That the widening never rounds is again a
+/// property of the two formats rather than something this relies on, and the shipped C in
+/// `runtime/builtins/float.c` again moves fields and normalizes a subnormal by hand.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __extendsftf2(value: f32) -> quad::Quad {
+    quad::quad_of(widen_quad(value.to_bits()))
+}
+
+pub(crate) fn widen_quad(bits: u32) -> u128 {
+    let sign = u128::from(bits & SIGN) << 96;
+    if is_nan(bits) {
+        let payload = u128::from(bits & FRACTION_MASK) << BETWEEN_QUAD;
+        let quiet = u128::from(QUIET) << BETWEEN_QUAD;
+        return sign | (quad::TOP << quad::FRACTION) | payload | quiet;
+    }
+    if is_infinite(bits) {
+        return sign | (quad::TOP << quad::FRACTION);
+    }
+    let taken = parts(bits);
+    quad::round_from(sign, quad::Wide::narrow(u128::from(taken.significand)), taken.scale, false)
+}
+
+/// `float __trunctfsf2(_Float128)`, the narrowing, which is the direction that rounds.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __trunctfsf2(value: quad::Quad) -> f32 {
+    narrow_quad(quad::bits_of(value))
+}
+
+fn narrow_quad(bits: u128) -> f32 {
+    let sign = (bits >> 96) as u32 & SIGN;
+    if quad::is_nan(bits) {
+        // The payload loses its bottom eighty nine bits, so one that lived only down there comes back
+        // empty, and the quiet bit goes on afterwards for the reason the narrowing above gives.
+        let payload = ((bits & quad::FRACTION_MASK) >> BETWEEN_QUAD) as u32;
+        return f32::from_bits(sign | (TOP << FRACTION) | payload | QUIET);
+    }
+    if quad::is_infinite(bits) {
+        return infinity(sign);
+    }
+    let taken = quad::parts(bits);
+    round_from(sign, taken.significand, taken.scale, false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -1187,6 +1248,183 @@ mod tests {
             let back = narrow(widen(bits).to_bits()).to_bits();
             let wanted = if is_nan(bits) { bits | QUIET } else { bits };
             assert_eq!(back, wanted, "{bits:08x} there and back came to {back:08x}");
+        }
+    }
+
+    /// What libgcc answers for the pair between this format and binary128, as `(float, quad)` going up
+    /// and `(quad, float)` coming down.
+    ///
+    /// Written down rather than computed, for the reason `quad.rs` gives about its own tables: the
+    /// language has no `f128` on a stable compiler, so there is no cast to hold these against the way
+    /// the pair above is held against one. The rows are gcc's own on x86-64, where a cast either way is
+    /// a call into libgcc.
+    const LIBGCC_UP_QUAD: &[(u32, u128)] = &[
+        (0x0000_0000, 0x0000_0000_0000_0000_0000_0000_0000_0000),
+        (0x8000_0000, 0x8000_0000_0000_0000_0000_0000_0000_0000),
+        (0x0000_0001, 0x3f6a_0000_0000_0000_0000_0000_0000_0000),
+        (0x0000_0002, 0x3f6b_0000_0000_0000_0000_0000_0000_0000),
+        (0x007f_ffff, 0x3f80_ffff_fc00_0000_0000_0000_0000_0000),
+        (0x0080_0000, 0x3f81_0000_0000_0000_0000_0000_0000_0000),
+        (0x0080_0001, 0x3f81_0000_0200_0000_0000_0000_0000_0000),
+        (0x3f80_0000, 0x3fff_0000_0000_0000_0000_0000_0000_0000),
+        (0xbf80_0000, 0xbfff_0000_0000_0000_0000_0000_0000_0000),
+        (0x3f7f_ffff, 0x3ffe_ffff_fe00_0000_0000_0000_0000_0000),
+        (0x4000_0000, 0x4000_0000_0000_0000_0000_0000_0000_0000),
+        (0x7f7f_ffff, 0x407e_ffff_fe00_0000_0000_0000_0000_0000),
+        (0x7f80_0000, 0x7fff_0000_0000_0000_0000_0000_0000_0000),
+        (0xff80_0000, 0xffff_0000_0000_0000_0000_0000_0000_0000),
+        (0x7f80_0001, 0x7fff_8000_0200_0000_0000_0000_0000_0000),
+        (0x7fc0_0000, 0x7fff_8000_0000_0000_0000_0000_0000_0000),
+        (0x7fff_ffff, 0x7fff_ffff_fe00_0000_0000_0000_0000_0000),
+        (0x4049_0fdb, 0x4000_921f_b600_0000_0000_0000_0000_0000),
+        (0x33d6_bf95, 0x3fe7_ad7f_2a00_0000_0000_0000_0000_0000),
+        (0x8000_0001, 0xbf6a_0000_0000_0000_0000_0000_0000_0000),
+        (0x4f06_be52, 0x401e_0d7c_a400_0000_0000_0000_0000_0000),
+        (0x70a1_67ae, 0x4061_42cf_5c00_0000_0000_0000_0000_0000),
+        (0x6d2e_0ee1, 0x405a_5c1d_c200_0000_0000_0000_0000_0000),
+        (0xbad3_cabc, 0xbff5_a795_7800_0000_0000_0000_0000_0000),
+        (0xb451_4229, 0xbfe8_a284_5200_0000_0000_0000_0000_0000),
+        (0xe8f6_4aed, 0xc051_ec95_da00_0000_0000_0000_0000_0000),
+        (0xcb98_bd38, 0xc017_317a_7000_0000_0000_0000_0000_0000),
+        (0x5703_c242, 0x402e_0784_8400_0000_0000_0000_0000_0000),
+        (0xb799_1546, 0xbfef_322a_8c00_0000_0000_0000_0000_0000),
+        (0xe7c3_b6ec, 0xc04f_876d_d800_0000_0000_0000_0000_0000),
+        (0xd93e_0a81, 0xc032_7c15_0200_0000_0000_0000_0000_0000),
+        (0x77f6_f6d4, 0x406f_eded_a800_0000_0000_0000_0000_0000),
+    ];
+
+    const LIBGCC_DOWN_QUAD: &[(u128, u32)] = &[
+        (0x0000_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x8000_0000_0000_0000_0000_0000_0000_0000, 0x8000_0000),
+        (0x0000_0000_0000_0000_0000_0000_0000_0001, 0x0000_0000),
+        (0x0001_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3fff_0000_0000_0000_0000_0000_0000_0000, 0x3f80_0000),
+        (0xbfff_0000_0000_0000_0000_0000_0000_0000, 0xbf80_0000),
+        (0x7ffe_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x7f80_0000),
+        (0x7fff_0000_0000_0000_0000_0000_0000_0000, 0x7f80_0000),
+        (0xffff_0000_0000_0000_0000_0000_0000_0000, 0xff80_0000),
+        (0x7fff_0000_0000_0000_0000_0000_0000_0001, 0x7fc0_0000),
+        (0x7fff_8000_0000_0000_0000_0000_0000_0000, 0x7fc0_0000),
+        (0x7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x7fff_ffff),
+        (0x7fff_0000_0000_0001_0000_0000_0000_0000, 0x7fc0_0000),
+        (0x407e_ffff_fe00_0000_0000_0000_0000_0000, 0x7f7f_ffff),
+        (0x407e_ffff_feff_ffff_ffff_ffff_ffff_ffff, 0x7f7f_ffff),
+        (0x407e_ffff_ff00_0000_0000_0000_0000_0000, 0x7f80_0000),
+        (0x407e_ffff_ff00_0000_0000_0000_0000_0001, 0x7f80_0000),
+        (0x407f_0000_0000_0000_0000_0000_0000_0000, 0x7f80_0000),
+        (0x3f81_0000_0000_0000_0000_0000_0000_0000, 0x0080_0000),
+        (0x3f80_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x0080_0000),
+        (0x3f6a_0000_0000_0000_0000_0000_0000_0000, 0x0000_0001),
+        (0x3f69_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3f69_0000_0000_0000_0000_0000_0000_0001, 0x0000_0001),
+        (0x3f69_8000_0000_0000_0000_0000_0000_0000, 0x0000_0001),
+        (0x3fff_0000_0100_0000_0000_0000_0000_0000, 0x3f80_0000),
+        (0x3fff_0000_0100_0000_0000_0000_0000_0001, 0x3f80_0001),
+        (0x3fff_0000_0300_0000_0000_0000_0000_0000, 0x3f80_0002),
+        (0x3f37_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x40c7_0000_0000_0000_0000_0000_0000_0000, 0x7f80_0000),
+        (0x43fe_ffff_ffff_ffff_f000_0000_0000_0000, 0x7f80_0000),
+        (0x43fe_ffff_ffff_ffff_f7ff_ffff_ffff_ffff, 0x7f80_0000),
+        (0x43fe_ffff_ffff_ffff_f800_0000_0000_0000, 0x7f80_0000),
+        (0x43fe_ffff_ffff_ffff_f800_0000_0000_0001, 0x7f80_0000),
+        (0x43ff_0000_0000_0000_0000_0000_0000_0000, 0x7f80_0000),
+        (0x3c01_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3c00_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 0x0000_0000),
+        (0x3bcd_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3bcc_0000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3bcc_0000_0000_0000_0000_0000_0000_0001, 0x0000_0000),
+        (0x3bcc_8000_0000_0000_0000_0000_0000_0000, 0x0000_0000),
+        (0x3fff_0000_0000_0000_0800_0000_0000_0000, 0x3f80_0000),
+        (0x3fff_0000_0000_0000_0800_0000_0000_0001, 0x3f80_0000),
+        (0x3fff_0000_0000_0000_1800_0000_0000_0000, 0x3f80_0000),
+        (0x406f_a028_e48a_9825_2a9d_3a02_8c4b_2455, 0x77d0_1472),
+        (0xc083_d46d_6a05_2413_52c2_ebeb_002c_4a9b, 0xff80_0000),
+        (0xbf98_5256_7728_c4e7_4397_6f5c_9037_4cae, 0x8c29_2b3c),
+        (0xbfa7_eaa1_598f_3be4_e56c_ff0f_26a8_5c93, 0x93f5_50ad),
+        (0x3fd8_f24b_435c_5afb_f459_9632_f08f_3c8e, 0x2c79_25a2),
+        (0xbfcb_2079_db8d_c135_f655_2de6_1c82_37f7, 0xa590_3cee),
+        (0x3fbe_3db7_9464_4804_b365_f819_6876_0194, 0x1f1e_dbca),
+        (0xc02d_ee17_000a_b946_7120_c512_00e4_3db4, 0xd6f7_0b80),
+        (0x400d_7d93_ff76_4f3e_fae0_8380_94bc_ac20, 0x46be_ca00),
+        (0x3fb6_48f2_107d_16c2_1c76_b168_711e_1c6f, 0x1b24_7908),
+        (0xbfdd_f052_5179_6fe0_080f_53f1_4c02_653f, 0xaef8_2929),
+        (0xc063_c53d_7194_7ee9_69b7_4ab2_791d_cc54, 0xf1e2_9eb9),
+        (0xbfb8_48e9_bf10_4d09_38d4_ce4d_be7a_0fd3, 0x9c24_74e0),
+        (0x403c_558e_0bb1_e2d2_9ea5_b4d9_2caa_7597, 0x5e2a_c706),
+        (0x3fd8_3e86_e497_42f5_737d_a670_c6b0_7130, 0x2c1f_4372),
+        (0x4054_398f_0861_2fe9_2223_94bc_442b_37f6, 0x6a1c_c784),
+    ];
+
+    #[test]
+    fn the_quads_libgcc_widens_a_float_to_come_out_bit_for_bit() {
+        for &(bits, wanted) in LIBGCC_UP_QUAD {
+            let got = widen_quad(bits);
+            assert_eq!(
+                got, wanted,
+                "{bits:08x} widened: got {got:032x}, libgcc says {wanted:032x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floats_libgcc_narrows_a_quad_to_come_out_bit_for_bit() {
+        for &(bits, wanted) in LIBGCC_DOWN_QUAD {
+            let got = narrow_quad(bits).to_bits();
+            assert_eq!(
+                got, wanted,
+                "{bits:032x} narrowed: got {got:08x}, libgcc says {wanted:08x}"
+            );
+        }
+    }
+
+    fn check_round_trip_quad(bits: u32) {
+        let back = narrow_quad(widen_quad(bits)).to_bits();
+        let wanted = if is_nan(bits) { bits | QUIET } else { bits };
+        assert_eq!(back, wanted, "{bits:08x} there and back by way of a quad came to {back:08x}");
+    }
+
+    /// The two directions against each other, which is the property that makes the pair worth having in
+    /// one place and needs no oracle at all: the widening is exact, so the narrowing has nothing to
+    /// round and hands back what went in, with a not a number coming back quiet either way.
+    #[test]
+    fn widening_a_float_to_a_quad_and_narrowing_it_back_is_where_it_started() {
+        let mut stream = Stream(0x5eed_f128_5eed_f121);
+        for _ in 0..60_000 {
+            check_round_trip_quad(stream.next() as u32);
+            // And a subnormal, which is the one input whose fields the widening does not simply move.
+            check_round_trip_quad((stream.next() as u32) & (SIGN | FRACTION_MASK));
+        }
+        for value in corners() {
+            check_round_trip_quad(value.to_bits());
+        }
+    }
+
+    fn check_narrow_through_quad(bits: u64) {
+        let value = f64::from_bits(bits);
+        let wanted = black_box(black_box(value) as f32).to_bits();
+        let got = narrow_quad(double::widen_quad(bits)).to_bits();
+        assert_eq!(
+            got, wanted,
+            "{bits:016x} narrowed by way of a quad: got {got:08x}, the machine says {wanted:08x}"
+        );
+    }
+
+    /// And the narrowing against the machine over every shape of double there is, which is the bulk of
+    /// what holds it: widening a double to a quad is exact, so narrowing that quad has to land on the
+    /// float the machine rounds the double to. Every edge of this format is a double exactly, so this
+    /// reaches all of them and the rows above are left to say what the wider patterns do.
+    #[test]
+    fn narrowing_a_quad_that_came_from_a_double_is_narrowing_the_double() {
+        let mut stream = Stream(0xf128_d00d_f128_d001);
+        for _ in 0..60_000 {
+            check_narrow_through_quad(stream.next());
+            // The exponent put where the rounding is, the way the narrowing one format down asks for it.
+            let stored = 870 + stream.next() % 290;
+            let rest = stream.next() & (double::SIGN | double::FRACTION_MASK);
+            check_narrow_through_quad(rest | (stored << double::FRACTION));
+        }
+        for bits in narrow_edges() {
+            check_narrow_through_quad(bits);
         }
     }
 }

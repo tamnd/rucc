@@ -182,7 +182,8 @@ for side in ours reference; do
         __addtf3 __subtf3 __multf3 __divtf3 __negtf2 \\
         __cmptf2 __eqtf2 __netf2 __getf2 __gttf2 __letf2 __lttf2 __unordtf2 \\
         __floatsitf __floatunsitf __floatditf __floatunditf \\
-        __fixtfsi __fixunstfsi __fixtfdi __fixunstfdi; do
+        __fixtfsi __fixunstfsi __fixtfdi __fixunstfdi \\
+        __extendsftf2 __trunctfsf2 __extenddftf2 __trunctfdf2; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
     done
 done

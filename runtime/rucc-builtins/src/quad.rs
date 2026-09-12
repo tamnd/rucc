@@ -67,7 +67,7 @@ const IMPLICIT: u128 = 1 << FRACTION;
 pub(crate) const FRACTION_MASK: u128 = IMPLICIT - 1;
 
 /// The top bit of the fraction, which is what tells a quiet not a number from a signalling one.
-const QUIET: u128 = 1 << (FRACTION - 1);
+pub(crate) const QUIET: u128 = 1 << (FRACTION - 1);
 
 /// The not a number an operation with no answer produces.
 const EMPTY_NAN: u128 = (TOP << FRACTION) | QUIET;
@@ -99,7 +99,7 @@ impl Wide {
     const ZERO: Wide = Wide { high: 0, low: 0 };
 
     /// A value that fits in a half, which is every operand before anything is combined.
-    const fn narrow(value: u128) -> Wide {
+    pub(crate) const fn narrow(value: u128) -> Wide {
         Wide { high: 0, low: value }
     }
 
@@ -515,7 +515,7 @@ pub struct Quad([u64; 2]);
 /// The bits of a quad, which is all the parameter ever carried.
 #[cfg(not(test))]
 #[inline]
-fn bits_of(value: Quad) -> u128 {
+pub(crate) fn bits_of(value: Quad) -> u128 {
     // SAFETY: sixteen bytes read as the integer they are. Both types are sixteen bytes wide and
     // neither has a bit pattern the other refuses, so every input is a value of the output type and
     // this is a move and nothing more.
@@ -525,7 +525,7 @@ fn bits_of(value: Quad) -> u128 {
 /// A quad made of bits, which is the same move the other way.
 #[cfg(not(test))]
 #[inline]
-fn quad_of(bits: u128) -> Quad {
+pub(crate) fn quad_of(bits: u128) -> Quad {
     // SAFETY: the same two types and the same widths as above, in the other direction.
     unsafe { core::mem::transmute(bits) }
 }
