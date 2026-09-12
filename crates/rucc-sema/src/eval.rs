@@ -500,11 +500,13 @@ impl<'a> Eval<'a> {
 
     /// A binary operator on two complex values of the same type, each as its two halves.
     ///
-    /// The multiply and the divide are not here. Both of them have rules about infinities and
-    /// nans that C annex G writes out and that the walk does not implement yet either, and a
-    /// fold that got them wrong would be a wrong answer in a static initializer rather than a
-    /// missing one. So they answer with no value, which is what a constant expression this
-    /// compiler cannot work out already means. tamnd/rucc#201.
+    /// The multiply and the divide are the two the runtime answers at run time, and what is folded
+    /// here is exactly the part of each routine that runs before its own check: the four products
+    /// for the multiply and Smith's method for the divide. Where the answer has a nan in both
+    /// halves the routine goes on to look at what the operands were, and that is the piece C annex
+    /// G writes out and the piece this does not do, so an answer like that is no answer at all
+    /// here. That is what a constant expression this compiler cannot work out already means, and
+    /// it is the one shape where the fold and the call could disagree. tamnd/rucc#201.
     fn complex_binary(
         &mut self,
         expr: ExprId,
@@ -525,8 +527,15 @@ impl<'a> Eval<'a> {
         let (real, imag) = match op {
             BinaryOp::Add => (left.0.sum(right.0).0, left.1.sum(right.1).0),
             BinaryOp::Sub => (left.0.difference(right.0).0, left.1.difference(right.1).0),
+            BinaryOp::Mul => complex_product(left, right),
+            BinaryOp::Div => complex_quotient(left, right),
             _ => return Err(self.stop(expr)),
         };
+        // Both halves being nan is where the routine starts over from the operands, so it is where
+        // this stops rather than where it answers.
+        if real.is_nan() && imag.is_nan() {
+            return Err(self.stop(expr));
+        }
         Ok(Const::Complex { real, imag })
     }
 
@@ -960,6 +969,41 @@ fn compare_float(op: BinaryOp, left: Float, right: Float) -> Option<bool> {
         // asked about first is only there to answer whether `op` is a comparison at all.
         None if holds(op, Ordering::Equal).is_some() => Some(matches!(op, BinaryOp::Ne)),
         None => None,
+    }
+}
+
+/// `z * w`, as the four products the runtime routine forms before it looks at what it got.
+///
+/// The status of each operation is dropped for the reason [`Eval::float_binary`] drops it.
+fn complex_product((a, b): (Float, Float), (c, d): (Float, Float)) -> (Float, Float) {
+    let ac = a.product(c).0;
+    let bd = b.product(d).0;
+    let ad = a.product(d).0;
+    let bc = b.product(c).0;
+    (ac.difference(bd).0, ad.sum(bc).0)
+}
+
+/// `z / w`, as Smith's method, which is what the runtime routine forms before it looks at what it
+/// got.
+///
+/// Dividing through by the larger half of the divisor first is what keeps the intermediate products
+/// in range: `(ac + bd) / (cc + dd)` written out overflows whenever `c` or `d` is much over the
+/// square root of the largest value of the type, and the answer it was heading for would have fit.
+/// Which half is larger is asked with `<`, so a nan in either takes the second branch, which is
+/// what the routine does with it too.
+fn complex_quotient((a, b): (Float, Float), (c, d): (Float, Float)) -> (Float, Float) {
+    if c.abs().compare(d.abs()) == Some(Ordering::Less) {
+        let ratio = c.quotient(d).0;
+        let denominator = c.product(ratio).0.sum(d).0;
+        let real = a.product(ratio).0.sum(b).0.quotient(denominator).0;
+        let imag = b.product(ratio).0.difference(a).0.quotient(denominator).0;
+        (real, imag)
+    } else {
+        let ratio = d.quotient(c).0;
+        let denominator = d.product(ratio).0.sum(c).0;
+        let real = b.product(ratio).0.sum(a).0.quotient(denominator).0;
+        let imag = b.difference(a.product(ratio).0).0.quotient(denominator).0;
+        (real, imag)
     }
 }
 
@@ -1638,10 +1682,8 @@ mod tests {
     }
 
     #[test]
-    fn a_complex_product_is_not_folded_yet_and_says_nothing_wrong_instead() {
-        // The multiply has rules about infinities and nans that C annex G writes out, and a fold
-        // that got them wrong would be a wrong answer in a static initializer rather than a
-        // missing one. So it answers with no value, which is what the caller reports.
+    fn a_complex_product_is_the_four_products_the_runtime_routine_forms() {
+        // `(1 + 2i) * (3 + 4i)` is `3 - 8` beside `4 + 6`.
         let mut f = Fixture::new();
         let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
         let left = f.binary(BinaryOp::Add, one, two);
@@ -1651,6 +1693,43 @@ mod tests {
 
         let mut c = f.checker();
         let folded = value(&mut c, product);
+
+        assert_eq!(folded, Ok(Const::Complex { real: real("-5.0"), imag: real("10.0") }));
+    }
+
+    #[test]
+    fn a_complex_quotient_is_smiths_method_and_not_the_formula_that_overflows() {
+        // `(1 + 2i) / (3 + 4i)` is `(11 + 2i) / 25`. The halves are exact in binary and the
+        // quotient is not, so what this pins is that the two divisions are the ones the routine
+        // does: the same answer written the obvious way comes out a bit apart.
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let left = f.binary(BinaryOp::Add, one, two);
+        let (three, four) = (f.double("3.0"), f.imaginary("4.0"));
+        let right = f.binary(BinaryOp::Add, three, four);
+        let quotient = f.binary(BinaryOp::Div, left, right);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, quotient);
+
+        assert_eq!(folded, Ok(Const::Complex { real: real("0.44"), imag: real("0.08") }));
+    }
+
+    #[test]
+    fn an_answer_with_a_nan_in_both_halves_is_left_to_the_runtime_routine() {
+        // Where both halves come out nan the routine starts over from the operands, and that part
+        // of C annex G is not written here, so there is no value to answer with and nothing is
+        // wrong with the program. Dividing by a zero is one of those: every division in Smith's
+        // method is a zero by a zero and the routine answers with two infinities in the end.
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let left = f.binary(BinaryOp::Add, one, two);
+        let (zero, none) = (f.double("0.0"), f.imaginary("0.0"));
+        let right = f.binary(BinaryOp::Add, zero, none);
+        let quotient = f.binary(BinaryOp::Div, left, right);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, quotient);
 
         assert!(folded.is_err());
         assert!(messages(&c).is_empty());

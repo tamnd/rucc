@@ -3,7 +3,8 @@
 // none, so every operator over one comes out as that operator over its two halves and there is
 // no complex anything left in the IR below.
 //
-// The multiply and the divide are not here yet. `tamnd/rucc#201` is where the rest of it lands.
+// The conjugate and `_Complex` on an integer type are not here yet. `tamnd/rucc#201` is where the
+// rest of it lands.
 
 // The two ways one is given a value: a real one, which fills the real half and zeroes the other,
 // and another complex one, which is a copy.
@@ -100,3 +101,29 @@ _Complex float small_pinned = 1.5f + 2.5if;
 _Complex double shifted(_Complex double z) {
   return z + 2.5i;
 }
+
+// The multiply and the divide, which are the two the runtime answers. Neither is the formula
+// written out, because C annex G has rules about what each does when a half is an infinity or a
+// nan that the formula gets wrong, so both are the call gcc makes of them and both go to libgcc's
+// name for the format the halves are in.
+_Complex double multiplied(_Complex double a, _Complex double b) {
+  return a * b;
+}
+
+_Complex float divided(_Complex float a, _Complex float b) {
+  return a / b;
+}
+
+// The compound form of the multiply, where the object is read, widened to the type the operator
+// works in, and the answer narrowed back. `_Complex float *= _Complex double` is the pair that
+// makes all three of those visible.
+_Complex float scaled(_Complex float a, _Complex double b) {
+  a *= b;
+  return a;
+}
+
+// The same two on constants, which the folding works out rather than the runtime. Smith's method
+// is what the divide folds through, which is what the routine does, so the image below is the
+// answer the call would have given.
+_Complex double product = (1.5 + 2.5i) * (0.5 + 4.0i);
+_Complex double quotient = (1.0 + 2.0i) / (3.0 + 4.0i);
