@@ -30,6 +30,12 @@
 (semantics (value.f32 v) v)
 (semantics (value.f64 v) v)
 
+;; And the format the machine keeps in the same register and computes nothing in. Every entry
+;; for it is one of the three that move a value without reading it, because those are the only
+;; instructions there are at this width: an add or a compare of two of these is a call to the
+;; runtime, and a call is not a term.
+(semantics (value.f128 v) v)
+
 ;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
 (semantics (add.i8 l r) (bvadd l r))
 (semantics (add.i16 l r) (bvadd l r))
@@ -280,4 +286,5 @@
 (semantics (ret.i64 v) v)
 (semantics (ret.f32 v) v)
 (semantics (ret.f64 v) v)
+(semantics (ret.f128 v) v)
 (semantics (brif.i1 v) v)

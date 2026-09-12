@@ -365,6 +365,20 @@
                            (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
                            (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
                            (select (mem) (bvadd a 1)) (select (mem) a))))
+;; And the format the machine moves and computes nothing in, which is the same bytes in the
+;; same order sixteen times over. `movaps` moves the whole of a vector register, and at this
+;; format the whole of the register is the whole of the value, so there is nothing here about
+;; a part of a register being left alone.
+(semantics (load.f128 a)
+           (float_from_bits 128
+                   (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                           (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                           (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                           (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                           (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                           (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                           (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
 
 ;; Writing memory.
 ;;
@@ -417,6 +431,24 @@
                                 (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
                                 (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
                                 (bvadd a 7) (extract 63 56 (bits_from_float 64 v))))
+(semantics (store.f128 v a)
+           (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 128 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 128 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 128 v)))
+                                (bvadd a 4) (extract 39 32 (bits_from_float 128 v)))
+                                (bvadd a 5) (extract 47 40 (bits_from_float 128 v)))
+                                (bvadd a 6) (extract 55 48 (bits_from_float 128 v)))
+                                (bvadd a 7) (extract 63 56 (bits_from_float 128 v)))
+                                (bvadd a 8) (extract 71 64 (bits_from_float 128 v)))
+                                (bvadd a 9) (extract 79 72 (bits_from_float 128 v)))
+                                (bvadd a 10) (extract 87 80 (bits_from_float 128 v)))
+                                (bvadd a 11) (extract 95 88 (bits_from_float 128 v)))
+                                (bvadd a 12) (extract 103 96 (bits_from_float 128 v)))
+                                (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
+                                (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
+                                (bvadd a 15) (extract 127 120 (bits_from_float 128 v))))
 
 ;; The instructions that do it. Written out again rather than in terms of the IR heads above,
 ;; for the reason `x64.add_rr_32` is written out rather than in terms of `add.i32`: the two
@@ -486,6 +518,34 @@
                                 (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
                                 (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
                                 (bvadd a 7) (extract 63 56 (bits_from_float 64 v))))
+(semantics (x64.movaps_rm a)
+           (float_from_bits 128
+                   (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                           (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                           (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                           (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                           (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                           (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                           (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                           (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movaps_mr a v)
+           (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 (bits_from_float 128 v)))
+                                (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
+                                (bvadd a 2) (extract 23 16 (bits_from_float 128 v)))
+                                (bvadd a 3) (extract 31 24 (bits_from_float 128 v)))
+                                (bvadd a 4) (extract 39 32 (bits_from_float 128 v)))
+                                (bvadd a 5) (extract 47 40 (bits_from_float 128 v)))
+                                (bvadd a 6) (extract 55 48 (bits_from_float 128 v)))
+                                (bvadd a 7) (extract 63 56 (bits_from_float 128 v)))
+                                (bvadd a 8) (extract 71 64 (bits_from_float 128 v)))
+                                (bvadd a 9) (extract 79 72 (bits_from_float 128 v)))
+                                (bvadd a 10) (extract 87 80 (bits_from_float 128 v)))
+                                (bvadd a 11) (extract 95 88 (bits_from_float 128 v)))
+                                (bvadd a 12) (extract 103 96 (bits_from_float 128 v)))
+                                (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
+                                (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
+                                (bvadd a 15) (extract 127 120 (bits_from_float 128 v))))
 
 ;; Leaving a value where the caller will look for it.
 ;;
@@ -501,6 +561,7 @@
 (semantics (x64.ret_val_64 v) v)
 (semantics (x64.ret_val_f32 v) v)
 (semantics (x64.ret_val_f64 v) v)
+(semantics (x64.ret_val_f128 v) v)
 
 ;; Branching on a condition, which is the same kind of claim for the same reason. The machine
 ;; branches on the value the IR branched on, unchanged, and where the two arms go is a fact

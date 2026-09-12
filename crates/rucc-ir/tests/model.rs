@@ -57,6 +57,7 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
     assert_eq!(
         missing,
         [
+            "load.f128",
             "load.f32",
             "load.f64",
             "load.i1",
@@ -64,6 +65,7 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
             "load.i32",
             "load.i64",
             "load.i8",
+            "store.f128",
             "store.f32",
             "store.f64",
             "store.i1",

@@ -96,7 +96,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 14, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 16, "the store rules moved and this test did not follow them");
     }
 
     /// Every comparison can be made against a constant as well as against a register.
@@ -165,12 +165,14 @@ mod tests {
         "arg_val_64",
         "arg_val_f32",
         "arg_val_f64",
+        "arg_val_f128",
         "ret_val2_8",
         "ret_val2_16",
         "ret_val2_32",
         "ret_val2_64",
         "ret_val2_f32",
         "ret_val2_f64",
+        "ret_val2_f128",
         "call",
         "call_reg",
     ];
@@ -281,8 +283,6 @@ mod tests {
         "ret",
         "mov_rr_64",
         "movaps_rr",
-        "movaps_rm",
-        "movaps_mr",
         // The touch a probing prologue puts on each page as it reaches it, the landing pad a
         // prologue opens with, and the byte that does nothing which one reserves room with. All
         // three are written by a frame and none on a command line that did not ask for it.
@@ -398,8 +398,8 @@ mod tests {
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_a_frame_really_writes() {
         // The same claim as the one about the convention, so that this list cannot grow an opcode
-        // that no frame asks for. In the order `x86_64::FRAME` names them, the moves last because
-        // there is one set of them per class the allocator may spill.
+        // that no frame asks for. In the order `x86_64::FRAME` names them, the copies after the
+        // return because there is one set of them per class the allocator may spill.
         let frame = &x86_64::FRAME;
         let mut written = vec![frame.push, frame.pop, frame.ret];
         for class in frame.classes {
@@ -413,9 +413,10 @@ mod tests {
         // reason.
         written.extend(frame.landing);
         written.extend(frame.pad);
-        // What is left after the ones a rule already reaches, which are the loads and the stores
-        // of a general purpose register, since those are the same instructions a program's own
-        // reads and writes of memory are.
+        // What is left after the ones a rule already reaches, which are the loads and the stores of
+        // both register files, since those are the same instructions a program's own reads and
+        // writes of memory are. The vector pair joined them with the rules for a quad float, and a
+        // spill of one is now the same instruction as a program reading a `_Float128` variable.
         written.retain(|opcode| !heads().contains(&format!("{PREFIX}{opcode}").as_str()));
         assert_eq!(written, FRAME);
     }
@@ -432,10 +433,10 @@ mod tests {
         // half at place zero is `ret_val_*` and is reached by a rule, so it is not on this list.
         let second = |ty| strip(crate::abi::ret_of(ty, 1).expect("every width the pseudos cover"));
         let widths = || {
-            [8, 16, 32, 64]
-                .into_iter()
-                .map(rucc_ir::Type::int)
-                .chain([rucc_ir::Float::F32, rucc_ir::Float::F64].map(rucc_ir::Type::float))
+            [8, 16, 32, 64].into_iter().map(rucc_ir::Type::int).chain(
+                [rucc_ir::Float::F32, rucc_ir::Float::F64, rucc_ir::Float::F128]
+                    .map(rucc_ir::Type::float),
+            )
         };
         let written: Vec<&str> = widths()
             .map(named)

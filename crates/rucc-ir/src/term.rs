@@ -424,6 +424,7 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
         Type::float(Float::F32),
         Type::float(Float::F64),
         Type::float(Float::F80),
+        Type::float(Float::F128),
         Type::vector(Type::int(32), 4),
     ];
 
@@ -527,6 +528,39 @@ pub fn float_slot(ty: Type) -> Option<usize> {
     }
 }
 
+/// Whether a type is the float the machine moves and does not compute in.
+///
+/// A hundred and twenty eight bits of float, which is `_Float128` and is `long double` on the
+/// targets whose `long double` is that format. It is not one of [`float_slot`]'s two, and it is a
+/// question of its own for the same reason [`is_bit`] is: the answer is a width no arithmetic is
+/// written at, so putting it in that table would hand every rule there an index its list of two
+/// names does not have.
+///
+/// What the machine does have for it is the moves. A vector register holds sixteen bytes, `movaps`
+/// moves all sixteen of them, and neither instruction looks at what it moves, so a value of this
+/// width can be loaded, stored, passed, returned and copied. What it cannot be is added, compared
+/// or converted: there is no instruction for any of those at this format, so every one of them is a
+/// call to the runtime, and until the pass that writes those calls exists an arithmetic reaching
+/// the selector finds no name here and is reported.
+///
+/// An eighty bit `long double` is not this. That one is on the x87 stack rather than in a vector
+/// register, which is a file nothing here allocates, and `crate::term` has no name for it at all.
+#[must_use]
+pub fn is_quad(ty: Type) -> bool {
+    ty.is_scalar() && ty.is_float() && ty.bits() == 128
+}
+
+/// Whether a value of that type lives in a vector register, which is the two formats the machine
+/// computes in plus the one it only moves.
+///
+/// The question a register file is picked by, asked here so that the three places that pick one are
+/// reading the same answer. A value put in the wrong file is a value every instruction that then
+/// touches it is the wrong instruction for.
+#[must_use]
+pub fn in_vector_file(ty: Type) -> bool {
+    float_slot(ty).is_some() || is_quad(ty)
+}
+
 /// Whether a type is the one bit a truth value comes in.
 ///
 /// One bit is a width the rule set is written at and is not one of [`slot`]'s four, because it is
@@ -553,6 +587,9 @@ fn value_head(ty: Type) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("value.i1");
     }
+    if is_quad(ty) {
+        return Some("value.f128");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["value.f32", "value.f64"][at]);
     }
@@ -576,6 +613,9 @@ fn iconst_head(ty: Type) -> Option<&'static str> {
 
 /// What a load is called, which is the width of the value it produced.
 fn load_head(ty: Type) -> Option<&'static str> {
+    if is_quad(ty) {
+        return Some("load.f128");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["load.f32", "load.f64"][at]);
     }
@@ -588,6 +628,9 @@ fn load_head(ty: Type) -> Option<&'static str> {
 /// What a store is called, which is the width of the value it writes, since it produces nothing
 /// to take a width from.
 fn store_head(ty: Type) -> Option<&'static str> {
+    if is_quad(ty) {
+        return Some("store.f128");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["store.f32", "store.f64"][at]);
     }
@@ -599,6 +642,9 @@ fn store_head(ty: Type) -> Option<&'static str> {
 
 /// What a return is called, which is the width of the value it gives back, for the same reason.
 fn ret_head(ty: Type) -> Option<&'static str> {
+    if is_quad(ty) {
+        return Some("ret.f128");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["ret.f32", "ret.f64"][at]);
     }
@@ -1171,6 +1217,32 @@ mod tests {
         assert_eq!(value_head(long), None);
         assert_eq!(binary_head(Opcode::FAdd, long), None);
         assert_eq!(ret_head(long), None);
+    }
+
+    /// The quad format has a name for each of the three things that move a value and for nothing
+    /// else, which is what the machine has: sixteen bytes into a vector register and back out, and
+    /// no instruction that looks at them.
+    ///
+    /// It is not one of [`float_slot`]'s two either, and that is the half of this worth asserting.
+    /// Every table indexed by that answer holds two names, so a third width answering it would be
+    /// an index past the end rather than a missing rule.
+    #[test]
+    fn the_quad_format_is_named_for_the_moves_and_for_nothing_else() {
+        let quad = Type::float(Float::F128);
+        assert!(is_quad(quad));
+        assert_eq!(float_slot(quad), None);
+        assert!(in_vector_file(quad));
+        assert_eq!(value_head(quad), Some("value.f128"));
+        assert_eq!(load_head(quad), Some("load.f128"));
+        assert_eq!(store_head(quad), Some("store.f128"));
+        assert_eq!(ret_head(quad), Some("ret.f128"));
+        assert_eq!(binary_head(Opcode::FAdd, quad), None);
+        assert_eq!(fcmp_head(FloatPred::Oeq, quad), None);
+        assert_eq!(cross_head(Opcode::FPExt, Type::float(Float::F64), quad), None);
+        assert_eq!(cross_head(Opcode::FPTrunc, quad, Type::float(Float::F64)), None);
+        // The eighty bit format is in neither file and has none of the three, which is what keeps
+        // this from being a claim about every float wider than a `double`.
+        assert!(!in_vector_file(Type::float(Float::F80)));
     }
 
     /// A lane count is not a width, so a rule written at a width does not get to answer for a

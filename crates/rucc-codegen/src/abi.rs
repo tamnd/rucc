@@ -722,6 +722,12 @@ fn place(ty: Type) -> Option<usize> {
 /// answers from drifting, and an address is what they used to disagree about.
 #[must_use]
 pub fn head_of(ty: Type) -> Option<&'static str> {
+    // The format that fills a whole vector register, which travels in one of them: the psABI
+    // classifies it SSE and SSEUP, and those two eightbytes are the one register the pair names
+    // rather than two registers.
+    if crate::term::is_quad(ty) {
+        return Some("x64.arg_val_f128");
+    }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.arg_val_f32", "x64.arg_val_f64"][at]);
     }
@@ -743,6 +749,13 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
 /// and says nothing at all about the rest of it.
 #[must_use]
 pub fn load_of(ty: Type) -> Option<&'static str> {
+    // Sixteen bytes, which is the whole register and is also the whole value, so the instruction
+    // a spill uses and the instruction an argument uses are the same one here. They are two
+    // different instructions at the two narrower formats because there the value is part of the
+    // register, and at this format there is no part of it to leave behind.
+    if crate::term::is_quad(ty) {
+        return Some("x64.movaps_rm");
+    }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
     }
@@ -763,6 +776,9 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
 /// agree about the rest.
 #[must_use]
 pub fn store_of(ty: Type) -> Option<&'static str> {
+    if crate::term::is_quad(ty) {
+        return Some("x64.movaps_mr");
+    }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.movss_mr", "x64.movsd_mr"][at]);
     }
@@ -784,6 +800,9 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
 /// there is none, which is what the `None` at the end is about.
 #[must_use]
 pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
+    if crate::term::is_quad(ty) {
+        return Some(*["x64.ret_val_f128", "x64.ret_val2_f128"].get(at)?);
+    }
     if let Some(width) = crate::term::float_slot(ty) {
         let names =
             [["x64.ret_val_f32", "x64.ret_val_f64"], ["x64.ret_val2_f32", "x64.ret_val2_f64"]];
@@ -954,10 +973,39 @@ mod tests {
             Type::float(rucc_ir::Float::F32),
             Type::float(rucc_ir::Float::F64),
             Type::float(rucc_ir::Float::F80),
+            Type::float(rucc_ir::Float::F128),
         ];
         for ty in types {
             assert_eq!(head_of(ty).is_some(), load_of(ty).is_some(), "{ty:?}");
+            assert_eq!(head_of(ty).is_some(), store_of(ty).is_some(), "{ty:?}");
+            assert_eq!(head_of(ty).is_some(), ret_of(ty, 0).is_some(), "{ty:?}");
         }
+    }
+
+    /// A hundred and twenty eight bit float arrives in a vector register like the two narrower
+    /// formats, and it takes one of them rather than two: the psABI classifies it SSE and SSEUP,
+    /// and what that pair names is the one register both eightbytes are in.
+    ///
+    /// The second float here is what says so. If the quad had taken two vector registers the
+    /// `double` after it would be in `xmm2`.
+    #[test]
+    fn a_quad_float_arrives_in_one_vector_register_and_not_in_two() {
+        let quad = Type::float(rucc_ir::Float::F128);
+        let f64 = Type::float(rucc_ir::Float::F64);
+        assert_eq!(
+            bind(&[quad, f64], &SYSV),
+            "mfunc @f {\nblock0:\n    %0:xmm($xmm0) = x64.arg_val_f128\n    \
+             %1:xmm($xmm1) = x64.arg_val_f64\n}\n"
+        );
+    }
+
+    /// And it is not the width that was refused before there was an instruction to move it with,
+    /// which is the one thing about this type that used to turn a whole function away.
+    #[test]
+    fn a_quad_float_is_no_longer_a_width_nothing_can_carry() {
+        assert_eq!(refuses(Type::float(rucc_ir::Float::F128)), None);
+        assert_eq!(refuses(Type::float(rucc_ir::Float::F80)), Some(Missing::OnX87));
+        assert_eq!(refuses(Type::int(128)), Some(Missing::Width));
     }
 
     /// A float arrives in the other file, and the two files are counted apart on SysV: the
