@@ -12,7 +12,10 @@
 //! that decision true in the function is in [`rewrite`], and [`run`] is the two of them together,
 //! which is the whole of the `-O0` allocator. [`check`] reads an assignment back and says whether
 //! it is one the machine can run, which [`run`] asserts on in debug and CI builds and which the
-//! backtracking allocator in M4 will be held to the same way.
+//! backtracking allocator in M4 will be held to the same way. [`trace`] asks the other half of the
+//! question, which is whether the rewrite wrote that decision down without losing a value on the
+//! way: it follows every value from the instruction that wrote it to the instructions that read
+//! it, through the moves, and [`run`] asserts on it in the same builds.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -26,6 +29,7 @@ pub mod live;
 pub mod moves;
 pub mod order;
 pub mod rewrite;
+pub mod trace;
 
 /// What allocating a function produced.
 ///
@@ -58,6 +62,10 @@ pub struct Allocation {
 /// that check in debug and CI builds, and it runs before the rewrite because the assignment is the
 /// decision and the rewrite only writes it down.
 ///
+/// A debug build panics on a rewrite [`trace`] finds a value missing from as well. That one runs
+/// afterwards, since a transcription can only be read once it has been made, and it is the check
+/// `spec/optimizer/39-register-allocation.md` section 39.6 asks for.
+///
 /// `called` is what to call the function in that message. It is passed in rather than read off the
 /// function because the name there is a symbol and resolving one wants the interner, which this
 /// crate has no reason to be handed otherwise. Without it the message is a pair of register numbers
@@ -71,7 +79,14 @@ pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Alloca
         let problems = check::check(func, &order, &live, &assignment);
         assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
     }
+    // What the rewrite is about to lose, taken while it is still there. Only in a build that is
+    // going to read it, since the snapshot is a copy of every operand list in the function.
+    let shape = cfg!(debug_assertions).then(|| trace::shape(func));
     let edits = rewrite::rewrite(func, &assignment, env);
+    if let Some(shape) = shape {
+        let faults = trace::trace(func, &shape, &assignment, &edits);
+        assert!(faults.is_empty(), "in '{called}': {}", trace::report(&faults));
+    }
     Allocation { assignment, edits }
 }
 

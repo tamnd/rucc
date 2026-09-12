@@ -34,8 +34,9 @@
 //!
 //! It also does not read the rewrite. It runs on the assignment, before [`crate::rewrite`] has
 //! touched the function, because the assignment is the decision and the rewrite is a
-//! transcription of it. A rewrite that transcribes a good decision badly is a different bug and
-//! the tests in that file are what catch it.
+//! transcription of it. A rewrite that transcribes a good decision badly is a different bug, and
+//! [`crate::trace`] is the checker that catches it by following each value from the instruction
+//! that wrote it to the instructions that read it.
 //!
 //! # Why it repeats work
 //!
