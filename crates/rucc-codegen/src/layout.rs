@@ -21,7 +21,7 @@
 //! it, which is the shape where the back edge is the only jump in it.
 //!
 //! Above it, traces: the software trace cache construction of
-//! `spec/optimizer/38-scheduling-and-layout.md` section 38.4, which is [`traces`] below.
+//! `spec/optimizer/38-scheduling-and-layout.md` section 38.4, which is `traces` below.
 //!
 //! Unreachable blocks are laid out rather than deleted. Deleting one is a decision about what the
 //! program does and this pass has no business making it, and a block nothing reaches costs the
