@@ -502,3 +502,28 @@ decl #80 reads_the_table : int(int) function external defined
                 decl #79 i : int lvalue
           convert lvalue : int
             decl #78 table_count : const int lvalue
+decl #81 ran : int object internal static tentative
+decl #82 opens : void(void) function internal defined constructor
+  body
+    block
+      expr
+        assign = : int
+          decl #81 ran : int lvalue
+          const 1 : int
+decl #83 closes : void(void) function internal defined destructor(101)
+  body
+    block
+      expr
+        assign = : int
+          decl #81 ran : int lvalue
+          const 0 : int
+decl #84 both_ways : void(void) function internal defined constructor(101) destructor
+  body
+    block
+      expr
+        assign = : int
+          decl #81 ran : int lvalue
+          binary + : int
+            convert lvalue : int
+              decl #81 ran : int lvalue
+            const 1 : int

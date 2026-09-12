@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Binding, Place, Property, Sections, Visibility};
+use rucc_object::{Alias, Array, Binding, Place, Property, Sections, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -296,8 +296,13 @@ impl Directives {
             (Directives::Coff, Place::ReadOnly | Place::RelocReadOnly { .. }) => {
                 out.push_str("\t.section\t.rdata,\"dr\"\n");
             }
+            // The type is `@progbits` for almost every name a program writes, and the three it is
+            // not for are the ones the startup code calls what it finds in. A section of the wrong
+            // type under the right name is gathered by the linker all the same and then called by
+            // nobody, which is a program whose constructors silently do not run.
             (Directives::Elf, Place::Named(name)) => {
-                let _ = writeln!(out, "\t.section\t{name},\"aw\",@progbits");
+                let kind = Array::of(name).map_or("@progbits", Array::asm);
+                let _ = writeln!(out, "\t.section\t{name},\"aw\",{kind}");
             }
             (Directives::Coff, Place::Named(name)) => {
                 let _ = writeln!(out, "\t.section\t{name},\"dw\"");
@@ -619,10 +624,34 @@ mod tests {
         let named = Place::Named(".init_array".to_owned());
         let mut asked = String::new();
         Directives::Elf.section(&mut asked, &named, "x", split);
-        assert_eq!(asked, "\t.section\t.init_array,\"aw\",@progbits\n");
+        assert_eq!(asked, "\t.section\t.init_array,\"aw\",@init_array\n");
         let mut apple = String::new();
         Directives::MachO.section(&mut apple, &Place::Written, "x", split);
         assert_eq!(apple, "\t.section\t__DATA,__data\n");
+    }
+
+    /// The three names the startup code calls what it finds in, and one that merely begins like
+    /// one.
+    ///
+    /// A numbered priority is written as a suffix on the name and is the same kind of section, so
+    /// the type has to survive the number. `.init_arrays` is an ordinary section whose name happens
+    /// to start with one of theirs, and writing the type on it would tell the linker to gather it
+    /// with them.
+    #[test]
+    fn a_section_of_function_addresses_says_which_kind_it_is() {
+        let cases = [
+            (".init_array", "\t.section\t.init_array,\"aw\",@init_array\n"),
+            (".init_array.00101", "\t.section\t.init_array.00101,\"aw\",@init_array\n"),
+            (".fini_array", "\t.section\t.fini_array,\"aw\",@fini_array\n"),
+            (".preinit_array", "\t.section\t.preinit_array,\"aw\",@preinit_array\n"),
+            (".init_arrays", "\t.section\t.init_arrays,\"aw\",@progbits\n"),
+        ];
+        for (name, want) in cases {
+            let mut out = String::new();
+            let place = Place::Named(name.to_owned());
+            Directives::Elf.section(&mut out, &place, "x", Sections::default());
+            assert_eq!(out, want, "{name}");
+        }
     }
 
     #[test]

@@ -25,6 +25,12 @@
 //! one. The names and the offsets are the same either way, so the only thing that moves is which
 //! section header a symbol points at.
 //!
+//! [`Array`] is what a section of function addresses for the startup code to call is, which is what
+//! the `constructor` and `destructor` attributes produce. ELF has a section type for each of the
+//! three kinds, and a section of the ordinary type under one of those names is gathered by the
+//! linker in the same run and called by nobody, so the type is written out rather than left to the
+//! default.
+//!
 //! [`Property`] is what the file says it was built to have checked, which is what
 //! `-fcf-protection=` asks for. It is written as a note the linker keeps only the agreed part of
 //! and the loader reads out of the result, which is why a file that says nothing about it turns
@@ -53,8 +59,8 @@ mod section;
 
 pub use crate::elf::{Error, defines, write};
 pub use crate::section::{
-    Alias, Binding, Data, Extent, FUNC_ALIGN, Object, Output, Patch, Place, Property, Reference,
-    Reloc, Sections, Text, Unwind, Visibility,
+    Alias, Array, Binding, Data, Extent, FUNC_ALIGN, Object, Output, Patch, Place, Property,
+    Reference, Reloc, Sections, Text, Unwind, Visibility,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

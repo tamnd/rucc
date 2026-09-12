@@ -249,3 +249,19 @@ extern const int table[];
 extern const int table_count;
 
 int reads_the_table(int i) { return table[i] + table_count; }
+
+// `__attribute__((constructor))` and `__attribute__((destructor))`, which ask for a function to
+// run without anything calling it. Each one becomes an object holding the function's address, in
+// the section the startup code of the target walks, and the priority is what orders them: a lower
+// number first, and a bare one after every numbered one. The two attributes are not exclusive, so
+// a function may be in both lists, and the entries are what keeps a `static` function with no
+// caller from being dropped as unreachable.
+static int ran;
+
+__attribute__((constructor)) static void opens(void) { ran = 1; }
+
+__attribute__((destructor(101))) static void closes(void) { ran = 0; }
+
+__attribute__((constructor(101))) __attribute__((destructor)) static void both_ways(void) {
+  ran = ran + 1;
+}

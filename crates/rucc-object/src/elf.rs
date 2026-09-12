@@ -25,6 +25,8 @@
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
 
+use std::collections::HashMap;
+
 use object::write::{
     Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
 };
@@ -36,7 +38,7 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Binding, Data, Object, Output, Place, Property, Reference, Reloc, Sections, Text,
+    Alias, Array, Binding, Data, Object, Output, Place, Property, Reference, Reloc, Sections, Text,
     Visibility,
 };
 
@@ -190,12 +192,12 @@ pub fn write(
     // section. A variable that is not in a section has no entry, since nothing in a merged one can
     // hold a relocation: the linker is being asked for zeroed space rather than for an image.
     let mut placed = Vec::with_capacity(data.objects.len());
-    // The one section the writer has no name of its own for, remembered so that every variable that
-    // wants it lands in the same one. The rest come back from `section_id`, which already answers
-    // with the section it made the first time it was asked.
-    let mut local = None;
+    // The sections the writer has no name of its own for, remembered by name so that every variable
+    // that wants one lands in the same one. The rest come back from `section_id`, which already
+    // answers with the section it made the first time it was asked.
+    let mut named = HashMap::new();
     for object in &data.objects {
-        let (section, offset) = put(&mut obj, object, &mut local, sections);
+        let (section, offset) = put(&mut obj, object, &mut named, sections);
         let id = obj.add_symbol(Symbol {
             name: object.name.clone().into_bytes(),
             // A common symbol says what it wants rather than where it is, and what it wants is
@@ -502,7 +504,7 @@ fn record(property: Property) -> Vec<u8> {
 fn put(
     obj: &mut Writer<'_>,
     object: &Object,
-    local: &mut Option<object::write::SectionId>,
+    named: &mut HashMap<String, object::write::SectionId>,
     sections: Sections,
 ) -> (SymbolSection, u64) {
     // A section of its own, named after the variable and after the section it would have gone in,
@@ -532,22 +534,31 @@ fn put(
         Place::RelocReadOnly { local: false } => {
             obj.section_id(StandardSection::ReadOnlyDataWithRel)
         }
-        Place::RelocReadOnly { local: true } => *local.get_or_insert_with(|| {
-            obj.add_section(
-                Vec::new(),
-                b".data.rel.ro.local".to_vec(),
-                SectionKind::ReadOnlyDataWithRel,
-            )
-        }),
+        Place::RelocReadOnly { local: true } => {
+            made(obj, named, ".data.rel.ro.local", SectionKind::ReadOnlyDataWithRel)
+        }
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
         Place::Thread { zero: false } => obj.section_id(StandardSection::Tls),
         Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
         Place::Merged => return (SymbolSection::Common, 0),
         // A named section is the program's word for where this goes, and a program that names one
         // wants what it named rather than what would have been chosen. It is written as ordinary
-        // data because nothing in the IR says otherwise.
+        // data because nothing in the IR says otherwise, except for the three names the startup
+        // code calls what it finds in, which have a section type of their own and are gathered by
+        // the linker whether or not they carry it.
         Place::Named(name) => {
-            obj.add_section(Vec::new(), name.clone().into_bytes(), SectionKind::Data)
+            let section = made(obj, named, name, SectionKind::Data);
+            if let Some(array) = Array::of(name) {
+                obj.section_mut(section).flags = SectionFlags::Elf {
+                    sh_type: match array {
+                        Array::Init => elf::SHT_INIT_ARRAY,
+                        Array::Fini => elf::SHT_FINI_ARRAY,
+                        Array::Preinit => elf::SHT_PREINIT_ARRAY,
+                    },
+                    sh_flags: elf::SHF_ALLOC | elf::SHF_WRITE,
+                };
+            }
+            section
         }
     };
     let offset = if carries_no_bytes(&object.place) {
@@ -565,6 +576,27 @@ fn put(
 /// and nothing in the file, which is what keeps a program with a large zeroed array small.
 fn carries_no_bytes(place: &Place) -> bool {
     matches!(place, Place::Zero | Place::Thread { zero: true })
+}
+
+/// The section of this name, made the first time it is asked for and found afterwards.
+///
+/// Two variables the program put the same section name on belong in one section, the way two in
+/// `.data` do. Asking the writer for a new one each time would make a second header with the same
+/// name, which a linker takes and which makes a file with ten constructors in it carry ten section
+/// headers describing eight bytes each. `section_id` does this already for the sections it has
+/// names of its own for, and this is the same answer for the ones it does not.
+fn made(
+    obj: &mut Writer<'_>,
+    named: &mut HashMap<String, object::write::SectionId>,
+    name: &str,
+    kind: SectionKind,
+) -> object::write::SectionId {
+    if let Some(section) = named.get(name) {
+        return *section;
+    }
+    let section = obj.add_section(Vec::new(), name.as_bytes().to_vec(), kind);
+    named.insert(name.to_owned(), section);
+    section
 }
 
 /// What a section split off for one variable is, which is what the section it was split off from
@@ -1281,6 +1313,52 @@ mod tests {
                 .unwrap_or_else(|| panic!("{place:?}"));
             assert_eq!(symbol.kind(), SymbolKind::Tls, "{place:?}");
         }
+    }
+
+    /// The section type a startup list carries, which is what makes the CRT call what is in it.
+    ///
+    /// A section of the ordinary type with the right name is gathered by the linker in the same run
+    /// and called by nobody, so the type is the whole of what this is about. The numbered name is
+    /// the same kind of section as the plain one: the number is there so that the linker sorts it.
+    #[test]
+    fn a_section_of_function_addresses_carries_the_type_the_runtime_looks_for() {
+        for (name, wanted) in [
+            (".init_array", elf::SHT_INIT_ARRAY),
+            (".init_array.00101", elf::SHT_INIT_ARRAY),
+            (".fini_array", elf::SHT_FINI_ARRAY),
+            (".preinit_array", elf::SHT_PREINIT_ARRAY),
+            (".init_arrays", elf::SHT_PROGBITS),
+        ] {
+            let bytes = holding(variable("x", Place::Named(name.to_owned())));
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let section = file.section_by_name(name).unwrap_or_else(|| panic!("{name}"));
+            let SectionFlags::Elf { sh_type, sh_flags } = section.flags() else {
+                panic!("{name} is not an elf section");
+            };
+            assert_eq!(sh_type, wanted, "{name}");
+            assert!(sh_flags.contains(elf::SHF_ALLOC | elf::SHF_WRITE), "{name}");
+        }
+    }
+
+    /// Two variables the program put one section name on, which belong in one section.
+    ///
+    /// A file with ten constructors in it would otherwise carry ten section headers describing eight
+    /// bytes each, and the order the entries run in would be the order the linker happened to put
+    /// the headers in rather than the order they were written.
+    #[test]
+    fn two_variables_in_one_named_section_share_it() {
+        let objects = vec![
+            variable("x", Place::Named(".init_array".to_owned())),
+            variable("y", Place::Named(".init_array".to_owned())),
+        ];
+        let data = Data { objects };
+        let bytes =
+            write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let named: Vec<_> =
+            file.sections().filter(|section| section.name() == Ok(".init_array")).collect();
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].size(), 8);
     }
 
     /// What `-fdata-sections` comes down to in an object file: the section a variable would have

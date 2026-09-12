@@ -355,6 +355,59 @@ impl Place {
     }
 }
 
+/// A section holding function addresses for a C runtime to call rather than data for the program
+/// to read.
+///
+/// ELF has a type for each of the three, and a section of that type is what the startup code walks:
+/// the linker gathers every input section of the kind into one run and the CRT calls what it finds
+/// between the two ends. A section of the ordinary type with the same name would be gathered the
+/// same way and called by nothing, which is why the type is worth writing down rather than leaving
+/// to the default.
+///
+/// Only ELF says it this way. COFF sorts by what follows the `$` in a section name and Mach-O has
+/// a section attribute for it, so on those two the name carries the whole of the answer and there
+/// is nothing for this to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Array {
+    /// Run on the way to `main`, in the order the linker sorted the sections into.
+    Init,
+    /// Run after `main` returns, in the reverse of that order.
+    Fini,
+    /// Run ahead of `.init_array` and ahead of the shared libraries a program is linked against,
+    /// which is a thing only the C library itself has a use for.
+    Preinit,
+}
+
+impl Array {
+    /// Which of them a section of this name is, and [`None`] for a name that is not one of them.
+    ///
+    /// The name itself or the name with a dot and a priority after it. A numbered `constructor` is
+    /// written as the second of those and is the same kind of section as the first: the number is
+    /// there so that the linker sorts it, not to make it a different thing.
+    #[must_use]
+    pub fn of(name: &str) -> Option<Array> {
+        let kinds = [
+            (".init_array", Array::Init),
+            (".fini_array", Array::Fini),
+            (".preinit_array", Array::Preinit),
+        ];
+        kinds.into_iter().find_map(|(base, array)| {
+            let rest = name.strip_prefix(base)?;
+            (rest.is_empty() || rest.starts_with('.')).then_some(array)
+        })
+    }
+
+    /// How the type is spelled in a `.section` directive.
+    #[must_use]
+    pub const fn asm(self) -> &'static str {
+        match self {
+            Array::Init => "@init_array",
+            Array::Fini => "@fini_array",
+            Array::Preinit => "@preinit_array",
+        }
+    }
+}
+
 /// How the linker sees a name.
 ///
 /// Three of the five linkages the IR has, because that is how many an object file can say. Which

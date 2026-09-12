@@ -9,6 +9,11 @@ global @table_count : i32 = 3, align 4, linkage(external), constant
 global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.2 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
+global @ran : bytes 4 = { zero 4 }, align 4, linkage(internal)
+global @__rucc_dtor.closes : bytes 8 = { addr.8 @closes }, align 8, linkage(internal), section ".fini_array.00101"
+global @__rucc_ctor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkage(internal), section ".init_array.00101"
+global @__rucc_ctor.opens : bytes 8 = { addr.8 @opens }, align 8, linkage(internal), section ".init_array"
+global @__rucc_dtor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkage(internal), section ".fini_array"
 
 func @use(i32) -> i32, linkage(external);
 
@@ -319,6 +324,33 @@ block0(%0: i32):
     %8 = load.i32 %7, align 4, tbaa !1
     %9 = add.nsw %6, %8
     return %9
+}
+
+func @opens(), linkage(internal) {
+block0:
+    %0 = global_addr @ran
+    %1 = iconst.i32 1
+    store %1 -> %0, align 4, tbaa !1
+    return
+}
+
+func @closes(), linkage(internal) {
+block0:
+    %0 = global_addr @ran
+    %1 = iconst.i32 0
+    store %1 -> %0, align 4, tbaa !1
+    return
+}
+
+func @both_ways(), linkage(internal) {
+block0:
+    %0 = global_addr @ran
+    %1 = global_addr @ran
+    %2 = load.i32 %1, align 4, tbaa !1
+    %3 = iconst.i32 1
+    %4 = add.nsw %2, %3
+    store %4 -> %0, align 4, tbaa !1
+    return
 }
 
 !0 = tbaa "char", offset 0

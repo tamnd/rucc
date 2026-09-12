@@ -126,6 +126,14 @@ pub struct Decl {
     /// is there for the same reason: the usual place to write it is a header, and the definition in
     /// the file below writes nothing.
     pub noreturn: bool,
+    /// Whether the function runs without anything calling it, which `constructor` and `destructor`
+    /// ask for.
+    ///
+    /// A fact about the name rather than about one declaration of it, like [`Self::visibility`],
+    /// and merged the way that one is: the usual place to write either attribute is the
+    /// declaration in a header and the definition below it writes nothing, so the first
+    /// declaration to ask for a place in the order is the one that gets it.
+    pub startup: Startup,
     /// How far outside a shared library the name reaches, when a declaration of it said, and
     /// nothing when none did.
     ///
@@ -229,6 +237,53 @@ pub enum Visibility {
     /// In the dynamic symbol table, and a reference from inside the library binds to the
     /// definition inside it.
     Protected,
+}
+
+/// Whether a function runs without anything calling it, and where in the order it goes.
+///
+/// Both halves of one question, because a function may carry both attributes and they ask for
+/// different ends of the program: `constructor` puts it in the run-up to `main` and `destructor`
+/// in the run-down after `main` returns. Nothing in the tree says either without one of those
+/// attributes being written, and nothing a translation unit contains calls such a function, which
+/// is why this is the only record of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Startup {
+    /// Where it goes in the run-up to `main`, from `constructor`, and nothing where that attribute
+    /// was not written.
+    pub before: Option<Priority>,
+    /// Where it goes in the run-down after `main` returns, from `destructor`.
+    pub after: Option<Priority>,
+}
+
+impl Startup {
+    /// What two declarations of one name asked for between them, where the first one to say
+    /// something stands.
+    #[must_use]
+    pub fn or(self, other: Startup) -> Startup {
+        Startup { before: self.before.or(other.before), after: self.after.or(other.after) }
+    }
+
+    /// Whether either attribute was written, which is what makes the declaration one the object
+    /// file has something to say about beyond the definition itself.
+    #[must_use]
+    pub const fn asked(&self) -> bool {
+        self.before.is_some() || self.after.is_some()
+    }
+}
+
+/// Where in the order one constructor or destructor goes.
+///
+/// The two are not one number with a default, because the unnumbered one is not at any number.
+/// GCC puts a numbered entry in a section whose name carries the number and an unnumbered one in
+/// the plain section, and the linker sorts the numbered sections in front of the plain one, so an
+/// unnumbered constructor runs after every numbered one however high the number was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    /// Written bare, as `__attribute__((constructor))`, which is almost every one of them.
+    Unnumbered,
+    /// Written with a number, as `__attribute__((constructor(101)))`, where a lower number runs
+    /// earlier and two at the same number run in the order the file defined them.
+    Numbered(u16),
 }
 
 /// How long an object lives.
