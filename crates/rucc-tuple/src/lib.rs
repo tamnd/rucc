@@ -38,7 +38,7 @@
 //! assert_eq!(target.to_llvm_string(), "x86_64-pc-windows-msvc");
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rucc-tuple/0.10.24")]
+#![doc(html_root_url = "https://docs.rs/rucc-tuple/0.10.25")]
 // Every public item here is read by somebody bringing up a target who has the psABI document
 // open beside it, so an undocumented one is a question they have to answer by reading the body.
 #![deny(missing_docs)]
