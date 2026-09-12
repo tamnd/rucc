@@ -150,6 +150,27 @@ fn an_installed_sdk_serves_every_apple_target_and_not_only_the_one_this_machine_
 }
 
 #[test]
+fn an_installed_windows_kit_serves_every_msvc_target_and_not_only_the_one_this_machine_is() {
+    // The same thing on the other wall. One kit holds `windows.h` and the universal CRT for every
+    // Windows architecture, because what differs between them is the import libraries and not the
+    // declarations, so a compile for `aarch64-windows-msvc` on an x86-64 box is served by the kit
+    // that is already installed.
+    let host = target("x86_64-windows-msvc");
+    let sdk =
+        [path("C:/Kits/10/Include/10.0.26100.0/ucrt"), path("C:/Kits/10/Include/10.0.26100.0/um")];
+    for tuple in ["x86_64-windows-msvc", "aarch64-windows-msvc", "arm64ec-windows-msvc"] {
+        let found =
+            include_paths(target(tuple), Some(host), &Options { sdk: &sdk, ..Options::default() });
+        assert_eq!(found.len(), 2, "{tuple}");
+        assert!(found.iter().all(|entry| entry.origin == Origin::Sdk), "{tuple}");
+        assert!(found.iter().all(|entry| !entry.origin.is_host()), "{tuple}");
+    }
+    // The mingw-w64 target beside them is not one of these, and that rule is not here: this field
+    // holds what the driver found, and the driver asks for a Windows SDK only in the MSVC
+    // environment, because a mingw-w64 target's headers are ours and come out of the cache.
+}
+
+#[test]
 fn a_target_behind_a_licence_wall_is_never_given_a_tree_of_ours() {
     // Section 13.4. There is no bundled sysroot for an Apple or an MSVC target and there will not be
     // one, so a path under the cache for either would name a directory nothing can ever put a file

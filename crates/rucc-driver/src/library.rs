@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use rucc_sysroot::{Kernel, Options, Sysroot, include_paths};
+use rucc_sysroot::{Kernel, Options, Sysroot, Wall, include_paths};
 use rucc_target::{Env, Os, Triple};
 
 /// What the machine says about itself, and what the command line said over the top of it.
@@ -43,9 +43,12 @@ pub struct Machine {
     pub sysroot: Option<PathBuf>,
     /// The SDK to compile against on an Apple platform, once it has been found.
     pub sdk: Option<PathBuf>,
-    /// `INCLUDE`, which is how every Windows toolchain says where its headers are. The
-    /// entries are separated by `;`, which is a path separator there and a legal character in
-    /// a file name nowhere.
+    /// The Windows SDK to compile against, as an `INCLUDE` spells one, once it has been found.
+    ///
+    /// `INCLUDE` itself when the environment has it, which is what `vcvarsall.bat` sets and what
+    /// every build on that platform already reads, and otherwise the same list assembled from the
+    /// Visual Studio installation this machine has. The entries are separated by `;`, which is a
+    /// path separator there and a legal character in a file name nowhere.
     pub include: Option<String>,
 }
 
@@ -57,11 +60,13 @@ pub struct Machine {
 pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
     // A target that is not this machine has no directories on this machine. There are two
     // exceptions and they are the same exception twice: a sysroot and an SDK are both somebody
-    // saying that the headers for that target are over there. The SDK case is how `SDKROOT` reaches
-    // an Apple target from a machine that is not a mac, which is the path
+    // saying that the headers for that target are over there, and `INCLUDE` is a third somebody
+    // saying it in the words that platform uses. The SDK case is how `SDKROOT` reaches an Apple
+    // target from a machine that is not a mac, which is the path
     // `spec/cross-compile/08-sysroots.md` section 8.6 leaves open when it says a user supplies one.
     if machine.sysroot.is_none()
         && machine.sdk.is_none()
+        && machine.include.is_none()
         && machine.host.is_some_and(|host| host.os != target.os)
     {
         return Vec::new();
@@ -70,7 +75,7 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
     match target.os {
         Os::Linux => linux(target, root),
         Os::Darwin => darwin(machine.sdk.as_deref().or(root)),
-        Os::Windows => windows(machine.include.as_deref()),
+        Os::Windows => windows(root, machine.include.as_deref()),
         // Freestanding. There is no library, so there are no headers of one, and the nine the
         // compiler ships are the whole of what a program may include.
         Os::None => Vec::new(),
@@ -111,13 +116,28 @@ fn darwin(sdk: Option<&Path>) -> Vec<PathBuf> {
     sdk.map(|sdk| vec![sdk.join("usr/include")]).unwrap_or_default()
 }
 
-/// Whatever `INCLUDE` says, in the order it says it.
+/// A tree somebody named, or whatever `INCLUDE` says, in the order it says it.
 ///
 /// Windows has no fixed place for the headers. The MSVC ones move with the toolchain version
 /// and the SDK ones move with the SDK version, and the way both are found is the environment
 /// that `vcvarsall.bat` sets, which is what every compiler on that platform reads and what
-/// every build there already has.
-fn windows(include: Option<&str>) -> Vec<PathBuf> {
+/// every build there already has. So `INCLUDE` is a list of directories rather than a root,
+/// and it is taken as it stands.
+///
+/// A named tree is the other way in, and it is the one a cross compile uses, because nothing on
+/// a Linux box ran `vcvarsall.bat`. The layout is the one `xwin` writes and `cargo-xwin` builds
+/// against, which is the only relocatable shape an MSVC tree has: the CRT's headers under
+/// `crt/include` and the Windows SDK's under `sdk/include`, lowercase, with the version
+/// directories already resolved away. A copied Visual Studio installation is reached by setting
+/// `INCLUDE` instead, which is that platform's own spelling for it.
+fn windows(sysroot: Option<&Path>, include: Option<&str>) -> Vec<PathBuf> {
+    if let Some(root) = sysroot {
+        return ["crt/include", "sdk/include/ucrt", "sdk/include/shared", "sdk/include/um"]
+            .into_iter()
+            .chain(["sdk/include/winrt", "sdk/include/cppwinrt"])
+            .map(|dir| root.join(dir))
+            .collect();
+    }
     include
         .unwrap_or_default()
         .split(';')
@@ -125,6 +145,135 @@ fn windows(include: Option<&str>) -> Vec<PathBuf> {
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .collect()
+}
+
+/// The header directories of a Visual Studio installation, in the order `vcvarsall.bat` puts them
+/// in `INCLUDE`.
+///
+/// `vc` is the versioned directory under `VC/Tools/MSVC` and `kit` is the versioned directory under
+/// the Windows Kit's `Include`, because the two halves are versioned separately and installed by
+/// different things: one comes with the compiler and holds the CRT, and the other is the platform
+/// and holds `windows.h` and the universal CRT. A machine can have several of each.
+///
+/// The five kit directories rather than the one, because they are five search roots and not a
+/// hierarchy. `ucrt` is the C library, `um` is the Win32 API, `shared` is what those two have in
+/// common, and the last two are for a language this compiler does not compile, so they are here for
+/// the same reason `vcvarsall.bat` puts them there: a header in one of them includes one of the
+/// others by its bare name.
+fn msvc_dirs(vc: &Path, kit: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![vc.join("include")];
+    for dir in ["ucrt", "shared", "um", "winrt", "cppwinrt"] {
+        dirs.push(kit.join(dir));
+    }
+    dirs
+}
+
+/// A version directory's name as numbers, for comparing two of them.
+///
+/// Text comparison is wrong here and quietly so. `10.0.9.0` sorts after `10.0.22621.0` as text and
+/// before it as a version, and the Windows Kit's directories are exactly that shape, so a compiler
+/// that picked the larger string would compile against an SDK from several years before the one the
+/// machine has. [`None`] for a name that is not a version at all, which is how a `Catalogs` or a
+/// `Source` directory beside the versioned ones is passed over.
+fn version_key(name: &str) -> Option<Vec<u64>> {
+    let parts: Vec<u64> = name.split('.').map(|part| part.parse().ok()).collect::<Option<_>>()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// The newest version directory under `dir`, which is the one to compile against.
+///
+/// The newest rather than a configured one, because there is nothing to configure it with and a
+/// person who installed a second SDK installed a newer one. A named `--sysroot` is how somebody
+/// says which tree they meant, and `INCLUDE` is how they say it in that platform's own words.
+fn newest(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(key) = name.to_str().and_then(version_key) else { continue };
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(found, _)| key > *found) {
+            best = Some((key, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// What this machine's own Visual Studio installation says, as an `INCLUDE` would say it.
+///
+/// Asked at most once per process, for the reason [`xcrun`] is: it costs two subprocesses and the
+/// answer does not change inside one compile. Joined with `;` rather than kept as a list so that
+/// there is one parser for both ways in, which is lossless because `;` is a path separator on that
+/// platform and a legal character in a file name nowhere.
+///
+/// This is the Windows half of what `xcrun` is on a mac, and it exists for the same reason: the
+/// headers of a platform whose SDK is not ours to ship are on the machine or they are nowhere, and
+/// the only way to be told where is to ask the thing that installed them. `vswhere.exe` is at a
+/// fixed path on every machine with Visual Studio 2017 or later, which is what makes it askable at
+/// all, and the kit is in the registry because that is where its installer puts it.
+fn installed_msvc() -> Option<String> {
+    static ANSWER: OnceLock<Option<String>> = OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            let vc = newest(&visual_studio()?.join("VC").join("Tools").join("MSVC"))?;
+            let kit = newest(&windows_kit()?.join("Include"))?;
+            let dirs: Vec<String> =
+                msvc_dirs(&vc, &kit).iter().map(|dir| dir.display().to_string()).collect();
+            Some(dirs.join(";"))
+        })
+        .clone()
+}
+
+/// Where Visual Studio is, according to the installer that put it there.
+///
+/// `-products *` because the C++ build tools are a product of their own and a machine with those and
+/// no Visual Studio is the ordinary shape of a build server. `-latest` because the alternative is to
+/// read a list and pick, which is [`newest`]'s job one level down.
+fn visual_studio() -> Option<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles(x86)")?;
+    let vswhere = PathBuf::from(program_files)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    if !vswhere.is_file() {
+        return None;
+    }
+    let out = Command::new(vswhere)
+        .args(["-latest", "-products", "*", "-property", "installationPath"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(out.stdout).ok()?.lines().next()?.trim());
+    path.is_dir().then_some(path)
+}
+
+/// Where the Windows Kit is, which is the Windows SDK and the universal CRT.
+///
+/// The registry first and the default location second, rather than the default location only,
+/// because the installer lets somebody move it and writes down where it went. `reg.exe` is how a
+/// program with no dependencies reads a key, and the value is the rest of the line after the type
+/// because a path there has spaces in it and `Program Files (x86)` has two.
+fn windows_kit() -> Option<PathBuf> {
+    const KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots";
+    if let Ok(out) = Command::new("reg.exe").args(["query", KEY, "/v", "KitsRoot10"]).output() {
+        if let Ok(text) = String::from_utf8(out.stdout) {
+            for line in text.lines() {
+                let Some((name, value)) = line.trim().split_once("REG_SZ") else { continue };
+                if name.trim() != "KitsRoot10" {
+                    continue;
+                }
+                let root = PathBuf::from(value.trim());
+                if root.is_dir() {
+                    return Some(root);
+                }
+            }
+        }
+    }
+    let default = PathBuf::from(std::env::var_os("ProgramFiles(x86)")?).join("Windows Kits/10");
+    default.is_dir().then_some(default)
 }
 
 /// A path under the sysroot, when there is one.
@@ -146,10 +295,17 @@ pub fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     let machine = Machine {
         host: Triple::host(),
         sysroot: sysroot.map(Path::to_path_buf),
-        // Asked for only on the platform that has one, since finding it can mean running a
-        // program and a compile for Linux should not wait on Xcode.
+        // Asked for only on the platforms that have one, since finding either can mean running a
+        // program and a compile for Linux should not wait on Xcode or on the Visual Studio
+        // installer. The MSVC environment and not every Windows target, because a mingw-w64 target's
+        // headers are ours and are in the cache, and handing it Microsoft's would be giving a
+        // program the declarations of a C library it is not being linked against.
         sdk: if target.os == Os::Darwin { sdk(sysroot) } else { None },
-        include: if target.os == Os::Windows { std::env::var("INCLUDE").ok() } else { None },
+        include: if target.os == Os::Windows && target.env == Env::Msvc {
+            msvc(sysroot)
+        } else {
+            None
+        },
     };
     candidates(target, &machine).into_iter().filter(|dir| dir.is_dir()).collect()
 }
@@ -189,18 +345,24 @@ pub fn header_dirs(
     bundled: Option<&Sysroot>,
     kernel: Option<&Kernel>,
 ) -> Vec<PathBuf> {
-    // Once, because asking can mean running `xcrun`. The answer goes to whichever of the three
-    // fields it belongs in, and which one that is decides how step 3 treats it rather than being a
-    // detail of how it was found. With a `--sysroot` these are the directories under the tree the
-    // user named. Without one, on an Apple target, they are an SDK this machine has, which is the
-    // target's own headers for every Apple architecture and not this machine's library, so it serves
-    // `x86_64-macos` on an arm64 mac the way Apple's own tools use it. Otherwise they are the
-    // machine's own directories and step 3 will only take them when the target is the host.
+    // Once, because asking can mean running `xcrun` or the Visual Studio installer. The answer goes
+    // to whichever of the three fields it belongs in, and which one that is decides how step 3 treats
+    // it rather than being a detail of how it was found. With a `--sysroot` these are the directories
+    // under the tree the user named. Without one, on a target behind a licence wall, they are an SDK
+    // this machine has, which is the target's own headers for every architecture of that platform and
+    // not this machine's library, so one Xcode serves `x86_64-macos` on an arm64 mac and one Windows
+    // Kit serves `aarch64-windows-msvc` on an x86_64 box, which is how the platform's own tools use
+    // them. Otherwise they are the machine's own directories and step 3 will only take them when the
+    // target is the host.
     let dirs = system_dirs(target, sysroot);
-    let (named, sdk, host) = match (sysroot.is_some(), target.os) {
+    // `Wall` rather than a second list of the two operating systems, because the targets whose
+    // headers are found as an SDK are exactly the targets whose headers are not ours to ship, and a
+    // copy of that rule here is a copy that can disagree with the one the diagnostic reads.
+    let walled = Wall::of(target.tuple()).is_some();
+    let (named, sdk, host) = match (sysroot.is_some(), walled) {
         (true, _) => (dirs, Vec::new(), Vec::new()),
-        (false, Os::Darwin) => (Vec::new(), dirs, Vec::new()),
-        (false, _) => (Vec::new(), Vec::new(), dirs),
+        (false, true) => (Vec::new(), dirs, Vec::new()),
+        (false, false) => (Vec::new(), Vec::new(), dirs),
     };
     let options = Options {
         sysroot: &named,
@@ -237,6 +399,22 @@ fn sdk(sysroot: Option<&Path>) -> Option<PathBuf> {
     }
     let tools = PathBuf::from("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk");
     tools.is_dir().then_some(tools)
+}
+
+/// The Windows SDK to compile against, in the order somebody would expect to be obeyed.
+///
+/// A tree somebody named beats `INCLUDE` beats the installation this machine has, which is the order
+/// [`sdk`] uses on the Apple side and for the same reasons: the cheap answers are the ones somebody
+/// gave us, and the one that costs a process is last. A named tree answers nothing here because it is
+/// not a list of directories, and [`windows`] is handed the root itself.
+fn msvc(sysroot: Option<&Path>) -> Option<String> {
+    if sysroot.is_some() {
+        return None;
+    }
+    match std::env::var("INCLUDE") {
+        Ok(include) if !include.trim().is_empty() => Some(include),
+        _ => installed_msvc(),
+    }
 }
 
 /// What `xcrun` said, asked at most once in a process.
@@ -350,6 +528,69 @@ mod tests {
         let dirs = candidates(triple(Os::Windows, Env::Msvc), &machine);
         assert_eq!(dirs, [PathBuf::from(r"C:\vc\include"), PathBuf::from(r"C:\sdk\ucrt")]);
         assert!(candidates(triple(Os::Windows, Env::Msvc), &on(Os::Windows)).is_empty());
+    }
+
+    #[test]
+    fn an_sdk_reaches_an_msvc_target_from_a_host_that_is_not_windows() {
+        // The same exception the Apple side gets, and the case it is for is a Linux build machine
+        // with a tree `xwin` assembled on it under a licence its owner accepted.
+        let machine = Machine { include: Some(r"C:\sdk\um".to_owned()), ..on(Os::Linux) };
+        let dirs = candidates(triple(Os::Windows, Env::Msvc), &machine);
+        assert_eq!(dirs, [PathBuf::from(r"C:\sdk\um")]);
+    }
+
+    #[test]
+    fn a_named_tree_for_an_msvc_target_is_the_layout_a_relocatable_one_has() {
+        let machine = Machine { sysroot: Some("/opt/xwin".into()), ..on(Os::Linux) };
+        let dirs = candidates(triple(Os::Windows, Env::Msvc), &machine);
+        let under = |dir| PathBuf::from("/opt/xwin").join(dir);
+        assert_eq!(
+            dirs,
+            [
+                under("crt/include"),
+                under("sdk/include/ucrt"),
+                under("sdk/include/shared"),
+                under("sdk/include/um"),
+                under("sdk/include/winrt"),
+                under("sdk/include/cppwinrt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_mingw_target_is_not_offered_microsofts_headers() {
+        // Its headers are ours, they are in the cache, and Microsoft's are the declarations of a
+        // library it is not linked against. `system_dirs` is what decides this, by asking for an
+        // `INCLUDE` only in the MSVC environment, so a `Machine` with one set is the test.
+        let machine = Machine { include: Some(r"C:\sdk\um".to_owned()), ..on(Os::Windows) };
+        assert!(system_dirs(triple(Os::Windows, Env::Gnu), None).is_empty());
+        // And the field itself is still obeyed when it is set, which is what keeps this test honest
+        // about where the decision is rather than asserting it twice.
+        assert!(!candidates(triple(Os::Windows, Env::Gnu), &machine).is_empty());
+    }
+
+    #[test]
+    fn the_headers_of_an_installation_are_in_the_order_the_developer_prompt_puts_them() {
+        // Joined rather than spelled out, because this test runs on hosts whose separator is not
+        // the one a path like this is written with.
+        let vc = PathBuf::from(r"C:\BuildTools\VC\Tools\MSVC\14.44.35207");
+        let dirs = msvc_dirs(&vc, Path::new("/k"));
+        assert_eq!(dirs[0], vc.join("include"));
+        let rest: Vec<String> =
+            dirs[1..].iter().map(|dir| dir.file_name().unwrap().to_string_lossy().into()).collect();
+        assert_eq!(rest, ["ucrt", "shared", "um", "winrt", "cppwinrt"]);
+    }
+
+    #[test]
+    fn a_version_directory_is_compared_as_numbers_and_not_as_text() {
+        // The case that makes this matter. As text the first of these is the larger.
+        assert!(version_key("10.0.9.0") < version_key("10.0.22621.0"));
+        assert!(version_key("10.0.22621.0") < version_key("10.0.26100.0"));
+        assert!(version_key("14.44.35207") > version_key("14.39.33519"));
+        // And the directories that sit beside the versioned ones in a Windows Kit.
+        assert_eq!(version_key("Catalogs"), None);
+        assert_eq!(version_key("wdf"), None);
+        assert_eq!(version_key(""), None);
     }
 
     #[test]
