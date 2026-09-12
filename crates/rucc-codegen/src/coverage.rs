@@ -116,12 +116,12 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::AtomicLoad, "`crate::expand`, into the plain load that is already an acquire"),
     (Opcode::AtomicStore, "`crate::expand`, into the plain store, and a barrier at the strongest"),
     // The barrier itself, which is one instruction or none and neither is a rewrite of anything.
-    // The template, which is a string and not a term. What an empty one stands for is no
-    // instructions and the places its operands share, and what a template with instructions in it
-    // stands for needs an assembler, which is `tamnd/rucc#349`.
+    // The template, which is a string and not a term. A rule set cannot be written over a string,
+    // so the instructions a template names are looked up in the machine description rather than
+    // matched, which is `rucc_target::x86_64::read`.
     (
         Opcode::InlineAsm,
-        "`crate::lower`, as the places its operands share, while its template is empty",
+        "`crate::lower`, as the places its operands share and the instructions its template names",
     ),
     (
         Opcode::Fence,
