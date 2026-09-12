@@ -39,6 +39,7 @@ use crate::frame::{Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::pressure::{Cost, Pressure};
+use crate::reload;
 use crate::retry;
 use crate::split;
 use crate::switch;
@@ -449,7 +450,13 @@ pub fn compile_recording(
         pad,
         ..Convention::new(machine.conv, machine.insts)
     };
-    finish(&mut func, &allocation, &frame, &stack, convention, names);
+    let moves = finish(&mut func, &allocation, &frame, &stack, convention, names);
+
+    // After the moves are written, because a spill and the reload of it are written by different
+    // decisions of the allocator and what says the two are next to each other is the function they
+    // both went into. Before the layout, because the layout is where the instruction sequence
+    // stops being something a pass may edit.
+    reload::dead(&mut func, &moves);
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
