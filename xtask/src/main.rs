@@ -14,6 +14,7 @@
 mod aux_plane;
 mod bench;
 mod bisect;
+mod builtins_diff;
 mod corpus;
 mod cost;
 mod differential;
@@ -49,6 +50,7 @@ tasks:
   link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
   abi-differential  compile the signature corpus with both compilers in both directions and run it
   builtins          compile the C runtime support routines into a static library for a target
+  builtins-diff     hold the C runtime routines against the Rust reference over the same cases
   bench             time the throughput floor workload against the reference compiler
   size              measure the distribution against the budget in document 13.1
   disasm            check every instruction we encode against an independent decoder
@@ -88,6 +90,7 @@ fn main() -> ExitCode {
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-differential") => differential::differential(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("builtins-diff") => builtins_diff::builtins_diff(),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("stubs") => stubs::stubs(),
@@ -1044,8 +1047,22 @@ fn builtins(args: &[String]) -> Result<()> {
         None => host_triple()?,
     };
 
+    println!("{}", builtins_archive(&target)?.display());
+    Ok(())
+}
+
+/// Writes the archive for one target and gives back the path to it.
+///
+/// Separate from the task above because `cargo xtask builtins-diff` wants the archive
+/// rather than a line of output about it, and because the two asking the same function for it is
+/// what keeps the differential run about the archive people actually get.
+///
+/// # Errors
+///
+/// As [`builtins`], which is the only other caller.
+fn builtins_archive(target: &str) -> Result<PathBuf> {
     let sources = builtin_sources()?;
-    let archive = root().join("target").join(&target).join("release").join("librucc_builtins.a");
+    let archive = root().join("target").join(target).join("release").join("librucc_builtins.a");
     if let Some(dir) = archive.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
     }
@@ -1083,9 +1100,7 @@ fn builtins(args: &[String]) -> Result<()> {
             )],
         });
     }
-
-    println!("{}", archive.display());
-    Ok(())
+    Ok(archive)
 }
 
 /// Every `.c` under `runtime/builtins`, in the order their names sort in.
