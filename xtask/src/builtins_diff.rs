@@ -25,6 +25,15 @@
 //! default, which reports all six names. Writing `-D_FORTIFY_SOURCE=2` instead proves nothing: on
 //! Ubuntu 24.04 the default is level 3 and it is level 3 that rewrites the calls here, so pinning
 //! the lower level turns the fortification off as surely as asking for it off does.
+//!
+//! # Why the divisions are guarded the other way round
+//!
+//! The same hazard is there for the 128-bit division and modulo and reading undefined symbols will
+//! not catch it. gcc puts libgcc on every link line, libgcc is a static archive, and a link that
+//! found `__udivti3` there instead of in the archive under test has the routine inside the program
+//! rather than undefined outside it, so both sides would quietly agree about libgcc's answer. What
+//! can be read instead is the archive: the script lists what each one defines and reports a name
+//! that is not in there, which is the case that would have the link reach past it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -144,6 +153,17 @@ gcc $flags -o \"$out/reference\" differential.c libreference.a || exit 1
 for side in ours reference; do
     nm -u \"$out/$side\" | awk -v side=$side '/mem(cpy|move|set|cmp)/ { print side \" reached \" $NF }'
 done
+for side in ours reference; do
+    case $side in
+    ours) lib=librucc_builtins.a ;;
+    *) lib=libreference.a ;;
+    esac
+    nm -g --defined-only \"$lib\" | awk '$2 == \"T\" { print $3 }' > \"$out/$side.names\"
+    for name in memcpy memmove memset memcmp \\
+        __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4; do
+        grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
+    done
+done
 \"$out/ours\" | sed 's/^/ours /'
 \"$out/reference\" | sed 's/^/reference /'
 ";
@@ -157,6 +177,8 @@ struct Side {
     cases: Option<String>,
     /// The four names this side went looking for outside itself, which should be none of them.
     reached: Vec<String>,
+    /// The names this side's archive does not define, which should also be none of them.
+    missing: Vec<String>,
 }
 
 /// Holds the two sides against each other.
@@ -168,6 +190,12 @@ fn compare(printed: &str) -> Result<()> {
             problems.push(format!(
                 "the {side} program calls {name}, which is not in the archive it was linked \
                  against, so that routine is the C library's and this comparison is not about it"
+            ));
+        }
+        for name in &said.missing {
+            problems.push(format!(
+                "the {side} archive does not define {name}, so the link found that routine in \
+                 libgcc and the two sides agree about libgcc rather than about themselves"
             ));
         }
     }
@@ -225,6 +253,8 @@ fn read(printed: &str) -> (Side, Side) {
         let rest = rest.trim();
         if let Some(name) = rest.strip_prefix("reached ") {
             said.reached.push(name.to_owned());
+        } else if let Some(name) = rest.strip_prefix("missing ") {
+            said.missing.push(name.to_owned());
         } else if let Some(cases) = rest.strip_prefix("cases ") {
             said.cases = Some(cases.to_owned());
         } else {
@@ -280,6 +310,17 @@ reference cases 40
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("__memcpy_chk"), "{}", problems[0]);
         assert!(problems[0].contains("the ours program"), "{}", problems[0]);
+    }
+
+    /// The division hazard: an archive that does not have the routine is a link that went to
+    /// libgcc, and nothing about the run itself would show it.
+    #[test]
+    fn a_routine_the_archive_does_not_define_is_a_failure_too() {
+        let printed = format!("reference missing __udivti3\n{AGREED}");
+        let problems = problems_of(&printed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("__udivti3"), "{}", problems[0]);
+        assert!(problems[0].contains("the reference archive"), "{}", problems[0]);
     }
 
     #[test]

@@ -27,9 +27,11 @@
 //!
 //! The block routines are here: `memcpy`, `memmove`, `memset` and `memcmp`, which are what
 //! `rucc-codegen` calls when a structure copy or a fill is too big to open up into moves. The
-//! rest of section 12.8, which is the wide division and modulo, the `__int128` arithmetic, the
-//! soft float and the atomics, is not written, and the set is driven by what the target ladder
-//! in `spec/14-target-ladder.md` actually calls.
+//! 128-bit division and modulo are here too, which is the six entry points a `/` or a `%` on an
+//! `__int128` becomes, since that is the one arithmetic `rucc-codegen` cannot split into
+//! instructions over the halves. The rest of section 12.8, which is the remaining `__int128`
+//! arithmetic, the soft float and the atomics, is not written, and the set is driven by what the
+//! target ladder in `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with
@@ -38,6 +40,7 @@
 #![no_builtins]
 #![doc(html_root_url = "https://docs.rs/rucc-builtins/0.10.27")]
 
+pub mod div;
 pub mod mem;
 
 // The tests allocate and compare, which `core` cannot do. The crate itself never sees this.
