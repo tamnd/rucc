@@ -511,11 +511,23 @@ mod tests {
     /// doing when there is a sixth, and it is not worth doing for the fifth: each of the five says
     /// a different thing about a declaration and each carries a paragraph saying which, and a
     /// bitset takes the paragraphs off the fields and puts them on a table of constants.
+    ///
+    /// Sixty to sixty eight for where a function goes in the two orders `constructor` and
+    /// `destructor` ask for. Eight bytes and none of them padding: each order is a priority that
+    /// may be absent, may be written bare, or may be a number up to sixty five thousand five
+    /// hundred and thirty five, which is three kinds of answer and does not fit in the two bytes
+    /// the number itself takes. A function may be in both orders and the two numbers have nothing
+    /// to do with each other, so it is two of those and not one. This is the field with the
+    /// weakest claim to a place on the node, since hardly any declaration in any program carries
+    /// either attribute, and it is here because it is merged the way the visibility and the
+    /// assembler name above it are merged: a header writes the attribute and the definition below
+    /// it writes nothing, so the answer has to travel with the declarations of a name rather than
+    /// with the one that was written.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 60);
+        assert_eq!(size_of::<Decl>(), 68);
         assert_eq!(size_of::<Case>(), 48);
     }
 
