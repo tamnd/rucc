@@ -369,6 +369,108 @@ static void corner_divisions(int which) {
     say("divcorner", which, digest);
 }
 
+/* The eight conversions between a 128-bit integer and a float.
+ *
+ * Nothing here says their names, because a cast is what a program writes and a call is what the
+ * compiler makes of it, which is the same arrangement the divisions are tested under. The names are
+ * checked against what each archive defines rather than read off this file.
+ *
+ * The float that comes back is digested as its bits rather than as a number, so that a difference in
+ * the last place is a difference rather than something printf rounded away. memcpy for that, since a
+ * union or a cast through a pointer would be this file taking a position on effective types while
+ * testing something else.
+ */
+static unsigned long long mix_double(unsigned long long digest, double value) {
+    unsigned char bytes[sizeof value];
+    memcpy(bytes, &value, sizeof value);
+    return mix(digest, bytes, sizeof bytes);
+}
+
+static unsigned long long mix_float(unsigned long long digest, float value) {
+    unsigned char bytes[sizeof value];
+    memcpy(bytes, &value, sizeof value);
+    return mix(digest, bytes, sizeof bytes);
+}
+
+/* One integer through all four conversions up. The signed pair reads the same bits as a signed
+ * value, which is where the sign and the magnitude of the most negative value get decided.
+ */
+static unsigned long long up(unsigned long long digest, uwide value) {
+    digest = mix_double(digest, (double)value);
+    digest = mix_float(digest, (float)value);
+    digest = mix_double(digest, (double)(wide)value);
+    digest = mix_float(digest, (float)(wide)value);
+    cases += 4;
+    return digest;
+}
+
+/* One float through all four conversions down, at both widths it arrives in.
+ *
+ * The float has to be inside the integer it is going to, because a value that is not is undefined in
+ * C and there is no answer for two implementations to agree about. The caller is what keeps it
+ * inside: every value here is built with an exponent below the top of the signed type, which is also
+ * below the top of the unsigned one.
+ */
+static unsigned long long down(unsigned long long digest, double value) {
+    digest = mix_wide(digest, (uwide)value);
+    digest = mix_wide(digest, (uwide)(float)value);
+    digest = mix_wide(digest, (uwide)(wide)value);
+    digest = mix_wide(digest, (uwide)(wide)(float)value);
+    cases += 4;
+    return digest;
+}
+
+/* A float whose exponent is random over the range the integer holds and whose mantissa is random
+ * bits, built out of its bits rather than out of arithmetic so that the exponent is the thing being
+ * swept. The exponent stops at 2^125 so that the value is inside the signed type as well as the
+ * unsigned one, with room for the narrowing to a float to round it up, and goes down to 2^-8 so that
+ * the cases that truncate to zero and to one are in here too.
+ */
+static double random_float(void) {
+    unsigned long long bits = next_random();
+    unsigned long long exponent = 1023 - 8 + (next_random() % 134);
+    double value;
+    bits = (bits & 0x800FFFFFFFFFFFFFull) | (exponent << 52);
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+#define CONVERSION_ROUNDS 8
+#define CONVERSION_CASES 2048
+
+static void conversions(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < CONVERSION_CASES; i++) {
+        digest = up(digest, random_wide());
+        digest = down(digest, random_float());
+    }
+    say("convert", round, digest);
+}
+
+/* Every corner value up, and the float of every corner value back down.
+ *
+ * Going up, a power of two and the values either side of it are where the rounding is decided by
+ * something other than the bits: one of the three is exact, one rounds down and one rounds up, and
+ * at this width all three are past the precision of both formats. Coming back down from the float of
+ * one is how a value that came out rounded gets asked about in the other direction.
+ */
+static void corner_conversions(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    uwide value = corners[which];
+    digest = up(digest, value);
+    /* Only the ones the signed type holds, since the float of a larger one is outside it. */
+    if ((value >> 126) == 0) {
+        digest = down(digest, (double)value);
+        digest = down(digest, -(double)value);
+    }
+    for (int i = 0; i < CORNERS; i++) {
+        uwide other = corners[i];
+        digest = up(digest, value ^ other);
+        digest = up(digest, value + other);
+    }
+    say("convcorner", which, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -387,9 +489,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < CORNERS; i++) {
         corner_divisions(i);
     }
+    for (int i = 0; i < CORNERS; i++) {
+        corner_conversions(i);
+    }
     for (int i = 0; i < DIVISION_ROUNDS; i++) {
         divisions(i);
         near_misses(i);
+    }
+    for (int i = 0; i < CONVERSION_ROUNDS; i++) {
+        conversions(i);
     }
     printf("cases %ld\n", cases);
     return 0;

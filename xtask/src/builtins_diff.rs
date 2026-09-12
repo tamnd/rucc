@@ -26,10 +26,10 @@
 //! Ubuntu 24.04 the default is level 3 and it is level 3 that rewrites the calls here, so pinning
 //! the lower level turns the fortification off as surely as asking for it off does.
 //!
-//! # Why the divisions are guarded the other way round
+//! # Why the divisions and the conversions are guarded the other way round
 //!
-//! The same hazard is there for the 128-bit division and modulo and reading undefined symbols will
-//! not catch it. gcc puts libgcc on every link line, libgcc is a static archive, and a link that
+//! The same hazard is there for the 128-bit division and modulo, and for the conversions between
+//! that width and a float, and reading undefined symbols will not catch it. gcc puts libgcc on every link line, libgcc is a static archive, and a link that
 //! found `__udivti3` there instead of in the archive under test has the routine inside the program
 //! rather than undefined outside it, so both sides would quietly agree about libgcc's answer. What
 //! can be read instead is the archive: the script lists what each one defines and reports a name
@@ -160,7 +160,9 @@ for side in ours reference; do
     esac
     nm -g --defined-only \"$lib\" | awk '$2 == \"T\" { print $3 }' > \"$out/$side.names\"
     for name in memcpy memmove memset memcmp \\
-        __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4; do
+        __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4 \\
+        __floattidf __floattisf __floatuntidf __floatuntisf \\
+        __fixdfti __fixsfti __fixunsdfti __fixunssfti; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
     done
 done
