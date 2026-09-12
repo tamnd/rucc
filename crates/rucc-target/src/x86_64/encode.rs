@@ -613,6 +613,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("ja", &D, Long, &[0x0F, 0x87], NO_MODRM, ImmSize::Cd),
     bytes("jae", &D, Long, &[0x0F, 0x83], NO_MODRM, ImmSize::Cd),
     bytes("jmp", &D, Long, &[0xE9], NO_MODRM, ImmSize::Cd),
+    // The same mnemonic through a register, which is a different row for the reason the call above
+    // has two: what a row is looked up by is the arguments as well as the name. It is another of
+    // the eight that share `0xFF` and sits one place along from the call, and it is sixty four bits
+    // without a prefix saying so for the same reason the call is.
+    bytes("jmp", &R, Long, &[0xFF], ext(0, 4), NO_IMM),
     // What a prologue and an epilogue are made of. A push and a pop move eight bytes without
     // being told to, so neither carries the prefix that would say so.
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),

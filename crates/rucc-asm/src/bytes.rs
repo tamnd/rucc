@@ -169,6 +169,9 @@ struct Jump {
     end: usize,
     /// The block it goes to.
     to: Block,
+    /// What is added to the distance, which is nothing for a jump and is the displacement for an
+    /// address that names a block and has one.
+    disp: i64,
 }
 
 /// One function being written out.
@@ -224,7 +227,7 @@ impl Assembler<'_> {
         for jump in std::mem::take(&mut self.jumps) {
             let to = self.blocks[jump.to.index()];
             debug_assert_ne!(to, usize::MAX, "a jump to a block that was never laid out");
-            let distance = i64::try_from(to).expect("a section this size")
+            let distance = i64::try_from(to).expect("a section this size") + jump.disp
                 - i64::try_from(jump.end).expect("a section this size");
             let distance = i32::try_from(distance)
                 .map_err(|_| Error::Distance { func: self.name.to_owned(), bytes: distance })?;
@@ -247,6 +250,9 @@ impl Assembler<'_> {
             // afterwards for the ones that name something it cannot see.
             let mut values = Vec::with_capacity(machine.args.len());
             let mut wanted = None;
+            // The other thing an address can name, which is a place in this same function and so is
+            // a distance nothing outside the file has to be told about.
+            let mut labelled = None;
             for arg in machine.args {
                 values.push(match *arg {
                     Arg::Reg(at, width) => {
@@ -282,6 +288,9 @@ impl Assembler<'_> {
                                 Reach::Thread => Reference::Thread,
                             };
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
+                        }
+                        if let Some(block) = amode.and_then(|mem| mem.block) {
+                            labelled = Some((block, i64::from(addr.disp)));
                         }
                         Value::Mem(addr)
                     }
@@ -323,9 +332,15 @@ impl Assembler<'_> {
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
                 let addend = disp - i64::try_from(end - at).expect("an instruction this long");
                 self.text.relocs.push(Reloc { at, symbol, kind, addend });
+            } else if let Some((to, disp)) = labelled {
+                // The address of a label, which is the four bytes an address counted from the
+                // instruction pointer leaves and is patched where a jump is patched rather than
+                // written out as a relocation, since both ends of it are in this function.
+                let at = holes.rip.expect("an address naming a label leaves room for the distance");
+                self.jumps.push(Jump { at, end, to, disp });
             } else if let Some(at) = holes.dest {
                 match self.func[block].succs.first() {
-                    Some(call) => self.jumps.push(Jump { at, end, to: call.block }),
+                    Some(call) => self.jumps.push(Jump { at, end, to: call.block, disp: 0 }),
                     None => debug_assert!(false, "a jump out of a block with no arms"),
                 }
             }
@@ -359,7 +374,11 @@ impl Assembler<'_> {
             None => None,
         };
         let symbol = amode.symbol.map(|symbol| self.names.resolve(symbol).to_owned());
-        let rip = symbol.is_some() && base.is_none() && index.is_none();
+        // A block is reached the same way and leaves the same four bytes. What is different is who
+        // fills them in, which is this file rather than the linker, and that is the caller's to
+        // sort out: what it needs from here is that the address was written that way at all.
+        let names = symbol.is_some() || amode.block.is_some();
+        let rip = names && base.is_none() && index.is_none();
         let addr =
             Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment: amode.segment };
         Ok((addr, if rip { symbol } else { None }))
@@ -477,6 +496,30 @@ mod tests {
         // backwards because a jump counts from where it ends.
         assert_eq!(hex(&text.bytes), "01 c8 e9 f9 ff ff ff");
         assert!(text.relocs.is_empty(), "a jump inside a function is not the linker's business");
+    }
+
+    #[test]
+    fn the_address_of_a_label_is_filled_in_here_as_well() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let first = func.create_block();
+        let second = func.create_block();
+        let lea = Opcode::new(names.intern("x64.lea_64"));
+        func.build(first, lea)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::block(second))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(first, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        func.succs_mut(first).push(BlockCall::to(second));
+        func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+
+        let text = assemble(&[func], &names, &target(), true).expect("two blocks");
+        // Seven bytes of address, two of jump, and then the block. The distance is two, because
+        // the four bytes count from the end of the instruction that holds them and the jump is
+        // what is in between.
+        assert_eq!(hex(&text.bytes), "48 8d 05 02 00 00 00 ff e0 c3");
+        assert!(text.relocs.is_empty(), "a label of this function is not the linker's business");
     }
 
     #[test]

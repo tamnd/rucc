@@ -385,7 +385,7 @@ impl Writer<'_> {
     ///
     /// A symbol with no base and no index is written relative to the instruction pointer, which
     /// is how a global is reached in position independent code and is the only way this compiler
-    /// reaches one.
+    /// reaches one. A block is written the same way, and is the address a `&&label` produces.
     fn amode(
         &self,
         operands: &[Operand],
@@ -416,6 +416,15 @@ impl Writer<'_> {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
             }
+        } else if let Some(block) = amode.block {
+            // A label of this function, which is written the way a symbol is and reached the way a
+            // symbol is, and is neither: what the assembler puts in the four bytes is a distance it
+            // works out itself, since both ends are in the section it is writing.
+            out.push_str(&self.label(func_name, block));
+            if amode.disp != 0 {
+                let sign = if amode.disp < 0 { '-' } else { '+' };
+                let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
+            }
         } else if amode.disp != 0 || (amode.base.is_none() && amode.index.is_none()) {
             // A mode that names no register at all is an absolute address, and zero is one of
             // them, so the number is written even when it is zero and there is nothing else.
@@ -433,7 +442,7 @@ impl Writer<'_> {
                 let _ = write!(out, ",{reg},{}", amode.scale);
             }
             out.push(')');
-        } else if amode.symbol.is_some() {
+        } else if amode.symbol.is_some() || amode.block.is_some() {
             out.push_str("(%rip)");
         }
         Ok(out)
@@ -679,6 +688,26 @@ mod tests {
                 .finish();
         });
         assert_eq!(body(&text), ["movq\tcounter(%rip), %rax"]);
+    }
+
+    #[test]
+    fn an_address_with_a_label_in_it_is_the_label_and_is_relative_as_well() {
+        let text = write(|func, names| {
+            let head = func.create_block();
+            let there = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            let jump = Opcode::new(names.intern("x64.jmp_reg"));
+            func.build(head, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem::block(there))
+                .finish();
+            func.build(head, jump).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+            func.build(there, Opcode::new(names.intern("x64.ret"))).finish();
+        });
+        // The four bytes a symbol would leave, holding a distance the assembler works out for
+        // itself rather than one a relocation asks the linker for, since both ends of it are in
+        // the section being written.
+        assert_eq!(body(&text), ["leaq\t.Lf_1(%rip), %rax", "jmp\t*%rax", "ret"]);
     }
 
     #[test]

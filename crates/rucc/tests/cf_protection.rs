@@ -31,6 +31,21 @@ void calls(void) { use(0); }
 void deep(void) { char b[100000]; use(b); }
 ";
 
+/// A computed `goto`, which is the one thing in C that puts an address an indirect branch arrives
+/// at somewhere other than the top of a function.
+const COMPUTED: &str = "\
+int pick(int n) {
+  void *table[2];
+  table[0] = &&odd;
+  table[1] = &&even;
+  goto *table[n & 1];
+odd:
+  return 1;
+even:
+  return 2;
+}
+";
+
 /// The fixture, under a directory of its own so that two of these running at once do not write the
 /// same file.
 fn fixture(what: &str, source: &str) -> PathBuf {
@@ -116,6 +131,21 @@ fn every_function_opens_with_a_landing_pad_when_the_forward_edge_is_asked_for() 
             );
         }
     }
+}
+
+/// A label whose address the program took opens with one as well.
+///
+/// The other address an indirect branch arrives at, and the one a prologue knows nothing about. A
+/// computed `goto` compiled without this is a program that runs everywhere except on the hardware
+/// the flag was turned on for, which is the one place it was compiled for.
+#[test]
+fn a_label_whose_address_is_taken_opens_with_a_landing_pad_too() {
+    let text = asm("labels", &["-fcf-protection=branch"], COMPUTED);
+    let lines = insts(&text, "pick");
+    assert_eq!(lines.first(), Some(&"endbr64"), "{lines:?}");
+    // One at the top of the function and one at each of the two labels, and the two at the labels
+    // are what the jump through the register arrives at.
+    assert_eq!(lines.iter().filter(|line| **line == "endbr64").count(), 3, "{lines:?}");
 }
 
 /// And nothing opens with one when it was not.

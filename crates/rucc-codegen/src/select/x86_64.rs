@@ -227,6 +227,15 @@ mod tests {
         "set_ae",
     ];
 
+    /// The instruction a computed `goto` is written as rather than a rule.
+    ///
+    /// The one branch `crate::lower` writes by name, and the one the block layout does not write
+    /// either. What it reads is the address, which a pattern could have bound, so it is not
+    /// exempt for the reason the branches above are. What no pattern can say is the rest of it:
+    /// how many arms the block has, which is every label of the function the program took the
+    /// address of, and a rule says what an instruction reads rather than where a block goes.
+    const LABELS: &[&str] = &["jmp_reg"];
+
     /// The instruction the memory model writes rather than a rule.
     ///
     /// A barrier computes nothing, so there is no equality for the solver to discharge and no
@@ -497,6 +506,13 @@ mod tests {
         assert_eq!(written, exempt);
     }
 
+    /// And the same claim about the one the lowering writes, held against the name the target gave
+    /// it rather than against the spelling written above.
+    #[test]
+    fn the_instruction_a_computed_goto_is_exempt_for_is_the_one_the_target_names() {
+        assert_eq!(LABELS, [x86_64::BRANCH.indirect]);
+    }
+
     #[test]
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
@@ -510,7 +526,7 @@ mod tests {
             if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
                 continue;
             }
-            if COMPARE.contains(&opcode) {
+            if COMPARE.contains(&opcode) || LABELS.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

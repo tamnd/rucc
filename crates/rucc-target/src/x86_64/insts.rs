@@ -41,10 +41,10 @@ use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 use Form::{
     AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
     CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, Landing, Lea, Load, LoadImm,
-    LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2,
-    RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov, UnaryR,
-    UnaryX87,
+    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load,
+    LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal,
+    RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Store, StoreVec, Test, TestCmov,
+    UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -214,6 +214,18 @@ pub enum Form {
     /// block that falls into the next one has no jump at all, which is what laying blocks out in
     /// a good order is worth.
     Jmp,
+    /// A jump to the address in a register, which is what a computed `goto` comes to.
+    ///
+    /// The one branch here whose target is not on the block and cannot be, since which of the
+    /// block's successors it arrives at is decided by the address while the program runs. They are
+    /// all still successors, because everything downstream reads the block to find out where
+    /// control can go and a target left off the list is a place the liveness and the layout would
+    /// both believe control never reaches.
+    ///
+    /// One operand, which is the address, and that is the whole difference from
+    /// [`Form::Call`]: a call through an address has an operand vector nothing can write down,
+    /// because a call passes arguments and this passes none.
+    JmpReg,
     /// A call, whose operand vector is not a fact about the instruction.
     ///
     /// Empty for a different reason than the jumps are. A jump has no operands because there is
@@ -591,6 +603,10 @@ static CMP: [OperandDesc; 2] = [OperandDesc::read(GPR), OperandDesc::read(GPR)];
 static CMP_RI: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
 static JUMP: [OperandDesc; 0] = [];
+// The address a computed goto jumps to, which is the one operand a branch here has. Where it
+// goes is still the block's successors, since the register holds one of them and nothing knows
+// which.
+static JUMP_REG: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A push reads a whole register and a pop writes one. Neither says anything about the stack
 // pointer, which every one of them moves: it is not an operand because nothing may be allocated
 // to it, and a frame that has one of these in it is a frame that has already accounted for the
@@ -690,6 +706,7 @@ impl Form {
             Test => &TEST,
             TestCmov => &TEST_CMOV,
             Jcc | Jmp => &JUMP,
+            JmpReg => &JUMP_REG,
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
@@ -1083,6 +1100,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("jcc_a", Jcc),
     ("jcc_ae", Jcc),
     ("jmp", Jmp),
+    // The same jump through a register, which is where a computed goto ends up. It is a separate
+    // name for the reason `call_reg` is one: the assembler writes the register with a star in
+    // front of it and the machine reads a different opcode byte, and both come from the target
+    // being a register rather than a place in the program.
+    ("jmp_reg", JmpReg),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of, which is the other
     // set of instructions no rule reaches. The arithmetic and the address computation a frame
     // needs are already above, because a prologue taking its frame is the same instruction as a
@@ -1350,7 +1372,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 375);
+        assert_eq!(described, 376);
     }
 
     #[test]
@@ -1393,6 +1415,7 @@ mod tests {
                             | CmpRi
                             | Jcc
                             | Jmp
+                            | JmpReg
                             | Push
                             | Ret
                             | StoreVec
@@ -1596,11 +1619,14 @@ mod tests {
         assert_eq!(form("amode_index_scale"), None);
     }
 
-    /// The block layout reads the four names out of [`crate::x86_64::BRANCH`] and writes them
+    /// The block layout reads the names out of [`crate::x86_64::BRANCH`] and writes them
     /// into the machine IR without ever asking what any of them is, so a name there that is not
     /// an opcode here would come out as an instruction nothing further along could describe. The
     /// forms are pinned too, because the layout writes one shape each and a name that turned out
-    /// to be an ordinary two-address instruction would be written with no operands at all.
+    /// to be an ordinary two-address instruction would be written with no operands at all. The
+    /// indirect jump is the one it does not write and only reads, and it is pinned here anyway,
+    /// since a name that was not this form would be a block the layout thought had a branch in it
+    /// and did not.
     #[test]
     fn every_instruction_the_block_layout_writes_is_described_here() {
         use crate::x86_64::BRANCH;
@@ -1611,6 +1637,7 @@ mod tests {
         assert_eq!(form(BRANCH.if_true), Some(Jcc));
         assert_eq!(form(BRANCH.if_false), Some(Jcc));
         assert_eq!(form(BRANCH.jump), Some(Jmp));
+        assert_eq!(form(BRANCH.indirect), Some(JmpReg));
         assert_ne!(BRANCH.if_true, BRANCH.if_false, "the two arms are not the same jump");
     }
 

@@ -767,6 +767,21 @@ impl<'a> Lowering<'a> {
                     self.address_of(inst)?;
                     continue;
                 }
+                // The address of a label and the branch that reads one, built here for the same
+                // reason and for one more. The reason is the same: what the first of them names is
+                // a block, which is not a value a rule pattern can bind, and there is nothing in
+                // the distance between two places in one function that a proof over bitvectors
+                // could discharge. The extra one is that the second is a terminator whose arms are
+                // not two and not fixed, and a rule says what an instruction reads rather than
+                // where a block goes.
+                Opcode::BlockAddr => {
+                    self.block_address(inst)?;
+                    continue;
+                }
+                Opcode::IndirectBr => {
+                    self.indirect_branch(inst)?;
+                    continue;
+                }
                 // Where this thread's own storage starts, built here for a reason of the same
                 // shape: what it reads is `%fs`, which is not a register the rule language can
                 // bind and not one a proof over bitvectors could say anything about, because what
@@ -1936,6 +1951,52 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// `&&label`, GNU's address of a label, which is the same `lea` a global gets against a place
+    /// in this same function.
+    ///
+    /// What the two have in common is the whole of the instruction: an address worked out from
+    /// where the instruction is, which is what `(%rip)` means and is the only way this compiler
+    /// reaches anything. What they do not have in common is what fills the four bytes in. A
+    /// global is a name, so the number is a relocation and the linker writes it. A block is a
+    /// place in this function, so both ends are in one section and the number is known as soon as
+    /// the blocks have been laid out, which is why `rucc_asm` fills it in the way it fills in a
+    /// jump rather than leaving a relocation behind.
+    ///
+    /// Nothing here says the block is one control can arrive at. That is said by the
+    /// [`Opcode::IndirectBr`] that reads the address, which lists every block it can arrive at,
+    /// and by nothing else: an address on its own is a number.
+    fn block_address(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let Some(call) = self.source.successors(inst).next() else {
+            return Err(self.unsupported(inst));
+        };
+        let block = self.at.expect("a block is being filled");
+        let reg = self.new_reg(result);
+        let span = self.source.span(inst);
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let mem = mir::Mem::block(self.out_block(call.block));
+        self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+        Ok(())
+    }
+
+    /// `goto *p`, GNU's computed goto, which is a jump through a register.
+    ///
+    /// Where it goes is not written here and cannot be. Every block it can arrive at is on the
+    /// block this ends, the way every other arm is, and which of them the address holds is decided
+    /// while the program runs. So this is one instruction with one operand, and the arms are
+    /// copied across by [`Self::edges`] like anybody else's.
+    fn indirect_branch(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let &address = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
+        let reg = self.reg_of(address)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let name = x86_64::BRANCH.indirect;
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        self.out.build(block, opcode).at(span).operand(mir::Operand::read(reg, self.gpr)).finish();
+        Ok(())
+    }
+
     /// `__builtin_thread_pointer`, which is the front of the block [`Self::thread_address`] adds
     /// an offset to.
     ///
@@ -2304,15 +2365,15 @@ impl<'a> Lowering<'a> {
     /// materialized where it is first wanted and the end of the block is where an edge wants it.
     ///
     /// Which is not quite the end. A block that leaves two ways has the branch as its last
-    /// instruction, and anything appended after a branch is something the branch has already
-    /// jumped past, so a constant materialized here would be a register the block below reads and
-    /// nothing ever writes. The branch is put back on the end when that happened, which is the
-    /// only reordering anything in this crate does and is why the branch is remembered before a
-    /// single argument is read.
+    /// instruction, and a block that leaves through a register has the indirect jump as its last,
+    /// and anything appended after either is something it has already jumped past, so a constant
+    /// materialized here would be a register the block below reads and nothing ever writes. The
+    /// one that was there is put back on the end when that happened, which is the only reordering
+    /// anything in this crate does and is why it is remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
-        let branch =
-            if self.source[term].opcode == Opcode::BrIf { self.out.terminator(out) } else { None };
+        let leaves = matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr);
+        let branch = if leaves { self.out.terminator(out) } else { None };
 
         let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
         let mut succs = Vec::with_capacity(calls.len());
@@ -2843,6 +2904,7 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             scale: u8::try_from(read.imm?).ok()?,
             disp: 0,
             symbol: None,
+            block: None,
             reach: mir::Reach::Itself,
             segment: None,
         }),

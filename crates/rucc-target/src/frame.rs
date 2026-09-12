@@ -139,7 +139,8 @@ pub struct FrameInsts {
     /// is: a target with no such instruction is one the flag cannot be honoured on, and the answer
     /// there is to say so rather than to write a name that stands for nothing. A prologue puts one
     /// at the top of every function, because a function's own address is the one address of it a
-    /// pointer can hold.
+    /// pointer can hold, and one goes at the top of every label a program took the address of,
+    /// because a computed `goto` is an indirect branch and those are the addresses it arrives at.
     pub landing: Option<&'static str>,
     /// A byte that does nothing, or `None` on a target where nothing is written for the purpose.
     ///

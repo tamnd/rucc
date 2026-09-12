@@ -74,6 +74,14 @@ pub struct BranchInsts {
     pub if_false: &'static str,
     /// Goes to the block's first successor.
     pub jump: &'static str,
+    /// Goes to the address in its one operand, which is one of the block's successors and which
+    /// of them is not known until the program runs.
+    ///
+    /// The one branch here the layout does not write. A computed `goto` is selected as this
+    /// instruction, because what it reads is a value and reading a value is what selection is for,
+    /// and the layout only has to know the name so that it can tell a block that already ends in
+    /// one from a block that still wants a jump.
+    pub indirect: &'static str,
     /// The comparisons a branch on their answer can be folded into, and what each pair becomes.
     ///
     /// Empty is a target that does not do this, and the layout then writes the test every time.

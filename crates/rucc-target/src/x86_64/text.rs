@@ -599,6 +599,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("jcc_a", &[spell("ja", &[Label])]),
     ("jcc_ae", &[spell("jae", &[Label])]),
     ("jmp", &[spell("jmp", &[Label])]),
+    // A jump through a register, which is the same mnemonic and a different instruction, the way
+    // `call_reg` above is. The star is the whole of the difference in the text.
+    ("jmp_reg", &[spell("jmp", &[Through])]),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of. A vector register is
     // moved with the aligned form for the reason `crate::x86_64::FRAME` gives.
     ("mov_rr_64", &[spell("movq", &[Reg(1, Quad), Reg(0, Quad)])]),
@@ -1007,17 +1010,28 @@ mod tests {
                     Symbol => symbol = true,
                     Label => label = true,
                     // The one argument that names an operand without saying which, so there is no
-                    // index to check against the form. What is checked is that only a call has
-                    // one, and that a call has one of these or a symbol and never both: those are
-                    // the two places a call can go and an instruction that named neither would go
-                    // nowhere.
+                    // index to check against the form. What is checked is that only the two
+                    // instructions that go through a register have one, and that a call has one of
+                    // these or a symbol and never both: those are the two places a call can go and
+                    // an instruction that named neither would go nowhere.
                     Through => through = true,
                 }
             }
             assert_eq!(imm, form.takes_imm(), "{name} and its immediate disagree");
             assert_eq!(mem, form.takes_mem(), "{name} and its addressing mode disagree");
-            assert_eq!(symbol || through, form == Form::Call, "{name} and where it goes disagree");
+            assert_eq!(
+                symbol || through,
+                matches!(form, Form::Call | Form::JmpReg),
+                "{name} and where it goes disagree"
+            );
             assert!(!(symbol && through), "{name} goes to a name and through a register at once");
+            // And the jump has no second place it could go. A call may be to a name the linker
+            // resolves, which is the ordinary one, but where a computed `goto` goes is in the
+            // register and a name written for one would be a jump somewhere the program never said.
+            assert!(
+                form != Form::JmpReg || through,
+                "{name} goes through a register and names something else"
+            );
             assert_eq!(
                 label,
                 matches!(form, Form::Jcc | Form::Jmp),
@@ -1034,11 +1048,19 @@ mod tests {
     /// of its answers in the opcode, so all it is given is the divisor. A compare and exchange is
     /// the second kind: what it compares against and where it leaves what it found are both `rax`,
     /// which the instruction reads and writes without being told.
+    ///
+    /// The jump through a register is a third. Its register is named by the argument that says a
+    /// register without saying which operand it is, which is the argument a call through one is
+    /// written with, so what is named here is not an index and there is nothing for the count below
+    /// to match it against. The check that it is named at all is in the test above, where the
+    /// argument it is named by is the thing being read.
     #[test]
     fn an_operand_no_instruction_names_is_one_that_is_not_written() {
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
-            if insts.is_empty() || matches!(form, Form::DivQuo | Form::DivRem | Form::CmpXchg) {
+            if insts.is_empty()
+                || matches!(form, Form::DivQuo | Form::DivRem | Form::CmpXchg | Form::JmpReg)
+            {
                 continue;
             }
             let named = named(insts);

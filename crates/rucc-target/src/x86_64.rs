@@ -247,6 +247,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     if_true: "jcc_ne",
     if_false: "jcc_e",
     jump: "jmp",
+    indirect: "jmp_reg",
     fused: &FUSED,
 };
 
