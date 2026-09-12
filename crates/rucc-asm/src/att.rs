@@ -43,7 +43,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, defs};
+use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
@@ -405,9 +405,12 @@ impl Writer<'_> {
             let _ = write!(out, "{}{}", self.directives.symbol(), self.names.resolve(symbol));
             // The slot rather than the thing, which the assembler is told by the suffix and not by
             // the instruction: the two are the same `movq` and differ only in what goes in the
-            // four bytes, so there is nowhere else to say it.
-            if amode.got {
-                out.push_str("@GOTPCREL");
+            // four bytes, so there is nowhere else to say it. The third one is a slot as well, and
+            // what it holds is an offset into a thread's own block rather than an address.
+            match amode.reach {
+                Reach::Itself => {}
+                Reach::Table => out.push_str("@GOTPCREL"),
+                Reach::Thread => out.push_str("@GOTTPOFF"),
             }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
@@ -696,6 +699,23 @@ mod tests {
     }
 
     #[test]
+    fn an_address_that_reads_the_offset_of_a_thread_local_says_so_on_the_symbol_as_well() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
+            let away = names.intern("away");
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem::thread(away))
+                .finish();
+        });
+        // The third instruction that is the same instruction as the two above it. What comes back
+        // this time is not an address at all: it is how far into a thread's own block the variable
+        // sits, and what makes it an address is the addition that follows it.
+        assert_eq!(body(&text), ["movq\taway@GOTTPOFF(%rip), %rax"]);
+    }
+
+    #[test]
     fn a_jump_goes_to_the_label_of_the_block_the_first_arm_names() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
@@ -911,6 +931,35 @@ mod tests {
         // listing is a thing to read and the bytes are the object's business.
         assert!(text.contains("\ncounter:\n\t.long\t42\n"), "{text}");
         assert!(text.contains("\t.size\tcounter, .-counter\n"), "{text}");
+    }
+
+    /// The flag and the type are the whole of what makes it thread-local in a listing, and they
+    /// are what gcc 16.2.0 writes for `_Thread_local int counter = 42;`.
+    #[test]
+    fn a_thread_local_variable_is_a_section_with_the_flag_on_it_and_a_type_of_its_own() {
+        let text = data(
+            vec![var(
+                "counter",
+                Place::Thread { zero: false },
+                vec![Piece::Scalar(vec![42, 0, 0, 0])],
+            )],
+            Os::Linux,
+        );
+        assert!(text.contains("\t.section\t.tdata,\"awT\",@progbits\n"), "{text}");
+        assert!(text.contains("\t.type\tcounter, @tls_object\n"), "{text}");
+        assert!(text.contains("\ncounter:\n\t.long\t42\n"), "{text}");
+    }
+
+    /// The other half of the pair, which is `.bss` to the one above's `.data`.
+    #[test]
+    fn a_thread_local_variable_with_no_image_to_carry_goes_in_the_section_that_carries_none() {
+        let text = data(
+            vec![var("counter", Place::Thread { zero: true }, vec![Piece::Zero(4)])],
+            Os::Linux,
+        );
+        assert!(text.contains("\t.section\t.tbss,\"awT\",@nobits\n"), "{text}");
+        assert!(text.contains("\t.type\tcounter, @tls_object\n"), "{text}");
+        assert!(text.contains("\ncounter:\n\t.space\t4\n"), "{text}");
     }
 
     #[test]

@@ -100,15 +100,19 @@ pub enum Error {
         /// The triple that was asked for.
         triple: String,
     },
-    /// A thread-local variable, which is not a mistake and not written yet.
+    /// A thread-local variable on a format that does not spell one the way ELF does.
     ///
-    /// The only one of these that is about a program rather than about this compiler. Reaching a
-    /// thread-local variable is a call or a load off the thread pointer depending on the model,
-    /// and none of that is built, so one is refused rather than written out as an ordinary
-    /// variable that every thread would share.
+    /// The only one of these that is about a program rather than about this compiler. ELF says a
+    /// thread-local variable with a section flag and a symbol type, and that is written. Windows
+    /// hands out an index at load time and reaches the variable through a table the index names,
+    /// and Mach-O puts a descriptor in front of every one and reaches it by calling through the
+    /// descriptor, so on those two one is refused rather than written out as an ordinary variable
+    /// that every thread would share.
     Thread {
         /// The variable, as the C program spelled it.
         name: String,
+        /// The object format that has no writing of one here, as its own name.
+        format: &'static str,
     },
     /// An ifunc, which is not a mistake and not written yet.
     ///
@@ -148,8 +152,8 @@ impl fmt::Display for Error {
             Error::Machine { triple } => {
                 write!(f, "there is no assembly writer for {triple} in this compiler yet")
             }
-            Error::Thread { name } => {
-                write!(f, "'{name}' is thread-local, which this compiler does not build yet")
+            Error::Thread { name, format } => {
+                write!(f, "'{name}' is thread-local, which is not written on {format} yet")
             }
             Error::IFunc { name } => {
                 write!(f, "'{name}' is an ifunc, which this compiler does not write yet")

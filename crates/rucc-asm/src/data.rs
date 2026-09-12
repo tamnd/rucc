@@ -27,10 +27,12 @@
 //!
 //! # What is refused
 //!
-//! A thread-local variable. Reaching one is a call to `__tls_get_addr` or a load from the thread
-//! pointer depending on the model, none of which the back end builds yet, so a file with one in it
-//! is refused by name rather than written out as an ordinary variable that every thread would
-//! share.
+//! A thread-local variable on a format that is not ELF. ELF says one with a section flag and a
+//! symbol type, which is what [`place`] and [`crate::format`] write. Windows hands out an index at
+//! load time and reaches a variable through a table the index names, and Mach-O puts a descriptor
+//! in front of every one and reaches it by calling through the descriptor, so neither is this
+//! written a different way and both are refused by name rather than written out as an ordinary
+//! variable that every thread would share.
 //!
 //! An ifunc, which is the other thing an alias in the IR can be. It is resolved once at program
 //! start by calling a function in the same object, which wants a symbol type and a relocation
@@ -40,6 +42,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module, SymbolRef};
 use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc, Visibility};
+use rucc_target::ObjectFormat;
 
 use crate::Error;
 
@@ -125,7 +128,7 @@ impl Globals {
                 visibility: var.visibility,
                 relocs: Vec::new(),
             };
-            if matches!(var.place, Place::Zero | Place::Merged) {
+            if matches!(var.place, Place::Zero | Place::Merged | Place::Thread { zero: true }) {
                 data.objects.push(object);
                 continue;
             }
@@ -158,18 +161,22 @@ impl Globals {
 
 /// Every variable a module defines, laid out.
 ///
+/// The format is an argument because one question here is the format's rather than the module's:
+/// a thread-local variable is a section flag and a symbol type on ELF and is neither of those on
+/// the other two, so which of them is being written decides whether there is anything to write.
+///
 /// # Errors
 ///
-/// [`Error::Thread`] for a thread-local variable, which is a program this compiler is behind on
-/// rather than a mistake, and [`Error::Image`] for a piece of an initializer nothing here can
-/// write down. See [`Error`].
-pub fn globals(module: &Module, names: &Interner) -> Result<Globals, Error> {
+/// [`Error::Thread`] for a thread-local variable on a format that does not spell one this way,
+/// which is a program this compiler is behind on rather than a mistake, and [`Error::Image`] for a
+/// piece of an initializer nothing here can write down. See [`Error`].
+pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Result<Globals, Error> {
     let mut out = Globals::default();
     for id in module.globals() {
         if module[id].is_declaration() {
             continue;
         }
-        out.vars.push(variable(module, names, id)?);
+        out.vars.push(variable(module, names, id, format)?);
     }
     Ok(out)
 }
@@ -203,11 +210,16 @@ pub fn aliases(module: &Module, names: &Interner) -> Result<Vec<Alias>, Error> {
 }
 
 /// One variable, laid out.
-fn variable(module: &Module, names: &Interner, id: GlobalId) -> Result<Variable, Error> {
+fn variable(
+    module: &Module,
+    names: &Interner,
+    id: GlobalId,
+    format: ObjectFormat,
+) -> Result<Variable, Error> {
     let global = &module[id];
     let name = names.resolve(global.name).to_owned();
-    if global.tls.is_some() {
-        return Err(Error::Thread { name });
+    if global.tls.is_some() && format != ObjectFormat::Elf {
+        return Err(Error::Thread { name, format: format.as_str() });
     }
     let init = global.init.expect("a definition has an image");
 
@@ -318,6 +330,14 @@ fn place(
     addrs: &[Symbol],
 ) -> Place {
     let global = &module[id];
+    // First, because a thread-local variable has to be in one of the two sections a thread gets a
+    // copy of whatever else is true of it. It is never merged, since what `.comm` asks the linker
+    // for is one piece of zeroed space and this wants one per thread, and it is never read only,
+    // since the copy is made by writing it.
+    if global.tls.is_some() {
+        let zero = !pieces.is_empty() && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
+        return Place::Thread { zero };
+    }
     if let Some(section) = global.section {
         return Place::Named(names.resolve(section).to_owned());
     }
@@ -383,7 +403,8 @@ mod tests {
         let mut module = module(&mut names);
         module.add_global(Global::new(names.intern("x"), 4, 4));
         defined(&mut module, &mut names, "y", &[Datum::Zero(4)]);
-        let vars = globals(&module, &names).expect("a module of two globals").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of two globals").vars;
         assert_eq!(vars.iter().map(|var| var.name.as_str()).collect::<Vec<_>>(), ["y"]);
     }
 
@@ -403,7 +424,7 @@ mod tests {
             let mut module = module(&mut names);
             let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
             module[id].visibility = asked;
-            let out = globals(&module, &names).expect("a module of one global");
+            let out = globals(&module, &names, ObjectFormat::Elf).expect("a module of one global");
             assert_eq!(out.vars[0].visibility, wanted, "{asked:?}");
             assert_eq!(out.image().objects[0].visibility, wanted, "{asked:?} through the image");
         }
@@ -415,7 +436,8 @@ mod tests {
         let mut module = module(&mut names);
         let value = module.add_imm(Imm::int(258, Type::int(32)));
         defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(32), value }]);
-        let vars = globals(&module, &names).expect("a module of one global").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
         assert_eq!(vars[0].pieces, [Piece::Scalar(vec![2, 1, 0, 0])]);
         // The low byte first, which is what this machine reads and is a fact about the module
         // rather than about the variable.
@@ -438,7 +460,8 @@ mod tests {
         let merged = defined(&mut module, &mut names, "merged", &[Datum::Zero(4)]);
         module[merged].linkage = Linkage::Common;
 
-        let vars = globals(&module, &names).expect("a module of five globals").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of five globals").vars;
         let places: Vec<&Place> = vars.iter().map(|var| &var.place).collect();
         assert_eq!(
             places,
@@ -496,7 +519,8 @@ mod tests {
         module[both].constant = true;
         module[both].size = 16;
 
-        let vars = globals(&module, &names).expect("a module of five globals").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of five globals").vars;
         let places: Vec<(&str, &Place)> =
             vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
         assert_eq!(
@@ -519,7 +543,8 @@ mod tests {
         let id =
             defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(8), value }]);
         module[id].size = 4;
-        let vars = globals(&module, &names).expect("a module of one global").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
         assert_eq!(vars[0].pieces, [Piece::Scalar(vec![7]), Piece::Zero(3)]);
         assert_eq!(vars[0].size, 4);
     }
@@ -531,7 +556,8 @@ mod tests {
         let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 16, size: 8 });
         let id = defined(&mut module, &mut names, "p", &[Datum::Addr(reloc)]);
         module[id].size = 8;
-        let vars = globals(&module, &names).expect("a module of one global").vars;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
         assert_eq!(vars[0].pieces, [Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 }]);
 
         let data = Globals { vars }.image();
@@ -553,7 +579,8 @@ mod tests {
         let mut module = module(&mut names);
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4096)]);
         module[id].size = 4096;
-        let data = globals(&module, &names).expect("a module of one global").image();
+        let data =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").image();
         assert_eq!(data.objects[0].place, Place::Zero);
         assert_eq!(data.objects[0].size, 4096);
         // The point of the section: a program with a large zeroed array is a small file.
@@ -576,7 +603,8 @@ mod tests {
             let name = format!("x{index}");
             let id = defined(&mut module, &mut names, &name, &[Datum::Zero(4)]);
             module[id].linkage = linkage;
-            let vars = globals(&module, &names).expect("a module of globals").vars;
+            let vars =
+                globals(&module, &names, ObjectFormat::Elf).expect("a module of globals").vars;
             assert_eq!(vars[index].binding, binding, "{linkage:?}");
         }
     }
@@ -616,13 +644,77 @@ mod tests {
         assert_eq!(error, Error::IFunc { name: "memcpy".to_owned() });
     }
 
+    /// The two sections a thread gets a copy of, told apart the way `.data` and `.bss` are.
     #[test]
-    fn a_thread_local_variable_is_refused_rather_than_shared_between_every_thread() {
+    fn a_thread_local_variable_goes_in_the_section_a_thread_gets_a_copy_of() {
         let mut names = Interner::new();
         let mut module = module(&mut names);
-        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+        let written = defined(
+            &mut module,
+            &mut names,
+            "counted",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[written].tls = Some(TlsModel::GlobalDynamic);
+        let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
+        module[zeroed].tls = Some(TlsModel::GlobalDynamic);
+
+        let vars = globals(&module, &names, ObjectFormat::Elf).expect("two thread-locals").vars;
+        assert_eq!(vars[0].place, Place::Thread { zero: false }, ".tdata");
+        assert_eq!(vars[1].place, Place::Thread { zero: true }, ".tbss");
+    }
+
+    /// Being read only loses to being thread-local, because the copy is made by writing it.
+    #[test]
+    fn a_constant_thread_local_is_still_in_the_section_a_thread_gets_a_copy_of() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+        let id =
+            defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(32), value }]);
         module[id].tls = Some(TlsModel::GlobalDynamic);
-        let error = globals(&module, &names).expect_err("a thread-local variable");
-        assert_eq!(error, Error::Thread { name: "x".to_owned() });
+        module[id].constant = true;
+
+        let vars = globals(&module, &names, ObjectFormat::Elf).expect("a thread-local").vars;
+        assert_eq!(vars[0].place, Place::Thread { zero: false });
+    }
+
+    /// The image of a thread-local whose image is all zeros costs the file nothing, the same as
+    /// `.bss` does, and the one that is not all zeros carries its bytes.
+    #[test]
+    fn the_image_of_a_thread_local_is_carried_only_when_it_is_not_all_zeros() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(258, Type::int(32)));
+        let written = defined(
+            &mut module,
+            &mut names,
+            "counted",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[written].tls = Some(TlsModel::GlobalDynamic);
+        let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
+        module[zeroed].tls = Some(TlsModel::GlobalDynamic);
+
+        let data = globals(&module, &names, ObjectFormat::Elf).expect("two thread-locals").image();
+        assert_eq!(data.objects[0].bytes, [2, 1, 0, 0]);
+        assert_eq!(data.objects[0].size, 4);
+        assert!(data.objects[1].bytes.is_empty(), "a zeroed one carries its size and no bytes");
+        assert_eq!(data.objects[1].size, 4);
+    }
+
+    /// Windows and Mach-O reach a thread-local through a table and through a descriptor, neither
+    /// of which is a section with a flag on it, so the variable is refused by name there.
+    #[test]
+    fn a_thread_local_variable_is_refused_on_a_format_that_does_not_spell_one_this_way() {
+        for format in [ObjectFormat::MachO, ObjectFormat::Coff] {
+            let mut names = Interner::new();
+            let mut module = module(&mut names);
+            let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+            module[id].tls = Some(TlsModel::GlobalDynamic);
+            let error = globals(&module, &names, format).expect_err("a thread-local variable");
+            assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
+        }
     }
 }

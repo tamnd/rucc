@@ -269,6 +269,21 @@ impl Directives {
                 out.push_str("\t.data\n");
             }
             (Directives::Elf | Directives::Coff, Place::Zero) => out.push_str("\t.bss\n"),
+            // The flags are spelled out because no assembler has a one word directive for either
+            // of these, and `T` is the one that matters: it is `SHF_TLS`, and it is what tells the
+            // linker the section is the template every thread gets a copy of rather than storage
+            // the program has one of. The other two are the `a` and `w` that `.data` has already.
+            (Directives::Elf, Place::Thread { zero: false }) => {
+                out.push_str("\t.section\t.tdata,\"awT\",@progbits\n");
+            }
+            (Directives::Elf, Place::Thread { zero: true }) => {
+                out.push_str("\t.section\t.tbss,\"awT\",@nobits\n");
+            }
+            // COFF and Mach-O spell thread-local storage in ways that are not a section with a
+            // flag on it, and [`crate::globals`] refuses a thread-local variable on both of them
+            // before anything reaches here. This arm is here because the match is over every pair
+            // of a format and a place, not because it is one that can be taken.
+            (Directives::Coff, Place::Thread { .. }) => out.push_str("\t.data\n"),
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
             (Directives::Elf, Place::RelocReadOnly { local }) => {
                 let name = if *local { ".data.rel.ro.local" } else { ".data.rel.ro" };
@@ -343,7 +358,15 @@ impl Directives {
         self.seen(out, &var.name, var.binding, var.visibility);
         let _ = writeln!(out, "\t.p2align\t{align}");
         if self == Directives::Elf {
-            let _ = writeln!(out, "\t.type\t{}, @object", var.name);
+            // The type a linker checks a relocation against. A reference to a thread-local is not
+            // the distance to an address, because it has a different address in every thread, so
+            // saying which kind of object this is is what lets the linker refuse a reference that
+            // asked for the wrong thing rather than resolve it to a number that means nothing.
+            let kind = match var.place {
+                Place::Thread { .. } => "@tls_object",
+                _ => "@object",
+            };
+            let _ = writeln!(out, "\t.type\t{}, {kind}", var.name);
         }
         let _ = writeln!(out, "{symbol}{}:", var.name);
         true

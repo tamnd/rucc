@@ -168,6 +168,26 @@ impl Operand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Imm(pub i64);
 
+/// What the four bytes beside a symbol in an address hold.
+///
+/// Three different numbers written in the same place, and nothing about the instruction says which
+/// one it is: `movq sym(%rip)`, `movq sym@GOTPCREL(%rip)` and `movq sym@GOTTPOFF(%rip)` are the
+/// same opcode with the same operands, and the only thing that tells them apart is the relocation
+/// the assembler leaves behind. So the difference has to be carried here, beside the symbol, rather
+/// than being read back out of the shape of the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Reach {
+    /// The distance to the symbol itself, which is the ordinary case. `R_X86_64_PC32`.
+    #[default]
+    Itself,
+    /// The distance to the slot of the global offset table holding the symbol's address, which is
+    /// a load rather than an arithmetic. See [`Mem::got`].
+    Table,
+    /// The distance to the slot of the global offset table holding the symbol's offset inside a
+    /// thread's own block of storage. See [`Mem::thread`].
+    Thread,
+}
+
 /// A memory addressing mode, as the instruction holds it.
 ///
 /// The registers are the indices of the operands holding them rather than the registers
@@ -186,9 +206,8 @@ pub struct Amode {
     pub disp: i32,
     /// The symbol the address is relative to, for an access to a global.
     pub symbol: Option<Symbol>,
-    /// Whether the address is read out of the global offset table rather than worked out from the
-    /// instruction pointer. See [`Mem::got`].
-    pub got: bool,
+    /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
+    pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
 }
@@ -201,7 +220,7 @@ impl Amode {
         scale: 1,
         disp: 0,
         symbol: None,
-        got: false,
+        reach: Reach::Itself,
         segment: None,
     };
 }
@@ -224,9 +243,8 @@ pub struct Mem {
     pub disp: i32,
     /// The symbol the address is relative to.
     pub symbol: Option<Symbol>,
-    /// Whether the address is read out of the global offset table rather than worked out from the
-    /// instruction pointer. See [`Self::got`].
-    pub got: bool,
+    /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
+    pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
 }
@@ -241,7 +259,7 @@ impl Mem {
             scale: 1,
             disp: 0,
             symbol: None,
-            got: false,
+            reach: Reach::Itself,
             segment: None,
         }
     }
@@ -255,7 +273,7 @@ impl Mem {
             scale: 1,
             disp: 0,
             symbol: Some(symbol),
-            got: false,
+            reach: Reach::Itself,
             segment: None,
         }
     }
@@ -272,7 +290,7 @@ impl Mem {
             scale: 1,
             disp,
             symbol: None,
-            got: false,
+            reach: Reach::Itself,
             segment: Some(segment),
         }
     }
@@ -290,7 +308,24 @@ impl Mem {
     /// program after all, which is why nothing is lost by asking for it.
     #[must_use]
     pub const fn got(symbol: Symbol) -> Self {
-        Self { got: true, ..Self::of(symbol) }
+        Self { reach: Reach::Table, ..Self::of(symbol) }
+    }
+
+    /// The slot of the global offset table holding that symbol's offset inside a thread's block.
+    ///
+    /// A thread-local variable has no one address, since every thread has a copy of it, so there is
+    /// nothing for [`Self::of`] to be the distance to and a linker refuses one aimed at such a
+    /// symbol. What every copy does share is where it sits inside the block a thread gets, and that
+    /// offset is the number this slot holds: add it to the address of the running thread's block,
+    /// which the machine keeps in `%fs`, and the result is this thread's copy.
+    ///
+    /// The offset is a slot rather than a constant because how big the blocks in front of this
+    /// object's are is only known once the program is linked together, and in a shared library only
+    /// once it is loaded. The linker writes the constant into the instruction instead when it is
+    /// making an executable, where it does know, so this costs nothing in the case that is common.
+    #[must_use]
+    pub const fn thread(symbol: Symbol) -> Self {
+        Self { reach: Reach::Thread, ..Self::of(symbol) }
     }
 
     /// The same address with an index register scaled by that much.

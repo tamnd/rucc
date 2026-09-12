@@ -35,7 +35,7 @@
 //! between two functions is never executed, so there is nothing to be gained by it.
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, Func, Inst, Operand, defs};
+use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
@@ -276,10 +276,10 @@ impl Assembler<'_> {
                             // A mode that reads the global offset table names the slot rather than
                             // the thing, and the four bytes are the same four bytes either way, so
                             // which relocation it is is the whole of the difference here.
-                            let kind = if amode.is_some_and(|mem| mem.got) {
-                                Reference::Got
-                            } else {
-                                Reference::Data
+                            let kind = match amode.map_or(Reach::Itself, |mem| mem.reach) {
+                                Reach::Itself => Reference::Data,
+                                Reach::Table => Reference::Got,
+                                Reach::Thread => Reference::Thread,
                             };
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }
@@ -314,7 +314,7 @@ impl Assembler<'_> {
             if let Some((symbol, kind, disp)) = wanted {
                 let at = match kind {
                     Reference::Call => holes.dest,
-                    Reference::Data | Reference::Got => holes.rip,
+                    Reference::Data | Reference::Got | Reference::Thread => holes.rip,
                     // An address written into an image rather than reached by an instruction.
                     // Nothing above produces one, because every reference an instruction makes
                     // is a distance from where the instruction ends.

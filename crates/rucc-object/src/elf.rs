@@ -202,7 +202,14 @@ pub fn write(
             // recorded where an ordinary symbol records its address.
             value: if object.place == Place::Merged { object.align } else { offset },
             size: object.size,
-            kind: SymbolKind::Data,
+            // A thread-local variable is a different kind of symbol rather than a symbol in a
+            // different section, and it has to be both: the kind is what a linker checks a
+            // relocation against, so a `R_X86_64_PC32` aimed at one is refused rather than
+            // resolved to an address that would have been one thread's and is nobody's.
+            kind: match object.place {
+                Place::Thread { .. } => SymbolKind::Tls,
+                _ => SymbolKind::Data,
+            },
             scope: scope_of(object.binding),
             weak: object.binding == Binding::Weak,
             section,
@@ -506,7 +513,7 @@ fn put(
     if sections.data {
         if let Some(name) = object.place.split(&object.name) {
             let section = obj.add_section(Vec::new(), name.into_bytes(), kind_of(&object.place));
-            let offset = if object.place == Place::Zero {
+            let offset = if carries_no_bytes(&object.place) {
                 obj.append_section_bss(section, object.size, object.align)
             } else {
                 obj.append_section_data(section, &object.bytes, object.align)
@@ -533,6 +540,8 @@ fn put(
             )
         }),
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
+        Place::Thread { zero: false } => obj.section_id(StandardSection::Tls),
+        Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
         Place::Merged => return (SymbolSection::Common, 0),
         // A named section is the program's word for where this goes, and a program that names one
         // wants what it named rather than what would have been chosen. It is written as ordinary
@@ -541,12 +550,21 @@ fn put(
             obj.add_section(Vec::new(), name.clone().into_bytes(), SectionKind::Data)
         }
     };
-    let offset = if object.place == Place::Zero {
+    let offset = if carries_no_bytes(&object.place) {
         obj.append_section_bss(section, object.size, object.align)
     } else {
         obj.append_section_data(section, &object.bytes, object.align)
     };
     (SymbolSection::Section(section), offset)
+}
+
+/// Whether the section this goes in says how big the variable is and holds none of its bytes.
+///
+/// Two of them, and they are the same answer twice: `.bss` is the image that is all zeros, and
+/// `.tbss` is a thread's own copy of one. A section like this costs its size in the section header
+/// and nothing in the file, which is what keeps a program with a large zeroed array small.
+fn carries_no_bytes(place: &Place) -> bool {
+    matches!(place, Place::Zero | Place::Thread { zero: true })
 }
 
 /// What a section split off for one variable is, which is what the section it was split off from
@@ -562,6 +580,8 @@ fn kind_of(place: &Place) -> SectionKind {
         Place::ReadOnly => SectionKind::ReadOnlyData,
         Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
         Place::Zero => SectionKind::UninitializedData,
+        Place::Thread { zero: false } => SectionKind::Tls,
+        Place::Thread { zero: true } => SectionKind::UninitializedTls,
         Place::Written | Place::Merged | Place::Named(_) => SectionKind::Data,
     }
 }
@@ -645,13 +665,15 @@ fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibil
 /// library work at all. A load may not, because there is nowhere to put a stub that a load would
 /// read, so a load of something another object may define reads a table slot the linker fills in
 /// instead, and the relaxing form of the relocation lets the linker undo that when it turns out
-/// nobody else defines it. The fourth is the address itself, at the two widths this machine writes
-/// one at.
+/// nobody else defines it. The fourth is a table slot as well and holds an offset into a thread's
+/// own block rather than an address, because a thread-local variable has a copy per thread and no
+/// address at all. The fifth is the address itself, at the two widths this machine writes one at.
 fn r_type(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
         Reference::Data => elf::R_X86_64_PC32,
         Reference::Got => elf::R_X86_64_REX_GOTPCRELX,
+        Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
         Reference::Address { .. } => return None,
@@ -918,6 +940,7 @@ mod tests {
             (Reference::Call, elf::R_X86_64_PLT32),
             (Reference::Data, elf::R_X86_64_PC32),
             (Reference::Got, elf::R_X86_64_REX_GOTPCRELX),
+            (Reference::Thread, elf::R_X86_64_GOTTPOFF),
         ] {
             let mut text = calling("puts");
             text.relocs[0].kind = reference;
@@ -1203,7 +1226,7 @@ mod tests {
     fn variable(name: &str, place: Place) -> Object {
         Object {
             name: name.to_owned(),
-            bytes: if place == Place::Zero { Vec::new() } else { vec![1, 0, 0, 0] },
+            bytes: if carries_no_bytes(&place) { Vec::new() } else { vec![1, 0, 0, 0] },
             size: 4,
             align: 4,
             place,
@@ -1227,6 +1250,8 @@ mod tests {
             (Place::RelocReadOnly { local: false }, ".data.rel.ro"),
             (Place::RelocReadOnly { local: true }, ".data.rel.ro.local"),
             (Place::Zero, ".bss"),
+            (Place::Thread { zero: false }, ".tdata"),
+            (Place::Thread { zero: true }, ".tbss"),
             (Place::Named(".init_array".to_owned()), ".init_array"),
         ] {
             let bytes = holding(variable("x", place.clone()));
@@ -1236,7 +1261,25 @@ mod tests {
             // The zero filled one is as long as it says and carries none of it, which is the
             // whole reason the section exists.
             let carried = section.data().expect("the bytes").len();
-            assert_eq!(carried, if place == Place::Zero { 0 } else { 4 }, "{place:?}");
+            assert_eq!(carried, if carries_no_bytes(&place) { 0 } else { 4 }, "{place:?}");
+        }
+    }
+
+    /// The section is half of it and the symbol is the other half.
+    ///
+    /// A linker checks a relocation against the kind of the symbol it names, so a variable that is
+    /// in `.tdata` and is an ordinary data symbol is one an ordinary reference resolves to an
+    /// address that belongs to no thread. `STT_TLS` is what makes that reference an error instead.
+    #[test]
+    fn a_thread_local_variable_is_a_thread_local_symbol_and_not_only_a_thread_local_section() {
+        for place in [Place::Thread { zero: false }, Place::Thread { zero: true }] {
+            let bytes = holding(variable("counter", place.clone()));
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let symbol = file
+                .symbols()
+                .find(|symbol| symbol.name() == Ok("counter"))
+                .unwrap_or_else(|| panic!("{place:?}"));
+            assert_eq!(symbol.kind(), SymbolKind::Tls, "{place:?}");
         }
     }
 
@@ -1253,6 +1296,8 @@ mod tests {
             (Place::RelocReadOnly { local: false }, ".data.rel.ro.x"),
             (Place::RelocReadOnly { local: true }, ".data.rel.ro.local.x"),
             (Place::Zero, ".bss.x"),
+            (Place::Thread { zero: false }, ".tdata.x"),
+            (Place::Thread { zero: true }, ".tbss.x"),
         ] {
             let data = Data { objects: vec![variable("x", place.clone())] };
             let bytes = write(&Text::default(), &data, &[], &target(), sections).expect("object");
@@ -1263,7 +1308,7 @@ mod tests {
             // Which page it lands in is what the section it came out of decided, and splitting
             // must not quietly change it: the zero filled one still carries none of its bytes.
             let carried = section.data().expect("the bytes").len();
-            assert_eq!(carried, if place == Place::Zero { 0 } else { 4 }, "{place:?}");
+            assert_eq!(carried, if carries_no_bytes(&place) { 0 } else { 4 }, "{place:?}");
         }
     }
 
