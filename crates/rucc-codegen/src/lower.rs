@@ -370,6 +370,14 @@ pub struct Lowered {
     /// Which rules of the table lowered it, which is what `-Zrule-coverage` asks for and what
     /// `crate::coverage` writes down.
     pub fired: Fired,
+    /// Which machine IR block each IR block became, indexed by the IR block's own index, and
+    /// nothing for a block the walk never reached.
+    ///
+    /// Here because it is the only place the correspondence exists. Selection makes one block per
+    /// block, in the same order and with the arms in the same order, so anything the IR knows
+    /// about a block can be carried down through this and nothing else, and
+    /// [`crate::weights::carry`] is what does.
+    pub blocks: Vec<Option<mir::Block>>,
 }
 
 /// What a function's stack has to hold, as far as selection is able to say.
@@ -631,7 +639,7 @@ impl<'a> Lowering<'a> {
         for block in self.order() {
             self.block(block)?;
         }
-        Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired })
+        Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired, blocks: self.blocks })
     }
 
     /// The order the blocks are filled in, which is not the order they are written in.
@@ -2161,7 +2169,7 @@ impl<'a> Lowering<'a> {
                 };
                 regs.push(reg);
             }
-            succs.push(mir::BlockCall { block: self.out_block(call.block), args: regs });
+            succs.push(mir::BlockCall::with(self.out_block(call.block), regs));
         }
         if let Some(branch) = branch {
             if self.out.terminator(out) != Some(branch) {

@@ -761,6 +761,13 @@ fn generate(
             Some(false) => pipeline::Profile::Late,
         },
         patch: pipeline::Room { after: opts.patchable.after(), before: opts.patchable.before },
+        // On at every level above `-O0`, which is where gcc turns `-freorder-blocks` on
+        // (`gcc/opts.cc:604`) and what `spec/optimizer/38-scheduling-and-layout.md` section 38.3
+        // reads off that: it is one of the earliest optimizations there is, it is nearly free,
+        // and it helps every target. `-O0` keeps the order the shape of the graph gives, so that
+        // the blocks come out in the order they were written and a person stepping through the
+        // code walks down the screen.
+        reorder: opts.reorder_blocks.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

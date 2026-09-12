@@ -129,6 +129,7 @@ pub mod select;
 pub mod split;
 pub mod switch;
 pub mod varargs;
+pub mod weights;
 pub mod wide;
 pub mod widths;
 

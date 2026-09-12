@@ -1730,6 +1730,14 @@ pub struct Options {
     /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
     /// exactly that reason. A convention without a red zone ignores this.
     pub red_zone: bool,
+    /// Whether the blocks of a function are put in the order their weights say rather than in the
+    /// order the shape of the graph gives, from `-freorder-blocks` and `-fno-reorder-blocks`.
+    ///
+    /// `None` is a command line that said neither, which is nearly every one, and then the level
+    /// decides: on above `-O0`, which is where gcc turns it on. It is a three way answer rather
+    /// than a `bool` because `-O2 -fno-reorder-blocks` and `-O0` have to be different things and
+    /// a `bool` set from the level could not tell them apart.
+    pub reorder_blocks: Option<bool>,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
     /// Whether a prologue takes its frame a page at a time, from `-fstack-clash-protection`.
@@ -2071,6 +2079,7 @@ impl Options {
             profile_data: Profile::default(),
             frame_pointer: false,
             red_zone: true,
+            reorder_blocks: None,
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),

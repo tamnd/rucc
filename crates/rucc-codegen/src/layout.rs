@@ -10,16 +10,18 @@
 //!
 //! # What the order is
 //!
-//! Reverse postorder over the CFG, with each block's successors walked in reverse, and anything
-//! unreachable put at the end in block order.
+//! Two orders, and which one is used is what `-freorder-blocks` asks about.
 //!
-//! That is the `-O0` order `spec/10-backend.md` section 10.3 asks for, and it is not arbitrary.
-//! Walking the successors in reverse is what makes the first arm of a branch come out first,
-//! because a depth-first walk finishes its last child first and reverse postorder then puts that
-//! child last. So an `if` with no `else` falls through into its body, and a loop comes out as its
-//! header, its body and then whatever follows it, which is the shape where the back edge is the
-//! only jump in it. The chain construction weighted by block frequency that section 10.6
-//! describes is what replaces this above `-O0`, and it is not written yet.
+//! At `-O0`, reverse postorder over the CFG, with each block's successors walked in reverse, and
+//! anything unreachable put at the end in block order. That is the order `spec/10-backend.md`
+//! section 10.3 asks for, and it is not arbitrary. Walking the successors in reverse is what
+//! makes the first arm of a branch come out first, because a depth-first walk finishes its last
+//! child first and reverse postorder then puts that child last. So an `if` with no `else` falls
+//! through into its body, and a loop comes out as its header, its body and then whatever follows
+//! it, which is the shape where the back edge is the only jump in it.
+//!
+//! Above it, traces: the software trace cache construction of
+//! `spec/optimizer/38-scheduling-and-layout.md` section 38.4, which is [`traces`] below.
 //!
 //! Unreachable blocks are laid out rather than deleted. Deleting one is a decision about what the
 //! program does and this pass has no business making it, and a block nothing reaches costs the
@@ -87,11 +89,15 @@
 //! after the prologue and the epilogue are in is also what makes the epilogue something it can
 //! lay out around rather than something it has to leave room for.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, Fusion, Role};
+
+/// The scale a weight is in, which is what a share of a block is worked out against.
+const SCALE: u128 = mir::Weight::SCALE as u128;
 
 /// Puts a function's blocks in an order and writes the jumps that order needs.
 ///
@@ -108,9 +114,10 @@ pub fn blocks(
     insts: &BranchInsts,
     names: &mut Interner,
     fusable: &HashSet<mir::Inst>,
+    reorder: bool,
 ) {
     let table = table(insts, names);
-    let mut order = order(func);
+    let mut order = if reorder { traces(func) } else { order(func) };
     let mut writer = Writer { func, insts, names, table, fusable };
     let mut at = 0;
     while at < order.len() {
@@ -152,6 +159,287 @@ fn order(func: &mir::Func) -> Vec<mir::Block> {
     // there is anything to be said for when nothing goes to any of them.
     order.extend(func.blocks().filter(|block| !seen[block.index()]));
     order
+}
+
+/// The rounds the traces are built in, each asking for less than the one before it.
+///
+/// Design: `spec/optimizer/38-scheduling-and-layout.md` section 38.4, which quotes
+/// `gcc/bb-reorder.cc:32` on why there is more than one round: a first round that only follows
+/// the arms almost always taken builds the trunk of the function, and the rounds below it pick up
+/// what is left without being able to break the trunk apart. It costs one more pass over the
+/// blocks per round and it is the difference between "stc" and "simple".
+///
+/// A round is a pair. The first number is how likely an arm has to be for the trace to follow it,
+/// in parts of [`mir::Weight::SCALE`], which is GCC's branch threshold. The second is how often
+/// the block at the end of that arm has to run, in the same parts of how often the function is
+/// entered, which is GCC's exec threshold. The last round asks for nothing, which is what makes
+/// every block end up somewhere.
+///
+/// The eight numbers are GCC's own, out of `branch_threshold` and `exec_threshold` in
+/// `gcc/bb-reorder.cc`, in ten thousandths where GCC writes thousandths. Two things about them
+/// are worth saying out loud because both were got wrong here first.
+///
+/// The branch threshold is low. Two fifths, not nine tenths: an arm taken half the time is an arm
+/// the first round follows, and since one arm of a two way branch always is, the first round walks
+/// straight through an unpredicted function the way a depth first walk would. A high threshold
+/// stops the trace at every branch nothing predicted, which is most of them, and hands both arms
+/// back to the seed list to be laid out by weight, and weight is exactly what has nothing to say
+/// about them.
+///
+/// The exec threshold is against the entry and not against the hottest block. A block that runs
+/// once per call is a block in the trunk of the function, and measuring it against a loop that
+/// runs twenty times a call makes the whole trunk cold: the preheader of every loop lands at the
+/// end of the function behind a jump, which is the opposite of what this is for.
+const ROUNDS: [(u64, u64); 4] = [(4_000, 5_000), (2_000, 2_000), (1_000, 500), (0, 0)];
+
+/// The order the blocks are laid out in above `-O0`, which is traces grown from the hottest
+/// blocks outwards.
+///
+/// Design: `spec/optimizer/38-scheduling-and-layout.md` section 38.4.
+///
+/// A trace is a run of blocks that control is expected to walk straight through. It is grown from
+/// a seed by repeatedly taking the arm most likely to be the one taken, stopping when no arm is
+/// likely enough for the round or when the likeliest one leads somewhere the layout has already
+/// been. Every block is a seed in some round, the hotter ones first, and the traces come out in
+/// the order they were grown. So the function's trunk is laid out first and contiguously, its
+/// error paths end up behind it, and the branch that leaves the trunk is the one that costs a
+/// jump.
+///
+/// The entry is the first seed whatever its weight, because on this machine a function is entered
+/// at its first byte and the block laid out first is the block that runs first. A hotter block
+/// inside a loop would otherwise take the seat.
+///
+/// The traces are then run together by [`connect`], which is what keeps a run of blocks the rounds
+/// cut in half from coming out in two places.
+///
+/// # Which block the next trace starts at
+///
+/// Not simply the hottest one left. A block something already laid out goes to comes first, and
+/// among those the one with the hottest edge into it, which is [`Seed`] and which is GCC's
+/// `bb_to_key` in `gcc/bb-reorder.cc`. The reason is the whole of what a layout costs: a block laid
+/// out in front of everything that reaches it pays a jump on every one of those paths and saves
+/// nothing, and a block laid out behind the trace that reaches it pays nothing on the path that
+/// falls into it. Seeding by weight alone gets this wrong on the commonest shape in C, which is two
+/// arms that both end at one block: the block both arms join at is the hottest of the three and
+/// goes first, and then both arms jump to it.
+///
+/// # Loop rotation, and where it comes from
+///
+/// Section 38.4 asks for the loop to be rotated so that its exit is the last block of the trace,
+/// and there is no step here that does it. It falls out of the walk instead: a trace that enters
+/// a loop header follows the body, reaches the latch, finds that the latch's likeliest arm is the
+/// header it has already laid out, and stops. The exit is then a seed of its own and comes next.
+/// That is the rotated order, back edge running backwards and exit falling through, arrived at
+/// from the greedy rule rather than from a rule about loops.
+///
+/// What that does not cover is a loop whose header is its exit test and whose body is cold, where
+/// GCC would duplicate the header. Section 38.4 says the first version should not copy code and
+/// this does not.
+fn traces(func: &mir::Func) -> Vec<mir::Block> {
+    // Where the shape of the graph would have put each block, which is what decides between two
+    // blocks that run equally often. Most branches in most functions have nothing to predict them
+    // by and come out even, so without this the seed order between them would be the order the
+    // blocks happen to have been made in, and a block that falls into the one after it under
+    // [`order`] would be laid out somewhere else for no reason and pay a jump for it.
+    let mut place = vec![usize::MAX; func.block_count()];
+    for (at, &block) in order(func).iter().enumerate() {
+        place[block.index()] = at;
+    }
+
+    let mut found: Vec<Vec<mir::Block>> = Vec::new();
+    let mut seen = vec![false; func.block_count()];
+    // How often the function is entered, which every exec threshold is a share of. A function
+    // whose entry says nothing is one nobody wrote a weight on, and then once is the right answer
+    // for every block in it and every round behaves the same.
+    let entered = func.entry().map_or(mir::Weight::ONCE, |entry| func[entry].weight).raw();
+    // The hottest edge into each block out of a block already laid out, which is what the queue is
+    // ordered by and what says whether an entry popped off it is out of date. It outlives the
+    // round it was written in on purpose: a trace that stops because the next block is below this
+    // round's exec threshold leaves that block remembered as reached, and the round that does take
+    // it starts its first trace there rather than wherever the weights happen to point. That is
+    // how a chain of comparisons whose tail cools off below the threshold stays a straight line.
+    let mut reached = vec![0; func.block_count()];
+
+    for (likely, often) in ROUNDS {
+        // The exec threshold as a number rather than a fraction. In a hundred and twenty eight
+        // bits because a weight saturates at the top of a sixty four bit one and a nest of loops
+        // gets there.
+        let floor =
+            u64::try_from(u128::from(entered) * u128::from(often) / SCALE).unwrap_or(u64::MAX);
+        // A round does not start a trace in a block colder than its exec threshold, which is what
+        // keeps an error path out of the middle of the trunk: it waits for a round that asks for
+        // less. The entry is the exception below, because the block laid out first is the block
+        // that runs first and that has to be the entry whatever it weighs.
+        let mut queue: BinaryHeap<Seed> = func
+            .blocks()
+            .filter(|&block| !seen[block.index()] && func[block].weight.raw() >= floor)
+            .map(|block| Seed {
+                reached: reached[block.index()],
+                weight: func[block].weight,
+                place: Reverse(place[block.index()]),
+                block,
+            })
+            .collect();
+        let mut start = func.entry().filter(|entry| !seen[entry.index()]);
+
+        while let Some(from) = start.take().or_else(|| next_seed(&mut queue, &seen, &reached)) {
+            let mut trace = Vec::new();
+            let mut block = from;
+            loop {
+                seen[block.index()] = true;
+                trace.push(block);
+                let next = along(func, block, &seen, likely, floor);
+                // Everything this block goes to and the trace does not, so that the next trace can
+                // start at one of them rather than wherever the weights point. A block too cold
+                // for this round is still written down as reached, because the round that is cold
+                // enough to take it wants to know it hangs off something already laid out.
+                for call in &func[block].succs {
+                    let to = call.block;
+                    if seen[to.index()]
+                        || Some(to) == next
+                        || call.weight.raw() <= reached[to.index()]
+                    {
+                        continue;
+                    }
+                    reached[to.index()] = call.weight.raw();
+                    if func[to].weight.raw() >= floor {
+                        queue.push(Seed {
+                            reached: call.weight.raw(),
+                            weight: func[to].weight,
+                            place: Reverse(place[to.index()]),
+                            block: to,
+                        });
+                    }
+                }
+                let Some(next) = next else { break };
+                block = next;
+            }
+            found.push(trace);
+        }
+    }
+    connect(func, found)
+}
+
+/// The traces run together into one order, each one followed where possible by the trace control
+/// leaves it for.
+///
+/// Design: `gcc/bb-reorder.cc`, `connect_traces`.
+///
+/// The rounds cut a straight run of blocks into pieces whenever the run cools below the round's
+/// exec threshold, and a chain of comparisons against a constant is exactly that: each comparison
+/// is reached only when every one before it failed, so the chain halves in weight at every step and
+/// the round that laid the head of it down will not touch the tail. Left alone, the pieces come out
+/// in round order with other traces between them, and every piece pays a jump to reach the next.
+///
+/// So the pieces are put back together. Each trace is followed by the unplaced trace its last block
+/// most often goes to, and that one by the trace its last block most often goes to, until there is
+/// none, and only then does the next trace in round order start a new run. The rounds still decide
+/// which trace is hot and comes first, and this decides what falls in behind it.
+fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
+    // Which trace each block starts, for the blocks that start one. A trace may only be joined at
+    // its first block, because joining it anywhere else would mean cutting it in half and the
+    // rounds put it together for a reason.
+    let mut head = vec![usize::MAX; func.block_count()];
+    for (at, trace) in traces.iter().enumerate() {
+        if let Some(&first) = trace.first() {
+            head[first.index()] = at;
+        }
+    }
+
+    let mut order = Vec::with_capacity(func.block_count());
+    let mut used = vec![false; traces.len()];
+    for from in 0..traces.len() {
+        if used[from] {
+            continue;
+        }
+        let mut at = from;
+        loop {
+            used[at] = true;
+            order.extend_from_slice(&traces[at]);
+            let Some(&last) = traces[at].last() else { break };
+            let mut best: Option<(u64, usize)> = None;
+            for call in &func[last].succs {
+                let to = head[call.block.index()];
+                if to == usize::MAX || used[to] {
+                    continue;
+                }
+                let weight = call.weight.raw();
+                // Ties go to the trace found first, which is the hotter of the two, because the
+                // rounds laid the traces down hottest first.
+                if best.is_none_or(|(found, over)| weight > found || (weight == found && to < over))
+                {
+                    best = Some((weight, to));
+                }
+            }
+            let Some((_, next)) = best else { break };
+            at = next;
+        }
+    }
+    order
+}
+
+/// A block a trace could start at, ordered so that the greatest is the one to start at next.
+///
+/// Design: `gcc/bb-reorder.cc`, `bb_to_key`, of which this is the same three answers in the order
+/// GCC asks them.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Seed {
+    /// How often the hottest edge into this block out of a block already laid out is taken, and
+    /// zero while nothing laid out goes here. First, so that a block something reaches beats a
+    /// block nothing reaches however hot the second one is.
+    reached: u64,
+    /// How often the block runs, which decides between two blocks nothing laid out reaches.
+    weight: mir::Weight,
+    /// Where reverse postorder would have put it, which decides between two blocks that are equal
+    /// on both of the above, so that a function with no weights on it comes out in the order the
+    /// shape of its graph gives rather than in whatever order the queue settles.
+    place: Reverse<usize>,
+    /// The block, last, so that two blocks equal on everything else still come out in one order.
+    block: mir::Block,
+}
+
+/// The next block to start a trace at, out of the queue, or nothing when there is none left.
+///
+/// An entry whose block has been laid out since it was queued, or which was queued before a hotter
+/// edge into the same block was found, is thrown away here rather than found and updated in place
+/// when that happens. The queue is a heap and an entry in the middle of one cannot be reached, so
+/// the choice is between this and an index beside it, and a stale entry costs one pop.
+fn next_seed(queue: &mut BinaryHeap<Seed>, seen: &[bool], reached: &[u64]) -> Option<mir::Block> {
+    while let Some(seed) = queue.pop() {
+        if !seen[seed.block.index()] && seed.reached >= reached[seed.block.index()] {
+            return Some(seed.block);
+        }
+    }
+    None
+}
+
+/// The arm the trace follows out of a block, or nothing when no arm is worth following.
+///
+/// The likeliest arm that has not been laid out already, is taken at least as often as the
+/// round's floor, and takes at least the round's share of the times the block runs. Ties go to
+/// the arm written first, which is the arm a conditional branch takes when its condition holds,
+/// so a function with no weights on it at all comes out following the true arm.
+fn along(
+    func: &mir::Func,
+    block: mir::Block,
+    seen: &[bool],
+    likely: u64,
+    floor: u64,
+) -> Option<mir::Block> {
+    let whole = func[block].weight;
+    let mut best: Option<&mir::BlockCall> = None;
+    for call in &func[block].succs {
+        if seen[call.block.index()]
+            || call.weight.raw() < floor
+            || call.weight.out_of(whole) < likely
+        {
+            continue;
+        }
+        if best.is_none_or(|found| call.weight > found.weight) {
+            best = Some(call);
+        }
+    }
+    best.map(|call| call.block)
 }
 
 /// The comparisons a branch may be folded into, which [`blocks`] can then find by opcode.
@@ -335,8 +623,10 @@ impl Writer<'_> {
     fn bridge(&mut self, block: mir::Block) -> mir::Block {
         let bridge = self.func.create_block();
         let edge = self.func[block].succs[1].clone();
+        let weight = edge.weight;
+        self.func.set_weight(bridge, weight);
         *self.func.succs_mut(bridge) = vec![edge];
-        self.func.succs_mut(block)[1] = mir::BlockCall::to(bridge);
+        self.func.succs_mut(block)[1] = mir::BlockCall::to(bridge).taken(weight);
         bridge
     }
 
@@ -384,7 +674,7 @@ mod tests {
         // Both halves, in the order the pipeline runs them, so that a test which builds a
         // comparison in front of its branch sees what a compiled function would see.
         let fusable = fusable(func, &BRANCH, names);
-        blocks(func, &BRANCH, names, &fusable);
+        blocks(func, &BRANCH, names, &fusable, false);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -497,7 +787,7 @@ mod tests {
         branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
 
         let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
 
         let test = func.insts(made[0]).next().expect("a test");
         let operands = func[test].operands;
@@ -510,7 +800,7 @@ mod tests {
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[3])];
 
         let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
 
         // Blocks one and two are reached by nothing, so they go last, in the order they were
         // made. Deleting one would be a decision about what the program does, and this pass has
@@ -524,7 +814,7 @@ mod tests {
         let mut func = mir::Func::new(names.intern("f"));
 
         let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
 
         assert_eq!(func.block_count(), 0);
     }
@@ -536,7 +826,7 @@ mod tests {
         branch(&mut func, &mut names, made[0], &[made[1], made[2], made[3]]);
 
         let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
     }
 
     #[test]
@@ -548,7 +838,7 @@ mod tests {
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
 
         let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
     }
 
     /// Puts a comparison and a branch on its answer at the end of a block.
@@ -646,11 +936,200 @@ mod tests {
             .operand(Operand::read(Reg::physical(RAX), GPR))
             .finish();
         func.insert_before(branch, reload);
-        blocks(&mut func, &BRANCH, &mut names, &fusable);
+        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
         let text = mir::print_func(&func, &names, &REGS);
 
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
         assert!(text.contains("x64.test_rr_8"), "{text}");
         assert!(!text.contains("x64.cmp_rr_32"), "{text}");
+    }
+
+    /// Laying the blocks out along the traces the weights say, which is what every level above
+    /// `-O0` asks for.
+    fn traced(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
+        let fusable = fusable(func, &BRANCH, names);
+        blocks(func, &BRANCH, names, &fusable, true);
+        mir::print_func(func, names, &REGS)
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+
+    /// Says how often a block runs and how often each of its arms is taken, in parts of ten
+    /// thousand, the way `crate::weights` would have.
+    fn runs(func: &mut mir::Func, block: mir::Block, weight: u64, arms: &[u64]) {
+        func.set_weight(block, mir::Weight::parts(weight));
+        for (index, &taken) in arms.iter().enumerate() {
+            func.succs_mut(block)[index].weight = mir::Weight::parts(taken);
+        }
+    }
+
+    /// The arm almost always taken is the one laid out next, whichever of the two it is.
+    ///
+    /// Same function twice, with the two arms weighted the two ways round. At `-O0` the order is
+    /// the shape of the graph and the first arm always comes next; here it is the weights, so the
+    /// block that hardly ever runs goes behind the one that nearly always does and the jump is
+    /// spent on it rather than on the common path.
+    #[test]
+    fn the_arm_that_is_nearly_always_taken_is_the_one_laid_out_next() {
+        let (mut names, mut func, made) = blank(3);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        runs(&mut func, made[0], 10_000, &[200, 9_800]);
+        runs(&mut func, made[1], 200, &[]);
+        runs(&mut func, made[2], 9_800, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 1]);
+
+        let (mut names, mut func, made) = blank(3);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        runs(&mut func, made[0], 10_000, &[9_800, 200]);
+        runs(&mut func, made[1], 9_800, &[]);
+        runs(&mut func, made[2], 200, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2]);
+    }
+
+    /// A loop comes out as its header, its body and then its exit, with the back edge backwards.
+    ///
+    /// Nothing here rotates anything. The trace walks out of the header into the body because the
+    /// body is where the header nearly always goes, stops at the latch because the header it
+    /// wants next is already laid out, and the exit is picked up as the next seed. That is the
+    /// order a branch predictor's static guess expects and it is what the greedy rule gives.
+    #[test]
+    fn a_loop_is_laid_out_with_its_exit_behind_it_and_its_back_edge_running_backwards() {
+        let (mut names, mut func, made) = blank(4);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        branch(&mut func, &mut names, made[1], &[made[2], made[3]]);
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[1])];
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 100_000, &[90_000, 10_000]);
+        runs(&mut func, made[2], 90_000, &[90_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+
+        let text = traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2, 3]);
+        assert_eq!(
+            text,
+            [
+                "block0:",
+                "block1",
+                "block1:",
+                "x64.test_rr_8 $rax",
+                "x64.jcc_e block3, block2",
+                "block2:",
+                "x64.jmp block1",
+                "block3:",
+            ]
+        );
+    }
+
+    /// A block reached only from the cold arm is laid out behind everything the trunk reaches.
+    ///
+    /// The shape is `if (unlikely) handle(); rest();`, where the handler and the rest of the
+    /// function are both reached from the branch. Reverse postorder puts the handler between the
+    /// branch and the rest of the function; the trace puts the rest of the function next, because
+    /// that is where the branch nearly always goes, and the handler ends up last.
+    #[test]
+    fn a_block_only_the_cold_arm_reaches_goes_behind_the_rest_of_the_function() {
+        let (mut names, mut func, made) = blank(4);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[3])];
+        runs(&mut func, made[0], 10_000, &[100, 9_900]);
+        runs(&mut func, made[1], 100, &[100]);
+        runs(&mut func, made[2], 10_000, &[10_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+
+        assert_eq!(order(&func), [made[0], made[1], made[2], made[3]]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 3, 1]);
+    }
+
+    /// A block nothing reaches is still laid out, since the last round asks for nothing.
+    #[test]
+    fn the_last_round_picks_up_a_block_nothing_reaches() {
+        let (mut names, mut func, made) = blank(3);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[2])];
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 0, &[]);
+        runs(&mut func, made[2], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 1]);
+    }
+
+    /// The entry is laid out first however cold it is against the rest of the function.
+    ///
+    /// A function is entered at its first byte, so the block that runs first has to be the block
+    /// that is written first, and the seed order is what makes that true rather than any check
+    /// afterwards. Here the loop body runs ten times for every call and would otherwise have been
+    /// the first seed.
+    #[test]
+    fn the_entry_is_the_first_seed_even_when_something_else_runs_more_often() {
+        let (mut names, mut func, made) = blank(3);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        branch(&mut func, &mut names, made[1], &[made[1], made[2]]);
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 100_000, &[90_000, 10_000]);
+        runs(&mut func, made[2], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(func.blocks().next().map(mir::Block::index), Some(0));
+    }
+
+    /// A branch whose arms are even still falls into one of them rather than jumping to both.
+    ///
+    /// Nothing predicts a range check, so both arms come out at half, and half is under every
+    /// branch threshold above the last round. The trace therefore ends at the branch, and what
+    /// decides the layout is where the next one starts: at the likeliest arm out of the block the
+    /// trace stopped in, which is a fall-through, and not at whichever of the two blocks was made
+    /// first, which would have cost a jump on both paths out of an even branch.
+    #[test]
+    fn a_branch_whose_arms_are_even_is_still_laid_out_next_to_one_of_them() {
+        let (mut names, mut func, made) = blank(3);
+        // The second arm is the block made first, so a layout that fell back to the seed list
+        // would lay that one out next and leave the arm written first to be jumped to.
+        branch(&mut func, &mut names, made[0], &[made[2], made[1]]);
+        runs(&mut func, made[0], 10_000, &[5_000, 5_000]);
+        runs(&mut func, made[1], 5_000, &[]);
+        runs(&mut func, made[2], 5_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 1]);
+    }
+
+    /// A run of blocks the rounds cut in half comes back out in one piece.
+    ///
+    /// Two comparisons against a constant, one behind the other, which is what a switch over
+    /// scattered labels is lowered to. The second comparison is only reached when the first one
+    /// failed, so it runs half as often as the function is entered and the first round will not
+    /// touch it: the trace stops at the first comparison and the block that was about to fall
+    /// through it is left for a later round. What puts it back is [`connect`], and without it the
+    /// body of the first case would sit between the two comparisons and both would pay a jump.
+    #[test]
+    fn a_chain_the_rounds_cut_in_half_is_run_back_together() {
+        let (mut names, mut func, made) = blank(5);
+        branch(&mut func, &mut names, made[0], &[made[2], made[1]]);
+        branch(&mut func, &mut names, made[2], &[made[4], made[3]]);
+        runs(&mut func, made[0], 10_000, &[5_000, 5_000]);
+        runs(&mut func, made[1], 5_000, &[]);
+        runs(&mut func, made[2], 5_000, &[3_000, 2_000]);
+        runs(&mut func, made[3], 2_000, &[]);
+        runs(&mut func, made[4], 3_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 4, 1, 3]);
     }
 }
