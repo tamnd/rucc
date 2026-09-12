@@ -27,9 +27,12 @@ use rucc_base::Interner;
 use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
-use rucc_target::{BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64};
+use rucc_target::{
+    BitInsts, BranchInsts, CallRegs, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64,
+};
 use rucc_tuple::Arch;
 
+use crate::bits;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
@@ -66,6 +69,8 @@ pub struct Machine {
     pub insts: &'static FrameInsts,
     /// The instructions a branch becomes once the blocks are in an order.
     pub branch: &'static BranchInsts,
+    /// How much of a register each of the machine's instructions reads and writes.
+    pub bits: &'static BitInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -117,6 +122,7 @@ impl Machine {
             file: x86_64::REGS,
             insts: &x86_64::FRAME,
             branch: &x86_64::BRANCH,
+            bits: &x86_64::BITS,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -344,6 +350,12 @@ pub fn compile_recording(
             return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Aligned });
         }
     }
+
+    // Before the fold below, which is the order section 37.6 puts the two in. A widening this takes
+    // out is one whose readers are sent to its source, and one of those readers may be an address
+    // computation, so asking which bits are read first means the fold sees the addresses as they
+    // will be rather than as they were.
+    bits::dead(&mut func, machine.bits, names);
 
     // After selection, because the address instruction and the one that reads it are both machine
     // instructions only once selection has written them, and before allocation, because what makes

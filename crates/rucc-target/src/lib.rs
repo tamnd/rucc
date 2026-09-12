@@ -45,6 +45,7 @@ use rucc_base::float::Format;
 use rucc_tuple::{self as tuple, TargetTuple};
 
 mod abi;
+mod bits;
 mod branch;
 mod frame;
 mod operand;
@@ -52,6 +53,7 @@ mod regs;
 pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion};
 pub use crate::frame::{ClassMoves, FrameInsts, Probe};
 pub use crate::operand::{Constraint, OperandDesc, Role};

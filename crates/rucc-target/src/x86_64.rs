@@ -40,8 +40,9 @@ pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
 };
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
-pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, written};
+pub use crate::x86_64::text::{Arg, Width, Written, gpr_name, operand_width, written};
 
+use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
@@ -211,6 +212,26 @@ pub static FRAME: FrameInsts = FrameInsts {
 /// below a stack, and it is what gcc's `--param=stack-clash-protection-probe-interval` defaults
 /// to. A kernel configured with a larger guard needs a larger number here and nothing else.
 pub static PROBE: Probe = Probe { inst: "or_mi_8", interval: 4096 };
+
+/// How much of a register each x86-64 instruction reads and writes.
+///
+/// Both answers come out of the tables next door rather than out of a list written here.
+/// [`operand_width`] reads the assembly description, which names every operand at the width the
+/// instruction uses it at, and the family that copies the low bits of its source is exactly
+/// [`Form::Convert`], which is what the eleven widenings, the four that widen a truth value and
+/// the three that take the low part are already marked as and what nothing else is.
+pub static BITS: BitInsts = BitInsts { prefix: "x64.", width: operand_width, copies_low };
+
+/// Whether the instruction of that name is one that copies the low bits of its source.
+///
+/// [`Form::Convert`] and nothing else, because that form is the machine's moves between widths:
+/// every one of them reads one register at one width, writes another at another width, and
+/// agrees with its source about every bit the narrower of the two has. A conversion to or from
+/// the vector file is a different form, which is what keeps a float out of this.
+#[must_use]
+fn copies_low(name: &str) -> bool {
+    form(name) == Some(Form::Convert)
+}
 
 /// What an x86-64 conditional branch becomes once the blocks are in an order.
 ///
