@@ -515,3 +515,197 @@ int __ltdf2(double left, double right) {
 int __unorddf2(double left, double right) {
     return is_nan(pattern_of(left)) || is_nan(pattern_of(right));
 }
+
+/* The conversions between a double and an integer, which is what a cast becomes on a target with no
+ * floating point unit. They are here rather than in convert.c for the reason the single precision set
+ * is in float.c: convert.c hands sixty four bits of a 128-bit integer to the machine's own conversion
+ * instruction, so it exists for a target that has a floating point unit and no wide integer, which is
+ * the opposite problem.
+ *
+ * What C leaves undefined is a value the integer type cannot hold, an infinity, a not a number, and a
+ * negative value handed to an unsigned conversion. All four answer zero, on both sides, which section
+ * 12.8 records as a convention the two implementations share in order to be comparable rather than as
+ * a promise to a program.
+ *
+ * One thing is different from one format down and it is worth saying out loud. Fifty three significant
+ * bits hold every `int` and every `unsigned int` exactly, so the two conversions up from a 32-bit
+ * integer never round and the sticky bit below their significand is never set. Only the pair coming
+ * from a sixty four bit integer can round at all, which is the opposite of the single precision file,
+ * where all four round.
+ */
+
+/* How many bits an integer needs, which is one more than the power of two its highest bit is worth.
+ * A loop for the same reason `normalize` above is a loop.
+ */
+static int width_of(u64 value) {
+    int bits = 0;
+    while (value != 0) {
+        value >>= 1;
+        bits += 1;
+    }
+    return bits;
+}
+
+/* The magnitude of a signed value, taken through an unsigned type on purpose: the most negative value
+ * of a type has no positive counterpart in it, and negating it there is exactly the case a conversion
+ * has to get right rather than the case it may overflow on.
+ */
+static u64 magnitude_of(long long value) {
+    return value < 0 ? (u64)0 - (u64)value : (u64)value;
+}
+
+/* The double nearest an integer, with the sign handed in separately because the magnitude came through
+ * the routine above.
+ *
+ * The integer is already the significand, so the work is moving its highest bit to where
+ * `round_and_pack` wants it and keeping what falls off the bottom in the sticky bit. An integer of
+ * fifty three bits or fewer keeps everything and the shift is upwards, which is every value of an
+ * `int` and of an `unsigned int`.
+ */
+static double double_of_integer(u64 sign, u64 magnitude) {
+    if (magnitude == 0) {
+        return double_of(sign);
+    }
+    int top = width_of(magnitude) - 1;
+    u64 significand;
+    if (top <= LEADING) {
+        significand = magnitude << (LEADING - top);
+    } else {
+        significand = shift_down(magnitude, top - LEADING);
+    }
+    return round_and_pack(sign, top + BIAS, significand);
+}
+
+double __floatsidf(int value) {
+    return double_of_integer(value < 0 ? SIGN : 0, magnitude_of(value));
+}
+
+double __floatunsidf(unsigned int value) {
+    return double_of_integer(0, value);
+}
+
+double __floatdidf(long long value) {
+    return double_of_integer(value < 0 ? SIGN : 0, magnitude_of(value));
+}
+
+double __floatundidf(unsigned long long value) {
+    return double_of_integer(0, value);
+}
+
+/* The part of a double that is on the integer side of the point, with the sign and the magnitude
+ * handed back separately so that each caller can hold the answer to the bounds of its own type.
+ *
+ * Zero rather than a refusal where the whole value is below one, since truncating a half to an integer
+ * is an answer and not an overflow. Zero and a refusal where there is no answer at all, which is an
+ * infinity, a not a number, and a magnitude past what any of the four types hold.
+ *
+ * The shift goes both ways here. A double with an exponent above fifty two has no bits below the point
+ * at all and its significand moves up, which a `long long` answer needs and is the case the format
+ * does not store: the value is an integer already and the bits it ends in are zeros the shift puts
+ * there.
+ */
+static int integer_of_double(double value, u64 *sign, u64 *magnitude) {
+    u64 pattern = pattern_of(value);
+    *sign = pattern & SIGN;
+    *magnitude = 0;
+    if (exponent_of(pattern) == TOP) {
+        return 0;
+    }
+    u64 significand;
+    int stored;
+    unpack(pattern, &significand, &stored);
+    int exponent = stored - BIAS;
+    if (exponent < 0) {
+        return 1;
+    }
+    if (exponent > 63) {
+        return 0;
+    }
+    if (exponent >= FRACTION) {
+        *magnitude = significand << (exponent - FRACTION);
+    } else {
+        *magnitude = significand >> (FRACTION - exponent);
+    }
+    return 1;
+}
+
+/* The largest magnitude each of the four types holds. The signed ones hold one more going down than
+ * going up, which is the whole reason the magnitude and the sign travel separately above.
+ */
+#define SIGNED_32 2147483648ull
+#define SIGNED_64 9223372036854775808ull
+#define UNSIGNED_32 4294967295ull
+#define UNSIGNED_64 18446744073709551615ull
+
+int __fixdfsi(double value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_double(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_32) {
+            return 0;
+        }
+        /* One less than the magnitude, negated, and one more taken off, because the most negative
+         * value is not the negation of anything an `int` holds and writing it that way would be the
+         * overflow this is here to avoid.
+         */
+        return -(int)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_32 - 1) {
+        return 0;
+    }
+    return (int)magnitude;
+}
+
+unsigned int __fixunsdfsi(double value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_double(value, &sign, &magnitude)) {
+        return 0;
+    }
+    /* A negative value is undefined here, and a negative one that truncates to zero is not: the
+     * answer for that one is zero and it is the value rather than the convention.
+     */
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_32) {
+        return 0;
+    }
+    return (unsigned int)magnitude;
+}
+
+long long __fixdfdi(double value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_double(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_64) {
+            return 0;
+        }
+        return -(long long)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_64 - 1) {
+        return 0;
+    }
+    return (long long)magnitude;
+}
+
+unsigned long long __fixunsdfdi(double value) {
+    u64 sign;
+    u64 magnitude;
+    if (!integer_of_double(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_64) {
+        return 0;
+    }
+    return magnitude;
+}
