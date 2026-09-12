@@ -205,16 +205,18 @@ pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, ba
     judge(&row, &crate::report::Facts { site: None, addr, base, witness: None }, id);
 }
 
-/// The same, and says which other thread the access ran against.
+/// The same, and says which other store the access ran against.
 ///
-/// Two judgements have a second thread and both of them call this. J9 is a word another thread
-/// wrote, and J1 is storage another thread freed, which is document 03's C4. It is separate from
-/// [`report`] for the reason [`report_from`] is: what makes either report worth reading is the
-/// pair, an address on its own says which byte and not who else touched it, and a caller holding
-/// the other thread's stamp should have to say so rather than dropping it.
+/// Three of document 03's race classes have a second stamp and all of them call this. J9 is a word
+/// another thread wrote or a pair of halves two stores left behind, and J1 is storage another
+/// thread freed, which is C4. It is separate from [`report`] for the reason [`report_from`] is:
+/// what makes either report worth reading is the pair, an address on its own says which byte and
+/// not who else touched it, and a caller holding the other stamp should have to say so rather than
+/// dropping it.
 ///
 /// Which judgement it is comes from the descriptor, as everywhere else. This function does not
-/// assume J9 just because it is the one that named the plane first.
+/// assume J9 just because it is the one that named the plane first. Which sentence the pair gets is
+/// the caller's to say, and it says it with [`crate::report::Witness`].
 ///
 /// # Panics
 ///
@@ -226,8 +228,7 @@ pub unsafe fn report_from(descriptor: *const Descriptor, addr: Option<usize>, ba
 pub unsafe fn report_witness(
     descriptor: *const Descriptor,
     addr: usize,
-    found: crate::epoch::Stamp,
-    mine: crate::epoch::Stamp,
+    witness: crate::report::Witness,
 ) {
     // A null descriptor reads as one that says nothing, for the reason `report_from` gives.
     let row = if descriptor.is_null() {
@@ -237,12 +238,8 @@ pub unsafe fn report_witness(
         unsafe { descriptor.read() }
     };
     let id = (!descriptor.is_null()).then_some(descriptor as usize);
-    let facts = crate::report::Facts {
-        site: None,
-        addr: Some(addr),
-        base: None,
-        witness: Some((found, mine)),
-    };
+    let facts =
+        crate::report::Facts { site: None, addr: Some(addr), base: None, witness: Some(witness) };
     judge(&row, &facts, id);
 }
 
