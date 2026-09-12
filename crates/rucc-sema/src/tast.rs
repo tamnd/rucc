@@ -47,6 +47,17 @@ pub enum Const {
     Int(i128),
     /// A floating value, in the target's format rather than the host's.
     Float(Float),
+    /// A complex value, which is two floating ones in the format the real half has.
+    ///
+    /// This is what an imaginary constant folds to and what `1.0 + 2.0i` in a static initializer
+    /// folds to, and it is a variant of its own rather than a pair of entries because a constant
+    /// is one value and the object it initializes is one object.
+    Complex {
+        /// The real half.
+        real: Float,
+        /// The imaginary half.
+        imag: Float,
+    },
     /// The address of an object, which is a number nobody knows until the link.
     Address(Address),
 }

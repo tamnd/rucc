@@ -3,9 +3,7 @@
 // none, so every operator over one comes out as that operator over its two halves and there is
 // no complex anything left in the IR below.
 //
-// The multiply and the divide are not here yet, and neither are the imaginary constants that
-// would let a case below give the imaginary half a value without going through a parameter.
-// `tamnd/rucc#201` is where the rest of it lands.
+// The multiply and the divide are not here yet. `tamnd/rucc#201` is where the rest of it lands.
 
 // The two ways one is given a value: a real one, which fills the real half and zeroes the other,
 // and another complex one, which is a copy.
@@ -89,4 +87,16 @@ struct wrapped {
 struct wrapped tagged(_Complex double z) {
   struct wrapped w = { z, 1 };
   return w;
+}
+
+// An imaginary constant, which gcc reads as a complex value whose real half is a zero. So `1.5 +
+// 2.5i` is a sum of two complex values and the folding works it out, which is what a static
+// initializer needs: the image below is the two halves and no code at all.
+_Complex double pinned = 1.5 + 2.5i;
+_Complex float small_pinned = 1.5f + 2.5if;
+
+// The same constant inside a function, where the folding has already made the pair and what is
+// left is the two stores.
+_Complex double shifted(_Complex double z) {
+  return z + 2.5i;
 }

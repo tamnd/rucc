@@ -3,6 +3,9 @@
 target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
+global @pinned : bytes 16 = { f64 0x3ff8000000000000, f64 0x4004000000000000 }, align 8, linkage(external)
+global @small_pinned : bytes 8 = { f32 0x3fc00000, f32 0x40200000 }, align 4, linkage(external)
+
 func @built(f64) -> (f64, f64), linkage(external) {
 block0(%0: f64):
     %1 = alloca, size 16, align 8
@@ -281,6 +284,42 @@ block0(%0: ptr, %1: f64, %2: f64):
     store %10 -> %9, align 4, tbaa !3
     memcpy %0, %4, size 24, align 8
     return
+}
+
+func @shifted(f64, f64) -> (f64, f64), linkage(external) {
+block0(%0: f64, %1: f64):
+    %2 = alloca, size 16, align 8
+    %3 = alloca, size 16, align 8
+    %4 = alloca, size 16, align 8
+    store %0 -> %4, align 8
+    %5 = iconst.i64 8
+    %6 = ptr_add %4, %5
+    store %1 -> %6, align 8
+    %7 = fconst.f64 0x0
+    store %7 -> %2, align 8, tbaa !1
+    %8 = fconst.f64 0x4004000000000000
+    %9 = iconst.i64 8
+    %10 = ptr_add %2, %9
+    store %8 -> %10, align 8, tbaa !1
+    %11 = load.f64 %4, align 8, tbaa !1
+    %12 = load.f64 %2, align 8, tbaa !1
+    %13 = fadd %11, %12
+    store %13 -> %3, align 8, tbaa !1
+    %14 = iconst.i64 8
+    %15 = ptr_add %4, %14
+    %16 = load.f64 %15, align 8, tbaa !1
+    %17 = iconst.i64 8
+    %18 = ptr_add %2, %17
+    %19 = load.f64 %18, align 8, tbaa !1
+    %20 = fadd %16, %19
+    %21 = iconst.i64 8
+    %22 = ptr_add %3, %21
+    store %20 -> %22, align 8, tbaa !1
+    %23 = load.f64 %3, align 8
+    %24 = iconst.i64 8
+    %25 = ptr_add %3, %24
+    %26 = load.f64 %25, align 8
+    return %23, %26
 }
 
 !0 = tbaa "char", offset 0

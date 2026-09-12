@@ -2723,6 +2723,23 @@ impl<'u> Body<'_, 'u> {
     fn complex_into(&mut self, at: Value, expr: ExprId, ty: TypeId, span: Span) {
         let part = self.real_part(ty);
         match self.tast()[expr].kind {
+            // A complex constant, which is an imaginary constant or anything the folding made
+            // of one. It is two constants here the way it is two of everything else.
+            ExprKind::Const(value) => {
+                let Const::Complex { real, imag } = self.tast()[value] else {
+                    self.unsupported("this complex constant", span);
+                    return;
+                };
+                let Some(out) = repr::value_type(self.types(), self.target(), part) else {
+                    self.unsupported("this complex constant", span);
+                    return;
+                };
+                for (imaginary, half) in [(false, real), (true, imag)] {
+                    let value = self.build(span).fconst(out, half.to_bits());
+                    let into = self.half_place(at, imaginary, part, span);
+                    self.write(into, value, span);
+                }
+            }
             // `z + w` and `z - w`, which are the real operator on each half. Sema has converted
             // both operands to this type already, so there is no widening left to do here.
             ExprKind::Binary { op: op @ (BinaryOp::Add | BinaryOp::Sub), lhs, rhs } => {
@@ -3657,6 +3674,9 @@ impl<'u> Body<'_, 'u> {
             }
             Const::Int(number) => Some(self.build(span).iconst(ir, number)),
             Const::Float(number) => Some(self.build(span).fconst(ir, number.to_bits())),
+            // A complex constant has no value type, so the line above answered before this was
+            // reached. Where one goes is [`Self::complex_into`]'s to say.
+            Const::Complex { .. } => None,
             Const::Address(address) => {
                 let symbol = match address.base {
                     rucc_sema::Base::Decl(decl) => self.unit.symbol_of(decl),
