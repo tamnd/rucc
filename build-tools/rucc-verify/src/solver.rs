@@ -38,6 +38,38 @@ pub struct Solver {
     seconds: u32,
 }
 
+/// What the verifier is allowed to want of a solver.
+///
+/// [`Solver`] is the implementation that is a solver, and it is the one the gate runs. The reason
+/// there is a trait over it at all is the other kind: a test about what happens after the solver
+/// gives up has no way to make the real one give up except by starving it of time, and a test
+/// whose meaning depends on how fast the machine is says something slightly different everywhere
+/// it runs. That is tamnd/rucc#1123. A stub that answers unknown to the one question no solver
+/// settles says the thing the test is about.
+///
+/// Two methods, because two is what [`fn@crate::verify`] calls. This is a test double and not an
+/// abstraction anybody else has to hold: nothing outside this crate implements it, and a second
+/// real solver would be another [`Solver::find`] rather than another implementation of this.
+pub trait Ask {
+    /// Put one question, and allow it this many seconds.
+    ///
+    /// The budget is a parameter rather than a property of the solver because a rule that already
+    /// carries a written reason is given a look rather than the whole of it, and that decision
+    /// belongs to the caller who knows which rule it is.
+    ///
+    /// # Errors
+    ///
+    /// Anything that stops the solver from running or from being talked to.
+    fn ask(&self, query: &str, seconds: u32) -> std::io::Result<Answer>;
+
+    /// How long a question gets when nothing has narrowed it.
+    ///
+    /// A run that says what the budget was is a run whose shrug can be read. Without it, a rule
+    /// reported as unproved is either a rule that is false or a rule that ran out of a number
+    /// nobody printed, and telling those apart is the whole difficulty of tamnd/rucc#949.
+    fn seconds(&self) -> u32;
+}
+
 /// What the solver said about one query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
@@ -67,6 +99,9 @@ impl Solver {
     }
 
     /// How long a single query may take before the answer is [`Answer::Unknown`].
+    ///
+    /// This is the number [`Ask::seconds`] reports, so it is what a rule gets unless the caller
+    /// narrows it for that rule.
     #[must_use]
     pub fn within(self, seconds: u32) -> Solver {
         Solver { seconds, ..self }
@@ -77,26 +112,17 @@ impl Solver {
     pub fn name(&self) -> &str {
         &self.program
     }
+}
 
-    /// How long a rule is being given, for the same report.
-    ///
-    /// A run that says what the budget was is a run whose shrug can be read. Without it, a rule
-    /// reported as unproved is either a rule that is false or a rule that ran out of a number
-    /// nobody printed, and telling those apart is the whole difficulty of tamnd/rucc#949.
-    #[must_use]
-    pub fn seconds(&self) -> u32 {
+impl Ask for Solver {
+    fn seconds(&self) -> u32 {
         self.seconds
     }
 
-    /// Ask one question.
-    ///
-    /// # Errors
-    ///
-    /// Anything that stops the solver from running or from being talked to.
-    pub fn ask(&self, query: &str) -> std::io::Result<Answer> {
+    fn ask(&self, query: &str, seconds: u32) -> std::io::Result<Answer> {
         let timeout = match self.program.as_str() {
-            "cvc5" => format!("--tlimit={}", self.seconds * 1000),
-            _ => format!("-T:{}", self.seconds),
+            "cvc5" => format!("--tlimit={}", seconds * 1000),
+            _ => format!("-T:{seconds}"),
         };
         let stdin = if self.program == "cvc5" { "-" } else { "-in" };
 

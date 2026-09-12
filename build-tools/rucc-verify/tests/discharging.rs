@@ -5,7 +5,9 @@
 //! that the lowering the design document shows can be.
 
 use rucc_rules::{Rule, parse};
-use rucc_verify::{Model, Report, Solver, Verdict, Widths, admit, query, query_at, verify};
+use rucc_verify::{
+    Answer, Ask, Model, Report, Solver, Verdict, Widths, admit, query, query_at, verify,
+};
 
 /// What the machine terms in those rules mean. This is the hand written per-target model
 /// `spec/10-backend.md` says the machine semantics start as.
@@ -211,16 +213,43 @@ const HARD: &str = "\
       (spec (= (bvmul (result) y) (bvsub x (bvurem x y))))
       (bounded \"division against multiplication is out of reach at sixty four bits\"))";
 
-/// Enough for the narrow widths and not enough for the real one, which is the whole point of the
-/// rule above. Thirty, against the five minutes a run of the gate uses, because five minutes is a
-/// long time for a test to wait for a shrug it is asking for on purpose. Thirty rather than the
-/// two it was for a worse reason: two was a guess, and on eight cores with sixteen solvers sharing
-/// them the eight bit question took four and a half seconds, so the narrow widths came back a
-/// shrug of their own and a rule that is proved read as a rule nobody has proved. That is
-/// tamnd/rucc#1123, and it failed only on a machine that was busy. Waiting at the real width does
-/// not cost thirty either way, because a rule carrying a written reason is given ten there.
-fn quick_solver() -> Option<Solver> {
-    solver().map(|solver| solver.within(30))
+/// A solver that gives up on the hard question rather than running out of time on it.
+///
+/// The tests below are about what happens after a shrug, and until tamnd/rucc#1135 the shrug came
+/// from a clock: the sixty four bit question is not answered in the thirty seconds those tests
+/// allowed, and the narrow ones are answered in five, so the tests passed on the margin between
+/// two numbers rather than on anything either of them says. When the machine is busy that margin
+/// closes, the narrow widths come back a shrug of their own, and a rule that is proved reads as a
+/// rule nobody has proved. That is tamnd/rucc#1123.
+///
+/// So this says the thing instead. Division against multiplication at the rule's own width comes
+/// back unknown because that is what every solver anybody has run says about it, and every other
+/// question goes to the real one. The narrow widths in a bounded proof are still proved by z3,
+/// which is the part the tests are actually about, and the part that is a stub is the part they
+/// are not. What the three tests that used the clock spent it on was waiting for a shrug they
+/// were asking for, ten seconds apiece for the two whose rule carries a written reason and two
+/// for the one whose rule does not, and the whole of this file now runs in under two seconds.
+///
+/// The rest of this file keeps the real solver. Those tests ask a question that is answered in
+/// milliseconds and what they want to know is what the answer is, so a double would only put
+/// something between the test and the thing it is testing.
+struct GivesUp(Solver);
+
+impl Ask for GivesUp {
+    fn ask(&self, query: &str, seconds: u32) -> std::io::Result<Answer> {
+        if query.contains("(_ BitVec 64)") && query.contains("bvudiv") {
+            return Ok(Answer::Unknown);
+        }
+        self.0.ask(query, seconds)
+    }
+
+    fn seconds(&self) -> u32 {
+        self.0.seconds()
+    }
+}
+
+fn gives_up() -> Option<GivesUp> {
+    solver().map(GivesUp)
 }
 
 #[test]
@@ -235,7 +264,7 @@ fn the_same_question_can_be_asked_at_a_narrower_width() {
 /// at the rule's own width, and the rule says why narrow widths are enough.
 #[test]
 fn a_rule_the_solver_gives_up_on_gets_a_bounded_proof_if_it_asked_for_one() {
-    let Some(solver) = quick_solver() else {
+    let Some(solver) = gives_up() else {
         return;
     };
     let report = verify("t.rules", &rules(HARD), &model(), &solver).expect("nothing to report");
@@ -254,11 +283,7 @@ fn a_rule_the_solver_gives_up_on_gets_a_bounded_proof_if_it_asked_for_one() {
 /// it. Without the clause the same rule is a shrug, and a shrug is not a pass.
 #[test]
 fn a_rule_that_did_not_ask_for_a_bounded_proof_is_left_unknown() {
-    // Two seconds here rather than the thirty above, because with the clause gone there is no
-    // written reason and the rule is given the whole budget at its own width instead of the ten a
-    // signed off one gets. Two is enough to watch it give up, since the question does not settle
-    // in thirty, and there are no narrow widths to reach in this one.
-    let Some(solver) = solver().map(|solver| solver.within(2)) else {
+    let Some(solver) = gives_up() else {
         return;
     };
     let text = HARD.replace(
@@ -276,7 +301,7 @@ fn a_rule_that_did_not_ask_for_a_bounded_proof_is_left_unknown() {
 /// nobody described.
 #[test]
 fn a_rule_that_is_not_proved_keeps_the_whole_file_out() {
-    let Some(solver) = quick_solver() else {
+    let Some(solver) = solver() else {
         return;
     };
     let wrong = "\
@@ -291,7 +316,7 @@ fn a_rule_that_is_not_proved_keeps_the_whole_file_out() {
 
 #[test]
 fn a_file_of_rules_that_are_all_proved_is_admitted() {
-    let Some(solver) = quick_solver() else {
+    let Some(solver) = gives_up() else {
         return;
     };
     let text = format!("{LEA}\n{HARD}");

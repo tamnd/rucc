@@ -5,7 +5,7 @@ use std::fmt;
 use rucc_rules::{Error, Rule, Term, TermKind};
 
 use crate::model::{MEMORY_CONST, Model, Sort, Widths, rule_width};
-use crate::solver::{Answer, Solver};
+use crate::solver::{Answer, Ask};
 
 /// What became of one rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,7 +274,7 @@ pub fn verify(
     path: &str,
     rules: &[Rule],
     model: &Model,
-    solver: &Solver,
+    solver: &dyn Ask,
 ) -> Result<Report, Vec<Error>> {
     let mut report = Report::default();
     let mut errors = Vec::new();
@@ -284,10 +284,10 @@ pub fn verify(
         // A rule with a reason written on it is expected to come back a shrug here, so it is
         // given a look rather than the budget. Everything else gets the whole of it.
         let full = match rule.bounded {
-            None => solver.clone(),
-            Some(_) => solver.clone().within(SIGNED_OFF.min(solver.seconds())),
+            None => solver.seconds(),
+            Some(_) => SIGNED_OFF.min(solver.seconds()),
         };
-        match ask(path, rule, model, &full, width) {
+        match ask(path, rule, model, solver, width, full) {
             Err(error) => errors.push(error),
             Ok(Answer::Unsat) => report.verdicts.push(Verdict::Discharged),
             Ok(Answer::Sat(found)) => report.verdicts.push(Verdict::Refuted(found)),
@@ -319,7 +319,7 @@ pub fn admit(
     path: &str,
     rules: &[Rule],
     model: &Model,
-    solver: &Solver,
+    solver: &dyn Ask,
 ) -> Result<Report, Vec<Error>> {
     let report = verify(path, rules, model, solver)?;
     let mut errors = Vec::new();
@@ -336,16 +336,17 @@ pub fn admit(
     if errors.is_empty() { Ok(report) } else { Err(errors) }
 }
 
-/// Put one question to the solver.
+/// Put one question to the solver, at a width and within a budget.
 fn ask(
     path: &str,
     rule: &Rule,
     model: &Model,
-    solver: &Solver,
+    solver: &dyn Ask,
     width: u32,
+    seconds: u32,
 ) -> Result<Answer, Error> {
     let asked = query_at(path, rule, model, width)?;
-    solver.ask(&asked).map_err(|problem| Error {
+    solver.ask(&asked, seconds).map_err(|problem| Error {
         path: path.to_owned(),
         line: rule.line,
         column: rule.column,
@@ -363,13 +364,13 @@ fn bounded(
     path: &str,
     rule: &Rule,
     model: &Model,
-    solver: &Solver,
+    solver: &dyn Ask,
     width: u32,
     why: &str,
 ) -> Result<Verdict, Error> {
     let mut proved = Vec::new();
     for narrow in BOUNDED_WIDTHS.iter().copied().filter(|narrow| *narrow < width) {
-        match ask(path, rule, model, solver, narrow)? {
+        match ask(path, rule, model, solver, narrow, solver.seconds())? {
             Answer::Unsat => proved.push(narrow),
             Answer::Sat(found) => {
                 let said = format!("at {narrow} bits, where the rule works in {width}: {found}");

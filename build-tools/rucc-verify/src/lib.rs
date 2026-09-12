@@ -45,6 +45,12 @@
 //! which is the failure this whole crate exists to prevent, so the fallback is never taken
 //! without a written reason and the number of times it was taken is printed.
 //!
+//! Giving up and running out of the budget are the same shrug here, and `spec/15-testing.md`
+//! section 15.5 says why: a solver that stops does not say which of the two it did, so the budget
+//! is part of what a run means and is printed with every one of them. [`Ask`] is what a test uses
+//! to get the other kind, a solver that gives up because it says so rather than because a clock
+//! ran out.
+//!
 //! # The gate
 //!
 //! [`admit`] is the rule set's front door and the `rucc-verify` program is what CI runs it
@@ -87,7 +93,7 @@ pub use model::{
     ADDRESS_WIDTH, BYTE_WIDTH, DEFAULT_WIDTH, MEMORY_CONST, Model, Sort, Widths, rule_width,
 };
 pub use report::{Unverified, difference, listed, render};
-pub use solver::{Answer, Solver};
+pub use solver::{Answer, Ask, Solver};
 pub use verify::{BOUNDED_WIDTHS, Report, Verdict, admit, query, query_at, verify};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
