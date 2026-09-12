@@ -644,10 +644,12 @@ pub(crate) fn call(
 
 /// A call to `routine` with those arguments, not yet anywhere.
 ///
-/// Separate from [`call`] because the extent query is the one rewrite that sometimes needs the call
-/// beside the instruction rather than in place of it, and building the signature and the callee is
-/// the part the two have in common.
-fn calling(
+/// Separate from [`call`] because two rewrites need the call beside the instruction rather than in
+/// place of it, and building the signature and the callee is the part all of them have in common.
+/// The extent query is one, when the count comes back in a width that is not the instruction's, and
+/// `crate::slot`'s allocation capability is the other, because there the instruction gives back a
+/// value and the call does not.
+pub(crate) fn calling(
     func: &mut Func,
     names: &mut Interner,
     routine: &str,

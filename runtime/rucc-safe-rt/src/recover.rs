@@ -52,6 +52,16 @@
 //! beside it. That is the same missing capability and it takes the same recovery, so [`unwritten`]
 //! is [`recover`] under a second name and a second count. What decides whether a load takes it is
 //! [`Meta::HANDED`] on the instance, which [`mark_handed`] sets and `crate::cap::load` reads.
+//!
+//! # The one way that is not recovery at all
+//!
+//! [`made`] shares this module's machinery and belongs to the opposite situation. It is asked about
+//! the address an allocator has just returned, where the capability is not reconstructed from
+//! anything: the header behind the payload holds the extent, the version and the metadata word, so
+//! the answer is a subtract and a load and is the allocator's own account of the instance rather
+//! than the best guess an address supports. Nothing it answers is counted, since none of a build's
+//! guarantee is resting on lost provenance there, and an address it cannot answer for goes to
+//! [`recover`] and is counted as whatever it turns out to be.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -193,6 +203,47 @@ pub fn recover(addr: *const c_void) -> Cap {
     tally(Origin::Mapping, Cap::new(region.base as u64, ext, plane::FOREIGN, meta))
 }
 
+/// The capability of the instance whose payload begins at `base`.
+///
+/// The one address a recovery does not have to be a recovery for. Document 05 section 5.2.2 puts
+/// the header directly behind the payload so that finding it from the base of an object is a
+/// subtract by a constant and a load, and this is the entry point that is that: the bounds, the
+/// version and the whole of the metadata word come out of the instance's own header, in constant
+/// time, with nothing walked and nothing assumed. Generated code calls it where it knows the
+/// pointer it has is the one an allocator just handed it, which is the one place in a program where
+/// a capability is exact and free. tamnd/rucc#1085.
+///
+/// What makes it exact rather than merely cheap is the metadata. [`recover`] has to build a
+/// metadata word out of the region's class, because it found an instance rather than being told
+/// about one, so it cannot say which permissions the storage allows or which instance identifier a
+/// report should name, and it marks what it produced [`Meta::RECOVERED`]. Here the allocator wrote
+/// all of that down and the answer is what it wrote.
+///
+/// Nothing here is counted, and that is the point of it being a separate entry point rather than
+/// [`recover`] with a fast case inside. The four counts are how much of a build's guarantee rests
+/// on provenance the compiler lost, and a capability produced where the pointer was produced is
+/// not that. An address this cannot answer for is, so it falls through to [`recover`] and is
+/// counted there: the fall through covers an allocator nobody told the runtime about, an address
+/// that is not the base of a live instance, and storage whose header says something a header
+/// should not.
+#[must_use]
+pub fn made(base: *const c_void) -> Cap {
+    let payload = base as usize;
+    // A base that is not granule aligned is not the base of an instance, since the allocator lays
+    // every payload out on a granule so that no two instances share one.
+    if payload & (GRANULE - 1) != 0 {
+        return recover(base);
+    }
+    let Some(region) = alloc::covering(payload) else { return recover(base) };
+    // SAFETY: the region is the one covering this address, so its plane is built over it.
+    let version = unsafe { region.plane.version(payload) };
+    if !plane::owned(version) {
+        return recover(base);
+    }
+    let Some(header) = headed(&region, payload, version) else { return recover(base) };
+    Cap::new(payload as u64, header.ext, version, header.meta)
+}
+
 /// The capability for a pointer that was in memory and whose capability was not.
 ///
 /// [`recover`] with a second count on top, for the one caller that reaches it from inside the
@@ -222,11 +273,11 @@ pub fn unwritten(addr: *const c_void) -> Cap {
 /// time writes the same value, and a second thread rewriting the header for another reason is the
 /// allocator, which does not run against a live instance.
 pub fn mark_handed(region: &Region, payload: usize, version: Version) {
-    if stated(region, payload, version).is_none() {
+    if believed(region, payload, version).is_none() {
         return;
     }
     let header = layout::header_of(payload) as *mut Header;
-    // SAFETY: `stated` just read this header and found a live allocated instance of this region
+    // SAFETY: `believed` just read this header and found a live allocated instance of this region
     // whose version is the plane's, so the thirty two bytes are the runtime's own storage.
     unsafe {
         let meta = (*header).meta;
@@ -240,12 +291,7 @@ pub fn mark_handed(region: &Region, payload: usize, version: Version) {
 /// instance keeps class Y1 rather than losing it on the strength of bits nobody wrote.
 #[must_use]
 pub fn was_handed(region: &Region, payload: usize, version: Version) -> bool {
-    if stated(region, payload, version).is_none() {
-        return false;
-    }
-    // SAFETY: as `mark_handed`.
-    let header = unsafe { (layout::header_of(payload) as *const Header).read() };
-    header.meta.flags() & Meta::HANDED != 0
+    believed(region, payload, version).is_some_and(|header| header.meta.flags() & Meta::HANDED != 0)
 }
 
 /// Which of the four situations `addr` is in, without working out any bounds.
@@ -321,7 +367,7 @@ pub fn extent(region: &Region, addr: usize) -> Option<(usize, usize)> {
 /// granules nobody looked at.
 ///
 /// Except where the header answers, which is the case document 05 section 5.2.3 built the layout
-/// for and is [`stated`]. An address whose own granule is owned and whose neighbour below is not is
+/// for and is [`headed`]. An address whose own granule is owned and whose neighbour below is not is
 /// the first granule of a run, and the thirty two bytes in front of the first granule of a run are
 /// that instance's header, which states the extent. That is a load rather than a search, and it is
 /// the common case at a boundary: a pointer handed to a library is far more often the address an
@@ -329,15 +375,8 @@ pub fn extent(region: &Region, addr: usize) -> Option<(usize, usize)> {
 fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     let here = addr & !(GRANULE - 1);
 
-    // The same read the search below starts with. Asking it twice is a hit in the first level cache
-    // and asking it here is what makes the header safe to read: a granule with the same version
-    // underneath it is not the first of its run, so the thirty two bytes in front of it are some
-    // other instance's payload, and the program can put anything it likes in those.
-    // SAFETY: `here` is above the region's base, so the granule below it is one the plane covers.
-    let below = (here > region.base).then(|| unsafe { region.plane.version(here - GRANULE) });
-    let first = (below != Some(version)).then(|| stated(region, here, version)).flatten();
-    if let Some(ext) = first {
-        return (here, ext);
+    if let Some(header) = headed(region, here, version) {
+        return (here, header.ext as usize);
     }
 
     // How many granules there are to look at on each side, worked out from the region's own bounds
@@ -407,7 +446,25 @@ fn edge(region: &Region, here: usize, version: Version, span: usize, step: isize
     yes
 }
 
-/// How far the instance whose payload begins at `payload` runs, out of its own header.
+/// The header of the instance whose payload begins at `here`, when the address really begins one.
+///
+/// The read of the granule below is what makes the header safe to read at all: a granule with the
+/// same version underneath it is not the first of its run, so the thirty two bytes in front of it
+/// are some other instance's payload and the program can put anything it likes in those. [`run`]
+/// asks the same question again as its first step, which is a hit in the first level cache.
+///
+/// Whether the header is one to believe is [`believed`], and this is the pair of the two: the
+/// granule below says the address could be a base and the header says it is.
+fn headed(region: &Region, here: usize, version: Version) -> Option<Header> {
+    // SAFETY: `here` is above the region's base, so the granule below it is one the plane covers.
+    let below = (here > region.base).then(|| unsafe { region.plane.version(here - GRANULE) });
+    if below == Some(version) {
+        return None;
+    }
+    believed(region, here, version)
+}
+
+/// The header of the instance whose payload begins at `payload`, when there is one to believe.
 ///
 /// Nothing unless the header in front of the address is a live allocated instance's and says the
 /// version the plane says. The caller has already established that `payload` is the first granule
@@ -420,7 +477,11 @@ fn edge(region: &Region, here: usize, version: Version, span: usize, step: isize
 /// believe. What could produce one is storage adopted from an allocator that lays its own blocks
 /// out differently, per `spec/safe-memory/10-interop.md`, which is a region the runtime watches
 /// without having carved it.
-fn stated(region: &Region, payload: usize, version: Version) -> Option<usize> {
+///
+/// The whole header comes back rather than the extent alone because the extent is all [`run`] wants
+/// and it is not all anybody wants. [`made`] wants the metadata word, which is the part of an exact
+/// capability that a recovered one cannot have, and [`was_handed`] wants one flag out of it.
+fn believed(region: &Region, payload: usize, version: Version) -> Option<Header> {
     // Somebody else's arena has no header of ours in front of anything, so there is nothing here
     // to read and the walk is the only answer. See `alloc::Watch::carved`.
     if !region.carved {
@@ -451,7 +512,7 @@ fn stated(region: &Region, payload: usize, version: Version) -> Option<usize> {
     {
         return None;
     }
-    Some(ext)
+    Some(header)
 }
 
 /// The metadata word a recovered capability carries.
@@ -510,6 +571,25 @@ pub mod exports {
         unsafe { out.write(cap) }
     }
 
+    /// Document 05 section 5.2.1's capability for a pointer an allocator just returned.
+    ///
+    /// The same shape as [`__rucc_cap_recover`] and deliberately so, since the back end emits the
+    /// two from the same place and the only difference is which name it picks. What differs is the
+    /// cost and the answer: this one is a subtract and a load and is exact, and nothing it does is
+    /// counted as a recovery.
+    ///
+    /// # Safety
+    ///
+    /// `out` is a writable, aligned [`Cap`] sized slot. `base` is only ever compared and used to
+    /// find the header the runtime itself wrote, never read through as the program's own storage,
+    /// so it may be any value at all including null.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_made(out: *mut Cap, base: *const c_void) {
+        let cap = super::made(base);
+        // SAFETY: the caller's slot, which the contract above says is writable and aligned.
+        unsafe { out.write(cap) }
+    }
+
     /// Document 10 section 10.2's crossing count, which is what generated code calls.
     ///
     /// One argument and no result, because there is nothing yet for a result to be kept in and a
@@ -542,7 +622,7 @@ pub mod exports {
 mod tests {
     use core::ffi::c_void;
 
-    use super::{Cap, Header, Meta, Origin, counts, recover, witness};
+    use super::{Cap, Header, Meta, Origin, counts, made, recover, witness};
     use crate::alloc;
     use crate::layout::Class;
     use crate::plane;
@@ -631,6 +711,60 @@ mod tests {
         assert_eq!(cap.meta.flags(), Meta::RECOVERED);
 
         free(ptr);
+    }
+
+    #[test]
+    fn the_capability_of_a_fresh_allocation_comes_out_of_that_instances_own_header() {
+        let _turn = crate::turnstile::turn();
+        let ptr = alloc::alloc(64);
+        assert!(!ptr.is_null());
+
+        let before = counts();
+        let cap = made(ptr.cast_const());
+        assert_eq!(counts(), before, "a capability made where the pointer was is not a recovery");
+
+        assert_eq!(cap.lo, ptr as u64);
+        assert_eq!(cap.ext, 64);
+        assert!(cap.covers(ptr as u64, 64));
+        assert!(!cap.covers(ptr as u64, 65));
+
+        // The part that is not just cheaper. The metadata is the word the allocator wrote, so the
+        // permissions are the ones the storage really allows and the instance identifier is one a
+        // report can name, and the capability does not claim to have been recovered.
+        assert_eq!(cap.meta.class(), Class::Allocated as u8);
+        assert_eq!(cap.meta.flags(), 0);
+        assert_ne!(cap.meta.instance(), 0);
+        assert_eq!(recover(ptr.cast_const()).meta.flags(), Meta::RECOVERED);
+
+        free(ptr);
+    }
+
+    #[test]
+    fn an_address_that_is_not_a_live_base_falls_through_and_is_counted_there() {
+        let _turn = crate::turnstile::turn();
+        let ptr = alloc::alloc(64);
+        assert!(!ptr.is_null());
+        let local = 0_u64;
+
+        // An interior pointer, which the compiler is not supposed to hand this and which has to be
+        // answered anyway, since the flag that says a call allocates is a claim about the call.
+        let before = count(Origin::Planes);
+        let inside = made(ptr.cast::<u8>().wrapping_add(24).cast_const().cast::<c_void>());
+        assert_eq!(count(Origin::Planes), before + 1);
+        assert_eq!(inside.lo, ptr as u64);
+        assert_eq!(inside.meta.flags(), Meta::RECOVERED);
+
+        let before = count(Origin::Unwatched);
+        let nowhere = made((&raw const local).cast::<c_void>());
+        assert_eq!(count(Origin::Unwatched), before + 1);
+        assert!(nowhere.meta.flags() & Meta::UNWATCHED != 0);
+
+        free(ptr);
+        // A base address whose granules nobody owns any more, which is the case that says why the
+        // fall through has to exist rather than the entry point trusting what it was handed.
+        let before = count(Origin::Nobody);
+        assert!(made(ptr.cast_const()).is_bottom());
+        assert_eq!(count(Origin::Nobody), before + 1);
     }
 
     #[test]

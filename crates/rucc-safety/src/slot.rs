@@ -32,12 +32,22 @@
 //! # What is lowered and what is left
 //!
 //! `cap_null` and `cap_store`, which is the pair that makes a capability and consumes one without
-//! anybody having to work one out from an address. The other four producers are the boxes on
+//! anybody having to work one out from an address. The other producers are the boxes on
 //! tamnd/rucc#1085 after this one, and each of them is a question of its own about where the
 //! numbers come from rather than about where they are kept.
 //!
-//! Until those exist a function can still hold a capability this pass cannot place, and the answer
-//! then is to leave every capability in the function alone. Placing some and not others would mean
+//! And `cap_of` over a pointer an allocator just returned, which is the second of those boxes and
+//! the easiest of them by a long way. Everywhere else a `cap_of` is a question with no cheap answer,
+//! because an address on its own says nothing about the object around it and working the object out
+//! is the plane walk. At an allocation site the address is the base of the object, the header sits
+//! directly behind the base, and the header holds the extent and the version and the whole metadata
+//! word the allocator wrote. So the capability is a subtract and a load, and it is exact rather than
+//! recovered: the permissions and the instance identifier are the ones the allocator meant rather
+//! than a guess made from the region's class. `fresh` is the shape it recognises, and
+//! `rucc_safe_rt::recover`'s `made` is the load.
+//!
+//! Until the rest exist a function can still hold a capability this pass cannot place, and the
+//! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
 //! lowering it: the back end refuses an opcode it has no rule for and says so, and a slot full of
 //! whatever the frame held is a capability that permits whatever it happens to say.
@@ -54,7 +64,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_ir::{
-    Block, Extra, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict, Type, Value,
+    Block, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict, Type,
+    Value,
 };
 
 /// How many bytes a capability takes, which is section 5.2.1's four words.
@@ -85,8 +96,10 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     }
     let mut moved: HashMap<Value, Value> = HashMap::new();
     for inst in walk(func) {
-        if func[inst].opcode == Opcode::CapNull {
-            nulled(func, word, inst, &mut moved);
+        match func[inst].opcode {
+            Opcode::CapNull => nulled(func, word, inst, &mut moved),
+            Opcode::CapOf => allocated(func, names, inst, &mut moved),
+            _ => {}
         }
     }
     if moved.is_empty() {
@@ -143,7 +156,8 @@ fn prune(func: &mut Func) {
 fn placeable(func: &Func) -> bool {
     for inst in walk(func) {
         let opcode = func[inst].opcode;
-        if opcode.makes_capability() && opcode != Opcode::CapNull {
+        let known = opcode == Opcode::CapNull || fresh(func, inst).is_some();
+        if opcode.makes_capability() && !known {
             return false;
         }
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
@@ -223,6 +237,53 @@ fn nulled(func: &mut Func, word: Type, inst: Inst, moved: &mut HashMap<Value, Va
     func.remove_inst(inst);
 }
 
+/// The pointer a `cap_of` is asking about, when the pointer is one an allocator just returned.
+///
+/// Nothing for any other instruction and nothing for any other `cap_of`, which is what makes this
+/// the whole of the shape this pass recognises rather than a heuristic with an outside.
+///
+/// [`Flags::HEAP`] on the defining call is the thing being read, and `rucc_opt::heap::annotate` is
+/// what writes it: a direct call of a name on its list that the module does not define itself.
+/// Believing the flag is believing the same claim the aliasing summaries already rest on, so a
+/// program where it is wrong has larger problems than this. The result has to be the call's first,
+/// because a call with several is not one of those names.
+///
+/// What happens for a pointer the flag is not on is a capability this pass cannot place, which
+/// leaves the whole function's capabilities where they were. That is the conservative direction and
+/// it costs nothing today, since every `cap_of` that is not read is gone by the time this runs.
+fn fresh(func: &Func, inst: Inst) -> Option<Value> {
+    if func[inst].opcode != Opcode::CapOf {
+        return None;
+    }
+    let &[base] = &func[func[inst].args] else { return None };
+    let Def::Result { inst: call, index: 0 } = func[base].def else { return None };
+    (func[call].opcode == Opcode::Call && func[call].flags.contains(Flags::HEAP)).then_some(base)
+}
+
+/// `cap_of` over a fresh allocation becomes `__rucc_cap_made(slot, base)`.
+///
+/// Beside the instruction rather than in place of it, unlike every other rewrite in this pass and in
+/// [`mod@crate::lower`]. The call gives nothing back, because the capability it produced went into
+/// the slot the first argument names, and the instruction it replaces gave back a capability. So the
+/// call goes in front and the `cap_of` comes out, and everything that read the capability is pointed
+/// at the slot by [`substitute`].
+///
+/// In front of the `cap_of` rather than at the top of the function, because that is where the base
+/// pointer is: the call that produced it has run by then and nothing has to be kept live any longer
+/// than it already was. The slot itself is in the entry block for the reason [`reserve`] gives.
+fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, moved: &mut HashMap<Value, Value>) {
+    let Some(base) = fresh(func, inst) else { return };
+    let Some(result) = func[inst].results().next() else { return };
+    let Some(address) = reserve(func, inst) else { return };
+    let params = &[Type::PTR; 2];
+    let args = &[address, base];
+    let data = crate::lower::calling(func, names, "__rucc_cap_made", params, &[], args);
+    let made = func.create_inst(data, &[], func.span(inst));
+    func.insert_before(made, inst);
+    moved.insert(result, address);
+    func.remove_inst(inst);
+}
+
 /// `cap_store` becomes `__rucc_cap_store(container, at, value, capability)`.
 ///
 /// Four addresses, since both capabilities are slots by the time this runs and the other two
@@ -280,7 +341,7 @@ fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, Module, Signature, print_func, verify_func};
+    use rucc_ir::{Builder, CallInfo, Module, Signature, print_func, verify_func};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -309,6 +370,36 @@ mod tests {
         let mut b = Builder::new(&mut func, entry);
         let cap = b.value(InstData::new(Opcode::CapNull), Type::CAP);
         extra(&mut b, cap, at);
+        b.ret(&[]);
+        func
+    }
+
+    /// A `cap_of` over what a call returned, stored, with the call vouched for or not.
+    ///
+    /// The flag is the whole of what this pass reads to tell an allocation site from any other call,
+    /// so the version without it is a test of the fall through rather than of a different program.
+    fn called(names: &mut Interner, vouched: bool) -> Func {
+        let word = Type::int(64);
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[word, Type::PTR]));
+        let entry = func.create_block();
+        let size = func.append_param(entry, word);
+        let at = func.append_param(entry, Type::PTR);
+        let sig = Signature::new().with_params(&[word]).with_returns(&[Type::PTR]);
+        let sig = func.add_signature(sig);
+        let callee = names.intern("malloc");
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
+        let args = func.push_values(&[size]);
+        let flags = if vouched { Flags::HEAP } else { Flags::default() };
+        let mut b = Builder::new(&mut func, entry);
+        let data =
+            InstData { args, extra: Extra::Call(info), flags, ..InstData::new(Opcode::Call) };
+        let base = b.value(data, Type::PTR);
+        let args = b.func().push_values(&[base]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = b.func().push_values(&[cap, at, at, cap]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         b.ret(&[]);
         func
     }
@@ -377,6 +468,35 @@ mod tests {
         let entry = func.entry().expect("the function has a body");
         let here = func.insts(entry).filter(|&inst| func[inst].opcode == Opcode::Alloca).count();
         assert_eq!(here, count(&func, Opcode::Alloca));
+    }
+
+    #[test]
+    fn a_capability_for_a_fresh_allocation_is_one_call_and_no_stores() {
+        let mut names = Interner::new();
+        let mut func = called(&mut names, true);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        // Nothing writes the four words here, unlike the null case. The runtime fills the slot out
+        // of the instance's own header, which is the whole point of the site being cheap.
+        assert_eq!(count(&func, Opcode::Store), 0);
+        assert!(!any_capability(&func));
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_made"), "{text}");
+        assert!(text.contains("__rucc_cap_store"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_capability_for_a_pointer_nobody_vouched_for_is_left_where_it_was() {
+        let mut names = Interner::new();
+        let mut func = called(&mut names, false);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapOf), 1);
+        assert_eq!(count(&func, Opcode::CapStore), 1);
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
     }
 
     #[test]

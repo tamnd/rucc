@@ -205,8 +205,11 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
     (Opcode::CapExtentBack, "`rucc_safety::lower`, the same call about the bytes below an address"),
     // The capability the checks were reading, which the same pass takes out once they are calls,
-    // because a call to the runtime is handed an address and finds the rest for itself.
-    (Opcode::CapOf, "`rucc_safety::lower`, which removes it, since nothing reads it any more"),
+    // because a call to the runtime is handed an address and finds the rest for itself. One that
+    // something does read is a slot, and the only one of those the pass can fill so far is a
+    // capability for a pointer an allocator just returned, which is a load out of that instance's
+    // own header rather than anything worked out from the address.
+    (Opcode::CapOf, "`rucc_safety::slot`, into a call for a fresh allocation and gone otherwise"),
     // The two ends of a capability that something does read. A capability is four words of frame
     // and the value that stands for one is the slot's address, so the pair below is an `alloca`
     // with four zero words written into it and a call handed the addresses of two slots.
