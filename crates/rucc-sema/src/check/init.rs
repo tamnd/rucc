@@ -1872,7 +1872,8 @@ decl #0 a : char[3] object automatic defined
         let literal = f.text("hi", Encoding::Plain);
         let item = f.plain(literal);
         let init = f.list(&[item]);
-        let decl = f.var(f.builtin(BuiltinSet::CHAR), "a", &[unsized_array(), pointer()], Some(init));
+        let decl =
+            f.var(f.builtin(BuiltinSet::CHAR), "a", &[unsized_array(), pointer()], Some(init));
 
         let mut c = f.checker();
         c.scopes.push();
