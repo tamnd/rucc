@@ -138,11 +138,8 @@ fn an_installed_sdk_serves_every_apple_target_and_not_only_the_one_this_machine_
     let host = target("aarch64-macos");
     let sdk = [path("/SDKs/MacOSX.sdk/usr/include")];
     for tuple in ["aarch64-macos", "x86_64-macos", "aarch64-ios"] {
-        let found = include_paths(
-            target(tuple),
-            Some(host),
-            &Options { sdk: &sdk, ..Options::default() },
-        );
+        let found =
+            include_paths(target(tuple), Some(host), &Options { sdk: &sdk, ..Options::default() });
         assert_eq!(found.len(), 1, "{tuple}");
         assert_eq!(found[0].origin, Origin::Sdk, "{tuple}");
         assert_eq!(found[0].path, sdk[0], "{tuple}");
