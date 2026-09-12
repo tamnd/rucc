@@ -2179,6 +2179,13 @@ mod tests {
         pub(super) fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
         }
+
+        /// The same under `-fno-trapping-math`, which licenses one fold the default does not.
+        pub(super) fn checker_without_trapping_math(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.trapping_math = false;
+            Checker::new(&self.ast, cx)
+        }
     }
 
     /// The tree under one node, which is what almost every assertion here is about.

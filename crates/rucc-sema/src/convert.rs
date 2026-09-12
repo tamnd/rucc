@@ -37,9 +37,12 @@
 //! symptom is a whole expression coming out unsigned on the strength of one member's declared
 //! type.
 
+use rucc_base::Interner;
+use rucc_base::float::Status;
 use rucc_target::TargetInfo;
-use rucc_types::{TypeId, TypeKind, Types, is_arithmetic, is_pointer, is_void};
+use rucc_types::{TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer, is_void};
 
+use crate::eval::{Eval, bare, int_shape};
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::{Const, Tast};
 
@@ -47,7 +50,8 @@ use crate::tast::{Const, Tast};
 ///
 /// Three references rather than a pass-wide context, because the conversions are the part of
 /// semantic analysis with no state of its own and nothing else here should be able to reach
-/// the scopes or the diagnostics through them.
+/// the scopes or the diagnostics through them. The flag beside them is the one exception, and
+/// it is a copied `bool` rather than a fourth reference for the same reason.
 #[derive(Debug)]
 pub struct Conv<'a> {
     /// The tree the nodes are written into.
@@ -56,6 +60,11 @@ pub struct Conv<'a> {
     pub types: &'a mut Types,
     /// What the target's integers are, which is what the promotions are decided by.
     pub target: &'a TargetInfo,
+    /// The spellings, which are here only because the constant folder asks for one.
+    pub names: &'a Interner,
+    /// Whether an operation may raise an exception the program then looks at, which is
+    /// `-ftrapping-math` and is on by default. The saturating fold below is what reads it.
+    pub trapping_math: bool,
 }
 
 impl Conv<'_> {
@@ -262,8 +271,58 @@ impl Conv<'_> {
         self.types.unqualified(stripped)
     }
 
+    /// The value an out of range conversion of a floating constant to an integer type leaves,
+    /// where `-fno-trapping-math` licenses working it out here, and [`None`] everywhere else.
+    ///
+    /// A conversion of a value the integer type cannot hold is undefined behaviour in C rather
+    /// than an answer, and what a program gets is whatever the instruction does: on x86-64 the
+    /// integer indefinite value, on aarch64 the nearest end of the range. gcc leaves it there
+    /// while `-ftrapping-math` is on, because the same instruction is what raises the invalid
+    /// operation the program said it was going to look at, and folds it to the nearest end of
+    /// the range once the program says it is not. This is that fold.
+    ///
+    /// A conversion that does fit is not touched, so a program that never leaves the range
+    /// compiles to the same tree whichever way the flag is set. The cast and the assignment both
+    /// come through here, since `(int)2147483648.0f` and `int x = 2147483648.0f;` are the same
+    /// conversion written two ways, and the operand is folded rather than looked at, since
+    /// `(int)(float)2147483647` is out of range for an `int` without a float being written
+    /// anywhere in it.
+    pub(crate) fn saturated(&mut self, operand: ExprId, ty: TypeId) -> Option<ExprId> {
+        if self.trapping_math || !is_floating(self.types, self.tast[operand].ty) {
+            return None;
+        }
+        // `bool` is left out because its conversion is a comparison against zero and not a
+        // truncation, and saturating a negative one would answer false for a value that is true.
+        if !matches!(
+            bare(self.types, ty),
+            TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_)
+        ) {
+            return None;
+        }
+        let info = int_shape(self.types, ty, self.target)?;
+        let value = {
+            let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
+            match eval.constant(operand) {
+                Ok(Const::Float(value)) => value,
+                _ => return None,
+            }
+        };
+        let (folded, status) = value.to_integer(info.width, info.signed);
+        if !status.has(Status::INVALID) {
+            return None;
+        }
+        let span = self.tast.expr_span(operand);
+        let folded = self.tast.add_const(Const::Int(folded));
+        Some(self.tast.expr(Expr::new(ExprKind::Const(folded), ty, Category::Rvalue), span))
+    }
+
     /// Writes one conversion node over an operand.
     fn write(&mut self, kind: Conversion, operand: ExprId, ty: TypeId) -> ExprId {
+        if kind == Conversion::Arithmetic
+            && let Some(folded) = self.saturated(operand, ty)
+        {
+            return folded;
+        }
         let span = self.tast.expr_span(operand);
         let node = Expr::new(ExprKind::Convert { kind, operand }, ty, Category::Rvalue);
         self.tast.expr(node, span)
@@ -296,7 +355,13 @@ mod tests {
         }
 
         fn conv(&mut self) -> Conv<'_> {
-            Conv { tast: &mut self.tast, types: &mut self.types, target: &self.target }
+            Conv {
+                tast: &mut self.tast,
+                types: &mut self.types,
+                target: &self.target,
+                names: &self.names,
+                trapping_math: true,
+            }
         }
 
         /// An lvalue of the given type, which is what a use of an object is.
