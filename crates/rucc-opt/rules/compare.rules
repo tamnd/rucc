@@ -308,3 +308,64 @@
 (rule (simplify (icmp_ult.i1 (value.i64 x) (iconst.i64 -1)))
       (icmp_ne.i1 (value.i64 x) (iconst.i64 -1))
       (spec (= (ite (bvult x -1) 1 0) (result))))
+
+
+;; A widened boolean compared against zero, which is the boolean.
+;;
+;; The second shape in the tier and the first anywhere below tier four to need an operand expanded
+;; into the instruction that computed it. `x != 0` on a value that is a zero extension of one bit
+;; is that bit, because a zero extension writes zeros above what it was given and leaves the value
+;; alone, so the wide value is zero exactly when the bit is. The other predicate is that bit
+;; negated, which is an exclusive or with one at a width where one is all the bits there are.
+;;
+;; This is the shape C arrives in rather than one written to be rewritten, and it arrives three
+;; ways. A boolean stored in an `int` and tested is `if (flag)`, where the front end widens the
+;; comparison to `int` at the assignment and compares the `int` against zero at the test. A
+;; conversion to a wider type in the middle of a condition is the same pair, which is what
+;; `(long)(a == b)` is. And `__builtin_expect` is the second of those whether or not the program
+;; wrote a cast, because the prototype is `long(long, long)` and the argument is converted before
+;; the call: tamnd/rucc#364 takes the instruction out and the widening and the comparison it sat
+;; between are what is left. Section 13.4 puts the `(x & c) != 0` family in this tier, and this is
+;; that family's neighbour, with the mask being the whole of the value rather than part of it.
+;;
+;; The negated half writes an exclusive or rather than a flipped comparison because there is no
+;; comparison left to flip: the pattern matched a widening, not a comparison, so what is under it
+;; is whatever produced the bit. Where that is a comparison, which it usually is, the hand written
+;; rewrite in `crate::simplify` turns the exclusive or back into the opposite comparison, and the
+;; two rewrites compose into the one instruction the program meant.
+;;
+;; Sign extension is not here, and not by oversight: nothing in `ir.model` gives a semantics for
+;; sign extending one bit, because nothing in the IR writes one. A boolean is widened with a zero
+;; extension everywhere the front end makes one.
+
+(rule (simplify (icmp_ne.i1 (zext.i1.i8 (value.i1 x)) (iconst.i8 0)))
+      (value.i1 x)
+      (spec (= (ite (not (= (zero_extend 1 8 x) 0)) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (zext.i1.i8 (value.i1 x)) (iconst.i8 0)))
+      (xor.i1 (value.i1 x) (iconst.i1 1))
+      (spec (= (ite (= (zero_extend 1 8 x) 0) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (zext.i1.i16 (value.i1 x)) (iconst.i16 0)))
+      (value.i1 x)
+      (spec (= (ite (not (= (zero_extend 1 16 x) 0)) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (zext.i1.i16 (value.i1 x)) (iconst.i16 0)))
+      (xor.i1 (value.i1 x) (iconst.i1 1))
+      (spec (= (ite (= (zero_extend 1 16 x) 0) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (zext.i1.i32 (value.i1 x)) (iconst.i32 0)))
+      (value.i1 x)
+      (spec (= (ite (not (= (zero_extend 1 32 x) 0)) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (zext.i1.i32 (value.i1 x)) (iconst.i32 0)))
+      (xor.i1 (value.i1 x) (iconst.i1 1))
+      (spec (= (ite (= (zero_extend 1 32 x) 0) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (zext.i1.i64 (value.i1 x)) (iconst.i64 0)))
+      (value.i1 x)
+      (spec (= (ite (not (= (zero_extend 1 64 x) 0)) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (zext.i1.i64 (value.i1 x)) (iconst.i64 0)))
+      (xor.i1 (value.i1 x) (iconst.i1 1))
+      (spec (= (ite (= (zero_extend 1 64 x) 0) 1 0) (result))))
