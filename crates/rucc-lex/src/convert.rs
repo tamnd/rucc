@@ -393,6 +393,7 @@ fn number(
             ints.push(IntConstant {
                 value: 0,
                 ty: crate::number::IntConstantType::Standard(rucc_types::IntKind::Int),
+                imaginary: false,
                 remarks: Remarks::NONE,
             });
             let index = u32::try_from(ints.len() - 1).expect("that many constants in one file");

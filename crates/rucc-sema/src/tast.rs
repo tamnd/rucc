@@ -58,6 +58,19 @@ pub enum Const {
         /// The imaginary half.
         imag: Float,
     },
+    /// A complex value whose halves are integers, which is `_Complex int` and the rest of gcc's
+    /// complex integer types.
+    ///
+    /// A variant of its own rather than a pair of [`Const::Int`] for the same reason the
+    /// floating one is, and separate from it because the two halves are held the way a half of
+    /// that type is held: sign extended into a hundred and twenty eight bits, not in a floating
+    /// format that would round every value wider than a `double` can hold exactly.
+    ComplexInt {
+        /// The real half, sign extended into the whole width from the type it has.
+        real: i128,
+        /// The imaginary half, held the same way.
+        imag: i128,
+    },
     /// The address of an object, which is a number nobody knows until the link.
     Address(Address),
 }

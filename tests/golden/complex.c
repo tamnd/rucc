@@ -3,7 +3,9 @@
 // none, so every operator over one comes out as that operator over its two halves and there is
 // no complex anything left in the IR below.
 //
-// `_Complex` on an integer type is not here yet. `tamnd/rucc#201` is where the rest of it lands.
+// `_Complex` on an integer type is here too. It is gcc's extension rather than C's and the halves
+// are integers, so the same walk comes out in integer opcodes and the two operators the runtime
+// answers for a floating pair are written out instead.
 
 // `_Complex` written on its own, which gcc reads as `_Complex double`. No edition of C wrote a
 // rule for it, so `-pedantic` says so and nothing else does, and the type below is the same one
@@ -151,3 +153,77 @@ _Complex float scaled(_Complex float a, _Complex double b) {
 // answer the call would have given.
 _Complex double product = (1.5 + 2.5i) * (0.5 + 4.0i);
 _Complex double quotient = (1.0 + 2.0i) / (3.0 + 4.0i);
+
+// `_Complex` on an integer type, which is gcc's and which the two halves being integers is the
+// whole of. The type is two of whatever the half is, so `_Complex char` is two bytes, and the ABI
+// asks about the half rather than about the keyword, so this pair is integer registers where the
+// one above is SSE ones.
+_Complex int integral(_Complex int a, _Complex int b) {
+  return a + b;
+}
+
+// The negation and the conjugate on integer halves, which are the integer negation the halves
+// would get on their own rather than the `fneg` above.
+_Complex int flipped(_Complex int a) {
+  return -a;
+}
+
+_Complex int mirrored(_Complex int a) {
+  return ~a;
+}
+
+// The multiply, which is the four products written out. There is no routine to call for it: the
+// libgcc family is written over the floating formats and has no member for an integer half.
+_Complex int scaled_up(_Complex int a, _Complex int b) {
+  return a * b;
+}
+
+// The divide, which is Smith's method the same way the floating one is, with an integer division
+// at every step. gcc writes this one out too and writes it in exactly this shape, and an integer
+// division truncates, so the shape is what the answer is and not a detail underneath it.
+_Complex int shared(_Complex int a, _Complex int b) {
+  return a / b;
+}
+
+// The same on an unsigned half, where there is no sign to take off the two halves of the divisor
+// before they are compared.
+_Complex unsigned unsigned_shared(_Complex unsigned a, _Complex unsigned b) {
+  return a / b;
+}
+
+// The imaginary suffix on an integer constant, which names the complex type whose half is the type
+// the rest of the suffix named. So this is a `_Complex long` and the one below it is a
+// `_Complex int`, and both fold into the pair the image holds.
+_Complex long wide_pinned = 3l + 4li;
+_Complex int integral_pinned = 3 + 4i;
+
+// The two the folding works out on integer halves, which have to agree with the two functions
+// above: a program that divides two constants and a program that divides two variables holding
+// those constants are the same program.
+_Complex int integral_product = (3 + 4i) * (1 + 2i);
+_Complex int integral_quotient = (3 + 4i) / (1 + 2i);
+
+// Both halves compared, and one as a condition, on integer halves. `icmp` where the pair above
+// gives `fcmp`, and nothing else about either changes.
+int integral_equal(_Complex int a, _Complex int b) {
+  return a == b;
+}
+
+int integral_nonzero(_Complex int a) {
+  return a ? 1 : 0;
+}
+
+// The conversions across the two families, which convert each half the way the halves convert.
+_Complex double widened(_Complex int a) {
+  return a;
+}
+
+_Complex int truncated(_Complex double a) {
+  return a;
+}
+
+// And a narrow half, to show that the layout is the half's own size and alignment doubled in size
+// and left alone in alignment.
+_Complex char narrow(_Complex char a, _Complex char b) {
+  return a + b;
+}

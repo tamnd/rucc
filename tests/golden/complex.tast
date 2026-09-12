@@ -290,3 +290,161 @@ decl #60 quotient : _Complex double object external static defined
           convert arithmetic : _Complex double
             const 0x18p-3 : double
           const 0x0p+0 + 0x1p+2i : _Complex double
+decl #63 integral : _Complex int(_Complex int, _Complex int) function external defined
+  params
+    decl #61 a : _Complex int object automatic defined
+    decl #62 b : _Complex int object automatic defined
+  body
+    block
+      return
+        binary + : _Complex int
+          convert lvalue : _Complex int
+            decl #61 a : _Complex int lvalue
+          convert lvalue : _Complex int
+            decl #62 b : _Complex int lvalue
+decl #65 flipped : _Complex int(_Complex int) function external defined
+  params
+    decl #64 a : _Complex int object automatic defined
+  body
+    block
+      return
+        unary - : _Complex int
+          convert lvalue : _Complex int
+            decl #64 a : _Complex int lvalue
+decl #67 mirrored : _Complex int(_Complex int) function external defined
+  params
+    decl #66 a : _Complex int object automatic defined
+  body
+    block
+      return
+        unary ~ : _Complex int
+          convert lvalue : _Complex int
+            decl #66 a : _Complex int lvalue
+decl #70 scaled_up : _Complex int(_Complex int, _Complex int) function external defined
+  params
+    decl #68 a : _Complex int object automatic defined
+    decl #69 b : _Complex int object automatic defined
+  body
+    block
+      return
+        binary * : _Complex int
+          convert lvalue : _Complex int
+            decl #68 a : _Complex int lvalue
+          convert lvalue : _Complex int
+            decl #69 b : _Complex int lvalue
+decl #73 shared : _Complex int(_Complex int, _Complex int) function external defined
+  params
+    decl #71 a : _Complex int object automatic defined
+    decl #72 b : _Complex int object automatic defined
+  body
+    block
+      return
+        binary / : _Complex int
+          convert lvalue : _Complex int
+            decl #71 a : _Complex int lvalue
+          convert lvalue : _Complex int
+            decl #72 b : _Complex int lvalue
+decl #76 unsigned_shared : _Complex unsigned int(_Complex unsigned int, _Complex unsigned int) function external defined
+  params
+    decl #74 a : _Complex unsigned int object automatic defined
+    decl #75 b : _Complex unsigned int object automatic defined
+  body
+    block
+      return
+        binary / : _Complex unsigned int
+          convert lvalue : _Complex unsigned int
+            decl #74 a : _Complex unsigned int lvalue
+          convert lvalue : _Complex unsigned int
+            decl #75 b : _Complex unsigned int lvalue
+decl #77 wide_pinned : _Complex long object external static defined
+  init
+    +0
+      binary + : _Complex long
+        convert arithmetic : _Complex long
+          const 3 : long
+        const 0 + 4i : _Complex long
+decl #78 integral_pinned : _Complex int object external static defined
+  init
+    +0
+      binary + : _Complex int
+        convert arithmetic : _Complex int
+          const 3 : int
+        const 0 + 4i : _Complex int
+decl #79 integral_product : _Complex int object external static defined
+  init
+    +0
+      binary * : _Complex int
+        binary + : _Complex int
+          convert arithmetic : _Complex int
+            const 3 : int
+          const 0 + 4i : _Complex int
+        binary + : _Complex int
+          convert arithmetic : _Complex int
+            const 1 : int
+          const 0 + 2i : _Complex int
+decl #80 integral_quotient : _Complex int object external static defined
+  init
+    +0
+      binary / : _Complex int
+        binary + : _Complex int
+          convert arithmetic : _Complex int
+            const 3 : int
+          const 0 + 4i : _Complex int
+        binary + : _Complex int
+          convert arithmetic : _Complex int
+            const 1 : int
+          const 0 + 2i : _Complex int
+decl #83 integral_equal : int(_Complex int, _Complex int) function external defined
+  params
+    decl #81 a : _Complex int object automatic defined
+    decl #82 b : _Complex int object automatic defined
+  body
+    block
+      return
+        binary == : int
+          convert lvalue : _Complex int
+            decl #81 a : _Complex int lvalue
+          convert lvalue : _Complex int
+            decl #82 b : _Complex int lvalue
+decl #85 integral_nonzero : int(_Complex int) function external defined
+  params
+    decl #84 a : _Complex int object automatic defined
+  body
+    block
+      return
+        cond : int
+          convert bool : _Bool
+            convert lvalue : _Complex int
+              decl #84 a : _Complex int lvalue
+          const 1 : int
+          const 0 : int
+decl #87 widened : _Complex double(_Complex int) function external defined
+  params
+    decl #86 a : _Complex int object automatic defined
+  body
+    block
+      return
+        convert arithmetic : _Complex double
+          convert lvalue : _Complex int
+            decl #86 a : _Complex int lvalue
+decl #89 truncated : _Complex int(_Complex double) function external defined
+  params
+    decl #88 a : _Complex double object automatic defined
+  body
+    block
+      return
+        convert arithmetic : _Complex int
+          convert lvalue : _Complex double
+            decl #88 a : _Complex double lvalue
+decl #92 narrow : _Complex char(_Complex char, _Complex char) function external defined
+  params
+    decl #90 a : _Complex char object automatic defined
+    decl #91 b : _Complex char object automatic defined
+  body
+    block
+      return
+        binary + : _Complex char
+          convert lvalue : _Complex char
+            decl #90 a : _Complex char lvalue
+          convert lvalue : _Complex char
+            decl #91 b : _Complex char lvalue

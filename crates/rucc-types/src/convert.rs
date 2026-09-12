@@ -100,6 +100,19 @@ pub fn promote_bit_field(types: &mut Types, id: TypeId, width: u32, target: &Tar
 /// The floating rules come first and the integer rules only run when neither side is floating,
 /// which is why `unsigned long long + float` is `float` and loses precision rather than being
 /// the other way round.
+///
+/// The complexity comes off both operands first and goes back on at the end, which is 6.3.1.8p1
+/// read literally: the rule is written over the corresponding real types and says the result is
+/// complex when either operand was. Doing it that way is also what gives gcc's answer for the
+/// complex integer types, since `_Complex int + long` is the integer rule on `int` and `long`
+/// with the complexity carried across, and none of the integer rules had to learn the word.
+///
+/// A half of a complex operand is not promoted, which is measured from gcc 16.2.0 rather than
+/// read anywhere: `_Complex char + _Complex char` is a `_Complex char` where `char + char` is an
+/// `int`. The promotions are written over the integer types and a complex one is not one of
+/// them, so the operand that is not complex is promoted and the half is taken as it stands.
+/// `_Complex char + char` is therefore a `_Complex int`, since the `char` beside it promotes and
+/// the rule then picks the wider of the two.
 pub fn usual_arithmetic(
     types: &mut Types,
     left: TypeId,
@@ -108,11 +121,32 @@ pub fn usual_arithmetic(
 ) -> Option<TypeId> {
     let left = value_type(types, left);
     let right = value_type(types, right);
+    let (left, left_complex) = real_of(types, left, target);
+    let (right, right_complex) = real_of(types, right, target);
+    let common = real_usual_arithmetic(types, left, right, target)?;
+    Some(if left_complex || right_complex { types.complex(common) } else { common })
+}
+
+/// The operand as the real type the rule works on, and whether it was complex.
+///
+/// The promotion is here because it is the operand that is not complex that gets one.
+fn real_of(types: &mut Types, id: TypeId, target: &TargetInfo) -> (TypeId, bool) {
+    match types.kind(id) {
+        TypeKind::Complex(part) => (part, true),
+        _ => (promote(types, id, target), false),
+    }
+}
+
+/// The usual arithmetic conversions on two operands neither of which is complex.
+fn real_usual_arithmetic(
+    types: &mut Types,
+    left: TypeId,
+    right: TypeId,
+    target: &TargetInfo,
+) -> Option<TypeId> {
     if let Some(common) = floating(types, left, right, target) {
         return Some(common);
     }
-    let left = promote(types, left, target);
-    let right = promote(types, right, target);
     if left == right {
         // Not only a shortcut: it is also the answer for the types this function does not model
         // as integers, which is every one of them once the two sides agree.
@@ -231,24 +265,26 @@ fn promoted_int(types: &mut Types, kind: IntKind, width: u32, target: &TargetInf
     types.int(IntKind::UInt)
 }
 
-/// The common type when either side is a floating type, and [`None`] when neither is.
+/// The common type when either side is a real floating type, and [`None`] when neither is.
 ///
-/// The real type is the one with the higher rank, or the floating one when the other side is an
-/// integer, and the result is complex when either operand was. That last part is why
-/// `_Complex float + double` is `_Complex double`: the real types combine first and the
-/// complexity is carried across afterwards.
+/// The answer is the one with the higher rank, or the floating one when the other side is an
+/// integer. The complexity was taken off both operands before this and is put back on by
+/// [`usual_arithmetic`], which is why `_Complex float + double` is `_Complex double`.
 fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo) -> Option<TypeId> {
     let left = float_part(types, left);
     let right = float_part(types, right);
-    let (kind, complex) = match (left, right) {
+    let kind = match (left, right) {
         (None, None) => return None,
-        (Some((kind, complex)), None) | (None, Some((kind, complex))) => (kind, complex),
-        (Some((a, a_complex)), Some((b, b_complex))) => {
-            let kind = if float_rank(a, target) >= float_rank(b, target) { a } else { b };
-            (kind, a_complex || b_complex)
+        (Some(kind), None) | (None, Some(kind)) => kind,
+        (Some(a), Some(b)) => {
+            if float_rank(a, target) >= float_rank(b, target) {
+                a
+            } else {
+                b
+            }
         }
     };
-    Some(if complex { types.complex(kind) } else { types.float(kind) })
+    Some(types.float(kind))
 }
 
 /// The conversion rank of a real floating type, as something two of which can be compared.
@@ -264,11 +300,10 @@ fn float_rank(kind: FloatKind, target: &TargetInfo) -> (u32, i32, u8) {
     (format.precision(), format.max_exponent(), kind.tie_break())
 }
 
-/// The real floating type inside `id`, and whether it was complex.
-fn float_part(types: &Types, id: TypeId) -> Option<(FloatKind, bool)> {
+/// The real floating type `id` is, and [`None`] for everything else.
+fn float_part(types: &Types, id: TypeId) -> Option<FloatKind> {
     match types.kind(id) {
-        TypeKind::Float(kind) => Some((kind, false)),
-        TypeKind::Complex(kind) => Some((kind, true)),
+        TypeKind::Float(kind) => Some(kind),
         _ => None,
     }
 }

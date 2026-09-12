@@ -69,7 +69,9 @@ use rucc_base::Interner;
 use rucc_base::float::{Float, Format, Status};
 use rucc_diag::Diagnostic;
 use rucc_target::TargetInfo;
-use rucc_types::{IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, spell};
+use rucc_types::{
+    IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, real_part, spell,
+};
 
 use crate::decl::{DeclId, StorageDuration};
 use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, Sign};
@@ -319,6 +321,8 @@ impl<'a> Eval<'a> {
             // type.
             (UnaryOp::Real, Const::Complex { real, .. }) => Ok(Const::Float(real)),
             (UnaryOp::Imag, Const::Complex { imag, .. }) => Ok(Const::Float(imag)),
+            (UnaryOp::Real, Const::ComplexInt { real, .. }) => Ok(Const::Int(real)),
+            (UnaryOp::Imag, Const::ComplexInt { imag, .. }) => Ok(Const::Int(imag)),
             (UnaryOp::Real, value) => Ok(value),
             (UnaryOp::Imag, _) => self.zero(expr),
             (UnaryOp::Minus, Const::Float(value)) => Ok(Const::Float(value.negated())),
@@ -332,6 +336,17 @@ impl<'a> Eval<'a> {
             // the other reading.
             (UnaryOp::BitNot, Const::Complex { real, imag }) => {
                 Ok(Const::Complex { real, imag: imag.negated() })
+            }
+            // The same two on a complex value whose halves are integers, where the negation is
+            // the wrapping one each half would get on its own. The overflow of the least value
+            // is not warned about here, because gcc does not warn about it on a half either.
+            (UnaryOp::Minus | UnaryOp::BitNot, Const::ComplexInt { real, imag }) => {
+                let Some(info) = self.half_shape(self.tast[operand].ty) else {
+                    return Err(self.stop(expr));
+                };
+                let imag = info.wrap(imag.wrapping_neg());
+                let real = if op == UnaryOp::Minus { info.wrap(real.wrapping_neg()) } else { real };
+                Ok(Const::ComplexInt { real, imag })
             }
             (UnaryOp::Minus | UnaryOp::BitNot, Const::Int(value)) => {
                 let Some(info) = self.int_shape(self.tast[operand].ty) else {
@@ -397,6 +412,15 @@ impl<'a> Eval<'a> {
                     }
                     (Const::Complex { real: a, imag: b }, Const::Complex { real: c, imag: d }) => {
                         self.complex_binary(expr, op, (a, b), (c, d))
+                    }
+                    (
+                        Const::ComplexInt { real: a, imag: b },
+                        Const::ComplexInt { real: c, imag: d },
+                    ) => {
+                        let Some(info) = self.half_shape(self.tast[lhs].ty) else {
+                            return Err(self.stop(expr));
+                        };
+                        self.complex_int_binary(expr, op, (a, b), (c, d), info)
                     }
                     // The two operands of an arithmetic operator have one type by the time they
                     // are here, so a mismatched pair is pointer arithmetic or a tree that did
@@ -543,6 +567,83 @@ impl<'a> Eval<'a> {
             return Err(self.stop(expr));
         }
         Ok(Const::Complex { real, imag })
+    }
+
+    /// A binary operator on two complex values whose halves are integers.
+    ///
+    /// Every step happens at the half's own width and wraps there, which is what the walk emits
+    /// and what the machine does. The multiply is the four products and the divide is Smith's
+    /// method, both of them written the way the walk writes them, because an integer division
+    /// truncates and the two forms of the divide do not truncate in the same places. A fold that
+    /// disagreed with the code beside it would be a program that answers differently depending on
+    /// whether the operands happened to be constants.
+    fn complex_int_binary(
+        &mut self,
+        expr: ExprId,
+        op: BinaryOp,
+        (a, b): (i128, i128),
+        (c, d): (i128, i128),
+        info: IntegerInfo,
+    ) -> Result<Const, NotConstant> {
+        // Both halves compared and the two answers combined, which is what the floating one does
+        // and is 6.5.9p3 either way.
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let real = compare_int(op, a, c, info);
+            let imag = compare_int(op, b, d, info);
+            let (Some(real), Some(imag)) = (real, imag) else { return Err(self.stop(expr)) };
+            let answer = if op == BinaryOp::Eq { real && imag } else { real || imag };
+            return Ok(Const::Int(i128::from(answer)));
+        }
+        let at = |op, left, right| half_arithmetic(info, op, left, right);
+        let (real, imag) = match op {
+            BinaryOp::Add => (at(op, a, c), at(op, b, d)),
+            BinaryOp::Sub => (at(op, a, c), at(op, b, d)),
+            BinaryOp::Mul => (
+                at(BinaryOp::Sub, at(op, a, c), at(op, b, d)),
+                at(BinaryOp::Add, at(op, a, d), at(op, b, c)),
+            ),
+            BinaryOp::Div => {
+                // Which half of the divisor is the larger one, which is what the method turns
+                // on. An unsigned half is its own magnitude and is compared as it stands, and
+                // the most negative signed one keeps its sign, which is where the negation
+                // wraps and is what gcc's `ABS_EXPR` leaves there as well.
+                let magnitude = |half: i128| {
+                    if info.signed && half < 0 { info.wrap(half.wrapping_neg()) } else { half }
+                };
+                let swap = match compare_int(BinaryOp::Lt, magnitude(c), magnitude(d), info) {
+                    Some(answer) => answer,
+                    None => return Err(self.stop(expr)),
+                };
+                let (small, large) = if swap { (c, d) } else { (d, c) };
+                let (matched, other) = if swap { (a, b) } else { (b, a) };
+                if large == 0 {
+                    // The same warning the real division gets, and then no value, for the
+                    // reason [`Self::int_binary`] gives there. The larger half being zero is
+                    // both halves being zero, which is the whole of the divisor being zero.
+                    self.warn(expr, "division by zero", "E0521");
+                    return Err(NotConstant { at: expr, poisoned: false });
+                }
+                let m = BinaryOp::Mul;
+                let ratio = at(op, small, large);
+                let below = at(BinaryOp::Add, at(m, small, ratio), large);
+                if below == 0 {
+                    self.warn(expr, "division by zero", "E0521");
+                    return Err(NotConstant { at: expr, poisoned: false });
+                }
+                let scaled_other = at(m, other, ratio);
+                let real = at(BinaryOp::Add, at(m, matched, ratio), other);
+                let imag = if swap {
+                    at(BinaryOp::Sub, scaled_other, matched)
+                } else {
+                    at(BinaryOp::Sub, matched, scaled_other)
+                };
+                (at(op, real, below), at(op, imag, below))
+            }
+            // `%` and the bitwise operators have no complex operands, so a tree with one here
+            // did not check.
+            _ => return Err(self.stop(expr)),
+        };
+        Ok(Const::ComplexInt { real, imag })
     }
 
     /// `<<` or `>>`, whose operands have their own types and whose result has the left one's.
@@ -732,7 +833,9 @@ impl<'a> Eval<'a> {
                 offset: address.offset.wrapping_add(distance),
             })),
             Const::Int(value) => Ok(Const::Int(value.wrapping_add(distance))),
-            Const::Float(_) | Const::Complex { .. } => Err(self.stop(expr)),
+            Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. } => {
+                Err(self.stop(expr))
+            }
         }
     }
 
@@ -822,6 +925,7 @@ impl<'a> Eval<'a> {
                     Const::Complex { real, .. } => {
                         Some(Const::Int(real.to_integer(info.width, info.signed).0))
                     }
+                    Const::ComplexInt { real, .. } => Some(Const::Int(info.wrap(real))),
                     // An address written as a number is still an address, and it survives only
                     // where every bit of it does. That is the whole difference between gcc
                     // taking `long n = (long)&a;` as a static initializer and refusing
@@ -837,19 +941,44 @@ impl<'a> Eval<'a> {
             // A real value becomes the real half beside a zero, 6.3.1.7p1, and a complex one has
             // each of its halves converted. The zero is a positive one, for the reason the
             // imaginary constant's own real half is.
-            TypeKind::Complex(kind) => {
-                let format = float_format(kind, self.target);
-                let (real, imag) = match value {
-                    Const::Complex { real, imag } => (real.to_format(format).0, imag),
-                    value => (self.as_float(value, from, format)?, Float::zero(format, false)),
-                };
-                Some(Const::Complex { real, imag: imag.to_format(format).0 })
-            }
+            TypeKind::Complex(part) => match bare(self.types, part) {
+                TypeKind::Float(kind) => {
+                    let format = float_format(kind, self.target);
+                    let (real, imag) = match value {
+                        Const::Complex { real, imag } => (real.to_format(format).0, imag),
+                        Const::ComplexInt { real, imag } => (
+                            self.as_float(Const::Int(real), from, format)?,
+                            self.as_float(Const::Int(imag), from, format)?,
+                        ),
+                        value => (self.as_float(value, from, format)?, Float::zero(format, false)),
+                    };
+                    Some(Const::Complex { real, imag: imag.to_format(format).0 })
+                }
+                // The halves are integers, so each of them is converted the way a value of the
+                // half's own type is. Nothing here is a floating type, so the imaginary half of
+                // a real operand is a plain zero.
+                _ => {
+                    let info = self.int_shape(part)?;
+                    let (real, imag) = match value {
+                        Const::ComplexInt { real, imag } => (info.wrap(real), info.wrap(imag)),
+                        Const::Complex { real, imag } => (
+                            real.to_integer(info.width, info.signed).0,
+                            imag.to_integer(info.width, info.signed).0,
+                        ),
+                        Const::Int(value) => (info.wrap(value), 0),
+                        Const::Float(value) => (value.to_integer(info.width, info.signed).0, 0),
+                        // No cast makes a complex value out of an address, so a tree with one
+                        // here did not check.
+                        Const::Address(_) => return None,
+                    };
+                    Some(Const::ComplexInt { real, imag })
+                }
+            },
             // A pointer keeps whatever it was, since a cast between pointer types moves nothing:
             // an address stays the same address and a number stays the same number.
             TypeKind::Pointer(_) => match value {
                 Const::Int(_) | Const::Address(_) => Some(value),
-                Const::Float(_) | Const::Complex { .. } => None,
+                Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. } => None,
             },
             // `void` and a record. Neither has a constant to be.
             _ => None,
@@ -866,6 +995,11 @@ impl<'a> Eval<'a> {
             Const::Float(value) => value.to_format(format),
             // Complex to real keeps the real half, 6.3.1.7p2.
             Const::Complex { real, .. } => real.to_format(format),
+            // The same, and then the integer case below on the half that is left.
+            Const::ComplexInt { real, .. } => match self.half_shape(from) {
+                Some(info) if !info.signed => Float::from_unsigned(real as u128, format),
+                _ => Float::from_signed(real, format),
+            },
             Const::Int(value) => match self.int_shape(from) {
                 Some(info) if !info.signed => Float::from_unsigned(value as u128, format),
                 _ => Float::from_signed(value, format),
@@ -892,6 +1026,15 @@ impl<'a> Eval<'a> {
     /// The shape of an integer type, over the tree's own types and target.
     fn int_shape(&self, ty: TypeId) -> Option<IntegerInfo> {
         int_shape(self.types, ty, self.target)
+    }
+
+    /// The shape of a half of a complex type whose halves are integers.
+    ///
+    /// The operand's type is what is asked, rather than the node's, for the reason
+    /// [`Self::int_binary`] asks the operand: a comparison of two `_Complex int` values has type
+    /// `int` and the arithmetic it does is at the width of the halves.
+    fn half_shape(&self, ty: TypeId) -> Option<IntegerInfo> {
+        self.int_shape(real_part(self.types, ty)?)
     }
 
     /// The format of a real floating type, and [`None`] for anything else.
@@ -941,6 +1084,7 @@ fn truth(value: Const) -> bool {
         // A complex value is true when either half is, 6.3.1.2, which is the same question asked
         // of both halves rather than of the pair.
         Const::Complex { real, imag } => !real.is_zero() || !imag.is_zero(),
+        Const::ComplexInt { real, imag } => real != 0 || imag != 0,
         // An object has an address and no object is at zero, so an address is always true.
         Const::Address(_) => true,
     }
@@ -952,6 +1096,32 @@ fn negate(value: Const) -> Const {
         Const::Int(value) => Const::Int(value.wrapping_neg()),
         other => other,
     }
+}
+
+/// One operation on a half of a complex integer, at that half's width and signedness.
+///
+/// The overflow of a half is not reported, which is gcc: `-Woverflow` is written about a value
+/// that will not fit in the object it is being stored in, and an intermediate product of a
+/// complex multiply is not one of those. The divide is only ever reached with a divisor this
+/// function's caller has already found to be non-zero.
+fn half_arithmetic(info: IntegerInfo, op: BinaryOp, left: i128, right: i128) -> i128 {
+    if !info.signed {
+        let (left, right) = (left as u128, right as u128);
+        let value = match op {
+            BinaryOp::Add => left.wrapping_add(right),
+            BinaryOp::Sub => left.wrapping_sub(right),
+            BinaryOp::Mul => left.wrapping_mul(right),
+            _ => left.wrapping_div(right),
+        };
+        return info.wrap(value as i128);
+    }
+    let value = match op {
+        BinaryOp::Add => left.wrapping_add(right),
+        BinaryOp::Sub => left.wrapping_sub(right),
+        BinaryOp::Mul => left.wrapping_mul(right),
+        _ => left.wrapping_div(right),
+    };
+    info.wrap(value)
 }
 
 /// The result of a comparison of two integers, and [`None`] when `op` is not a comparison.
@@ -1055,6 +1225,7 @@ pub(crate) fn narrowed(value: Const, info: IntegerInfo) -> i128 {
         Const::Float(value) => value.to_integer(info.width, info.signed).0,
         // The real half is what a complex value narrows through, 6.3.1.7p2.
         Const::Complex { real, .. } => real.to_integer(info.width, info.signed).0,
+        Const::ComplexInt { real, .. } => info.wrap(real),
         // Nothing narrows an address, since the caller asked for a number and got one of these
         // instead. Zero is a value it will not use.
         Const::Address(_) => 0,
@@ -1074,6 +1245,10 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
         },
         Const::Float(value) => value.to_hex(),
         Const::Complex { real, imag } => format!("{} + {}i", real.to_hex(), imag.to_hex()),
+        Const::ComplexInt { real, imag } => match info {
+            Some(info) => format!("{} + {}i", spell_int(real, info), spell_int(imag, info)),
+            None => format!("{real} + {imag}i"),
+        },
         Const::Address(address) => {
             let base = match address.base {
                 Base::Decl(decl) => decl.index(),
@@ -1106,6 +1281,10 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
         // overflow, so the question is the one the real half answers.
         Const::Complex { real, .. } => {
             real.to_integer(info.width, info.signed).1.has(Status::INVALID)
+        }
+        Const::ComplexInt { real, .. } => {
+            !IntegerInfo::new(true, info.width).holds(real)
+                && !IntegerInfo::new(false, info.width).holds(real)
         }
         // An address is as wide as a pointer or it would not have got this far, so nothing about
         // it is lost.
@@ -1158,14 +1337,24 @@ mod tests {
 
         fn int(&mut self, value: u128, kind: IntKind) -> ast::ExprId {
             let ty = IntConstantType::Standard(kind);
-            let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
             self.expr(ast::Expr::Int(id))
         }
 
         /// A constant of a bit precise type, which is the one integer type that does not promote.
         fn bit_int(&mut self, value: u128, signed: bool, width: u32) -> ast::ExprId {
             let ty = IntConstantType::BitInt { signed, width };
-            let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
             self.expr(ast::Expr::Int(id))
         }
 

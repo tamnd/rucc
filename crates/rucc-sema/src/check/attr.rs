@@ -604,7 +604,7 @@ impl Checker<'_> {
                     return None;
                 }
                 let kind = self.float_in(format, &name, attr.span)?;
-                self.types.complex(kind)
+                self.types.complex_float(kind)
             }
         };
         Some(made)

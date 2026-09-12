@@ -514,6 +514,9 @@ impl Builtin {
     /// The table is the one in 6.7.2 plus the GNU and C23 rows: `_Complex` and `_Imaginary` on
     /// the floating types, `_Complex` on the integer ones which GCC also allows, `__int128`
     /// with a sign, and the `_FloatN` and `_DecimalN` families which stand alone.
+    ///
+    /// The complexity is carried out of here rather than checked here, which is what lets the
+    /// checker report the pair. See the comment in the body.
     #[must_use]
     pub fn resolve(self) -> Option<Basic> {
         let set = self.set;
@@ -526,10 +529,12 @@ impl Builtin {
             (false, false) => Complexity::Real,
         };
         let set = set.without(BuiltinSet::COMPLEX.with(BuiltinSet::IMAGINARY));
+        // Whether a keyword may stand beside `_Complex` is not decided here. The table below says
+        // which keywords name a type together, and the ones that name a type C cannot make complex
+        // are answered with their complexity on them so that the checker can say what is wrong with
+        // the pair. GCC reports those as `both 'complex' and 'void'` and not as a list of keywords
+        // that names nothing, and it can only do that if the pair survives this far.
         let basic = |scalar| Some(Basic { scalar, complexity });
-        let real = |scalar| {
-            if complexity == Complexity::Real { Some(Basic { scalar, complexity }) } else { None }
-        };
 
         if set.has(BuiltinSet::SIGNED) && set.has(BuiltinSet::UNSIGNED) {
             return None;
@@ -540,16 +545,16 @@ impl Builtin {
         // Everything below is "these keywords and nothing else", which is what makes `void int`
         // and `char short` fail here rather than needing a rule each.
         if set.has(BuiltinSet::VOID) {
-            return if set == BuiltinSet::VOID && longs == 0 { real(Scalar::Void) } else { None };
+            return if set == BuiltinSet::VOID && longs == 0 { basic(Scalar::Void) } else { None };
         }
         if set.has(BuiltinSet::BOOL) {
-            return if set == BuiltinSet::BOOL && longs == 0 { real(Scalar::Bool) } else { None };
+            return if set == BuiltinSet::BOOL && longs == 0 { basic(Scalar::Bool) } else { None };
         }
         if set.has(BuiltinSet::CHAR) {
             if set.without(signs) != BuiltinSet::CHAR || longs != 0 {
                 return None;
             }
-            return real(match (set.has(BuiltinSet::SIGNED), unsigned) {
+            return basic(match (set.has(BuiltinSet::SIGNED), unsigned) {
                 (true, _) => Scalar::SignedChar,
                 (_, true) => Scalar::UnsignedChar,
                 _ => Scalar::Char,
@@ -559,7 +564,7 @@ impl Builtin {
             if set.without(signs) != BuiltinSet::INT128 || longs != 0 {
                 return None;
             }
-            return real(if unsigned { Scalar::UnsignedInt128 } else { Scalar::Int128 });
+            return basic(if unsigned { Scalar::UnsignedInt128 } else { Scalar::Int128 });
         }
         if set.has(BuiltinSet::BIT_INT) {
             if set.without(signs) != BuiltinSet::BIT_INT || longs != 0 {
@@ -568,16 +573,16 @@ impl Builtin {
             // A width of nothing is a `_BitInt` whose parenthesised part did not parse, which
             // the parser has already reported and which names no type here either.
             let width = self.width?;
-            return real(Scalar::BitInt { width, unsigned });
+            return basic(Scalar::BitInt { width, unsigned });
         }
         if set.has_any(BuiltinSet::DECIMALS) {
-            if longs != 0 || complexity != Complexity::Real {
+            if longs != 0 {
                 return None;
             }
             return match set {
-                s if s == BuiltinSet::DECIMAL32 => real(Scalar::Decimal32),
-                s if s == BuiltinSet::DECIMAL64 => real(Scalar::Decimal64),
-                s if s == BuiltinSet::DECIMAL128 => real(Scalar::Decimal128),
+                s if s == BuiltinSet::DECIMAL32 => basic(Scalar::Decimal32),
+                s if s == BuiltinSet::DECIMAL64 => basic(Scalar::Decimal64),
+                s if s == BuiltinSet::DECIMAL128 => basic(Scalar::Decimal128),
                 _ => None,
             };
         }
@@ -823,8 +828,12 @@ mod tests {
             Some(Basic { scalar: Scalar::Int, complexity: Complexity::Complex })
         );
         assert_eq!(resolve(&[BuiltinSet::COMPLEX, BuiltinSet::IMAGINARY, BuiltinSet::FLOAT]), None);
-        // There is no complex decimal type in any dialect.
-        assert_eq!(resolve(&[BuiltinSet::COMPLEX, BuiltinSet::DECIMAL64]), None);
+        // There is no complex decimal type in any dialect, and the pair comes out of here anyway
+        // so that the checker can say which two keywords do not go together.
+        assert_eq!(
+            resolve(&[BuiltinSet::COMPLEX, BuiltinSet::DECIMAL64]),
+            Some(Basic { scalar: Scalar::Decimal64, complexity: Complexity::Complex })
+        );
     }
 
     #[test]

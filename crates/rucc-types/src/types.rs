@@ -229,9 +229,15 @@ impl Types {
         self.floats[kind.index()]
     }
 
-    /// `_Complex T`.
-    pub fn complex(&mut self, kind: FloatKind) -> TypeId {
-        self.intern(Type::new(TypeKind::Complex(kind)))
+    /// `_Complex T` for the real type `T`, which is one of the halves.
+    pub fn complex(&mut self, part: TypeId) -> TypeId {
+        self.intern(Type::new(TypeKind::Complex(part)))
+    }
+
+    /// `_Complex T` for a real floating `T`, which is the spelling C has.
+    pub fn complex_float(&mut self, kind: FloatKind) -> TypeId {
+        let part = self.float(kind);
+        self.complex(part)
     }
 
     /// `_BitInt(width)`, signed or not.
@@ -504,6 +510,7 @@ impl Types {
             }
             TypeKind::Pointer(inner) => self.rebuild(ty, inner, TypeKind::Pointer),
             TypeKind::Atomic(inner) => self.rebuild(ty, inner, TypeKind::Atomic),
+            TypeKind::Complex(part) => self.rebuild(ty, part, TypeKind::Complex),
             TypeKind::Array { elem, len } => {
                 self.rebuild(ty, elem, |elem| TypeKind::Array { elem, len })
             }
@@ -515,7 +522,6 @@ impl Types {
             | TypeKind::Bool
             | TypeKind::Int(_)
             | TypeKind::Float(_)
-            | TypeKind::Complex(_)
             | TypeKind::BitInt { .. }
             | TypeKind::Record(_)
             | TypeKind::Enum(_) => None,

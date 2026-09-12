@@ -748,7 +748,12 @@ mod tests {
     /// An integer constant of the type the lexer would have given it.
     fn constant(fixture: &mut Fixture, value: u128, kind: IntKind) -> ast::ExprId {
         let ty = IntConstantType::Standard(kind);
-        let id = fixture.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+        let id = fixture.ast.add_int(IntConstant {
+            value,
+            ty,
+            imaginary: false,
+            remarks: Remarks::default(),
+        });
         fixture.ast.expr(ast::Expr::Int(id), Span::DUMMY)
     }
 

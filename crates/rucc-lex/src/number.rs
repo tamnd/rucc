@@ -94,8 +94,12 @@ pub struct IntConstant {
     /// constant, which is why `-2147483648` is a `long` on a 32-bit `int` and the reason
     /// `INT_MIN` is spelled the way it is in `limits.h`.
     pub value: u128,
-    /// The type the table walk arrived at.
+    /// The type the table walk arrived at, which is the type of a half where the constant is
+    /// imaginary and the type of the whole thing where it is not.
     pub ty: IntConstantType,
+    /// Whether an `i` or a `j` made this the imaginary part of a complex constant. The value is
+    /// the whole number that was written either way, so the caller builds the complex one.
+    pub imaginary: bool,
     /// What is worth saying about the constant, for the caller that holds the span.
     pub remarks: Remarks,
 }
@@ -392,11 +396,15 @@ pub fn integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant,
     if suffix.length == Some(Length::LongLong) && std == Std::C89 {
         remarks = remarks.with(Remarks::LONG_LONG);
     }
+    if suffix.imaginary {
+        remarks = remarks.with(Remarks::IMAGINARY);
+    }
     if suffix.length == Some(Length::BitInt) {
         if std < Std::C23 {
             remarks = remarks.with(Remarks::BIT_INT);
         }
-        return Ok(IntConstant { value, ty: bit_int(value, suffix.unsigned), remarks });
+        let ty = bit_int(value, suffix.unsigned);
+        return Ok(IntConstant { value, ty, imaginary: false, remarks });
     }
 
     let candidates = candidates(base, suffix, std);
@@ -408,7 +416,12 @@ pub fn integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant,
     if base == 10 && !suffix.unsigned && !signed_standard(kind) {
         remarks = remarks.with(Remarks::UNSIGNED);
     }
-    Ok(IntConstant { value, ty: IntConstantType::Standard(kind), remarks })
+    Ok(IntConstant {
+        value,
+        ty: IntConstantType::Standard(kind),
+        imaginary: suffix.imaginary,
+        remarks,
+    })
 }
 
 /// The base a spelling is written in, and where its digits start.
@@ -465,15 +478,23 @@ struct Suffix {
     unsigned: bool,
     /// The length part, when there was one.
     length: Option<Length>,
+    /// Whether `i`, `j`, `I` or `J` was there.
+    imaginary: bool,
 }
 
-/// Reads the suffix, which may hold each part once and in either order.
+/// Reads the suffix, which may hold each part once and in any order.
 fn suffix_of(mut rest: &[u8]) -> Result<Suffix, IntError> {
-    let mut suffix = Suffix { unsigned: false, length: None };
+    let mut suffix = Suffix { unsigned: false, length: None, imaginary: false };
     while let Some(&byte) = rest.first() {
         let taken = match byte {
             b'u' | b'U' if !suffix.unsigned => {
                 suffix.unsigned = true;
+                1
+            }
+            // The imaginary suffix, which sits on either side of the rest of the suffix the way
+            // it does on a floating constant: `1li` and `1il` are both `_Complex long`.
+            b'i' | b'j' | b'I' | b'J' if !suffix.imaginary => {
+                suffix.imaginary = true;
                 1
             }
             // The two letters have to agree about case, so `1ll` and `1LL` are constants and
@@ -498,6 +519,12 @@ fn suffix_of(mut rest: &[u8]) -> Result<Suffix, IntError> {
             _ => return Err(IntError::InvalidSuffix),
         };
         rest = &rest[taken..];
+    }
+    // `_BitInt` is the one length the imaginary suffix cannot join, because there is no complex
+    // `_BitInt` for the constant to have: gcc refuses `3wbi` as an invalid suffix rather than as
+    // a type it does not support, and refusing it here is what gives that message.
+    if suffix.imaginary && suffix.length == Some(Length::BitInt) {
+        return Err(IntError::InvalidSuffix);
     }
     Ok(suffix)
 }

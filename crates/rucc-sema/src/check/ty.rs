@@ -27,9 +27,8 @@
 //! because what fills them in is attribute checking rather than type building.
 //!
 //! `auto` as a type specifier needs the initializer that it takes its type from, so it waits on
-//! initialization. `_Complex` on an integer type, which gcc accepts, has no type to build
-//! because [`TypeKind::Complex`](TypeKind::Complex) holds a floating kind, and
-//! `_Imaginary` is a keyword gcc has never implemented either.
+//! initialization. `_Imaginary` is a keyword gcc has never implemented, so it is refused where
+//! it is written rather than given a type it is not.
 
 use std::collections::{HashMap, HashSet};
 
@@ -342,21 +341,68 @@ impl Checker<'_> {
                     self.types.float(FloatKind::Double)
                 }
             },
-            Complexity::Complex => match float {
-                Some(kind) => self.types.complex(kind),
-                // gcc accepts `_Complex int`. There is no type for it here, since a complex
-                // type holds a floating kind, and inventing one for a GNU extension nothing
-                // uses is not worth what it costs every reader of that enum.
-                None => {
-                    let what = format!("`_Complex` on the type `{}`", spell_scalar(scalar));
-                    self.unsupported_type(&what, span);
-                    self.types.complex(FloatKind::Double)
+            Complexity::Complex => match (scalar, kind, float) {
+                (_, _, Some(kind)) => self.types.complex_float(kind),
+                // `_Complex int`, which is gcc's and not C's: the halves are integers and
+                // everything else about the type is the same. gcc has had it for as long as it
+                // has had complex types and the torture suite writes it, and `-pedantic` says
+                // that no edition of C has it in the words gcc says it in.
+                (_, Some(kind), _) => {
+                    if self.cx.pedantic {
+                        self.report(
+                            Diagnostic::warning(
+                                "ISO C does not support complex integer types".to_string(),
+                                span,
+                            )
+                            .with_code("E0703"),
+                        );
+                    }
+                    let part = self.types.int(kind);
+                    self.types.complex(part)
+                }
+                // The ones the keyword cannot go in front of. gcc refuses these in its parser, in
+                // terms of the two specifiers written rather than the type they would name, and
+                // the wording here is its. The decimal types are on the list, so a program that
+                // writes one with the keyword hears about the pair and not about the half, which
+                // is the same thing gcc tells it.
+                (
+                    Scalar::Void
+                    | Scalar::Bool
+                    | Scalar::BitInt { .. }
+                    | Scalar::Decimal32
+                    | Scalar::Decimal64
+                    | Scalar::Decimal128,
+                    _,
+                    _,
+                ) => {
+                    // gcc names this one by the keyword C99 gave it whichever spelling was
+                    // written, so `_Complex bool` and `_Complex _Bool` read the same.
+                    let spelled =
+                        if scalar == Scalar::Bool { "_Bool" } else { spell_scalar(scalar) };
+                    self.report(
+                        Diagnostic::error(
+                            format!("both 'complex' and '{spelled}' in declaration specifiers"),
+                            span,
+                        )
+                        .with_code("E0525"),
+                    );
+                    self.complex_double()
+                }
+                // A floating type this compiler or this target does not have, which is the two
+                // the real arm turns away as well. The complexity is not what is wrong with
+                // either of them, so the message is the one the half would get.
+                _ => {
+                    self.unsupported_type(&format!("the type `{}`", spell_scalar(scalar)), span);
+                    self.complex_double()
                 }
             },
             // gcc parses this keyword and has never implemented the type behind it.
             Complexity::Imaginary => {
                 self.unsupported_type("`_Imaginary`", span);
-                self.types.complex(float.unwrap_or(FloatKind::Double))
+                match float {
+                    Some(kind) => self.types.complex_float(kind),
+                    None => self.complex_double(),
+                }
             }
         }
     }
@@ -1284,6 +1330,14 @@ impl Checker<'_> {
         );
     }
 
+    /// `_Complex double`, which is what a `_Complex` that could not be built stands in as.
+    ///
+    /// The keyword on its own means this, so it is the one answer that is never a surprise in a
+    /// message written about the expression the bad declaration is used in.
+    fn complex_double(&mut self) -> TypeId {
+        self.types.complex_float(FloatKind::Double)
+    }
+
     /// A type the target does not have, which is not the same thing as one not written yet.
     fn unavailable_type(&mut self, name: &str, span: Span) {
         self.report(
@@ -1468,7 +1522,12 @@ mod tests {
         /// An integer constant, for the array bounds and the `_BitInt` widths.
         pub(super) fn int(&mut self, value: u128) -> ast::ExprId {
             let ty = IntConstantType::Standard(IntKind::Int);
-            let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
             self.ast.expr(ast::Expr::Int(id), Span::DUMMY)
         }
 

@@ -130,7 +130,7 @@ impl Checker<'_> {
             .iter()
             .find(|row| row.name == spelled || row.builtin == spelled)
             .filter(|_| self.cx.means_the_library(spelled))?;
-        let whole = self.types.complex(row.at);
+        let whole = self.types.complex_float(row.at);
         let ty = self.result_type(row);
         if !self.callee_is_the_library_one(callee, ty, &[whole]) {
             return None;
@@ -151,7 +151,7 @@ impl Checker<'_> {
     /// for the other two.
     fn result_type(&mut self, row: Row) -> TypeId {
         match row.op {
-            UnaryOp::BitNot => self.types.complex(row.at),
+            UnaryOp::BitNot => self.types.complex_float(row.at),
             _ => self.types.float(row.at),
         }
     }

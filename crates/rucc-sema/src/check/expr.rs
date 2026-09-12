@@ -332,6 +332,14 @@ impl Checker<'_> {
         // is a reinterpretation and not a conversion: the lexer never produces a value the type
         // it chose cannot hold, so nothing is lost either way.
         let value = constant.value as i128;
+        // `2i` is an imaginary constant the same way `2.0i` is, and the type the suffix arrived
+        // at is the type of a half rather than of the whole thing: `2li` is a `_Complex long`.
+        // The real half is a zero, which is what gcc builds and what makes `1 + 2i` the pair
+        // that was written rather than anything cleverer.
+        if constant.imaginary {
+            let ty = self.types.complex(ty);
+            return self.constant(Const::ComplexInt { real: 0, imag: value }, ty, span);
+        }
         self.constant(Const::Int(value), ty, span)
     }
 
@@ -371,7 +379,7 @@ impl Checker<'_> {
         // would be a different value.
         if constant.imaginary {
             let real = Float::zero(value.format(), false);
-            let ty = self.types.complex(kind);
+            let ty = self.types.complex_float(kind);
             return self.constant(Const::Complex { real, imag: value }, ty, span);
         }
         let ty = self.types.float(kind);
@@ -2132,7 +2140,12 @@ mod tests {
 
         pub(super) fn int(&mut self, value: u128, kind: IntKind) -> ast::ExprId {
             let ty = IntConstantType::Standard(kind);
-            let id = self.ast.add_int(IntConstant { value, ty, remarks: Remarks::default() });
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
             self.expr(ast::Expr::Int(id))
         }
 
@@ -3234,7 +3247,7 @@ mod tests {
         let half = f.unary(UnaryOp::Imag, use_z);
 
         let mut c = f.checker();
-        let complex = c.types.complex(FloatKind::Double);
+        let complex = c.types.complex_float(FloatKind::Double);
         let constant = c.types.qualified(complex, Qualifiers::CONST);
         c.declare_object(z, constant, Span::DUMMY);
         let id = c.check_expr(half);
@@ -3276,7 +3289,7 @@ mod tests {
         let written = f.unary(UnaryOp::BitNot, use_z);
 
         let mut c = f.checker();
-        let complex = c.types.complex(FloatKind::Float);
+        let complex = c.types.complex_float(FloatKind::Float);
         c.declare_object(z, complex, Span::DUMMY);
         let id = c.check_expr(written);
 
