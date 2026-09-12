@@ -498,6 +498,17 @@ impl Builtin {
         self.set.is_none()
     }
 
+    /// Whether `_Complex` or `_Imaginary` was the only keyword written.
+    ///
+    /// [`Builtin::resolve`] answers `double` for that, the way gcc does, and this is how the
+    /// caller knows the `double` was implied rather than written. ISO C has never had a rule for
+    /// it, so it is worth a word under `-pedantic` and nothing otherwise.
+    #[must_use]
+    pub const fn is_bare_complexity(self) -> bool {
+        self.set.without(BuiltinSet::COMPLEX.with(BuiltinSet::IMAGINARY)).is_none()
+            && self.set.has_any(BuiltinSet::COMPLEX.with(BuiltinSet::IMAGINARY))
+    }
+
     /// The type this combination of keywords names, and `None` if it names no type.
     ///
     /// The table is the one in 6.7.2 plus the GNU and C23 rows: `_Complex` and `_Imaginary` on
@@ -604,7 +615,14 @@ impl Builtin {
             };
         }
         if set.is_none() {
-            return None;
+            // `_Complex x;` with nothing else, which gcc reads as `_Complex double` and which ISO
+            // C has no rule for at all. `_Imaginary` on its own reads the same way, so that the
+            // keyword gcc has never implemented is turned away for being that keyword rather than
+            // for naming no type.
+            return match complexity {
+                Complexity::Real => None,
+                _ => basic(Scalar::Double),
+            };
         }
         // What is left is the standard integer types, where `int` is implied by any of the
         // others and every combination is legal except `short long`.
@@ -807,6 +825,23 @@ mod tests {
         assert_eq!(resolve(&[BuiltinSet::COMPLEX, BuiltinSet::IMAGINARY, BuiltinSet::FLOAT]), None);
         // There is no complex decimal type in any dialect.
         assert_eq!(resolve(&[BuiltinSet::COMPLEX, BuiltinSet::DECIMAL64]), None);
+    }
+
+    #[test]
+    fn complex_on_its_own_is_a_complex_double() {
+        assert_eq!(
+            resolve(&[BuiltinSet::COMPLEX]),
+            Some(Basic { scalar: Scalar::Double, complexity: Complexity::Complex })
+        );
+        assert_eq!(
+            resolve(&[BuiltinSet::IMAGINARY]),
+            Some(Basic { scalar: Scalar::Double, complexity: Complexity::Imaginary })
+        );
+        let bare = Builtin::NONE.add(BuiltinSet::COMPLEX).expect("keyword rejected");
+        assert!(bare.is_bare_complexity());
+        let written = bare.add(BuiltinSet::FLOAT).expect("keyword rejected");
+        assert!(!written.is_bare_complexity());
+        assert!(!Builtin::NONE.is_bare_complexity());
     }
 
     #[test]

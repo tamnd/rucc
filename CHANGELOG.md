@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `_Complex` written with no type beside it means `_Complex double`, which is what gcc has always made of it. Every edition of C requires a type specifier next to the keyword, so `_Complex x;` is not a declaration any of them describes, and until now it was refused for naming two or more data types, which is a message about a program nobody wrote. The reading is gcc's and the words under `-pedantic` are gcc's too, and without that flag nothing is said, because the programs that write it are not asking a question. `_Imaginary` on its own resolves the same way for a different reason: the keyword is one gcc parses and has never implemented, and this compiler refuses it by name, so giving it a type first means the refusal is about the keyword rather than about the type specifier that is missing next to it. One more gcc torture case passes at all six optimization levels. tamnd/rucc#201.
+
 ## 0.10.31
 
 ### Added
