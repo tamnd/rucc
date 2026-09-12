@@ -3,9 +3,9 @@
  * Design: spec/12-abi-and-runtime.md section 12.8 and spec/cross-compile/10-runtime.md section
  * 10.2, which lists soft float as wanted on armv7 soft-float and on any target without an FPU. On
  * such a target an addition of two floats is not an instruction, so the front end emits a call and
- * the names in here are what it calls: the four operations and the negation, and the eight
- * comparisons at the bottom of the file, since `a < b` on two floats is a call there as much as
- * `a + b` is. They are libgcc's names, for the reason every other name in this directory is: an
+ * the names in here are what it calls: the four operations and the negation, the eight comparisons
+ * further down, since `a < b` on two floats is a call there as much as `a + b` is, and the eight
+ * conversions at the bottom, since a cast between a float and an integer is one too. They are libgcc's names, for the reason every other name in this directory is: an
  * object we produced gets linked against objects GCC produced and one of us has to give way.
  *
  * This is the single precision half. The double precision set is the same routines over a wider
@@ -512,4 +512,189 @@ int __ltsf2(float left, float right) {
  */
 int __unordsf2(float left, float right) {
     return is_nan(pattern_of(left)) || is_nan(pattern_of(right));
+}
+
+/* The conversions between a float and an integer.
+ *
+ * These are in this file rather than in convert.c, which is also full of conversions, because
+ * convert.c works at 128 bits by handing sixty four of them to the machine's own conversion
+ * instruction: it exists for a target that has a floating point unit and no 128-bit integer. A
+ * target with no floating point unit has the opposite problem, so these are done in integers the
+ * way everything else here is, and they share this file's rounding.
+ *
+ * What C leaves undefined is a float the integer type cannot hold, an infinity, a not a number, and
+ * a negative value handed to an unsigned conversion. All four answer zero, on both sides. That is
+ * the convention section 12.8 already records for the conversions at 128 bits, where it is written
+ * down as an accident of the shape rather than a promise. It has to be shared to be comparable.
+ */
+
+/* How many bits an integer needs, which is one more than the power of two its highest bit is worth.
+ * A loop for the same reason `normalize` above is a loop.
+ */
+static int width_of(u64 value) {
+    int bits = 0;
+    while (value != 0) {
+        value >>= 1;
+        bits += 1;
+    }
+    return bits;
+}
+
+/* The magnitude of a signed value, taken through an unsigned type on purpose: the most negative
+ * value of a type has no positive counterpart in it, and negating it there is exactly the case a
+ * conversion has to get right rather than the case it may overflow on.
+ */
+static u64 magnitude_of(long long value) {
+    return value < 0 ? (u64)0 - (u64)value : (u64)value;
+}
+
+/* The float nearest an integer, with the sign handed in separately because the magnitude came
+ * through the routine above.
+ *
+ * Nothing here is special: the integer is already the significand, and what the routine does is
+ * move its highest bit to where `round_and_pack` wants it, keeping what falls off the bottom in the
+ * sticky bit, which is what makes the rounding of a value with more than twenty four significant
+ * bits the right one rather than a truncation.
+ */
+static float float_of_integer(u32 sign, u64 magnitude) {
+    if (magnitude == 0) {
+        return float_of(sign);
+    }
+    int top = width_of(magnitude) - 1;
+    u64 significand;
+    if (top <= LEADING) {
+        significand = magnitude << (LEADING - top);
+    } else {
+        significand = shift_down(magnitude, top - LEADING);
+    }
+    return round_and_pack(sign, top + BIAS, significand);
+}
+
+float __floatsisf(int value) {
+    return float_of_integer(value < 0 ? SIGN : 0, magnitude_of(value));
+}
+
+float __floatunsisf(unsigned int value) {
+    return float_of_integer(0, value);
+}
+
+float __floatdisf(long long value) {
+    return float_of_integer(value < 0 ? SIGN : 0, magnitude_of(value));
+}
+
+float __floatundisf(unsigned long long value) {
+    return float_of_integer(0, value);
+}
+
+/* The part of a float that is on the integer side of the point, with the sign and the magnitude
+ * handed back separately so that each caller can hold the answer to the bounds of its own type.
+ *
+ * Zero rather than a refusal where the whole value is below one, since truncating 0.5 to an integer
+ * is an answer and not an overflow. Zero and a refusal where there is no answer at all, which is an
+ * infinity, a not a number, and a magnitude past what any of the four types hold.
+ */
+static int integer_of_float(float value, u32 *sign, u64 *magnitude) {
+    u32 pattern = pattern_of(value);
+    *sign = pattern & SIGN;
+    *magnitude = 0;
+    if (exponent_of(pattern) == TOP) {
+        return 0;
+    }
+    u32 significand;
+    int stored;
+    unpack(pattern, &significand, &stored);
+    int exponent = stored - BIAS;
+    if (exponent < 0) {
+        return 1;
+    }
+    if (exponent > 63) {
+        return 0;
+    }
+    if (exponent >= FRACTION) {
+        *magnitude = (u64)significand << (exponent - FRACTION);
+    } else {
+        *magnitude = (u64)significand >> (FRACTION - exponent);
+    }
+    return 1;
+}
+
+/* The largest magnitude each of the four types holds. The signed ones hold one more going down than
+ * going up, which is the whole reason the magnitude and the sign travel separately above.
+ */
+#define SIGNED_32 2147483648ull
+#define SIGNED_64 9223372036854775808ull
+#define UNSIGNED_32 4294967295ull
+#define UNSIGNED_64 18446744073709551615ull
+
+int __fixsfsi(float value) {
+    u32 sign;
+    u64 magnitude;
+    if (!integer_of_float(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_32) {
+            return 0;
+        }
+        /* One less than the magnitude, negated, and one more taken off, because the most negative
+         * value is not the negation of anything an `int` holds and writing it that way would be the
+         * overflow this is here to avoid.
+         */
+        return -(int)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_32 - 1) {
+        return 0;
+    }
+    return (int)magnitude;
+}
+
+unsigned int __fixunssfsi(float value) {
+    u32 sign;
+    u64 magnitude;
+    if (!integer_of_float(value, &sign, &magnitude)) {
+        return 0;
+    }
+    /* A negative value is undefined here, and a negative one that truncates to zero is not: the
+     * answer for that one is zero and it is the value rather than the convention.
+     */
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_32) {
+        return 0;
+    }
+    return (unsigned int)magnitude;
+}
+
+long long __fixsfdi(float value) {
+    u32 sign;
+    u64 magnitude;
+    if (!integer_of_float(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        if (magnitude > SIGNED_64) {
+            return 0;
+        }
+        return -(long long)(magnitude - 1) - 1;
+    }
+    if (magnitude > SIGNED_64 - 1) {
+        return 0;
+    }
+    return (long long)magnitude;
+}
+
+unsigned long long __fixunssfdi(float value) {
+    u32 sign;
+    u64 magnitude;
+    if (!integer_of_float(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && magnitude != 0) {
+        return 0;
+    }
+    if (magnitude > UNSIGNED_64) {
+        return 0;
+    }
+    return magnitude;
 }
