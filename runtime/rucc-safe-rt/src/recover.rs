@@ -36,7 +36,10 @@
 //!
 //! [`Origin::Unwatched`] is an address in no watched region at all: a local, a global, or memory
 //! from an allocator nobody told us about. The honest answer is a capability with no bounds, which
-//! permits everything and is marked [`Meta::WIDE`]. Refusing here instead would report every
+//! permits everything and is marked [`Meta::WIDE`] and [`Meta::UNWATCHED`]. The second of those is
+//! what tells this apart from the mapping case, which is wide for the opposite reason: there the
+//! runtime knows storage is being watched and could not say which instance, and here it was never
+//! told about the address at all. Refusing here instead would report every
 //! program that passes the address of a local across the boundary, and a monitor that reports
 //! correct programs is a monitor that gets turned off. This is the count that says how much of a
 //! build the boundary is actually covering.
@@ -387,8 +390,14 @@ fn word(class: u32, flags: u8) -> Meta {
 ///
 /// Bounds over the whole address space, which is the only honest answer, and [`Meta::WIDE`] so
 /// that anything asking later can tell it apart from a capability somebody meant.
+///
+/// [`Meta::UNWATCHED`] as well, which is what separates this from the boundary capability the
+/// mapping case answers with. Both are wide and both are recovered, and they mean opposite things:
+/// that one says there is an instance here that could not be found, and this one says no allocator
+/// ever mentioned this address, so there is nothing here to catch. The flag exists because the
+/// numbers do not say which is which, per tamnd/rucc#1085.
 fn everything() -> Cap {
-    let meta = word(Class::Mapped as u32, Meta::RECOVERED | Meta::WIDE);
+    let meta = word(Class::Mapped as u32, Meta::RECOVERED | Meta::WIDE | Meta::UNWATCHED);
     Cap::new(0, u64::MAX, plane::FOREIGN, meta)
 }
 
@@ -565,7 +574,7 @@ mod tests {
         assert_eq!(count(Origin::Unwatched), before + 1);
 
         assert!(cap.covers(addr as u64, 8));
-        assert_eq!(cap.meta.flags(), Meta::RECOVERED | Meta::WIDE);
+        assert_eq!(cap.meta.flags(), Meta::RECOVERED | Meta::WIDE | Meta::UNWATCHED);
         assert_eq!(cap.ver, plane::FOREIGN);
     }
 
@@ -581,6 +590,26 @@ mod tests {
         assert!(cap.covers(arena as u64, ARENA as u64));
         assert_eq!(cap.meta.flags(), Meta::RECOVERED | Meta::WIDE);
         assert_eq!(cap.meta.class(), Class::Mapped as u8);
+    }
+
+    #[test]
+    fn the_two_wide_capabilities_do_not_look_alike() {
+        let _turn = crate::turnstile::turn();
+        // Both are recovered, both are wide, both are `Class::Mapped` and both carry the foreign
+        // version, and they mean opposite things. The boundary one says there is a mapping here and
+        // an instance in it that could not be found, so an access may still be caught. The other
+        // says nothing here is watched at all. Anything reading bounds off a capability to decide
+        // how much of a loop needs no checks owes the whole of what it was asked for in one case
+        // and nothing in the other, so a bit has to say which. See tamnd/rucc#1085.
+        let local = 0u64;
+        let nowhere = recover(core::ptr::addr_of!(local).cast());
+        let mapping = recover((arena() + 4096) as *const c_void);
+
+        assert_eq!(nowhere.meta.class(), mapping.meta.class());
+        assert_eq!(nowhere.ver, mapping.ver);
+        assert_ne!(nowhere.meta.flags(), mapping.meta.flags());
+        assert_eq!(nowhere.meta.flags() & Meta::UNWATCHED, Meta::UNWATCHED);
+        assert_eq!(mapping.meta.flags() & Meta::UNWATCHED, 0);
     }
 
     #[test]
