@@ -91,6 +91,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::split::Split,
     &crate::nests::Nests,
     &crate::ivopts::Ivopts,
+    &crate::coalesce::Coalesce,
 ];
 
 /// The pass with this name, if there is one.

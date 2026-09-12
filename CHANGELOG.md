@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Plane writes that sit next to each other become one write over the whole range, which is the straight line half of `spec/safe-memory/07-check-elimination.md` section 7.6 and the first thing in that section anything could be written for. A structure filled in field by field gets a `meta_type` and a `meta_init` over each field, so three pointer fields cost six plane writes for what is one twenty four byte range in each of two planes, and the new `coalesce` pass turns the six into two. It runs per block, walks each plane write's pointer back to a base and a constant distance the way the discharge pass already does, and joins a write onto the run in front of it when the plane, the payload and the base all match and the bytes sit end to end. Either end, since a structure written backwards is as common as one written forwards. The merged write lands where the last of the run was and not where the first was, and that direction is the whole of what makes this safe rather than nearly safe: a plane that has not yet been told about a store refuses a read of those bytes, which stops a correct program, and a plane told about a store that has not happened yet permits a read of storage nothing has written, which reports nothing at all. The first is a bug and the second is a hole, so the pass never claims more than has already happened. `meta_epoch` is left out on purpose, because what it writes is the thread's own clock and the runtime ticks that clock as it goes, so merging two of them writes a different stamp rather than the same one over more bytes, and a higher stamp left in the plane is the direction that reports a race that is not there. The step from two adjacent byte counts to one write covering the same addresses and no others is `joined.i64` in `crates/rucc-opt/rules/safety.rules`, which is section 7.7's split and the first rule in that file that is not about removing a check. tamnd/rucc#430.
+
 ## 0.10.24
 
 ### Added

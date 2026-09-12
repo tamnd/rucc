@@ -31,6 +31,13 @@
 ;; the first range cannot refuse the second, because a bounds check asks whether the bytes it is
 ;; about lie inside one storage instance and a subset of those bytes lies inside the same instance.
 ;;
+;; Not every rule is about a check. Section 7.6 asks for the same treatment of what the pass does to
+;; the plane writes themselves, and the rule for that sits below with the rest: the obligation there
+;; is that one write over two ranges next to each other touches the same bytes the two writes
+;; touched and no others. The split is the same one. Working out that two writes are next to each
+;; other is the pass's and is not proved, and getting from that to the merged write is arithmetic on
+;; addresses and is.
+;;
 ;; The last rule in the file is about the other conjunct of the same check and so reads differently.
 ;; A bounds check asks where the bytes are and also asks whether the access starts where it says it
 ;; does, and the second of those is row S7 rather than row S1. The obligation there is that an
@@ -214,6 +221,57 @@
                         (bvugt delta far)
                         (and (bvule (bvsub at delta) at)
                              (bvuge (bvsub (bvsub at delta) reach) (bvsub at span))))
+                    1
+                    0)
+               (result))))
+
+;; Two writes to one plane that sit next to each other, as one write over both.
+;;
+;; The one rule in the file that is not about removing a check. `at` and `span` are the address and
+;; the width of the first write, `delta` is how far past that address the second one starts, `reach`
+;; is its width, and `byte` is any address at all. The guard is adjacency in byte counts, which is
+;; the arithmetic the pass does: it decomposes both pointers into one base and a constant distance
+;; and takes the two widths off the length operands. The claim is that one write of `span` plus
+;; `reach` bytes at `at` writes the byte at `byte` exactly when the two writes between them did, in
+;; addresses, which is what `spec/safe-memory/07-check-elimination.md` section 7.6 is asking for.
+;;
+;; Those are not the same statement and that is the reason this is a rule. Adjacent byte counts
+;; adding up says nothing on its own about two address ranges, either of which could run off the end
+;; of the address space, and it is the merged write that would cover the whole of memory if one did.
+;; The claim is also equality rather than containment, in both directions, because the two
+;; directions fail differently and both matter: a byte the merged write covers and neither original
+;; did is a plane told about a store that did not happen, which is a check that should have refused
+;; and did not, and a byte an original covered and the merged write does not is a plane not told
+;; about a store that did, which is a check that refuses a correct program.
+;;
+;; `byte` is a value rather than a number for the same reason `delta` is one in the loop rules. The
+;; question is asked once with the address left open, so the answer is about every byte in the
+;; program rather than about one the pass picked.
+;;
+;; The bounds on the numbers are the file comment's. Two plane writes more than four gigabytes wide
+;; are not merged, and stay as they are.
+(rule (discharge (joined.i64 (value.i64 at)
+                             (iconst.i64 span)
+                             (iconst.i64 delta)
+                             (iconst.i64 reach)
+                             (value.i64 byte)))
+      (if (and (>= span 0) (<= span 4294967296)
+               (>= reach 0) (<= reach 4294967296)
+               (= delta span)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvugt at (bvadd at (bvadd span reach)))
+                        (and (or (not (or (and (bvuge byte at)
+                                               (bvult byte (bvadd at span)))
+                                          (and (bvuge byte (bvadd at delta))
+                                               (bvult byte (bvadd (bvadd at delta) reach)))))
+                                 (and (bvuge byte at)
+                                      (bvult byte (bvadd at (bvadd span reach)))))
+                             (or (not (and (bvuge byte at)
+                                           (bvult byte (bvadd at (bvadd span reach)))))
+                                 (or (and (bvuge byte at)
+                                          (bvult byte (bvadd at span)))
+                                     (and (bvuge byte (bvadd at delta))
+                                          (bvult byte (bvadd (bvadd at delta) reach)))))))
                     1
                     0)
                (result))))
