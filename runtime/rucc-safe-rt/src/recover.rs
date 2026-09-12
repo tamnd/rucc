@@ -229,20 +229,21 @@ pub fn extent(region: &Region, addr: usize) -> Option<(usize, usize)> {
 
 /// The run of granules around `addr` that `version` owns, as a base and an extent.
 ///
-/// Walked in both directions and stopped at the region's edges, which bounds it at the size of the
-/// region in the worst case. That worst case is a single instance filling the whole region, and
-/// walking it is linear in an instance's size rather than in the heap's.
+/// Searched in both directions and stopped at the region's edges, so the worst case is a single
+/// instance filling the whole region and the answer costs a logarithm of that rather than a step
+/// per granule. [`edge`] is the search and the note there says why probing is allowed to skip
+/// granules nobody looked at.
 ///
 /// Except where the header answers, which is the case document 05 section 5.2.3 built the layout
 /// for and is [`stated`]. An address whose own granule is owned and whose neighbour below is not is
 /// the first granule of a run, and the thirty two bytes in front of the first granule of a run are
-/// that instance's header, which states the extent. That is a load rather than a walk, and it is
+/// that instance's header, which states the extent. That is a load rather than a search, and it is
 /// the common case at a boundary: a pointer handed to a library is far more often the address an
 /// allocator returned than a pointer into the middle of the object.
 fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     let here = addr & !(GRANULE - 1);
 
-    // The same read the walk below starts with. Asking it twice is a hit in the first level cache
+    // The same read the search below starts with. Asking it twice is a hit in the first level cache
     // and asking it here is what makes the header safe to read: a granule with the same version
     // underneath it is not the first of its run, so the thirty two bytes in front of it are some
     // other instance's payload, and the program can put anything it likes in those.
@@ -253,20 +254,71 @@ fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
         return (here, ext);
     }
 
-    let mut lo = here;
-    // SAFETY: the walk stops at the region's base, so every granule it reads is one the plane
-    // covers, which is what reading a version asks for.
-    while lo > region.base && unsafe { region.plane.version(lo - GRANULE) } == version {
-        lo -= GRANULE;
-    }
+    // How many granules there are to look at on each side, worked out from the region's own bounds
+    // so that every address [`edge`] reads is one the plane covers.
+    let down = here.saturating_sub(region.base) / GRANULE;
+    let up = (region.end - 1 - here) / GRANULE;
 
-    let mut hi = here + GRANULE;
-    // SAFETY: as above, at the other end.
-    while hi < region.end && unsafe { region.plane.version(hi) } == version {
-        hi += GRANULE;
-    }
+    let lo = here - edge(region, here, version, down, -STEP) * GRANULE;
+    let hi = here + (edge(region, here, version, up, STEP) + 1) * GRANULE;
 
     (lo, hi - lo)
+}
+
+/// One granule on, as the offset [`edge`] steps by.
+const STEP: isize = GRANULE as isize;
+
+/// How many granules past the one at `here` still answer with `version`, out of `span` of them.
+///
+/// `step` is [`STEP`] to look up the address space and its negation to look down, and the caller
+/// has already established that the granule at `here` itself answers. The answer is the largest `n`
+/// no greater than `span` for which every granule from `here` to `here + n * step` carries
+/// `version`.
+///
+/// Doubling out from the near end and then halving, rather than stepping one granule at a time.
+/// What makes probing sound is that a run of granules carrying one version has nothing else in the
+/// middle of it, so a granule that answers puts a floor under the count and one that does not puts
+/// a ceiling over it, and the truth is between them. `crate::plane` states that invariant and lists
+/// what rests on it. This is [`crate::check`]'s `reach` with the far end unknown: that one is asked
+/// about a span the caller named and so can probe the end of it first, and this one is asked how
+/// far an instance goes and has only the region's edge to bound it, which is why it doubles rather
+/// than starting there. Doubling is what keeps a small object in a large arena cheap, which is the
+/// case that matters: an instance of a few granules is found in a few reads whatever the arena
+/// around it costs, and the old walk's one read per granule is only ahead of that for an object of
+/// one or two granules.
+fn edge(region: &Region, here: usize, version: Version, span: usize, step: isize) -> usize {
+    if span == 0 {
+        return 0;
+    }
+    let at = |n: usize| here.wrapping_add_signed(step * n as isize);
+    // SAFETY: `n` is never more than `span`, which the caller worked out from the region's bounds,
+    // so every address reached is one the plane covers.
+    let owner = |n: usize| unsafe { region.plane.version(at(n)) };
+
+    let mut yes = 0;
+    let mut probe = 1;
+    let mut no = loop {
+        let at = probe.min(span);
+        if owner(at) != version {
+            break at;
+        }
+        if at == span {
+            return span;
+        }
+        yes = at;
+        probe *= 2;
+    };
+    // Halve between a granule that answered and one that did not. The first answered because the
+    // caller read it before calling, and the last did not, which is what the doubling above found.
+    while no - yes > 1 {
+        let mid = yes + (no - yes) / 2;
+        if owner(mid) == version {
+            yes = mid;
+        } else {
+            no = mid;
+        }
+    }
+    yes
 }
 
 /// How far the instance whose payload begins at `payload` runs, out of its own header.
@@ -599,6 +651,34 @@ mod tests {
 
             free(ptr);
         }
+    }
+
+    #[test]
+    fn every_address_in_an_instance_recovers_the_same_instance() {
+        let _turn = crate::turnstile::turn();
+        // What the doubling search has to get right. The first granule reads the header and every
+        // other granule searches down to the base and up to the end, so an off by one in either
+        // direction shows up as one address in the middle disagreeing with the rest. The neighbours
+        // are there to give the search something to stop at other than the region's own edge, which
+        // is the case a single allocation on its own would not exercise.
+        let below = alloc::alloc(48);
+        let ptr = alloc::alloc(1000);
+        let above = alloc::alloc(48);
+        assert!(!below.is_null() && !ptr.is_null() && !above.is_null());
+
+        let whole = recover(ptr);
+        assert_eq!(whole.lo, ptr as u64);
+        assert!(whole.ext >= 1000, "{}", whole.ext);
+        for offset in 0..whole.ext as usize {
+            let got = recover(ptr.cast::<u8>().wrapping_add(offset).cast());
+            assert_eq!(got.lo, whole.lo, "at {offset}");
+            assert_eq!(got.ext, whole.ext, "at {offset}");
+            assert_eq!(got.ver, whole.ver, "at {offset}");
+        }
+
+        free(below);
+        free(ptr);
+        free(above);
     }
 
     #[test]

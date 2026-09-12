@@ -284,7 +284,12 @@ pub struct Region {
     /// guarantee from one that watches three heaps, and the count that says so has to come from
     /// somewhere.
     pub class: u32,
-    /// Whether this crate's own allocator laid the region out, which is [`Watch::carved`].
+    /// Whether this crate's own allocator laid the region out, which is what the allocator that
+    /// published the region said about itself.
+    ///
+    /// False for an arena adopted from somewhere else, per `spec/safe-memory/10-interop.md`
+    /// section 10.4. The blocks in one of those are laid out by whoever adopted them, so nothing
+    /// here may assume there is a header of ours in front of a payload.
     pub carved: bool,
 }
 
