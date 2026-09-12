@@ -382,9 +382,13 @@ const fn kernel_arch(arch: Arch) -> Option<&'static str> {
 ///
 /// This returns false for those two and true for everything else, including freestanding, which
 /// needs nine compiler headers and no link inputs at all.
+///
+/// Which of the two walls a target is behind is [`crate::Wall`], and this is that question asked
+/// without caring about the answer. One of them is a predicate a producer filters a table with and
+/// the other is what a message has to say, and they are the same rule either way round.
 #[must_use]
 pub fn can_be_bundled(target: TargetTuple) -> bool {
-    !matches!(target.os(), Os::MacOs | Os::IOs) && target.env() != Env::Msvc
+    crate::Wall::of(target).is_none()
 }
 
 /// The glibc our bundled header tree is derived from.

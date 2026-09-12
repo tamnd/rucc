@@ -130,6 +130,77 @@ fn the_host_directories_are_used_when_the_target_is_the_host_and_there_is_nothin
 }
 
 #[test]
+fn an_installed_sdk_serves_every_apple_target_and_not_only_the_one_this_machine_is() {
+    // One SDK holds the headers of every Apple architecture, which is why Apple ships one for arm64
+    // and x86-64 together. So the directories in it are the target's own rather than this machine's,
+    // they reach step 3 through their own field, and a cross compile between two Apple targets on a
+    // mac is served by the SDK that is already there.
+    let host = target("aarch64-macos");
+    let sdk = [path("/SDKs/MacOSX.sdk/usr/include")];
+    for tuple in ["aarch64-macos", "x86_64-macos", "aarch64-ios"] {
+        let found = include_paths(
+            target(tuple),
+            Some(host),
+            &Options { sdk: &sdk, ..Options::default() },
+        );
+        assert_eq!(found.len(), 1, "{tuple}");
+        assert_eq!(found[0].origin, Origin::Sdk, "{tuple}");
+        assert_eq!(found[0].path, sdk[0], "{tuple}");
+        // And it is not a host directory, because what is in it belongs to the target. The cross
+        // compilation test above is written against that distinction.
+        assert!(!found[0].origin.is_host(), "{tuple}");
+    }
+}
+
+#[test]
+fn a_target_behind_a_licence_wall_is_never_given_a_tree_of_ours() {
+    // Section 13.4. There is no bundled sysroot for an Apple or an MSVC target and there will not be
+    // one, so a path under the cache for either would name a directory nothing can ever put a file
+    // in. The caller passes the layout it computed and the rule here is what refuses it.
+    for tuple in ["aarch64-macos", "aarch64-ios", "x86_64-pc-windows-msvc"] {
+        let walled = target(tuple);
+        let bundled = Sysroot::in_cache(Path::new("/cache"), walled);
+        let found = include_paths(
+            walled,
+            None,
+            &Options {
+                resources: Some(Path::new("/opt/rucc")),
+                bundled: Some(&bundled),
+                ..Options::default()
+            },
+        );
+        assert_eq!(found.len(), 1, "{tuple} was offered a tree of ours");
+        assert_eq!(found[0].origin, Origin::Compiler, "{tuple}");
+    }
+    // And the mingw-w64 target beside the MSVC one does get one, because its headers are ours to
+    // ship and that is the whole reason it is the default Windows environment.
+    let gnu = target("x86_64-pc-windows-gnu");
+    let bundled = Sysroot::in_cache(Path::new("/cache"), gnu);
+    let found =
+        include_paths(gnu, None, &Options { bundled: Some(&bundled), ..Options::default() });
+    assert!(found.iter().all(|entry| entry.origin == Origin::Bundled));
+    assert_eq!(found.len(), 2);
+}
+
+#[test]
+fn a_sysroot_the_user_named_beats_an_sdk_on_the_machine() {
+    // `-isysroot` is the Darwin spelling of `--sysroot` and somebody who wrote one is naming the SDK
+    // to compile against. An installed SDK winning over it would make the flag advice in the licence
+    // wall's own message useless on the one machine where both exist.
+    let host = target("aarch64-macos");
+    let named = [path("/opt/sdks/MacOSX14.sdk/usr/include")];
+    let sdk = [path("/SDKs/MacOSX.sdk/usr/include")];
+    let found = include_paths(
+        host,
+        Some(host),
+        &Options { sysroot: &named, sdk: &sdk, ..Options::default() },
+    );
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].origin, Origin::Sysroot);
+    assert_eq!(found[0].path, named[0]);
+}
+
+#[test]
 fn a_sysroot_the_user_named_beats_the_one_we_bundle() {
     let host = target("aarch64-linux-musl");
     let bundled = Sysroot::in_cache(Path::new("/cache"), host);

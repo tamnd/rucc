@@ -56,6 +56,11 @@
 //! the manifest inside it, which is section 13.8's division of a fetch into the transport and the
 //! part that decides whether the result is correct.
 //!
+//! [`Wall`] is section 13.4's two licence walls as data. Apple's SDK and Microsoft's are the two
+//! things in section 8.2's table that are not ours to ship, so for those targets there is no bundled
+//! tree, no artifact a release can pin, and a message that names the licence and the lawful ways to
+//! get one instead of a message about a tree that has not been built yet.
+//!
 //! # What is not in here
 //!
 //! Nothing fetches. Downloading musl, verifying it and unpacking it is
@@ -102,12 +107,14 @@ pub mod link;
 pub mod manifest;
 pub mod search;
 pub mod sha256;
+pub mod wall;
 
 pub use argv::{Invocation, Item, Unsupported};
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError, Provenance};
 pub use search::{Entry, Options, Origin, include_paths};
+pub use wall::Wall;
 
 #[doc(inline)]
 pub use rucc_tuple::TargetTuple;

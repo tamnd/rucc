@@ -24,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use rucc_sysroot::{Kernel, Options, Sysroot, include_paths};
 use rucc_target::{Env, Os, Triple};
@@ -54,9 +55,15 @@ pub struct Machine {
 /// split is so that this half can be read as the platform knowledge it is.
 #[must_use]
 pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
-    // A target that is not this machine has no directories on this machine. The one exception
-    // is a sysroot, which is a statement that the headers for that target are over there.
-    if machine.sysroot.is_none() && machine.host.is_some_and(|host| host.os != target.os) {
+    // A target that is not this machine has no directories on this machine. There are two
+    // exceptions and they are the same exception twice: a sysroot and an SDK are both somebody
+    // saying that the headers for that target are over there. The SDK case is how `SDKROOT` reaches
+    // an Apple target from a machine that is not a mac, which is the path
+    // `spec/cross-compile/08-sysroots.md` section 8.6 leaves open when it says a user supplies one.
+    if machine.sysroot.is_none()
+        && machine.sdk.is_none()
+        && machine.host.is_some_and(|host| host.os != target.os)
+    {
         return Vec::new();
     }
     let root = machine.sysroot.as_deref();
@@ -97,7 +104,8 @@ fn linux(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// There is no `/usr/include` on a Mac since the command line tools stopped installing one,
 /// and the headers live inside the SDK that Xcode or the command line tools brought with
 /// them. Nothing is offered when there is no SDK, because a guess at a path that is not there
-/// only makes the diagnostic longer.
+/// only makes the diagnostic longer, and the diagnostic is `rucc_sysroot::Wall::no_headers`:
+/// an Apple target with no SDK anywhere is Apple's licence wall rather than a missing directory.
 fn darwin(sdk: Option<&Path>) -> Vec<PathBuf> {
     sdk.map(|sdk| vec![sdk.join("usr/include")]).unwrap_or_default()
 }
@@ -180,13 +188,27 @@ pub fn header_dirs(
     bundled: Option<&Sysroot>,
     kernel: Option<&Kernel>,
 ) -> Vec<PathBuf> {
-    // Once, because asking can mean running `xcrun`. The answer goes to whichever of the two
-    // fields the command line put it in: with a `--sysroot` these are the directories under the
-    // tree the user named, and without one they are the machine's own.
+    // Once, because asking can mean running `xcrun`. The answer goes to whichever of the three
+    // fields it belongs in, and which one that is decides how step 3 treats it rather than being a
+    // detail of how it was found. With a `--sysroot` these are the directories under the tree the
+    // user named. Without one, on an Apple target, they are an SDK this machine has, which is the
+    // target's own headers for every Apple architecture and not this machine's library, so it serves
+    // `x86_64-macos` on an arm64 mac the way Apple's own tools use it. Otherwise they are the
+    // machine's own directories and step 3 will only take them when the target is the host.
     let dirs = system_dirs(target, sysroot);
-    let (named, host) = if sysroot.is_some() { (dirs, Vec::new()) } else { (Vec::new(), dirs) };
-    let options =
-        Options { sysroot: &named, bundled, kernel, host_include: &host, ..Options::default() };
+    let (named, sdk, host) = match (sysroot.is_some(), target.os) {
+        (true, _) => (dirs, Vec::new(), Vec::new()),
+        (false, Os::Darwin) => (Vec::new(), dirs, Vec::new()),
+        (false, _) => (Vec::new(), Vec::new(), dirs),
+    };
+    let options = Options {
+        sysroot: &named,
+        sdk: &sdk,
+        bundled,
+        kernel,
+        host_include: &host,
+        ..Options::default()
+    };
     include_paths(target.tuple(), Triple::host().map(Triple::tuple), &options)
         .into_iter()
         .map(|entry| entry.path)
@@ -216,8 +238,18 @@ fn sdk(sysroot: Option<&Path>) -> Option<PathBuf> {
     tools.is_dir().then_some(tools)
 }
 
-/// Asks `xcrun` for the SDK path, and says nothing if it is not there to ask.
+/// What `xcrun` said, asked at most once in a process.
+///
+/// A compiler that ran it for the header search and again for the diagnostic that explains an empty
+/// one would pay for a process twice to be told the same path. The answer cannot change underneath us
+/// in a way that matters either: a run of the compiler compiles against one SDK.
 fn xcrun() -> Option<PathBuf> {
+    static ANSWER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    ANSWER.get_or_init(ask_xcrun).clone()
+}
+
+/// Asks `xcrun` for the SDK path, and says nothing if it is not there to ask.
+fn ask_xcrun() -> Option<PathBuf> {
     let out = Command::new("/usr/bin/xcrun").args(["--show-sdk-path"]).output().ok()?;
     if !out.status.success() {
         return None;
@@ -296,6 +328,18 @@ mod tests {
         let dirs = candidates(triple(Os::Darwin, Env::None), &machine);
         assert_eq!(dirs, [PathBuf::from("/S.sdk/usr/include")]);
         assert!(candidates(triple(Os::Darwin, Env::None), &on(Os::Darwin)).is_empty());
+    }
+
+    #[test]
+    fn an_sdk_reaches_an_apple_target_from_a_host_that_is_not_a_mac() {
+        // A Linux box with `SDKROOT` pointing at an SDK somebody downloaded under their own licence,
+        // which is the path section 8.6 leaves open on every host that is not a mac. It is the same
+        // exception a `--sysroot` gets and for the same reason: somebody said where the headers are.
+        let machine = Machine { sdk: Some("/S.sdk".into()), ..on(Os::Linux) };
+        let dirs = candidates(triple(Os::Darwin, Env::None), &machine);
+        assert_eq!(dirs, [PathBuf::from("/S.sdk/usr/include")]);
+        // And with no SDK there is nothing, which is what the licence wall's message is about.
+        assert!(candidates(triple(Os::Darwin, Env::None), &on(Os::Linux)).is_empty());
     }
 
     #[test]

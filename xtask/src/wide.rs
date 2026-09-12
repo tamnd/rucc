@@ -6,10 +6,11 @@
 //! `crates/rucc-codegen/src/wide.rs` is the pass that makes this width work: every value becomes the
 //! two registers the convention holds it in and every operation over one becomes operations over the
 //! halves, except the four divisions and the conversions to and from a float, which become a call to
-//! the routines `runtime/builtins/div.c` and `runtime/builtins/convert.c` define. What checked that until now was the pass's own tests, which build a function, run the
-//! pass and read the IR back. That is the same kind of evidence as a stub writer reading its own
-//! bytes back: it catches a pass that did something other than what it meant to and not a pass that
-//! meant the wrong thing. Nothing ran the code.
+//! the routines `runtime/builtins/div.c` and `runtime/builtins/convert.c` define. What checked that
+//! until now was the pass's own tests, which build a function, run the pass and read the IR back.
+//! That is the same kind of evidence as a stub writer reading its own bytes back: it catches a pass
+//! that did something other than what it meant to and not a pass that meant the wrong thing. Nothing
+//! ran the code.
 //!
 //! So this compiles `tests/wide/arithmetic.c` with the compiler this tree builds and with the system
 //! compiler, runs both, and holds every group of cases against the other side. A difference names

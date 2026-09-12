@@ -20,21 +20,37 @@
 //! 1. `-I` in the order given.
 //! 2. The compiler's own headers. Always present, on every target including freestanding, and never
 //!    taken from a sysroot, because `stddef.h` describes the compiler and not the C library.
-//! 3. The target's libc headers, from `--sysroot` if given, otherwise from our bundled tree for
-//!    that tuple, otherwise, and only when the target is the host, from the host's directories. For
-//!    a Linux target the bundled case is four directories rather than two: the libc's per
-//!    architecture tree, the libc's generic tree, the kernel's `asm/` for the architecture, and the
-//!    kernel's shared tree. That is the order `zig cc -E -v` prints for a glibc target.
+//! 3. The target's libc headers, from `--sysroot` if given, otherwise from an Apple SDK this
+//!    machine has, otherwise from our bundled tree for that tuple, otherwise, and only when the
+//!    target is the host, from the host's directories. For a Linux target the bundled case is four
+//!    directories rather than two: the libc's per architecture tree, the libc's generic tree, the
+//!    kernel's `asm/` for the architecture, and the kernel's shared tree. That is the order
+//!    `zig cc -E -v` prints for a glibc target.
 //! 4. Nothing else. No `/usr/local/include` in a cross build, ever.
 //!
 //! `-nostdinc` removes 3, `-nobuiltininc` removes 2, `--sysroot` replaces 3's root, and `-isysroot`
 //! is the Darwin spelling of the same thing.
+//!
+//! # Why an SDK is a source of its own
+//!
+//! [`Options::sdk`] is the fourth of those sources and it is not one of the other three. It is not a
+//! tree the user named, because on a mac it is found by asking `xcrun` and nobody wrote it on the
+//! command line. It is not a bundled tree, because `spec/cross-compile/13-distribution.md` section
+//! 13.4 says we may never ship one. And it is not the host's own directories, because the SDK holds
+//! the headers of every Apple architecture rather than of this machine, so one installed SDK serves
+//! `x86_64-macos` on an arm64 mac and that is what Apple's own tools do with it.
+//!
+//! The other half of the same rule is that a target behind one of those licence walls never takes
+//! the bundled branch at all, whatever the caller passes, because [`crate::Wall`] is the statement
+//! that no tree of ours can exist for it. A path under the cache for such a target would be a
+//! directory nothing will ever put a file in, named in a `-v` listing as though a fetch were coming.
 
 use std::path::{Path, PathBuf};
 
 use rucc_tuple::TargetTuple;
 
 use crate::layout::{Kernel, Sysroot};
+use crate::wall::Wall;
 
 /// Which of section 8.5's four steps put a directory in the list.
 ///
@@ -49,6 +65,13 @@ pub enum Origin {
     Compiler,
     /// Step 3, taken from a `--sysroot` or `-isysroot` the user named.
     Sysroot,
+    /// Step 3, taken from an Apple SDK installed on this machine.
+    ///
+    /// Separate from [`Origin::Sysroot`] because nobody named it, and separate from
+    /// [`Origin::Host`] because what is in it is the target's headers and not this machine's: one
+    /// SDK holds every Apple architecture. A user who sees this in `-print-search-dirs` is being
+    /// told that the path came from Xcode rather than from their command line.
+    Sdk,
     /// Step 3, taken from the tree we bundle for this target.
     Bundled,
     /// Step 3, taken from the kernel header tree, which is bundled too and is not the libc's.
@@ -79,6 +102,7 @@ impl Origin {
             Origin::User => "-I",
             Origin::Compiler => "compiler",
             Origin::Sysroot => "sysroot",
+            Origin::Sdk => "sdk",
             Origin::Bundled => "bundled",
             Origin::Kernel => "kernel",
             Origin::Host => "host",
@@ -116,7 +140,17 @@ pub struct Options<'a> {
     /// computes the list and this replaces step 3 with it wholesale. A user who did lay their tree
     /// out the way we lay one out passes [`Sysroot::includes`] and gets the same thing.
     pub sysroot: &'a [PathBuf],
+    /// The include directories of an Apple SDK this machine has, for an Apple target.
+    ///
+    /// Paths rather than a root, for the same reason [`Options::sysroot`] is paths: the layout inside
+    /// an SDK is Apple's and the caller is the half of the compiler that knows it. Empty on every
+    /// other target and on a machine that has no SDK, and the second of those is what
+    /// `spec/cross-compile/08-sysroots.md` section 8.6 turns into a refusal that names the licence.
+    pub sdk: &'a [PathBuf],
     /// The tree we bundle for this target, when there is one.
+    ///
+    /// Ignored for a target behind a licence wall, because there is no such tree and there will not
+    /// be one. The caller is free to pass the layout it computed without having to ask.
     pub bundled: Option<&'a Sysroot>,
     /// The kernel headers for this target, when it has any and we have them.
     ///
@@ -164,13 +198,24 @@ pub fn include_paths(
         }
     }
 
-    // Step 3. The target's libc headers, from the first of three sources that has them.
+    // Step 3. The target's libc headers, from the first of four sources that has them.
     if !options.no_std_inc {
         if !options.sysroot.is_empty() {
             for path in options.sysroot {
                 paths.push(Entry { path: path.clone(), origin: Origin::Sysroot });
             }
-        } else if let Some(bundled) = options.bundled {
+        } else if !options.sdk.is_empty() {
+            // Before the bundled tree rather than after it, which costs nothing today because the
+            // only targets an SDK is found for are the ones we have no bundled tree for, and says
+            // the right thing if that ever stops being true: an SDK on the machine is the platform's
+            // own headers and ours would be a reconstruction of them.
+            for path in options.sdk {
+                paths.push(Entry { path: path.clone(), origin: Origin::Sdk });
+            }
+        // A walled target has no tree of ours anywhere, so the branch cannot fire for one even when
+        // a caller passes the layout. `Wall` is the whole of that rule and this is the only place it
+        // reaches the search path.
+        } else if let Some(bundled) = options.bundled.filter(|_| Wall::of(target).is_none()) {
             for path in bundled.includes() {
                 paths.push(Entry { path, origin: Origin::Bundled });
             }
