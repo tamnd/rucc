@@ -137,6 +137,23 @@ impl Meta {
     /// rather than a rule. See tamnd/rucc#1085.
     pub const UNWATCHED: u8 = 4;
 
+    /// Flag: this instance was handed to code the build did not compile, so its aux is not to be
+    /// believed when it says a word holds no pointer.
+    ///
+    /// The other three flags above are about one capability and this one is about a whole
+    /// instance. It lives in the instance's header, `crate::check::handed` sets it at the boundary,
+    /// and a capability taken from that header afterwards carries it the way any other meta bit
+    /// travels.
+    ///
+    /// What it buys is the one thing an empty aux slot cannot say for itself. A zero slot means
+    /// both "this word holds an integer", which is document 03's class Y1 and wants refusing, and
+    /// "somebody wrote a real pointer here without knowing there was a slot to write", which is a
+    /// correct program and wants recovering. Nothing in the slot tells the two apart, so the
+    /// instance says instead: an instance that never crossed the boundary keeps Y1, and one that
+    /// did gives it up for the rest of its life. `crate::cap::load` is the reader and
+    /// tamnd/rucc#1081 is the decision.
+    pub const HANDED: u8 = 8;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {
