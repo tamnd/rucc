@@ -500,7 +500,8 @@ mod tests {
         for _ in 0..20_000 {
             // A random normal and exactly half of its own spacing, which is a tie at every exponent
             // rather than only at the one above.
-            let value = f64::from_bits(stream.next() & 0x3fff_ffff_ffff_ffff | 0x2000_0000_0000_0000);
+            let value =
+                f64::from_bits(stream.next() & 0x3fff_ffff_ffff_ffff | 0x2000_0000_0000_0000);
             let stored = (value.to_bits() >> FRACTION) & TOP;
             let step = f64::from_bits((stored - u64::from(FRACTION) - 1) << FRACTION);
             check(0, value, step);
