@@ -1,6 +1,6 @@
 //! Double precision arithmetic in integers, which is the reference for the entry points in
 //! `runtime/builtins/double.c`: the four operations a target with no floating point unit calls for a
-//! `double`, and the negation.
+//! `double`, the negation, and the eight comparisons, which are calls on such a target too.
 //!
 //! Design: `spec/12-abi-and-runtime.md` section 12.8. The names and the conventions are libgcc's.
 //!
@@ -340,6 +340,131 @@ pub extern "C" fn __negdf2(value: f64) -> f64 {
     f64::from_bits(value.to_bits() ^ SIGN)
 }
 
+/// The comparisons, worked out from the exact parts rather than from the bit patterns.
+///
+/// The same split as `float.rs` one format down, and for the same reason. The shipped C reads the two
+/// patterns as unsigned integers, which works because the format was designed so that two values of
+/// the same sign order the way their patterns do. This does not use that property at all: it asks
+/// which power of two each value's highest bit is worth, and only where those agree does it line the
+/// two significands up and compare them. It is slower and pointless on a real target, which is why
+/// the C ships, and it is independent of the property the C leans on, which is why it checks it.
+///
+/// An infinity needs no case of its own. `parts` hands back its stored exponent like anything else,
+/// which puts its highest bit one power of two above the largest finite value's, so it is greater than
+/// everything finite and equal to another infinity by the ordinary path.
+fn order(left: u64, right: u64) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+
+    let left_parts = parts(left);
+    let right_parts = parts(right);
+    let left_negative = left & SIGN != 0;
+    let right_negative = right & SIGN != 0;
+
+    // A zero of either sign equals a zero of either sign, which is the one place the sign is not
+    // read, and it comes first because a zero has no highest bit to ask about.
+    if left_parts.significand == 0 && right_parts.significand == 0 {
+        return Ordering::Equal;
+    }
+    if left_parts.significand == 0 {
+        return if right_negative { Ordering::Greater } else { Ordering::Less };
+    }
+    if right_parts.significand == 0 {
+        return if left_negative { Ordering::Less } else { Ordering::Greater };
+    }
+    if left_negative != right_negative {
+        return if left_negative { Ordering::Less } else { Ordering::Greater };
+    }
+
+    // Which power of two the highest set bit of each is worth, and then, where those agree, the two
+    // significands with their highest bits in the same place.
+    let left_top = left_parts.scale + (63 - left_parts.significand.leading_zeros() as i32);
+    let right_top = right_parts.scale + (63 - right_parts.significand.leading_zeros() as i32);
+    let magnitudes = left_top.cmp(&right_top).then_with(|| {
+        let left_lined = left_parts.significand << left_parts.significand.leading_zeros();
+        let right_lined = right_parts.significand << right_parts.significand.leading_zeros();
+        left_lined.cmp(&right_lined)
+    });
+    if left_negative { magnitudes.reverse() } else { magnitudes }
+}
+
+/// What the eight entry points below share: the comparison, and the one number that differs between
+/// them, which is what to answer when an operand is a not a number. That answer has to make the
+/// caller's own test fail, and which answer does that depends on the test, which is why there are
+/// eight of these rather than one.
+fn compare(left: u64, right: u64, unordered: i32) -> i32 {
+    use core::cmp::Ordering;
+
+    if is_nan(left) || is_nan(right) {
+        return unordered;
+    }
+    match order(left, right) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    }
+}
+
+/// `int __cmpdf2(double, double)`, which is minus one, zero or one, and one for a not a number as
+/// well. The documentation says not to rely on that last part, and the compiler emits this routine
+/// only where it has already ruled a not a number out.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __cmpdf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), 1)
+}
+
+/// `int __eqdf2(double, double)`, zero when the two are equal and anything else when they are not. A
+/// not a number is unequal to everything including itself.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __eqdf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), 1)
+}
+
+/// `int __nedf2(double, double)`, which is the same work, since a caller testing for inequality tests
+/// the same answer against zero the other way round. Two names because a compiler emits both.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __nedf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), 1)
+}
+
+/// `int __gedf2(double, double)`, at or above zero when the left one is greater or equal, so a not a
+/// number has to come back below zero for that test to fail.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __gedf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), -1)
+}
+
+/// `int __gtdf2(double, double)`, above zero when the left one is greater.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __gtdf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), -1)
+}
+
+/// `int __ledf2(double, double)`, at or below zero when the left one is less or equal.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __ledf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), 1)
+}
+
+/// `int __ltdf2(double, double)`, below zero when the left one is less.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __ltdf2(left: f64, right: f64) -> i32 {
+    compare(left.to_bits(), right.to_bits(), 1)
+}
+
+/// `int __unorddf2(double, double)`, not zero when the two cannot be ordered at all.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __unorddf2(left: f64, right: f64) -> i32 {
+    i32::from(is_nan(left.to_bits()) || is_nan(right.to_bits()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -506,6 +631,91 @@ mod tests {
             let step = f64::from_bits((stored - u64::from(FRACTION) - 1) << FRACTION);
             check(0, value, step);
             check(1, value, step);
+        }
+    }
+
+    /// What the eight comparisons have to agree with, which is the machine's own comparison of the
+    /// same two values: each routine is a sign and a test, and the test has to come out the way `<` or
+    /// `==` does here, including where one operand is a not a number and every test but the last two
+    /// is false.
+    fn check_comparisons(left: f64, right: f64) {
+        let one = black_box(left);
+        let two = black_box(right);
+        let bits = (left.to_bits(), right.to_bits());
+        let unordered = left.is_nan() || right.is_nan();
+        // The three way answer first, since it is the one routine whose whole sign is specified rather
+        // than one side of zero: minus one below, one above, zero equal, and one for a not a number
+        // because that is what libgcc hands back there.
+        let wanted = if unordered {
+            1
+        } else if black_box(one < two) {
+            -1
+        } else if black_box(one > two) {
+            1
+        } else {
+            0
+        };
+        assert_eq!(
+            compare(bits.0, bits.1, 1).signum(),
+            wanted,
+            "cmp of {:016x} and {:016x}",
+            bits.0,
+            bits.1
+        );
+
+        let answers: [(&str, bool, bool); 7] = [
+            ("eq", compare(bits.0, bits.1, 1) == 0, black_box(one == two)),
+            ("ne", compare(bits.0, bits.1, 1) != 0, black_box(one != two)),
+            ("ge", compare(bits.0, bits.1, -1) >= 0, black_box(one >= two)),
+            ("gt", compare(bits.0, bits.1, -1) > 0, black_box(one > two)),
+            ("le", compare(bits.0, bits.1, 1) <= 0, black_box(one <= two)),
+            ("lt", compare(bits.0, bits.1, 1) < 0, black_box(one < two)),
+            ("unord", i32::from(is_nan(bits.0) || is_nan(bits.1)) != 0, unordered),
+        ];
+        for (name, ours, machine) in answers {
+            assert_eq!(
+                ours, machine,
+                "{name} of {:016x} and {:016x}: we say {ours}, the machine says {machine}",
+                bits.0, bits.1
+            );
+        }
+    }
+
+    #[test]
+    fn the_comparisons_answer_what_the_machine_answers() {
+        let mut stream = Stream(0x1234_5678_9abc_def1);
+        for _ in 0..60_000 {
+            let left = stream.any();
+            let right = stream.any();
+            check_comparisons(left, right);
+            check_comparisons(left, stream.near(left));
+            // The same value on both sides, which is the case an implementation that compares patterns
+            // and one that compares values can still differ on: a negative zero against a positive
+            // one, and a not a number against itself.
+            check_comparisons(left, left);
+        }
+        let values = corners();
+        for left in &values {
+            for right in &values {
+                check_comparisons(*left, *right);
+            }
+        }
+    }
+
+    #[test]
+    fn two_values_that_differ_only_in_the_fraction_order_the_way_the_machine_orders_them() {
+        // The part the shipped C gets from reading patterns as integers and this gets from lining the
+        // significands up: two values of one exponent, and the same pair made negative, where the
+        // order reverses. Random fractions at a random exponent rather than a table, because the
+        // property is about every exponent.
+        let mut stream = Stream(0xfeed_face_dead_beef);
+        for _ in 0..40_000 {
+            let stored = 1 + stream.next() % 2046;
+            let one = f64::from_bits((stored << FRACTION) | (stream.next() & FRACTION_MASK));
+            let two = f64::from_bits((stored << FRACTION) | (stream.next() & FRACTION_MASK));
+            check_comparisons(one, two);
+            check_comparisons(-one, -two);
+            check_comparisons(one, -two);
         }
     }
 

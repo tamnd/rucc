@@ -1,9 +1,9 @@
 /* Double precision arithmetic done in integers, for a target with no floating point unit.
  *
  * Design: spec/12-abi-and-runtime.md section 12.8 and spec/cross-compile/10-runtime.md section 10.2.
- * This is the same work as runtime/builtins/float.c one format up: the four operations and the
- * negation, under libgcc's names, for a target where `a + b` on two doubles is a call rather than an
- * instruction. The comparisons and the conversions for this format are not written yet.
+ * This is the same work as runtime/builtins/float.c one format up: the four operations, the negation
+ * and the eight comparisons, under libgcc's names, for a target where `a + b` or `a < b` on two
+ * doubles is a call rather than an instruction. The conversions for this format are not written yet.
  *
  * # What is the same and what is not
  *
@@ -429,4 +429,89 @@ double __divdf3(double left, double right) {
  */
 double __negdf2(double value) {
     return double_of(pattern_of(value) ^ SIGN);
+}
+
+/* The comparisons, which are the same eight routines over the same one piece of work that float.c has
+ * one format down, with the width of a pattern changed and nothing else. `a < b` on two doubles is a
+ * call on a target with no floating point unit as much as `a + b` is.
+ *
+ * Only the sign of what these hand back is specified and never its magnitude, so the caller tests the
+ * answer against zero, and what differs between the eight is one number: what to answer when an
+ * operand is a not a number, which has to be whichever sign makes the caller's own test come out
+ * false. The work itself is a comparison of two unsigned integers, because the format orders two
+ * values of the same sign the way it orders their patterns, and that holds at this width for the same
+ * reason it holds at the last one: the exponent sits above the fraction and both are unsigned.
+ */
+static int compare(u64 left, u64 right, int unordered) {
+    if (is_nan(left) || is_nan(right)) {
+        return unordered;
+    }
+    u64 left_magnitude = left & ~SIGN;
+    u64 right_magnitude = right & ~SIGN;
+    /* A negative zero equals a positive zero, which is the one place the sign is not read. */
+    if (left_magnitude == 0 && right_magnitude == 0) {
+        return 0;
+    }
+    int left_negative = (left & SIGN) != 0;
+    int right_negative = (right & SIGN) != 0;
+    if (left_negative != right_negative) {
+        return left_negative ? -1 : 1;
+    }
+    if (left_magnitude == right_magnitude) {
+        return 0;
+    }
+    int ordered = left_magnitude > right_magnitude ? 1 : -1;
+    /* Both negative, so the larger magnitude is the smaller number. */
+    return left_negative ? -ordered : ordered;
+}
+
+/* The three way comparison, which answers one for a not a number as well. The documentation says not
+ * to rely on that and the compiler emits this routine only where it has ruled one out already.
+ */
+int __cmpdf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Zero when the two are equal and anything else when they are not. A not a number is unequal to
+ * everything including itself, so the answer there is not zero.
+ */
+int __eqdf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* The same work as the one above it, since a caller testing for inequality tests the same answer
+ * against zero the other way round. Two functions rather than one alias for float.c's reason: an
+ * alias is a linker feature and this file is meant to compile with nothing underneath it.
+ */
+int __nedf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* At or above zero when the left one is greater or equal, so a not a number has to come back below
+ * zero for the test to fail.
+ */
+int __gedf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), -1);
+}
+
+/* Above zero when the left one is greater, so a not a number comes back at or below zero. */
+int __gtdf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), -1);
+}
+
+/* At or below zero when the left one is less or equal, so a not a number comes back above zero. */
+int __ledf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Below zero when the left one is less, so a not a number comes back at or above zero. */
+int __ltdf2(double left, double right) {
+    return compare(pattern_of(left), pattern_of(right), 1);
+}
+
+/* Not zero when the two cannot be ordered, which is when either of them is a not a number. This is
+ * the one the others are defined in terms of: each of them is its own comparison and this answer.
+ */
+int __unorddf2(double left, double right) {
+    return is_nan(pattern_of(left)) || is_nan(pattern_of(right));
 }
