@@ -48,7 +48,7 @@ long long __divdi3(long long top, long long bottom);
 long long __moddi3(long long top, long long bottom);
 long long __divmoddi4(long long top, long long bottom, long long *rest);
 
-/* And the five single precision soft float routines, by name for the same reason.
+/* And the single precision soft float routines, by name for the same reason.
  *
  * Writing a + b here would compile to the machine's own instruction, which is not what is under
  * test: what is under test is what a target with no floating point unit calls instead. The host has
@@ -59,6 +59,20 @@ float __subsf3(float left, float right);
 float __mulsf3(float left, float right);
 float __divsf3(float left, float right);
 float __negsf2(float value);
+
+/* And the eight comparisons, which are calls on such a target for the same reason `a < b` is not an
+ * instruction there. Only the sign of what they hand back is specified, so only the sign is
+ * digested, the way the sign of `memcmp` is and for the same reason: pinning the magnitude would
+ * make this a test of an accident rather than of the contract.
+ */
+int __cmpsf2(float left, float right);
+int __eqsf2(float left, float right);
+int __nesf2(float left, float right);
+int __gesf2(float left, float right);
+int __gtsf2(float left, float right);
+int __lesf2(float left, float right);
+int __ltsf2(float left, float right);
+int __unordsf2(float left, float right);
 
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
@@ -608,10 +622,16 @@ static float single_of(unsigned int pattern) {
     return value;
 }
 
-/* One pair through all five routines. The negation takes one operand, so it is the left one here and
- * every pair below is also run the other way round, which is what gets the right one through it.
+/* The sign of an answer and nothing else, which is all eight comparisons promise. */
+static unsigned long long mix_sign(unsigned long long digest, int answer) {
+    return mix_number(digest, (answer > 0) - (answer < 0));
+}
+
+/* One pair through all thirteen routines. The negation takes one operand, so it is the left one here
+ * and every pair below is also run the other way round, which is what gets the right one through it.
  */
-static unsigned long long five(unsigned long long digest, unsigned int left, unsigned int right) {
+static unsigned long long thirteen(unsigned long long digest, unsigned int left,
+                                   unsigned int right) {
     float one = single_of(left);
     float two = single_of(right);
     digest = mix_float(digest, __addsf3(one, two));
@@ -619,7 +639,15 @@ static unsigned long long five(unsigned long long digest, unsigned int left, uns
     digest = mix_float(digest, __mulsf3(one, two));
     digest = mix_float(digest, __divsf3(one, two));
     digest = mix_float(digest, __negsf2(one));
-    cases += 5;
+    digest = mix_sign(digest, __cmpsf2(one, two));
+    digest = mix_sign(digest, __eqsf2(one, two));
+    digest = mix_sign(digest, __nesf2(one, two));
+    digest = mix_sign(digest, __gesf2(one, two));
+    digest = mix_sign(digest, __gtsf2(one, two));
+    digest = mix_sign(digest, __lesf2(one, two));
+    digest = mix_sign(digest, __ltsf2(one, two));
+    digest = mix_sign(digest, __unordsf2(one, two));
+    cases += 13;
     return digest;
 }
 
@@ -655,10 +683,10 @@ static void singles(int round) {
         unsigned int left = random_single();
         unsigned int right = random_single();
         unsigned int close = near_single(left);
-        digest = five(digest, left, right);
-        digest = five(digest, right, left);
-        digest = five(digest, left, close);
-        digest = five(digest, close, left);
+        digest = thirteen(digest, left, right);
+        digest = thirteen(digest, right, left);
+        digest = thirteen(digest, left, close);
+        digest = thirteen(digest, close, left);
     }
     say("single", round, digest);
 }
@@ -678,10 +706,10 @@ static void single_ties(int round) {
         unsigned int stored = 30 + (unsigned int)(next_random() % 200);
         unsigned int value = (random_single() & 0x007FFFFFu) | (stored << 23);
         unsigned int half = (stored - 24) << 23;
-        digest = five(digest, value & ~1u, half);
-        digest = five(digest, value | 1u, half);
-        digest = five(digest, (value & ~1u) | SINGLE_SIGN, half);
-        digest = five(digest, half, value | 1u);
+        digest = thirteen(digest, value & ~1u, half);
+        digest = thirteen(digest, value | 1u, half);
+        digest = thirteen(digest, (value & ~1u) | SINGLE_SIGN, half);
+        digest = thirteen(digest, half, value | 1u);
     }
     say("singletie", round, digest);
 }
@@ -702,10 +730,10 @@ static void single_edges(int round) {
                              | ((unsigned int)(next_random() % 3) << 23);
         unsigned int large = (random_single() & 0x807FFFFFu)
                              | ((unsigned int)(248 + next_random() % 7) << 23);
-        digest = five(digest, small, other);
-        digest = five(digest, small, large);
-        digest = five(digest, large, small);
-        digest = five(digest, large, large);
+        digest = thirteen(digest, small, other);
+        digest = thirteen(digest, small, large);
+        digest = thirteen(digest, large, small);
+        digest = thirteen(digest, large, large);
     }
     say("singleedge", round, digest);
 }
@@ -733,8 +761,8 @@ static void single_corner_cases(int which) {
         for (int signs = 0; signs < 4; signs++) {
             unsigned int left = SINGLE_CORNERS[which] | ((signs & 1) ? SINGLE_SIGN : 0u);
             unsigned int right = SINGLE_CORNERS[i] | ((signs & 2) ? SINGLE_SIGN : 0u);
-            digest = five(digest, left, right);
-            digest = five(digest, right, left);
+            digest = thirteen(digest, left, right);
+            digest = thirteen(digest, right, left);
         }
     }
     say("singlecorner", which, digest);
