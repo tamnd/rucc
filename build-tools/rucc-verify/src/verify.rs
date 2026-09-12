@@ -240,7 +240,7 @@ fn agreement(
 /// reasons that are about that width. Both of them small, because the claims that need a
 /// bounded proof at all are the ones mixing multiplication with division, and one of those is
 /// as far out of reach at sixteen bits as it is at sixty four: the rule the tests use is
-/// answered in hundredths of a second at eight bits and not at all at sixteen. Only widths
+/// answered in a second or two at eight bits and not at all at sixteen. Only widths
 /// narrower than the rule's own are used, so a rule that already works in four bits has nothing
 /// to fall back to.
 pub const BOUNDED_WIDTHS: [u32; 2] = [4, 8];
