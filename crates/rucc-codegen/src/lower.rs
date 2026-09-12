@@ -78,7 +78,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder, Opcode, Param,
@@ -86,7 +86,7 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{CallRegs, Constraint, RegClass};
+use rucc_target::{CallRegs, Constraint, RegClass, Segment};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -1821,10 +1821,15 @@ impl<'a> Lowering<'a> {
     /// What this does not do is give the name anything to refer to. A module carries its globals
     /// and nothing writes them out, so a file that defines the variable it reads compiles to a
     /// reference the linker cannot resolve. Issue #293 is the other half.
+    ///
+    /// A thread-local variable is neither of the two above and is [`Self::thread_address`].
     fn address_of(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Symbol(symbol) = data.extra else { return Err(self.unsupported(inst)) };
         let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        if self.elsewhere.thread(symbol) {
+            return self.thread_address(inst, symbol, result);
+        }
 
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
@@ -1836,6 +1841,81 @@ impl<'a> Lowering<'a> {
         };
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mnemonic}")));
         self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+        Ok(())
+    }
+
+    /// The address of a thread-local variable, which is this thread's copy of it.
+    ///
+    /// Neither instruction the ordinary case writes would mean anything here. There is no distance
+    /// to the variable for a `lea` to add, because there is no variable: there is one copy of it per
+    /// thread and they are at different addresses, so a link asked for the distance to the name
+    /// refuses rather than picking one. And there is no address for a table slot to hold either, for
+    /// the same reason.
+    ///
+    /// What is the same in every thread is where the variable sits inside the block of storage a
+    /// thread gets, so that offset is what the link writes down, and the address of the running
+    /// thread's block is what turns it into an address. x86-64 keeps that address in `%fs`, at the
+    /// front of the block, so the whole of this is three instructions:
+    ///
+    /// ```text
+    /// movq  x@gottpoff(%rip), %off   # how far into the block x sits, which the link fills in
+    /// movq  %fs:0, %tp               # where this thread's block is, which only the machine knows
+    /// addq  %tp, %off                # this thread's copy of x
+    /// ```
+    ///
+    /// That is the initial exec model. It is one instruction longer than what gcc writes at `-O2`
+    /// in an executable, which folds the addition into the instruction that uses the address, and
+    /// the difference is issue #282 rather than anything about threads: nothing here folds an
+    /// address into its reader yet. The link relaxes the first instruction into an immediate when it
+    /// is making an executable, since it lays the blocks out and therefore knows the number, so the
+    /// table slot costs nothing in the case that is common.
+    ///
+    /// It is not the most general model. A library loaded by `dlopen` gets its storage after the
+    /// program is already running, and the block this reaches was laid out before it started, so
+    /// the loader has to find room in that block for the library's variables. glibc keeps a little
+    /// spare room for exactly this and a library that fits in it loads and runs; one that does not
+    /// fails to load, with a message saying so. The model with no such limit calls `__tls_get_addr`
+    /// and is what gcc writes under `-fPIC` by default, and it is issue #1104.
+    ///
+    /// So this is the model gcc writes under `-ftls-model=initial-exec`: right for an executable,
+    /// right for a library the program is linked against, and a load that either works or is
+    /// refused out loud for a library something opens later. What it is never is quietly wrong.
+    fn thread_address(
+        &mut self,
+        inst: Inst,
+        symbol: Symbol,
+        result: Value,
+    ) -> Result<(), Unsupported> {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{GOT_LOAD}")));
+
+        let offset = self.out.new_vreg(gpr);
+        self.out
+            .build(block, load)
+            .at(span)
+            .def(offset, gpr)
+            .mem(mir::Mem::thread(symbol))
+            .finish();
+        // The front of the block, which is the one thing on this machine that no instruction can
+        // work out: `%fs` is not a register a program can read, and what it points at is a word
+        // holding its own address, so reading through it at zero is how the address is come by.
+        let pointer = self.out.new_vreg(gpr);
+        let at = mir::Mem::in_segment(Segment::Fs, 0);
+        self.out.build(block, load).at(span).def(pointer, gpr).mem(at).finish();
+
+        // Two address, spelled out for the reason `x87_to_int` gives: this machine adds into the
+        // register it read, and only the constraint says the two are the same one.
+        let reg = self.new_reg(result);
+        let add = mir::Opcode::new(self.names.intern(&format!("{PREFIX}add_rr_64")));
+        self.out
+            .build(block, add)
+            .at(span)
+            .operand(mir::Operand::write(reg, gpr).with(Constraint::Reuse(1)))
+            .operand(mir::Operand::read(offset, gpr))
+            .operand(mir::Operand::read(pointer, gpr))
+            .finish();
         Ok(())
     }
 
@@ -2678,7 +2758,7 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             scale: u8::try_from(read.imm?).ok()?,
             disp: 0,
             symbol: None,
-            got: false,
+            reach: mir::Reach::Itself,
             segment: None,
         }),
         x86_64::Address::Base => Some(mir::Mem::at(regs.next()?)),
@@ -4082,6 +4162,27 @@ mod tests {
             mir::print_func(&out.func, &names, &REGS),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [got @away]\n    \
              x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_thread_local_is_an_offset_out_of_the_table_plus_where_this_thread_starts() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let own = address_of(&mut source, block, &mut names, "own");
+        Builder::new(&mut source, block).ret(&[own]);
+        let elsewhere = Elsewhere::default().with_threads([names.intern("own")]);
+
+        // `extern _Thread_local int own; void *f(void) { return &own; }`. Three instructions where
+        // the two cases above are one, because there is no address to load or to work out: the
+        // slot holds how far into a thread's block the variable sits, `%fs:0` is where this
+        // thread's block starts, and the sum of the two is this thread's copy.
+        let out =
+            func(&source, &mut names, &SYSV, &elsewhere).expect("every instruction has a rule");
+        assert_eq!(
+            mir::print_func(&out.func, &names, &REGS),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [thread @own]\n    \
+             %1:gpr = x64.mov_rm_64 [fs:0]\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
+             x64.ret_val_64 %2($rax)\n}\n"
         );
     }
 

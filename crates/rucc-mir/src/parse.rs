@@ -35,7 +35,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::Func;
-use crate::inst::{BlockCall, Mem, Opcode, Operand, Param, Reg};
+use crate::inst::{BlockCall, Mem, Opcode, Operand, Param, Reach, Reg};
 
 /// Why a text could not be read.
 ///
@@ -99,7 +99,7 @@ struct PendingMem {
     scale: u8,
     disp: i32,
     symbol: Option<Symbol>,
-    got: bool,
+    reach: Reach,
     segment: Option<Segment>,
 }
 
@@ -350,7 +350,13 @@ impl<'a> Parser<'a, '_> {
         let mut mem = PendingMem { scale: 1, ..PendingMem::default() };
         // Written in front of everything else, and a bare word where every other part of an
         // address starts with a sigil or a digit, so one look is enough to know it is there.
-        mem.got = self.eat_word("got");
+        mem.reach = if self.eat_word("got") {
+            Reach::Table
+        } else if self.eat_word("thread") {
+            Reach::Thread
+        } else {
+            Reach::Itself
+        };
         // In front of everything as well, and behind the marker above only because that is the
         // order they read in. Both are facts about how the address is come by rather than about
         // what is added to what, which is what the loop below reads.
@@ -508,7 +514,7 @@ impl<'a> Parser<'a, '_> {
                         scale: mem.scale,
                         disp: mem.disp,
                         symbol: mem.symbol,
-                        got: mem.got,
+                        reach: mem.reach,
                         segment: mem.segment,
                     }),
                     None => None,
@@ -809,6 +815,23 @@ mod tests {
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [got @away]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn the_offset_of_a_thread_local_read_out_of_the_offset_table_round_trips() {
+        // The same slot as the one above holding a different number, which is why it is the same
+        // shape with a different word in front and why the word has to survive the trip: an offset
+        // read as though it were an address is the whole of the difference between this thread's
+        // copy of a variable and somewhere near the front of memory.
+        round_trip(
+            "\
+mfunc @take {
+block0:
+    %0:gpr = x64.mov_rm [thread @away]
     x64.ret
 }
 ",

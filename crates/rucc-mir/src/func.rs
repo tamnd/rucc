@@ -710,7 +710,7 @@ impl InstBuilder<'_> {
             scale: mem.scale.max(1),
             disp: mem.disp,
             symbol: mem.symbol,
-            got: mem.got,
+            reach: mem.reach,
             segment: mem.segment,
         };
         if let Some(base) = mem.base {

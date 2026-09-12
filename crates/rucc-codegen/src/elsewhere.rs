@@ -24,6 +24,13 @@
 //! reaching it from the instruction pointer would reach the wrong one. The static linker will not
 //! let that happen quietly: `R_X86_64_PC32` against a name it can see is replaceable is refused
 //! when it is making a shared object, which is how tamnd/rucc#756 was found.
+//!
+//! A thread-local variable is the other name this file cannot work the address of out for itself,
+//! and it is here for the same reason: which names are thread-local is a fact about the module and
+//! the code generator sees one function at a time. It is a harder case than the one above rather
+//! than a variation of it, because there is no address to work out at all. Every thread has its own
+//! copy, so what the link can say is only where the variable sits inside the block a thread gets,
+//! and turning that into an address is something the running program does. See [`Elsewhere::thread`].
 
 use std::collections::HashSet;
 
@@ -50,15 +57,31 @@ use rucc_ir::{Module, Pic};
 /// A name this module has never heard of is not in here. Nothing the front end writes produces one,
 /// and treating an unknown name as a function would put the addresses the instrumentation takes of
 /// its own tables through a table of their own for no reason.
+///
+/// A thread-local variable is kept separately and answered by [`Self::thread`], because the two
+/// questions have different answers rather than one being a case of the other: the table slot of an
+/// ordinary name holds its address and the slot of a thread-local holds an offset, and reading
+/// either as though it were the other is a wrong answer rather than a slower one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Elsewhere {
     names: HashSet<Symbol>,
+    threads: HashSet<Symbol>,
 }
 
 impl Elsewhere {
     /// The names that link cannot reach from the instruction pointer.
     #[must_use]
     pub fn of(module: &Module, pic: Pic) -> Self {
+        let threads = module
+            .globals()
+            .filter(|&id| module[id].tls.is_some())
+            .map(|id| module[id].name)
+            .collect();
+        Self { threads, ..Self::table(module, pic) }
+    }
+
+    /// The half of the above that is about the global offset table, which is the older one.
+    fn table(module: &Module, pic: Pic) -> Self {
         let funcs = module.funcs().filter(|&id| {
             let func = &module[id];
             func.is_declaration() || pic.replaceable(func.linkage, func.visibility)
@@ -83,6 +106,17 @@ impl Elsewhere {
     pub fn holds(&self, name: Symbol) -> bool {
         self.names.contains(&name)
     }
+
+    /// Whether that name is a variable every thread has its own copy of.
+    ///
+    /// Asked before [`Self::holds`] and not instead of it, because the two answers are about
+    /// different things: a thread-local variable that another object may define is still reached
+    /// the same way, since the table slot holds an offset that is the same for every copy and the
+    /// question of whose copy is answered by the segment register rather than by the link.
+    #[must_use]
+    pub fn thread(&self, name: Symbol) -> bool {
+        self.threads.contains(&name)
+    }
 }
 
 /// The same set, written out by hand.
@@ -92,7 +126,16 @@ impl Elsewhere {
 /// module for it to be outside of.
 impl FromIterator<Symbol> for Elsewhere {
     fn from_iter<T: IntoIterator<Item = Symbol>>(names: T) -> Self {
-        Self { names: names.into_iter().collect() }
+        Self { names: names.into_iter().collect(), threads: HashSet::new() }
+    }
+}
+
+impl Elsewhere {
+    /// The same set with those names said to be thread-local, for a test that lowers one function.
+    #[must_use]
+    pub fn with_threads<T: IntoIterator<Item = Symbol>>(mut self, threads: T) -> Self {
+        self.threads = threads.into_iter().collect();
+        self
     }
 }
 
@@ -101,11 +144,11 @@ mod tests {
     use super::*;
 
     use rucc_base::Interner;
-    use rucc_ir::{Alias, Func, Global, Linkage, Signature, Visibility};
+    use rucc_ir::{Alias, Func, Global, Linkage, Signature, TlsModel, Visibility};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     /// A module with one of everything: a function with a body and one without, a variable with an
-    /// image and one without, a `static`, a hidden export and an alias.
+    /// image and one without, a `static`, a hidden export, an alias and a thread-local.
     fn module(names: &mut Interner) -> Module {
         let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
         let mut module = Module::new(names.intern("test.c"), &target);
@@ -129,8 +172,33 @@ mod tests {
         shy.visibility = Visibility::Hidden;
         module.add_global(shy);
 
+        let mut own = Global::new(names.intern("own"), 4, 4);
+        own.init = Some(module.push_data(&[]));
+        own.tls = Some(TlsModel::GlobalDynamic);
+        module.add_global(own);
+
         module.add_alias(Alias::new(names.intern("second"), names.intern("here")));
         module
+    }
+
+    #[test]
+    fn a_variable_every_thread_has_its_own_copy_of_is_one() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        assert!(elsewhere.thread(names.intern("own")));
+    }
+
+    /// The question the other five ask is a different question, and a variable that is not
+    /// thread-local answering yes to this one would put an offset where an address belongs.
+    #[test]
+    fn an_ordinary_variable_is_not() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        for name in ["kept", "away", "quiet", "shy", "here"] {
+            assert!(!elsewhere.thread(names.intern(name)), "{name} was called thread-local");
+        }
     }
 
     #[test]

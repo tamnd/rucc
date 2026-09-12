@@ -294,6 +294,22 @@ pub enum Place {
     },
     /// All zeros, so the file says how big it is and carries none of it. `.bss`.
     Zero,
+    /// One copy per thread rather than one copy per program. `.tdata` and `.tbss`.
+    ///
+    /// What the loader does with these two sections is what makes them different from every other
+    /// section here. Their contents are the template of a thread's own block of storage rather than
+    /// the storage itself: the image is laid out once, and every thread that starts gets a fresh
+    /// copy of it, so the address of a variable in one of them is a different address in every
+    /// thread and there is no single address for the link to write down. That is why a reference to
+    /// one is not the ordinary distance from the instruction pointer, and why the symbol is marked
+    /// as being of this kind so a linker refuses one that is.
+    ///
+    /// The pair is the same split as `.data` and `.bss` for the same reason, so an image that is
+    /// all zeros costs its size in the file and not its bytes.
+    Thread {
+        /// Whether the image is all zeros, which puts it in `.tbss` rather than `.tdata`.
+        zero: bool,
+    },
     /// A tentative definition, which is not in a section at all: the linker is asked for that
     /// much zeroed space and merges every definition of the name into one. `.comm`.
     Merged,
@@ -332,6 +348,8 @@ impl Place {
             Place::RelocReadOnly { local: false } => ".data.rel.ro",
             Place::RelocReadOnly { local: true } => ".data.rel.ro.local",
             Place::Zero => ".bss",
+            Place::Thread { zero: false } => ".tdata",
+            Place::Thread { zero: true } => ".tbss",
             Place::Merged | Place::Named(_) => return None,
         })
     }
@@ -418,6 +436,18 @@ pub enum Reference {
     /// which says the instruction is a `mov` with a REX prefix and lets the linker turn it back
     /// into the `lea` it would have been if the symbol had been here all along.
     Got,
+    /// A slot of the global offset table, reached from the instruction pointer, holding how far
+    /// into a thread's own block of storage a thread-local variable sits.
+    ///
+    /// An offset and not an address, which is what makes it a different relocation from the one
+    /// above rather than the same one against a different symbol: a thread-local variable has one
+    /// copy per thread and therefore no address for a link to write down, and what every copy has
+    /// in common is where it sits inside the block. Adding the block's own address, which the
+    /// machine keeps in a segment register, is what turns one into the other, and that addition is
+    /// in the code rather than in the relocation. `R_X86_64_GOTTPOFF` on ELF, which the linker
+    /// turns into a constant in the instruction when it is making an executable and therefore
+    /// knows how the blocks are laid out.
+    Thread,
     /// The address itself, written into an image. `int *p = &y;` and nothing else in C.
     Address {
         /// How many bytes of it are written, which is the pointer width except on a target with

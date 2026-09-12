@@ -393,7 +393,7 @@ fn touches(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> bool {
 /// down, because the reader is the half of the pair with no room left in it.
 fn base_reg(func: &mir::Func, inst: mir::Inst) -> Option<mir::Reg> {
     let amode = func[func[inst].mem?];
-    if amode.index.is_some() || amode.symbol.is_some() || amode.got {
+    if amode.index.is_some() || amode.symbol.is_some() || amode.reach != mir::Reach::Itself {
         return None;
     }
     Some(func[func[inst].operands].get(usize::from(amode.base?))?.reg)

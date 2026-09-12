@@ -45,7 +45,7 @@ use rucc_base::Interner;
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::{Func, defs};
-use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reg};
+use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reach, Reg};
 
 /// Every function, as text, which is what `--emit=mir` writes.
 #[must_use]
@@ -295,8 +295,10 @@ impl<'a> Printer<'a> {
         // In front of the symbol rather than after it, because it is a fact about how the address
         // is come by rather than about which name is wanted, and reading it first is what lets the
         // reader below take the rest of the mode the way it takes every other one.
-        if amode.got {
-            self.out.push_str("got ");
+        match amode.reach {
+            Reach::Itself => {}
+            Reach::Table => self.out.push_str("got "),
+            Reach::Thread => self.out.push_str("thread "),
         }
         // The same, and in front of that: which storage the address is in is decided before
         // anything about where in it, and an address in a segment names nothing else anyway.

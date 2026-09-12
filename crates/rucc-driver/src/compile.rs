@@ -833,7 +833,7 @@ fn generate(
     // nor a variable: an alias is an entry in the symbol table and no bytes of anything.
     let (globals, aliases) = match opts.emit {
         EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => (
-            rucc_asm::globals(module, names).map_err(refused)?,
+            rucc_asm::globals(module, names, target.object_format).map_err(refused)?,
             rucc_asm::aliases(module, names).map_err(refused)?,
         ),
         _ => (rucc_asm::Globals::default(), Vec::new()),
@@ -2482,16 +2482,23 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.section\t.rodata\n"), "{text}");
     }
 
-    /// A thread-local variable, which is valid C that the back end does not build yet.
+    /// A thread-local variable, which is the whole of one: the storage and the way to reach it.
+    ///
+    /// The two halves are in one test on purpose. Either one alone is worse than neither: a
+    /// definition with no way to reach it is a variable nothing can read, and a reference with no
+    /// definition behind it is the bug this pair was written to prevent, where a thread-local is
+    /// read as though it were an ordinary global and every thread quietly shares one copy.
     #[test]
-    fn a_thread_local_variable_is_reported_as_work_that_is_not_done() {
-        let mut opts = options();
-        opts.emit = EmitKind::Asm;
-        let result = run(&opts, "_Thread_local int x = 1;\n");
-        assert!(result.failed(), "every thread sharing one variable is worse than a message");
-        assert!(result.messages.iter().any(|m| m.contains("thread-local")), "{:?}", result);
-        // Not an internal error: nothing here is wrong and the note says where the work is.
-        assert!(!result.messages.iter().any(|m| m.contains("internal")), "{:?}", result);
+    fn a_thread_local_variable_is_storage_a_thread_gets_a_copy_of_and_an_offset_into_it() {
+        let text = asm("_Thread_local int x = 1;\nint read(void) { return x; }\n");
+        // The storage: the section the loader makes a copy of for every thread, and the symbol
+        // type that makes a linker refuse an ordinary relocation aimed at it.
+        assert!(text.contains("\t.section\t.tdata,\"awT\",@progbits\n"), "{text}");
+        assert!(text.contains("\t.type\tx, @tls_object\n"), "{text}");
+        // The way to reach it: how far into a thread's block it sits, out of the table, plus where
+        // this thread's block is, out of the segment register.
+        assert!(text.contains("x@GOTTPOFF(%rip)"), "{text}");
+        assert!(text.contains("%fs:0"), "{text}");
     }
 
     /// Not a rewording of the check above: what the two paths agree about is the point.
