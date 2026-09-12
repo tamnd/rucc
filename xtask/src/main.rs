@@ -45,6 +45,7 @@ tasks:
   style             check documentation and specification prose against the house rules
   thresholds        check that no pass compares against a number it made up
   malformed         check that the written list of malformed IR forms still names real tests
+  paths             check that every tracked path can be checked out on Windows
   version           check that every version number in the tree agrees with the workspace's
   targets           regenerate docs/TARGETS.md from the target table, or check it with --check
   abi-corpus        regenerate tests/abi-corpus from the layout engine, or check it with --check
@@ -87,6 +88,7 @@ fn main() -> ExitCode {
         Some("style") => style(),
         Some("thresholds") => thresholds(),
         Some("malformed") => malformed(),
+        Some("paths") => paths(),
         Some("interpose") => interpose(),
         Some("version") => version(),
         Some("targets") => targets(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -781,6 +783,106 @@ fn backticked(text: &str) -> Vec<String> {
     out
 }
 
+/// The file names Windows will not write, whatever extension follows them.
+///
+/// They are device names rather than names, so `AUX`, `aux.rs` and `aux.tar.gz` are all the same
+/// request to the kernel and all of them fail. `CONIN$` and `CONOUT$` are the two newer ones and
+/// they are in the list for the same reason as the rest.
+const RESERVED_STEMS: &[&str] = &[
+    "con", "prn", "aux", "nul", "conin$", "conout$", "com0", "com1", "com2", "com3", "com4",
+    "com5", "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6",
+    "lpt7", "lpt8", "lpt9",
+];
+
+/// The characters a Windows path component may not contain.
+const ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*', '\\'];
+
+/// Checks that every tracked path can be checked out on Windows.
+///
+/// This is the cheapest check in the tree and it is here because the bug it catches has landed
+/// twice. `xtask/src/aux.rs` was renamed to `xtask/src/aux_plane.rs` because `AUX` is a reserved
+/// device name on Windows whatever extension follows it, and then the same file appeared again as
+/// `runtime/rucc-safe-rt/src/aux.rs` and the Windows job failed the same way a second time.
+///
+/// What makes it worth a check of its own rather than a note in a review is how it fails. A path
+/// Windows will not write does not fail a test, it fails `git clone`, which means no crate is
+/// compiled, no test is collected and the job's log has one line in it that is about git. Nothing
+/// else in CI can see it, because everything else in CI needs a checkout first. So the guard has to
+/// run somewhere that is not Windows, which is every other job, and it is a string comparison over
+/// the output of `git ls-files`.
+///
+/// Four rules, which are the four ways a path that is fine on Linux is not a path on Windows: a
+/// reserved device stem, a character that is not allowed in a component, a component that ends in a
+/// dot or a space, and two paths that differ only in case. The last one is not a refusal by Windows
+/// but a collision on it, where checking out the second file overwrites the first and the working
+/// tree is dirty the moment it exists.
+fn paths() -> Result<()> {
+    let out = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root())
+        .output()
+        .map_err(|e| Error::Io(format!("could not run git: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::Failed {
+            task: "paths",
+            problems: vec!["git ls-files failed, so there is no list of tracked files".to_owned()],
+        });
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let files: Vec<&str> = listing.split('\0').filter(|path| !path.is_empty()).collect();
+
+    let mut problems = Vec::new();
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for path in &files {
+        for part in path.split('/') {
+            // The stem is everything before the first dot, because that is what Windows matches a
+            // device name against. `aux.rs` is the device, not a file with an extension.
+            let stem = part.split('.').next().unwrap_or(part).to_ascii_lowercase();
+            if RESERVED_STEMS.contains(&stem.as_str()) {
+                problems.push(format!(
+                    "{path} has the component `{part}`, and `{stem}` is a reserved device name on \
+                     Windows whatever extension follows it, so git cannot write the path at all \
+                     and the checkout fails before anything is compiled. Rename the file, the way \
+                     xtask/src/aux_plane.rs already is."
+                ));
+            }
+            if let Some(bad) = part.chars().find(|c| ILLEGAL_CHARS.contains(c)) {
+                problems.push(format!(
+                    "{path} has the component `{part}`, which contains `{bad}`, and a Windows path \
+                     component may not. Rename the file."
+                ));
+            }
+            if let Some(bad) = part.chars().find(|c| (*c as u32) < 0x20) {
+                problems.push(format!(
+                    "{path} has a component holding the control character {:#04x}, which no \
+                     Windows path may contain. Rename the file.",
+                    bad as u32
+                ));
+            }
+            if part.ends_with('.') || part.ends_with(' ') {
+                problems.push(format!(
+                    "{path} has the component `{part}`, which ends in a dot or a space. Windows \
+                     strips both, so the file is written under a different name than the one in \
+                     the index and the working tree is dirty as soon as it exists. Rename the file."
+                ));
+            }
+        }
+        if let Some(first) = folded.insert(path.to_ascii_lowercase(), path) {
+            problems.push(format!(
+                "{first} and {path} differ only in case, so on a case insensitive filesystem the \
+                 second one checked out overwrites the first. Rename one of them."
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        println!("paths: {} files, every one of them checks out on Windows", files.len());
+        Ok(())
+    } else {
+        Err(Error::Failed { task: "paths", problems })
+    }
+}
+
 /// Checks that every version number in the tree agrees with the workspace manifest.
 ///
 /// The workspace manifest is the one that gets edited when the version goes up, and it is the
@@ -1352,6 +1454,9 @@ fn ci() -> Result<()> {
         ("cargo", &["test", "--workspace", "--all-features"]),
         ("cargo", &["doc", "--workspace", "--no-deps"]),
     ];
+    // First, because it is the one check about the tree rather than about the code in it, and
+    // because what it catches stops the Windows job before that job can report anything.
+    paths()?;
     layers()?;
     style()?;
     thresholds()?;

@@ -40,6 +40,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: cargo fmt
         run: cargo fmt --all --check
+      # Before the rest, because a path Windows will not write fails the checkout of the Windows
+      # job rather than a test in it, and a job that never got a working tree cannot say why.
+      - name: checkable paths
+        run: cargo xtask paths
       - name: layer rule
         run: cargo xtask layers
       - name: prose style
