@@ -35,8 +35,8 @@ use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLite
 use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
-    compatible, is_arithmetic, is_array, is_complete, is_function, is_integer, is_pointer,
-    is_record, is_scalar, is_void, pointee,
+    compatible, is_arithmetic, is_array, is_complete, is_complex, is_function, is_integer,
+    is_pointer, is_record, is_scalar, is_void, pointee, real_part,
 };
 
 use crate::check::expr::typeop::Measure;
@@ -846,19 +846,32 @@ impl Checker<'_> {
                     .expr(Expr::new(ExprKind::Unary { op, operand }, ty, Category::Rvalue), span)
             }
             UnaryOp::Real | UnaryOp::Imag => {
-                let operand = self.value(operand);
+                // A half of an object is an object. gcc says both of these are lvalues wherever
+                // the operand is one, and without that a program has no way at all to give the
+                // imaginary half a value until the imaginary constants arrive. The lvalue
+                // conversion is skipped in that case, since converting the operand to a value is
+                // exactly what would throw the object away.
+                let half = self.tast[operand].category == Category::Lvalue
+                    && is_complex(&self.types, self.tast[operand].ty);
+                let operand = if half { operand } else { self.value(operand) };
                 if self.is_poisoned(operand) {
                     return self.poison(span);
                 }
                 let ty = self.tast[operand].ty;
                 let what = if op == UnaryOp::Real { "__real__" } else { "__imag__" };
-                let ty = match self.types.kind(self.types.canonical(ty)) {
-                    TypeKind::Complex(kind) => self.types.float(kind),
-                    _ if is_arithmetic(&self.types, ty) => ty,
-                    _ => return self.wrong_operand(what, span),
+                let ty = match real_part(&self.types, ty) {
+                    // The qualifiers come along, because `__real__ z` on a `const _Complex
+                    // double` is a `const double` and assigning to it is the same mistake as
+                    // assigning to `z`.
+                    Some(part) => {
+                        let quals = self.types.quals(ty);
+                        self.types.qualified(part, quals)
+                    }
+                    None if is_arithmetic(&self.types, ty) => ty,
+                    None => return self.wrong_operand(what, span),
                 };
-                self.tast
-                    .expr(Expr::new(ExprKind::Unary { op, operand }, ty, Category::Rvalue), span)
+                let category = if half { Category::Lvalue } else { Category::Rvalue };
+                self.tast.expr(Expr::new(ExprKind::Unary { op, operand }, ty, category), span)
             }
         }
     }
@@ -3165,6 +3178,64 @@ mod tests {
 
         assert_eq!(message(&c), "an imaginary constant is not supported yet");
         assert!(c.is_poisoned(id));
+    }
+
+    #[test]
+    fn a_half_of_an_object_is_an_object_and_carries_the_qualifiers_it_was_reached_through() {
+        let mut f = Fixture::new();
+        let z = f.name("z");
+        let use_z = f.expr(ast::Expr::Name(z));
+        let half = f.unary(UnaryOp::Imag, use_z);
+
+        let mut c = f.checker();
+        let complex = c.types.complex(FloatKind::Double);
+        let constant = c.types.qualified(complex, Qualifiers::CONST);
+        c.declare_object(z, constant, Span::DUMMY);
+        let id = c.check_expr(half);
+
+        assert!(c.errors.is_empty());
+        assert_eq!(
+            dump(&c, id),
+            "unary __imag__ : const double lvalue\n  decl #0 z : const _Complex double lvalue\n"
+        );
+    }
+
+    #[test]
+    fn a_half_of_a_real_value_is_a_value_and_nothing_it_could_be_assigned_to() {
+        // gcc takes both on a real operand, where the real half is the value itself. There is no
+        // object under it to name, so the operand is converted the way every other operator
+        // converts it and what comes out is worth something rather than somewhere.
+        let mut f = Fixture::new();
+        let x = f.name("x");
+        let use_x = f.expr(ast::Expr::Name(x));
+        let half = f.unary(UnaryOp::Real, use_x);
+
+        let mut c = f.checker();
+        let double = c.types.float(FloatKind::Double);
+        c.declare_object(x, double, Span::DUMMY);
+        let id = c.check_expr(half);
+
+        assert!(c.errors.is_empty());
+        assert_eq!(
+            dump(&c, id),
+            "unary __real__ : double\n  convert lvalue : double\n    decl #0 x : double lvalue\n"
+        );
+    }
+
+    #[test]
+    fn a_half_of_something_with_no_halves_says_which_operator_it_was() {
+        let mut f = Fixture::new();
+        let p = f.name("p");
+        let use_p = f.expr(ast::Expr::Name(p));
+        let half = f.unary(UnaryOp::Imag, use_p);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let pointer = c.types.pointer(int);
+        c.declare_object(p, pointer, Span::DUMMY);
+        c.check_expr(half);
+
+        assert_eq!(message(&c), "wrong type argument to __imag__");
     }
 
     /// The type `1.0` written with the given suffix has on this target, as it would be written.

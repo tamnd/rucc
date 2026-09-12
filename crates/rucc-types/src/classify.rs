@@ -63,6 +63,19 @@ pub fn is_complex(types: &Types, id: TypeId) -> bool {
     matches!(bare(types, id), TypeKind::Complex(_))
 }
 
+/// The corresponding real type of a complex one, 6.2.5p14, and [`None`] for every other type.
+///
+/// This is the type both halves of the object have, so it is what a walk over one asks for. It
+/// is deliberately not [`element`]: an array and a vector are a count of elements and a complex
+/// type is two named halves, and a caller that wanted one of those does not want the other.
+#[must_use]
+pub fn real_part(types: &Types, id: TypeId) -> Option<TypeId> {
+    match bare(types, id) {
+        TypeKind::Complex(kind) => Some(types.float(kind)),
+        _ => None,
+    }
+}
+
 /// A floating type, which is the real ones and the complex ones together.
 #[must_use]
 pub fn is_floating(types: &Types, id: TypeId) -> bool {
@@ -275,6 +288,21 @@ mod tests {
         assert!(is_floating(&types, complex));
         // Which is why `<` on two of them is a constraint violation and `+` is not.
         assert!(!is_real(&types, complex));
+    }
+
+    #[test]
+    fn the_corresponding_real_type_is_the_type_of_both_halves() {
+        let mut types = Types::new();
+        let complex = types.complex(FloatKind::Float);
+        let qualified = types.qualified(complex, Qualifiers::CONST);
+
+        assert_eq!(real_part(&types, complex), Some(types.float(FloatKind::Float)));
+        // Through the qualifiers, since an access to a half of a `const _Complex float` is still
+        // an access to a `float`.
+        assert_eq!(real_part(&types, qualified), Some(types.float(FloatKind::Float)));
+        // And not an answer for the types that have elements rather than halves.
+        assert_eq!(real_part(&types, types.float(FloatKind::Float)), None);
+        assert_eq!(real_part(&types, types.int(IntKind::Int)), None);
     }
 
     #[test]
