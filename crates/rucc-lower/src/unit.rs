@@ -867,7 +867,44 @@ impl Unit<'_> {
         // initializer of a flexible array member, and there the object grows to hold what was
         // written rather than the value being cut to fit, so nothing is taken off it.
         let room = if entry.offset < size { size - entry.offset } else { u64::MAX };
+        if let Some(halves) = self.complex_image(entry.value) {
+            return halves;
+        }
         self.datum(entry.value, room).into_iter().collect()
+    }
+
+    /// A complex constant as the two data an image holds it in, and [`None`] for anything else.
+    ///
+    /// A complex value is two real ones and an image is bytes, so `1.0 + 2.0i` goes in as the two
+    /// halves one after the other, which is the layout every ABI here already reads it as. It is
+    /// two data rather than one because a datum is one scalar, and it is here rather than in
+    /// [`Self::datum`] for the same reason.
+    fn complex_image(&mut self, value: ExprId) -> Option<Vec<Datum>> {
+        let ty = self.tast[value].ty;
+        let part = rucc_types::real_part(self.types, ty)?;
+        let span = self.tast.expr_span(value);
+        // Everything below this point answers with something, because the folding reports its own
+        // failure and asking for the value a second time would report it twice.
+        let halves = match self.fold(value) {
+            Some(Const::Complex { real, imag }) => [real, imag],
+            Some(_) => {
+                self.unsupported("this complex initializer", span);
+                return Some(Vec::new());
+            }
+            None => return Some(Vec::new()),
+        };
+        let Some(ty) = repr::value_type(self.types, self.target, part) else {
+            self.unsupported("this complex initializer", span);
+            return Some(Vec::new());
+        };
+        let data = halves
+            .into_iter()
+            .map(|half| {
+                let imm = self.module.add_imm(Imm::from_bits(half.to_bits()));
+                Datum::Scalar { ty, value: imm }
+            })
+            .collect();
+        Some(data)
     }
 
     /// The compound literal an entry reads, if that is what the entry is.
@@ -980,6 +1017,9 @@ impl Unit<'_> {
                 let imm = self.module.add_imm(Imm::from_bits(number.to_bits()));
                 Some(Datum::Scalar { ty, value: imm })
             }
+            // A complex constant is two scalars and this answers with one, so it is not one of
+            // these. [`Self::complex_image`] puts one in before this is reached.
+            Const::Complex { .. } => None,
             Const::Address(address) => {
                 let symbol = match address.base {
                     Base::Decl(decl) => {

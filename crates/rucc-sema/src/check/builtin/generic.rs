@@ -306,7 +306,7 @@ impl Checker<'_> {
         let value = eval.constant(arg);
         let _ = eval.finish();
         match value {
-            Ok(Const::Int(_) | Const::Float(_)) => true,
+            Ok(Const::Int(_) | Const::Float(_) | Const::Complex { .. }) => true,
             Ok(Const::Address(address)) => matches!(address.base, Base::Str(_)),
             Err(_) => false,
         }

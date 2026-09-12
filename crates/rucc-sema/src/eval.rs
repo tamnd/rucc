@@ -314,12 +314,19 @@ impl<'a> Eval<'a> {
         match (op, value) {
             (UnaryOp::Plus, value) => Ok(value),
             (UnaryOp::Not, value) => Ok(Const::Int(i128::from(!truth(value)))),
-            // `__real__` of a real operand is the operand, and `__imag__` of one is a zero of
-            // the same type. The complex cases cannot arrive: there is no complex constant for
-            // the operand to have folded to, so it fails above.
+            // The two halves of a complex constant, which are what these name, and the halves of
+            // a real one, where `__real__` is the operand and `__imag__` is a zero of the same
+            // type.
+            (UnaryOp::Real, Const::Complex { real, .. }) => Ok(Const::Float(real)),
+            (UnaryOp::Imag, Const::Complex { imag, .. }) => Ok(Const::Float(imag)),
             (UnaryOp::Real, value) => Ok(value),
             (UnaryOp::Imag, _) => self.zero(expr),
             (UnaryOp::Minus, Const::Float(value)) => Ok(Const::Float(value.negated())),
+            // A complex negation is the real one on each half, which is what makes `-2.0 + 2.0i`
+            // the value it looks like rather than the negation of the whole sum.
+            (UnaryOp::Minus, Const::Complex { real, imag }) => {
+                Ok(Const::Complex { real: real.negated(), imag: imag.negated() })
+            }
             (UnaryOp::Minus | UnaryOp::BitNot, Const::Int(value)) => {
                 let Some(info) = self.int_shape(self.tast[operand].ty) else {
                     return Err(self.stop(expr));
@@ -381,6 +388,9 @@ impl<'a> Eval<'a> {
                     }
                     (Const::Float(left), Const::Float(right)) => {
                         self.float_binary(expr, op, left, right)
+                    }
+                    (Const::Complex { real: a, imag: b }, Const::Complex { real: c, imag: d }) => {
+                        self.complex_binary(expr, op, (a, b), (c, d))
                     }
                     // The two operands of an arithmetic operator have one type by the time they
                     // are here, so a mismatched pair is pointer arithmetic or a tree that did
@@ -486,6 +496,38 @@ impl<'a> Eval<'a> {
             _ => return Err(self.stop(expr)),
         };
         Ok(Const::Float(value))
+    }
+
+    /// A binary operator on two complex values of the same type, each as its two halves.
+    ///
+    /// The multiply and the divide are not here. Both of them have rules about infinities and
+    /// nans that C annex G writes out and that the walk does not implement yet either, and a
+    /// fold that got them wrong would be a wrong answer in a static initializer rather than a
+    /// missing one. So they answer with no value, which is what a constant expression this
+    /// compiler cannot work out already means. tamnd/rucc#201.
+    fn complex_binary(
+        &mut self,
+        expr: ExprId,
+        op: BinaryOp,
+        left: (Float, Float),
+        right: (Float, Float),
+    ) -> Result<Const, NotConstant> {
+        // Two complex values are equal when both halves are and unequal when either half is,
+        // which is 6.5.9p3 and is what the walk builds out of two real comparisons as well.
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let real = compare_float(op, left.0, right.0);
+            let imag = compare_float(op, left.1, right.1);
+            let (Some(real), Some(imag)) = (real, imag) else { return Err(self.stop(expr)) };
+            let answer = if op == BinaryOp::Eq { real && imag } else { real || imag };
+            return Ok(Const::Int(i128::from(answer)));
+        }
+        // The status is dropped for the reason [`Self::float_binary`] drops it.
+        let (real, imag) = match op {
+            BinaryOp::Add => (left.0.sum(right.0).0, left.1.sum(right.1).0),
+            BinaryOp::Sub => (left.0.difference(right.0).0, left.1.difference(right.1).0),
+            _ => return Err(self.stop(expr)),
+        };
+        Ok(Const::Complex { real, imag })
     }
 
     /// `<<` or `>>`, whose operands have their own types and whose result has the left one's.
@@ -675,7 +717,7 @@ impl<'a> Eval<'a> {
                 offset: address.offset.wrapping_add(distance),
             })),
             Const::Int(value) => Ok(Const::Int(value.wrapping_add(distance))),
-            Const::Float(_) => Err(self.stop(expr)),
+            Const::Float(_) | Const::Complex { .. } => Err(self.stop(expr)),
         }
     }
 
@@ -760,6 +802,11 @@ impl<'a> Eval<'a> {
                     Const::Float(value) => {
                         Some(Const::Int(value.to_integer(info.width, info.signed).0))
                     }
+                    // Complex to real keeps the real half and drops the imaginary one, 6.3.1.7p2,
+                    // and then it is the conversion above.
+                    Const::Complex { real, .. } => {
+                        Some(Const::Int(real.to_integer(info.width, info.signed).0))
+                    }
                     // An address written as a number is still an address, and it survives only
                     // where every bit of it does. That is the whole difference between gcc
                     // taking `long n = (long)&a;` as a static initializer and refusing
@@ -770,27 +817,49 @@ impl<'a> Eval<'a> {
             }
             TypeKind::Float(kind) => {
                 let format = float_format(kind, self.target);
-                let (value, _) = match value {
-                    Const::Float(value) => value.to_format(format),
-                    Const::Int(value) => match self.int_shape(from) {
-                        Some(info) if !info.signed => Float::from_unsigned(value as u128, format),
-                        _ => Float::from_signed(value, format),
-                    },
-                    // No cast turns an address into a floating value, so a tree with one here
-                    // did not check.
-                    Const::Address(_) => return None,
+                Some(Const::Float(self.as_float(value, from, format)?))
+            }
+            // A real value becomes the real half beside a zero, 6.3.1.7p1, and a complex one has
+            // each of its halves converted. The zero is a positive one, for the reason the
+            // imaginary constant's own real half is.
+            TypeKind::Complex(kind) => {
+                let format = float_format(kind, self.target);
+                let (real, imag) = match value {
+                    Const::Complex { real, imag } => (real.to_format(format).0, imag),
+                    value => (self.as_float(value, from, format)?, Float::zero(format, false)),
                 };
-                Some(Const::Float(value))
+                Some(Const::Complex { real, imag: imag.to_format(format).0 })
             }
             // A pointer keeps whatever it was, since a cast between pointer types moves nothing:
             // an address stays the same address and a number stays the same number.
             TypeKind::Pointer(_) => match value {
                 Const::Int(_) | Const::Address(_) => Some(value),
-                Const::Float(_) => None,
+                Const::Float(_) | Const::Complex { .. } => None,
             },
-            // `void`, a record, a complex type. None of them has a constant to be.
+            // `void` and a record. Neither has a constant to be.
             _ => None,
         }
+    }
+
+    /// A folded value as a floating one in `format`, and [`None`] where it is not a number.
+    ///
+    /// `from` is the type the value has and is consulted for its signedness, since a folded
+    /// integer is sign extended into a hundred and twenty eight bits whatever type it had and
+    /// the largest `unsigned long` is a negative number there.
+    fn as_float(&self, value: Const, from: TypeId, format: Format) -> Option<Float> {
+        let (value, _) = match value {
+            Const::Float(value) => value.to_format(format),
+            // Complex to real keeps the real half, 6.3.1.7p2.
+            Const::Complex { real, .. } => real.to_format(format),
+            Const::Int(value) => match self.int_shape(from) {
+                Some(info) if !info.signed => Float::from_unsigned(value as u128, format),
+                _ => Float::from_signed(value, format),
+            },
+            // No cast turns an address into a floating value, so a tree with one here did not
+            // check.
+            Const::Address(_) => return None,
+        };
+        Some(value)
     }
 
     /// A zero of the type of a node, for the `__imag__` of something real.
@@ -854,6 +923,9 @@ fn truth(value: Const) -> bool {
     match value {
         Const::Int(value) => value != 0,
         Const::Float(value) => !value.is_zero(),
+        // A complex value is true when either half is, 6.3.1.2, which is the same question asked
+        // of both halves rather than of the pair.
+        Const::Complex { real, imag } => !real.is_zero() || !imag.is_zero(),
         // An object has an address and no object is at zero, so an address is always true.
         Const::Address(_) => true,
     }
@@ -931,6 +1003,8 @@ pub(crate) fn narrowed(value: Const, info: IntegerInfo) -> i128 {
     match value {
         Const::Int(value) => info.wrap(value),
         Const::Float(value) => value.to_integer(info.width, info.signed).0,
+        // The real half is what a complex value narrows through, 6.3.1.7p2.
+        Const::Complex { real, .. } => real.to_integer(info.width, info.signed).0,
         // Nothing narrows an address, since the caller asked for a number and got one of these
         // instead. Zero is a value it will not use.
         Const::Address(_) => 0,
@@ -949,6 +1023,7 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
             None => format!("{value}"),
         },
         Const::Float(value) => value.to_hex(),
+        Const::Complex { real, imag } => format!("{} + {}i", real.to_hex(), imag.to_hex()),
         Const::Address(address) => {
             let base = match address.base {
                 Base::Decl(decl) => decl.index(),
@@ -977,6 +1052,11 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
         // a value out of range and for a nan. Dropping a fraction is not overflow and gcc does
         // not warn about `char c = 3.5;` either.
         Const::Float(value) => value.to_integer(info.width, info.signed).1.has(Status::INVALID),
+        // The imaginary half is dropped whatever is in it, which is the conversion and not an
+        // overflow, so the question is the one the real half answers.
+        Const::Complex { real, .. } => {
+            real.to_integer(info.width, info.signed).1.has(Status::INVALID)
+        }
         // An address is as wide as a pointer or it would not have got this far, so nothing about
         // it is lost.
         Const::Address(_) => false,
@@ -1045,6 +1125,19 @@ mod tests {
                 value,
                 ty: FloatConstantType::Double,
                 imaginary: false,
+                remarks: Remarks::default(),
+            };
+            let id = self.ast.add_float(constant);
+            self.expr(ast::Expr::Float(id))
+        }
+
+        /// The same constant with an `i` on the end of it, which makes it imaginary.
+        fn imaginary(&mut self, text: &str) -> ast::ExprId {
+            let (value, _) = Float::parse(text, Format::Double).expect("a float");
+            let constant = FloatConstant {
+                value,
+                ty: FloatConstantType::Double,
+                imaginary: true,
                 remarks: Remarks::default(),
             };
             let id = self.ast.add_float(constant);
@@ -1466,6 +1559,100 @@ mod tests {
 
         let mut c = f.checker();
         assert_eq!(fold(&mut c, product), Ok(9));
+        assert!(messages(&c).is_empty());
+    }
+
+    /// `1.0` as a `double`, which is what these tests compare halves against.
+    fn real(text: &str) -> Float {
+        Float::parse(text, Format::Double).expect("a float").0
+    }
+
+    #[test]
+    fn a_sum_with_an_imaginary_constant_in_it_folds_to_the_pair_that_was_written() {
+        // Which is the whole reason the folding knows about complex values at all: `1.0 + 2.0i`
+        // is a sum of two of them and a static initializer needs it worked out here.
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let sum = f.binary(BinaryOp::Add, one, two);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, sum);
+
+        assert_eq!(folded, Ok(Const::Complex { real: real("1.0"), imag: real("2.0") }));
+        assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_complex_negation_is_the_negation_of_both_halves() {
+        let mut f = Fixture::new();
+        let (two, three) = (f.double("2.0"), f.imaginary("3.0"));
+        let sum = f.binary(BinaryOp::Add, two, three);
+        let negated = f.unary(UnaryOp::Minus, sum);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, negated);
+
+        assert_eq!(folded, Ok(Const::Complex { real: real("-2.0"), imag: real("-3.0") }));
+    }
+
+    #[test]
+    fn the_two_halves_of_a_folded_complex_constant_are_the_two_it_was_built_from() {
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let sum = f.binary(BinaryOp::Add, one, two);
+        let imaginary = f.unary(UnaryOp::Imag, sum);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, imaginary);
+
+        assert_eq!(folded, Ok(Const::Float(real("2.0"))));
+    }
+
+    #[test]
+    fn two_complex_constants_are_equal_when_both_halves_are() {
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let left = f.binary(BinaryOp::Add, one, two);
+        let (one, three) = (f.double("1.0"), f.imaginary("3.0"));
+        let right = f.binary(BinaryOp::Add, one, three);
+        let equal = f.binary(BinaryOp::Eq, left, right);
+        let unequal = f.binary(BinaryOp::Ne, left, right);
+
+        let mut c = f.checker();
+
+        assert_eq!(fold(&mut c, equal), Ok(0));
+        assert_eq!(fold(&mut c, unequal), Ok(1));
+    }
+
+    #[test]
+    fn a_complex_constant_converted_to_a_real_type_keeps_the_real_half() {
+        let mut f = Fixture::new();
+        let (seven, eight) = (f.double("7.5"), f.imaginary("8.0"));
+        let sum = f.binary(BinaryOp::Add, seven, eight);
+        let specs = f.int_specs();
+        let narrowed = f.cast(specs, &[], sum);
+
+        let mut c = f.checker();
+
+        assert_eq!(fold(&mut c, narrowed), Ok(7));
+    }
+
+    #[test]
+    fn a_complex_product_is_not_folded_yet_and_says_nothing_wrong_instead() {
+        // The multiply has rules about infinities and nans that C annex G writes out, and a fold
+        // that got them wrong would be a wrong answer in a static initializer rather than a
+        // missing one. So it answers with no value, which is what the caller reports.
+        let mut f = Fixture::new();
+        let (one, two) = (f.double("1.0"), f.imaginary("2.0"));
+        let left = f.binary(BinaryOp::Add, one, two);
+        let (three, four) = (f.double("3.0"), f.imaginary("4.0"));
+        let right = f.binary(BinaryOp::Add, three, four);
+        let product = f.binary(BinaryOp::Mul, left, right);
+
+        let mut c = f.checker();
+        let folded = value(&mut c, product);
+
+        assert!(folded.is_err());
         assert!(messages(&c).is_empty());
     }
 

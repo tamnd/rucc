@@ -165,3 +165,27 @@ decl #33 tagged : struct wrapped(_Complex double) function external defined
       return
         convert lvalue : struct wrapped
           decl #34 w : struct wrapped lvalue
+decl #35 pinned : _Complex double object external static defined
+  init
+    +0
+      binary + : _Complex double
+        convert arithmetic : _Complex double
+          const 0x18p-4 : double
+        const 0x0p+0 + 0x14p-3i : _Complex double
+decl #36 small_pinned : _Complex float object external static defined
+  init
+    +0
+      binary + : _Complex float
+        convert arithmetic : _Complex float
+          const 0xcp-3 : float
+        const 0x0p+0 + 0xap-2i : _Complex float
+decl #38 shifted : _Complex double(_Complex double) function external defined
+  params
+    decl #37 z : _Complex double object automatic defined
+  body
+    block
+      return
+        binary + : _Complex double
+          convert lvalue : _Complex double
+            decl #37 z : _Complex double lvalue
+          const 0x0p+0 + 0x14p-3i : _Complex double

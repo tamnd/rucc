@@ -394,6 +394,9 @@ impl<'a> Printer<'a> {
                 // without such an algorithm quietly prints a different number.
                 Const::Int(value) => format!("const {value}"),
                 Const::Float(value) => format!("const {}", value.to_hex()),
+                Const::Complex { real, imag } => {
+                    format!("const {} + {}i", real.to_hex(), imag.to_hex())
+                }
                 Const::Address(address) => {
                     let base = match address.base {
                         Base::Decl(decl) => format!("decl #{}", decl.index()),

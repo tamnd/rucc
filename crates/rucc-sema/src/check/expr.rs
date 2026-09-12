@@ -29,7 +29,7 @@
 
 use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
-use rucc_base::float::Format;
+use rucc_base::float::{Float, Format};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLiteral};
 use rucc_session::Std;
@@ -338,9 +338,6 @@ impl Checker<'_> {
     fn float_constant(&mut self, id: ast::FloatId, span: Span) -> ExprId {
         let ast = self.ast;
         let constant = &ast[id];
-        if constant.imaginary {
-            return self.unsupported("an imaginary constant", span);
-        }
         // One suffix, one type. `0.1f32` is a `_Float32` and not a `float`, even though the two
         // are the same format, because they are two types and `_Generic` can tell them apart.
         let kind = match constant.ty {
@@ -366,6 +363,16 @@ impl Checker<'_> {
             }
         };
         let value = constant.value;
+        // `2.0i` is an imaginary constant, which C calls `_Imaginary` and gcc has never had. In
+        // gcc it is a complex constant whose real half is a zero, so `1.0 + 2.0i` is the sum of
+        // two complex values and comes out as the pair that was written. The zero is a positive
+        // one, which matters because `-0.0` on the real half of a value gcc built the same way
+        // would be a different value.
+        if constant.imaginary {
+            let real = Float::zero(value.format(), false);
+            let ty = self.types.complex(kind);
+            return self.constant(Const::Complex { real, imag: value }, ty, span);
+        }
         let ty = self.types.float(kind);
         self.constant(Const::Float(value), ty, span)
     }
@@ -1960,14 +1967,6 @@ impl Checker<'_> {
         self.poison(span)
     }
 
-    /// An expression form that is recognised and not checked yet.
-    fn unsupported(&mut self, what: &str, span: Span) -> ExprId {
-        self.report(
-            Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
-        );
-        self.poison(span)
-    }
-
     /// A folded constant, as a node.
     pub(in crate::check) fn constant(&mut self, value: Const, ty: TypeId, span: Span) -> ExprId {
         let value = self.tast.add_const(value);
@@ -2065,7 +2064,6 @@ impl Checker<'_> {
 mod tests {
     use rucc_ast::{BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Derived};
     use rucc_base::Interner;
-    use rucc_base::float::{Float, Format};
     use rucc_lex::{CharConstant, FloatConstant, IntConstant, Remarks, StringLiteral};
     use rucc_session::Std;
     use rucc_target::{TargetInfo, Triple};
@@ -3161,23 +3159,49 @@ mod tests {
     }
 
     #[test]
-    fn a_form_that_waits_on_a_later_piece_is_refused_rather_than_guessed() {
+    fn an_imaginary_constant_is_a_complex_one_whose_real_half_is_a_zero() {
+        // Which is gcc's reading of it rather than C's. C has `_Imaginary`, where the real half
+        // does not exist at all and `0.0 * infinity` therefore never happens, and gcc has never
+        // had the type, so the suffix builds a complex value here.
         let mut f = Fixture::new();
-        let (value, _) = Float::parse("1.0", Format::Double).expect("a float");
+        let (value, _) = Float::parse("2.0", Format::Double).expect("a float");
         let constant = FloatConstant {
             value,
             ty: FloatConstantType::Double,
             imaginary: true,
             remarks: Remarks::default(),
         };
-        let value = f.ast.add_float(constant);
-        let imaginary = f.expr(ast::Expr::Float(value));
+        let id = f.ast.add_float(constant);
+        let imaginary = f.expr(ast::Expr::Float(id));
 
         let mut c = f.checker();
-        let id = c.check_expr(imaginary);
+        let checked = c.check_expr(imaginary);
 
-        assert_eq!(message(&c), "an imaginary constant is not supported yet");
-        assert!(c.is_poisoned(id));
+        assert!(c.errors.is_empty());
+        assert_eq!(c.spell(c.tast[checked].ty), "_Complex double");
+        let ExprKind::Const(folded) = c.tast[checked].kind else { panic!("a constant") };
+        let zero = Float::zero(Format::Double, false);
+        assert_eq!(c.tast[folded], Const::Complex { real: zero, imag: value });
+    }
+
+    #[test]
+    fn an_imaginary_suffix_takes_the_type_the_rest_of_the_suffix_names() {
+        let mut f = Fixture::new();
+        let (value, _) = Float::parse("2.0", Format::Single).expect("a float");
+        let constant = FloatConstant {
+            value,
+            ty: FloatConstantType::Float,
+            imaginary: true,
+            remarks: Remarks::default(),
+        };
+        let id = f.ast.add_float(constant);
+        let imaginary = f.expr(ast::Expr::Float(id));
+
+        let mut c = f.checker();
+        let checked = c.check_expr(imaginary);
+
+        assert!(c.errors.is_empty());
+        assert_eq!(c.spell(c.tast[checked].ty), "_Complex float");
     }
 
     #[test]
