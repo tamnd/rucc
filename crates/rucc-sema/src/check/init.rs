@@ -431,6 +431,9 @@ impl<'a> Checker<'a> {
         let kind = self.kind_of(place.ty);
         let mut items = Cursor::new(self.ast, list);
         let Kind::Scalar = kind else {
+            if let Some(reached) = self.braced_string(w, place, kind, &mut items) {
+                return reached;
+            }
             return self.fill(w, place, kind, &mut items, true, None);
         };
         w.stack.push(place);
@@ -445,6 +448,49 @@ impl<'a> Checker<'a> {
         self.scalar_braces(w, place, &mut items);
         w.stack.pop();
         1
+    }
+
+    /// A string literal written inside the braces of the array it fills.
+    ///
+    /// C 6.7.10 paragraph 14 puts the braces around a string literal at the option of whoever
+    /// writes it, so `char a[] = { "abc" }` is the same declaration as `char a[] = "abc"` and not
+    /// one whose first element is a string. Both readings are only ever available at once for an
+    /// array of the character type the literal has, since nothing else takes a literal whole, so
+    /// the element type is what decides it rather than a look at what the braces hold. An array of
+    /// pointers is the case that makes the difference: `const char *p[] = { "abc" }` has to stay a
+    /// list of one pointer.
+    ///
+    /// Gives back one past the highest element reached when that is what it was, and nothing when
+    /// the braces hold a list for the ordinary walk.
+    fn braced_string(
+        &mut self,
+        w: &mut Walk,
+        place: Place,
+        kind: Kind,
+        items: &mut Cursor<'a>,
+    ) -> Option<u64> {
+        let Kind::Array { elem, .. } = kind else { return None };
+        let item = items.peek()?;
+        if !item.designators.is_empty() {
+            return None;
+        }
+        let ast::Init::Expr(expr) = self.ast[item.init] else { return None };
+        let ast::Expr::Str(id) = self.ast[expr] else { return None };
+        let encoding = self.ast[id].encoding;
+        if !self.takes_string(elem, encoding, self.string_element(encoding)) {
+            return None;
+        }
+        items.bump();
+        w.stack.push(place);
+        let reached = self.string_init(w, place, expr, item.span);
+        // Anything after the literal is an element too many, the same as a second initializer for
+        // a scalar is, because the one literal is the whole of the value.
+        while let Some(rest) = items.peek() {
+            self.excess(w, kind, rest.span);
+            items.bump();
+        }
+        w.stack.pop();
+        Some(reached)
     }
 
     /// What is between a brace pair that turned out to hold a scalar.
@@ -1793,6 +1839,78 @@ decl #0 a : char[3] object automatic defined
             "one entry of array type, which is a block copy and not three stores"
         );
         assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn braces_around_a_string_literal_are_the_writer_option_and_not_a_list_of_one() {
+        let mut f = Fixture::new();
+        let literal = f.text("hi", Encoding::Plain);
+        let item = f.plain(literal);
+        let init = f.list(&[item]);
+        let decl = f.var(f.builtin(BuiltinSet::CHAR), "a", &[unsized_array()], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let id = check(&mut c, decl);
+
+        assert_eq!(
+            dump(&c, id),
+            "\
+decl #0 a : char[3] object automatic defined
+  init
+    +0
+      string \"hi\" : char[3] lvalue
+",
+            "the same declaration as the one without the braces, which is 6.7.10p14"
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn braces_around_a_string_literal_leave_an_array_of_pointers_a_list() {
+        let mut f = Fixture::new();
+        let literal = f.text("hi", Encoding::Plain);
+        let item = f.plain(literal);
+        let init = f.list(&[item]);
+        let decl = f.var(f.builtin(BuiltinSet::CHAR), "a", &[unsized_array(), pointer()], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let id = check(&mut c, decl);
+
+        // An array of pointers cannot take a literal whole, so the braces are the list they look
+        // like and the literal is the first pointer in it.
+        assert_eq!(
+            dump(&c, id),
+            "\
+decl #0 a : char *[1] object automatic defined
+  init
+    +0
+      convert array-decay : char *
+        string \"hi\" : char[3] lvalue
+",
+        );
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn a_second_element_after_a_braced_string_literal_is_one_too_many() {
+        let mut f = Fixture::new();
+        let literal = f.text("hi", Encoding::Plain);
+        let first = f.plain(literal);
+        let extra = f.int(7);
+        let second = f.plain(extra);
+        let init = f.list(&[first, second]);
+        let decl = f.var(f.builtin(BuiltinSet::CHAR), "a", &[unsized_array()], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        c.check_decl(decl);
+
+        assert_eq!(
+            messages(&c),
+            ["excess elements in array initializer", "(near initialization for 'a')"]
+        );
     }
 
     #[test]
