@@ -36,6 +36,21 @@
 //! and the reader brings the pointer it just loaded. That is what makes twenty one bits enough for
 //! a number that would otherwise be sixty four.
 //!
+//! # Where a slot is
+//!
+//! [`address_of`] is the other half of the format: not what the sixteen bytes say but which
+//! sixteen bytes they are. Section 5.2.2's block puts the aux in front of the header in payload
+//! order, so the slot for the word at `off` bytes into an object is `lo - 32 - aux(ext) + off / 8 *
+//! 16`, and every term of that is either a constant or a field of the capability the check in front
+//! of the store already holds. A store through a pointer whose object and offset are both known,
+//! which is most of them, folds the whole expression to one displacement off the base.
+//!
+//! Only storage the allocator laid out has an aux. Automatic and static storage is where the design
+//! says the aux goes beside the frame and in a section of the image, and neither exists yet, so
+//! [`address_of`] answers nothing for them rather than pointing at whatever is in front of a stack
+//! object. A caller that cannot tell the difference between no slot and a slot saying nothing would
+//! refuse every pointer loaded out of a local, which is why [`load()`] reports the two separately.
+//!
 //! # What is not here
 //!
 //! `instance_id` is left in the header. Section 5.2.1 already calls it a debugging aid rather than
@@ -49,7 +64,7 @@
 //! Nothing writes one of these yet. What is missing is the compiler's half, which is a `cap_store`
 //! beside every store of a pointer, and that is milestone S5 work on tamnd/rucc#856.
 
-use crate::layout::{Cap, Meta};
+use crate::layout::{self, Cap, Class, Meta, WORD};
 use crate::plane::{DEAD, Version};
 
 /// Bits of [`Meta`] a slot keeps, which is everything below `instance_id`.
@@ -68,7 +83,7 @@ const OFF: u32 = META;
 const EXT: u32 = META + BOUND;
 
 /// The flag that says the two numbers did not fit and the header has them.
-const HEADER: u64 = 1 << (META + 2 * BOUND);
+const IN_HEADER: u64 = 1 << (META + 2 * BOUND);
 
 /// The largest displacement or extent a slot can hold, which is one byte under two megabytes.
 ///
@@ -135,7 +150,7 @@ impl Slot {
         // arrives here the slot says to ask the header rather than naming a different object.
         let off = addr.wrapping_sub(cap.lo);
         if off > EXACT || cap.ext > EXACT {
-            return Self { ver: cap.ver, packed: meta | HEADER };
+            return Self { ver: cap.ver, packed: meta | IN_HEADER };
         }
         Self { ver: cap.ver, packed: meta | (off << OFF) | (cap.ext << EXT) }
     }
@@ -147,7 +162,7 @@ impl Slot {
             return Read::Nothing;
         }
         let meta = Meta(self.packed & ((1 << META) - 1));
-        if self.packed & HEADER != 0 {
+        if self.packed & IN_HEADER != 0 {
             return Read::Header { ver: self.ver, meta };
         }
         let off = (self.packed >> OFF) & EXACT;
@@ -162,10 +177,86 @@ impl Slot {
     }
 }
 
+/// Where the slot for the word at `addr` is, given the capability of the object that word is in.
+///
+/// `container` is the object being written into rather than the pointer being written. A store of
+/// `p->next` brings the capability of `p`, and the capability of whatever `next` holds is the thing
+/// that ends up in the slot this returns the address of.
+///
+/// Nothing for a word that has no slot, which is three cases and they are all different questions
+/// the caller has already had to ask: storage that is not an allocation and so has no aux at all,
+/// a word that is not inside the object, and a word that is not pointer aligned. The last is not a
+/// refusal either. A pointer sized store at an odd offset is something a C program may legitimately
+/// do through a packed structure, and what it means for the aux is that the capability cannot be
+/// written down, not that the store is wrong.
+#[must_use]
+pub const fn address_of(container: Cap, addr: u64) -> Option<u64> {
+    // Only the allocator lays a block out this way. A stack object's aux is beside the frame and a
+    // static's is in a section of the image, and until those exist the honest answer for both is
+    // that there is no slot rather than an address in front of somebody else's storage.
+    if container.meta.class() != Class::Allocated as u8 {
+        return None;
+    }
+    // The whole word has to be in the object, so a four byte tail at the end of a payload has no
+    // slot, and neither does one past the end.
+    if !container.covers(addr, WORD as u64) {
+        return None;
+    }
+    let off = addr - container.lo;
+    if off % WORD as u64 != 0 {
+        return None;
+    }
+    // `layout::HEADER` rather than the `IN_HEADER` above: one is the thirty two bytes in front of
+    // the payload and the other is the flag that sends a reader to them.
+    let block = container.lo - layout::HEADER as u64 - layout::aux(container.ext as usize) as u64;
+    Some(block + layout::aux_at(off as usize) as u64)
+}
+
+/// Writes the capability of the pointer `value` into the slot for the word at `at`.
+///
+/// False if that word has no slot, which is [`address_of`]'s three cases and means the capability
+/// was not written down anywhere. A caller that cares has to decide what to do about it, and what
+/// the compiler's half will do is not store a pointer it cannot describe into storage it cannot
+/// describe. False is not a refusal on its own.
+///
+/// # Safety
+///
+/// `container` is the capability of a live instance this runtime's allocator laid out, so that the
+/// aux in front of its payload is storage the runtime owns rather than the program's. Two threads
+/// storing to the same word at the same time is document 09's problem and not handled here.
+pub unsafe fn store(container: Cap, at: u64, value: u64, cap: Cap) -> bool {
+    let Some(slot) = address_of(container, at) else {
+        return false;
+    };
+    // SAFETY: the caller says the block is one the allocator laid out, and `address_of` returned
+    // an offset inside that block's aux, which is sixteen byte aligned from a granule aligned base
+    // and so is aligned for a `Slot`.
+    unsafe { (slot as *mut Slot).write(Slot::of(cap, value)) };
+    true
+}
+
+/// What the slot for the word at `at` says about the pointer `value` that was loaded from it.
+///
+/// Nothing at all when the word has no slot, which is a different answer from a slot that says
+/// [`Read::Nothing`]. The first means the capability was never written down and something else has
+/// to supply it, and the second means the word holds an integer.
+///
+/// # Safety
+///
+/// As [`store()`].
+pub unsafe fn load(container: Cap, at: u64, value: u64) -> Option<Read> {
+    let slot = address_of(container, at)?;
+    // SAFETY: as `store`, and a slot that was never written reads as zero, which is `Slot::EMPTY`.
+    let slot = unsafe { (slot as *const Slot).read() };
+    Some(slot.read(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{AUX_PER_WORD, Class, perm};
+    use crate::layout::{AUX_PER_WORD, perm};
+    use std::vec;
+    use std::vec::Vec;
 
     /// A capability over `[lo, lo + ext)` with something in every field.
     fn cap(lo: u64, ext: u64) -> Cap {
@@ -328,5 +419,136 @@ mod tests {
         assert_eq!(back.lo, 0);
         assert_eq!(back.ext, EXACT);
         assert_eq!(back.meta.0, (1 << META) - 1);
+    }
+
+    /// A block laid out the way the allocator lays one out, in storage the test owns.
+    ///
+    /// Real memory rather than arithmetic about memory, because the point of the functions below
+    /// is that they land in the aux and not in the header or the payload, and a test that computes
+    /// the same addresses the code computes would not notice if both were wrong.
+    struct Block {
+        _store: Vec<u64>,
+        base: u64,
+        cap: Cap,
+    }
+
+    fn block(n: usize) -> Block {
+        let size = layout::payload(n);
+        let mut store = vec![0u64; layout::block(size).div_ceil(WORD)];
+        let base = store.as_mut_ptr() as usize;
+        let payload = layout::payload_of(base, size);
+        let meta = Meta::new(Class::Allocated, perm::READ | perm::WRITE, 3);
+        Block {
+            _store: store,
+            base: base as u64,
+            cap: Cap::new(payload as u64, size as u64, 9, meta),
+        }
+    }
+
+    #[test]
+    fn the_slot_for_a_word_is_where_the_layout_puts_it() {
+        let b = block(64);
+        for word in 0..8 {
+            let at = b.cap.lo + word * WORD as u64;
+            assert_eq!(
+                address_of(b.cap, at),
+                Some(b.base + layout::aux_at(word as usize * WORD) as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn every_word_of_the_payload_has_its_own_slot_and_they_all_fit_in_the_aux() {
+        // The aux is sized from the payload and indexed from the payload, so the last word's slot
+        // has to end exactly where the header begins. An off by one here would have `cap_store`
+        // write the instance's own bounds over the top of the object's header.
+        let b = block(4096);
+        let words = b.cap.ext / WORD as u64;
+        let first = address_of(b.cap, b.cap.lo).expect("the first word is in the object");
+        let last = address_of(b.cap, b.cap.lo + (words - 1) * WORD as u64)
+            .expect("the last word is in the object");
+        assert_eq!(first, b.base);
+        assert_eq!(last - first, (words - 1) * AUX_PER_WORD as u64);
+        assert_eq!(last + AUX_PER_WORD as u64, layout::header_of(b.cap.lo as usize) as u64);
+    }
+
+    #[test]
+    fn a_word_that_is_not_where_a_pointer_goes_has_no_slot() {
+        let b = block(64);
+        // Not pointer aligned, which a packed structure can ask for and which is not an error.
+        assert_eq!(address_of(b.cap, b.cap.lo + 4), None);
+        // Past the end, and one past the end, where a whole word does not fit.
+        assert_eq!(address_of(b.cap, b.cap.lo + b.cap.ext), None);
+        assert_eq!(address_of(b.cap, b.cap.lo + b.cap.ext - 4), None);
+        // Below the base, which wraps rather than going negative.
+        assert_eq!(address_of(b.cap, b.cap.lo - WORD as u64), None);
+    }
+
+    #[test]
+    fn storage_the_allocator_did_not_lay_out_has_no_slot_yet() {
+        // A local and a global are the two the design owes an aux to and does not have one for.
+        // Answering with an address would be reading the eight bytes in front of somebody's stack
+        // frame and calling the result a capability.
+        for class in [Class::Automatic, Class::Static, Class::Mapped] {
+            let cap = Cap::new(0x40000, 64, 5, Meta::new(class, perm::READ, 1));
+            assert_eq!(address_of(cap, 0x40000), None);
+        }
+        assert_eq!(address_of(Cap::BOTTOM, 0), None);
+    }
+
+    #[test]
+    fn a_pointer_stored_into_a_block_comes_back_out_of_it() {
+        let b = block(64);
+        let other = block(128);
+        let at = b.cap.lo + 16;
+        let value = other.cap.lo + 8;
+        // SAFETY: the block is this test's own storage, laid out the way the allocator lays one
+        // out, and no other thread is touching it.
+        assert!(unsafe { store(b.cap, at, value, other.cap) });
+        // SAFETY: as above.
+        let Some(Read::Whole(back)) = (unsafe { load(b.cap, at, value) }) else {
+            panic!("an object of 128 bytes fits in a slot");
+        };
+        assert_eq!(back.lo, other.cap.lo);
+        assert_eq!(back.ext, other.cap.ext);
+        assert_eq!(back.ver, other.cap.ver);
+    }
+
+    #[test]
+    fn a_word_nobody_has_stored_a_pointer_into_says_it_holds_no_pointer() {
+        // Fresh storage, which the allocator does not write an aux for, so this is what every word
+        // of every new allocation says until something stores a pointer there.
+        let b = block(64);
+        // SAFETY: as above.
+        assert_eq!(unsafe { load(b.cap, b.cap.lo, 0x1234) }, Some(Read::Nothing));
+    }
+
+    #[test]
+    fn a_word_with_no_slot_is_not_the_same_answer_as_a_slot_that_says_nothing() {
+        // The distinction the compiler's half depends on. A pointer loaded out of a local has no
+        // slot today, and a caller that read that as `Nothing` would refuse the pointer.
+        let b = block(64);
+        // SAFETY: as above.
+        assert_eq!(unsafe { load(b.cap, b.cap.lo + 4, 0x1234) }, None);
+        // SAFETY: as above.
+        assert!(!unsafe { store(b.cap, b.cap.lo + 4, 0x1234, b.cap) });
+    }
+
+    #[test]
+    fn storing_a_capability_leaves_the_object_itself_alone() {
+        // The whole point of putting the aux beside the payload rather than in it: the program's
+        // bytes are the program's bytes, which is what lets an instrumented structure be passed to
+        // a kernel that knows nothing about any of this.
+        let b = block(64);
+        let payload = b.cap.lo as *mut u64;
+        for word in 0..8 {
+            let at = b.cap.lo + word * WORD as u64;
+            // SAFETY: the block is this test's own storage.
+            assert!(unsafe { store(b.cap, at, at, b.cap) });
+        }
+        for word in 0..8 {
+            // SAFETY: the payload is eight words of this test's own storage.
+            assert_eq!(unsafe { payload.add(word).read() }, 0);
+        }
     }
 }
