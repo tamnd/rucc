@@ -17,6 +17,15 @@
 //! the operation, which is what the groups are for, and the seed in the fixture is fixed, so the
 //! case it happened at can be found again.
 //!
+//! The overflow checking builtins are in the fixture too, and they are the one thing in it that is
+//! not that pass. `__builtin_add_overflow` and its two neighbours are rewritten into ordinary
+//! arithmetic before the splitting runs, so the pass sees adds, multiplies and comparisons it
+//! already knows, and what the fixture is asking is whether the rewriting picked the right ones. It
+//! is here rather than somewhere of its own because the awkward case is a hundred and twenty eight
+//! bit unsigned operand beside a signed one, which needs a hundred and twenty nine bits to hold both
+//! and so is done by carrying each operand's sign alongside its value. That is tamnd/rucc#602, and
+//! it is a shape only this width has.
+//!
 //! # Three optimization levels
 //!
 //! Because one of them is where the pass has already been wrong. tamnd/rucc#1054 was the splitting

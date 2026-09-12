@@ -17,6 +17,12 @@
  * and a path for one that does not, and a stream of full width values would only ever ask about one
  * of them.
  *
+ * The overflow checking builtins are here as well, and they are the one thing in this file that is
+ * not that pass. They are rewritten into ordinary arithmetic before the splitting runs, so what the
+ * pass sees is work it already knows, and what these groups ask is whether the rewriting picked the
+ * right work. They belong here because the shape that makes them hard is a shape only this width
+ * has, which is a hundred and twenty eight bit unsigned operand beside a signed one.
+ *
  * Nothing here divides by zero and nothing divides the most negative value by minus one. Both are
  * undefined in C, so a program that did either would be comparing two compilers' guesses. The
  * conversions to and from a float keep the same rule: a value with no float to become and a float
@@ -328,6 +334,82 @@ static void conversions(int round) {
     report("convert-down-signed", round, down_signed);
 }
 
+/* One builtin's answer folded into a digest, which is the value it wrote and then the flag it gave
+ * back.
+ *
+ * Both halves through the same digest, because they are one answer: a compiler that wrote the right
+ * bits and said the wrong thing about them is as wrong as one that wrote the wrong bits, and a
+ * digest that only carried the value would pass the first of those.
+ */
+static unsigned long long answer(unsigned long long digest, int over, uwide value) {
+    return mix(mix(digest, value), (uwide)(unsigned long long)over);
+}
+
+/* The three overflow checking builtins at this width.
+ *
+ * Not arithmetic over the halves and not a call either. The check is rewritten into ordinary
+ * arithmetic before the splitting pass runs, so what reaches that pass is adds, multiplies and
+ * comparisons it already knows, and what this asks is whether the rewriting picked the right ones.
+ * The interesting shape is the mixed one: a hundred and twenty eight bit unsigned operand beside a
+ * signed one needs a hundred and twenty nine bits to hold both and there is no such width, so the
+ * sign of each operand is carried alongside its value rather than inside it. jtckdint is written
+ * that way throughout, which is what tamnd/rucc#602 is about.
+ *
+ * A narrowing destination is here for the same reason a widening one is not. Writing a sixty four
+ * bit result is where the check has to ask whether the exact answer fit in something other than the
+ * type the arithmetic happened at, and that question is the whole of what these builtins are for.
+ *
+ * Each builtin is its own statement rather than an argument, because a call taking both the flag
+ * and the object the builtin wrote would be reading and writing one object with nothing between
+ * them, and the two compilers pick opposite orders for that.
+ */
+static void overflows(int round) {
+    unsigned long long unsigned_digest = 0, signed_digest = 0;
+    unsigned long long mixed_digest = 0, narrow_digest = 0;
+    for (int i = 0; i < CASES; i++) {
+        uwide a = random_wide();
+        uwide b = random_wide();
+        wide sa = (wide)a;
+        wide sb = (wide)b;
+        uwide u;
+        wide s;
+        long long narrow;
+        unsigned long long wrapped;
+        int over;
+
+        over = __builtin_add_overflow(a, b, &u);
+        unsigned_digest = answer(unsigned_digest, over, u);
+        over = __builtin_sub_overflow(a, b, &u);
+        unsigned_digest = answer(unsigned_digest, over, u);
+        over = __builtin_mul_overflow(a, b, &u);
+        unsigned_digest = answer(unsigned_digest, over, u);
+
+        over = __builtin_add_overflow(sa, sb, &s);
+        signed_digest = answer(signed_digest, over, (uwide)s);
+        over = __builtin_sub_overflow(sa, sb, &s);
+        signed_digest = answer(signed_digest, over, (uwide)s);
+        over = __builtin_mul_overflow(sa, sb, &s);
+        signed_digest = answer(signed_digest, over, (uwide)s);
+
+        over = __builtin_add_overflow(a, sb, &s);
+        mixed_digest = answer(mixed_digest, over, (uwide)s);
+        over = __builtin_sub_overflow(sa, b, &u);
+        mixed_digest = answer(mixed_digest, over, u);
+        over = __builtin_mul_overflow(a, sb, &u);
+        mixed_digest = answer(mixed_digest, over, u);
+
+        over = __builtin_add_overflow(a, b, &wrapped);
+        narrow_digest = answer(narrow_digest, over, (uwide)wrapped);
+        over = __builtin_mul_overflow(sa, sb, &narrow);
+        narrow_digest = answer(narrow_digest, over, (uwide)(wide)narrow);
+        cases += 11;
+    }
+    report("overflow-unsigned", round, unsigned_digest);
+    report("overflow-signed", round, signed_digest);
+    report("overflow-mixed", round, mixed_digest);
+    report("overflow-narrow", round, narrow_digest);
+}
+
 /* Every corner value up to a float, and the floats they became back down again.
  *
  * Going up, a corner is where the rounding has to decide something: a value one below a power of two
@@ -412,10 +494,50 @@ static void corner_pairs(void) {
     report("corner-division", 0, division_digest);
 }
 
+/* Every pair of corner values through the three overflow checking builtins.
+ *
+ * The random pairs above overflow nearly every time, which tests one side of the answer over and
+ * over. A corner pair is where the answer is decided by one bit: the largest value the type holds
+ * added to one, the most negative divided in half and doubled, a product that lands exactly on the
+ * boundary between fitting and not. That is the row a rewritten check gets wrong by an off by one
+ * in the comparison it built.
+ */
+static void corner_overflows(void) {
+    unsigned long long digest = 0;
+    for (int i = 0; i < CORNERS; i++) {
+        for (int j = 0; j < CORNERS; j++) {
+            uwide a = corners[i];
+            uwide b = corners[j];
+            wide sa = (wide)a;
+            wide sb = (wide)b;
+            uwide u;
+            wide s;
+            int over;
+            over = __builtin_add_overflow(a, b, &u);
+            digest = answer(digest, over, u);
+            over = __builtin_sub_overflow(a, b, &u);
+            digest = answer(digest, over, u);
+            over = __builtin_mul_overflow(a, b, &u);
+            digest = answer(digest, over, u);
+            over = __builtin_add_overflow(sa, sb, &s);
+            digest = answer(digest, over, (uwide)s);
+            over = __builtin_sub_overflow(sa, sb, &s);
+            digest = answer(digest, over, (uwide)s);
+            over = __builtin_mul_overflow(sa, sb, &s);
+            digest = answer(digest, over, (uwide)s);
+            over = __builtin_add_overflow(a, sb, &s);
+            digest = answer(digest, over, (uwide)s);
+            cases += 7;
+        }
+    }
+    report("corner-overflow", 0, digest);
+}
+
 int main(void) {
     make_corners();
     corner_pairs();
     corner_conversions();
+    corner_overflows();
     for (int round = 0; round < ROUNDS; round++) {
         arithmetic(round);
         shifts(round);
@@ -423,6 +545,7 @@ int main(void) {
         divisions(round);
         constants(round);
         conversions(round);
+        overflows(round);
     }
     printf("cases %ld\n", cases);
     return 0;
