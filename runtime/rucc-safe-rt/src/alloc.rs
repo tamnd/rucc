@@ -124,8 +124,9 @@ pub const fn initing(len: usize) -> usize {
 /// A stamp for every granule of the region, which is more than a stamp for every granule a program
 /// can allocate. A block is the aux, then the header, then the payload, and all three of those are
 /// inside the region, so the aux beside a payload word has a slot of its own here and it is not the
-/// payload word's slot. That is where judgement C1's second stamp goes, and tamnd/rucc#1069 asks
-/// where because the aux slot itself has no room left for one. Nothing writes it yet.
+/// payload word's slot. That is where judgement C1's second stamp goes, since the aux slot itself
+/// has no room left for one, and `spec/safe-memory/09-type-init-and-races.md` section 9.5 is where
+/// that is written down. Nothing writes it yet.
 #[must_use]
 pub const fn epoching(len: usize) -> usize {
     len / crate::epoch::GRANULE * crate::epoch::SLOT
@@ -1229,12 +1230,12 @@ mod tests {
     fn the_epoch_plane_covers_the_aux_beside_a_payload_and_not_only_the_payload() {
         let _turn = turn();
         // Judgement C1 compares the stamp of a pointer word against the stamp of the aux slot
-        // paired with it, and tamnd/rucc#1069 is open because the aux slot is full and has nowhere
-        // to keep the second stamp. It does not have to keep it. The epoch plane is reserved and
-        // biased over the whole region rather than over the payloads in it, and the aux is inside
-        // the region, so the second stamp already has a slot and the candidate that keeps every
-        // field at full width costs no mapping at all. What it costs is a second write per pointer
-        // store, which is a different argument and is the one still to be had.
+        // paired with it, and the aux slot is full and has nowhere to keep the second stamp. It
+        // does not have to keep it. The epoch plane is reserved and biased over the whole region
+        // rather than over the payloads in it, and the aux is inside the region, so the second
+        // stamp already has a slot and the candidate that keeps every field at full width costs no
+        // mapping at all. That is what section 9.5 of the safe memory design settled on, and what
+        // it costs is a second write per pointer store rather than any bits.
         let want = 4096;
         let ptr = alloc(want);
         assert!(!ptr.is_null());

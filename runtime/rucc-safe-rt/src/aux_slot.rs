@@ -63,8 +63,10 @@
 //! that a check never looks at, so an aux slot that carries it would be paying most of its budget
 //! for something no judgement asks about.
 //!
-//! The second epoch stamp is not here either, which is judgement C1's problem rather than a
-//! decision this module gets to make. The slot is full, so where that stamp lives is tamnd/rucc#1069.
+//! The second epoch stamp is not here either. The slot is full, so it lives in the epoch plane at
+//! the slot's own address, which is a stamp the plane already has room for because it is mapped over
+//! a whole region and the aux is inside one. `spec/safe-memory/09-type-init-and-races.md` section
+//! 9.5 has the reasoning and [`crate::epoch`] has the plane.
 //!
 //! Nothing writes one of these yet. What is missing is the compiler's half, which is a `cap_store`
 //! beside every store of a pointer, and that is milestone S5 work on tamnd/rucc#856.
@@ -328,8 +330,10 @@ mod tests {
 
     #[test]
     fn the_version_keeps_all_sixty_four_of_its_bits() {
-        // Halving it is the candidate #1069 rejects for the temporal check's sake, so the full
-        // width is a property worth a test rather than an accident of the packing.
+        // Halving it to make room for judgement C1's second stamp is the candidate section 9.5
+        // turned down for the temporal check's sake, since a thirty two bit version repeats after
+        // an hour of a busy allocator and a repeat is a use after free the checker calls live. So
+        // the full width is a property worth a test rather than an accident of the packing.
         let original = Cap::new(0x100, 8, u64::MAX, Meta(0));
         let Read::Whole(back) = Slot::of(original, 0x100).read(0x100) else {
             panic!("eight bytes fit");
