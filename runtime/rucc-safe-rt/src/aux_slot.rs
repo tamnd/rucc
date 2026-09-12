@@ -121,6 +121,10 @@ pub enum Read {
     /// Untouched memory reads as this, which is section 5.2.2's point about document 03's class Y1
     /// costing nothing: an integer read as a pointer arrives with no capability and the first
     /// access through it is refused.
+    ///
+    /// Not always refused, and the exception is not this module's to make. A word a foreign writer
+    /// filled reads as this too, and [`crate::cap::load`] is where the two are told apart, by a bit
+    /// on the instance rather than by anything in the slot.
     Nothing,
     /// The whole capability, which is every object shorter than [`EXACT`] and a byte.
     Whole(Cap),

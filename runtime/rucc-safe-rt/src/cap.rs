@@ -25,8 +25,12 @@
 //! believing them without checking would be believing a different object's extent.
 //!
 //! The slot says the word holds no pointer. That is section 5.2.2's class Y1 and the answer is
-//! bottom, which refuses the first access through it. It is also what a word written by code this
-//! build did not compile looks like, and those two want opposite answers, which is tamnd/rucc#1081.
+//! bottom, which refuses the first access through it, unless the instance the word is in has been
+//! handed to code this build did not compile. One encoding covers two situations there, an integer
+//! read as a pointer and a real pointer some foreign writer stored without knowing there was a slot
+//! beside it, and they want opposite answers. Which one a load gives is
+//! [`crate::layout::Meta::HANDED`] on the instance, and `nothing` below is the paragraph on why the
+//! answer is per instance rather than per word. That was tamnd/rucc#1081.
 //!
 //! The word has no slot at all, which today is every local and every global, since only the
 //! allocator lays out an aux. The answer is a recovery from the address, the same one a pointer
@@ -105,10 +109,43 @@ pub unsafe fn load(dest: Cap, at: *const c_void, value: *const c_void) -> Cap {
         return recover::recover(value);
     };
     match read {
-        Read::Nothing => Cap::BOTTOM,
+        Read::Nothing => nothing(dest, value),
         Read::Whole(cap) => cap,
         Read::Header { ver, meta } => header(ver, meta, value),
     }
+}
+
+/// The capability for a word whose slot says nothing, which is two situations and one encoding.
+///
+/// Bottom is the answer for an instance the boundary has never seen, which is document 03's class
+/// Y1 and is what section 5.2.2 means by getting it for free. For an instance that has been handed
+/// out the answer is a recovery from the address instead, because the slot being empty there is as
+/// likely to mean a foreign writer stored a real pointer without knowing the slot existed, and
+/// refusing would report a correct program. tamnd/rucc#1081 is the decision and
+/// [`crate::layout::Meta::HANDED`] is the bit.
+///
+/// A null word is bottom either way and the check is not an optimization. Recovery over an address
+/// nothing watches answers with bounds over everything, so recovering null would hand back a
+/// capability that permits dereferencing it, which is the one thing no reading of this can want.
+///
+/// The flag is looked for in the capability first and in the instance's header second. The first is
+/// where it will be once `cap_of` reads a header inline, and the second is what makes a capability
+/// taken before the call and used after it give the same answer as one taken after.
+fn nothing(dest: Cap, value: *const c_void) -> Cap {
+    if value.is_null() || !incomplete(dest) {
+        return Cap::BOTTOM;
+    }
+    recover::unwritten(value)
+}
+
+/// Whether the aux of the instance `dest` describes is one to believe when it says nothing.
+fn incomplete(dest: Cap) -> bool {
+    if dest.meta.flags() & Meta::HANDED != 0 {
+        return true;
+    }
+    let lo = dest.lo as usize;
+    let Some(region) = alloc::covering(lo) else { return false };
+    recover::was_handed(&region, lo, dest.ver)
 }
 
 /// The capability of an object too long for its slot to describe.
@@ -367,6 +404,19 @@ mod tests {
         unsafe { region.epochs.write(addr, stamp) }
     }
 
+    /// Writes the slot beside `word` to say the word holds no pointer.
+    ///
+    /// A block handed out again comes with whatever the last program to use it left in its aux,
+    /// which document 08 section 8.3 says is the recycled slot the version check refuses, and these
+    /// tests are about a slot that says nothing rather than about whatever a previous test stored.
+    /// Storing the bottom capability is how a program says a word holds no pointer and it writes
+    /// the same sixteen bytes a block off the bump pointer comes with.
+    fn clear(dest: Cap, word: *const c_void) {
+        // SAFETY: an instance the caller owns, and neither address is read through.
+        let written = unsafe { store(dest, word, core::ptr::null(), Cap::BOTTOM) };
+        assert!(written, "the word is inside the instance and pointer aligned");
+    }
+
     /// Runs one check and says whether it refused, without the panic reaching the harness.
     fn refused(check: impl FnOnce()) -> bool {
         let hook = std::panic::take_hook();
@@ -549,12 +599,158 @@ mod tests {
     #[test]
     fn a_word_nobody_stored_a_pointer_into_says_nothing_and_that_refuses() {
         let _turn = turn();
-        // Section 5.2.2's class Y1: an integer read as a pointer arrives with no capability. It is
-        // also tamnd/rucc#1081, since a word a foreign writer filled looks exactly like this.
+        // Section 5.2.2's class Y1: an integer read as a pointer arrives with no capability. This
+        // instance has never been out of the build, so the empty slot is believed.
         let holder = alloc(64);
         // SAFETY: an instance this test owns, and the address is never read through.
         let back = unsafe { load(of(holder), at(holder, 0), at(holder, 32)) };
         assert!(back.is_bottom());
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(holder) };
+    }
+
+    #[test]
+    fn a_pointer_a_foreign_writer_left_behind_is_recovered_once_the_instance_has_been_out() {
+        let _turn = turn();
+        // tamnd/rucc#1081. The callee filled the word and did not know there was a slot in front
+        // of it, so the aux says nothing about a word that holds a real pointer. Refusing here
+        // would report a correct program.
+        let holder = alloc(64);
+        let pointee = alloc(128);
+        let word = at(holder, 16);
+        clear(of(holder), word);
+
+        // SAFETY: an instance this test owns, and the address is never read through.
+        unsafe { crate::check::handed(holder) };
+        // SAFETY: as above, and the capability is the one this test built for the holder, which is
+        // the case where the flag has to be found in the header rather than in the capability.
+        let back = unsafe { load(of(holder), word, pointee) };
+        assert!(!back.is_bottom(), "the aux of a handed instance is not believed");
+        assert_eq!(back.lo, pointee as u64);
+        assert_eq!(back.ext, of(pointee).ext);
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn the_instance_beside_a_handed_one_keeps_class_y1() {
+        let _turn = turn();
+        // One bit per instance is the whole cost of the decision, so the thing to hold it to is
+        // that it costs one instance. The neighbour was never passed anywhere and still refuses.
+        let handed = alloc(64);
+        let quiet = alloc(64);
+        let pointee = alloc(128);
+        clear(of(handed), at(handed, 16));
+        clear(of(quiet), at(quiet, 16));
+
+        // SAFETY: an instance this test owns, and the address is never read through.
+        unsafe { crate::check::handed(handed) };
+        // SAFETY: instances this test owns, and neither address is read through.
+        let (loose, kept) = unsafe {
+            (load(of(handed), at(handed, 16), pointee), load(of(quiet), at(quiet, 16), pointee))
+        };
+        assert!(!loose.is_bottom());
+        assert!(kept.is_bottom(), "an instance that never left keeps the refusal");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(handed);
+            dealloc(quiet);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn a_null_word_in_a_handed_instance_is_still_bottom() {
+        let _turn = turn();
+        // Recovery over an address nothing watches answers with bounds over everything, so
+        // recovering a null would hand back a capability that permits dereferencing it.
+        let holder = alloc(64);
+        clear(of(holder), at(holder, 16));
+        // SAFETY: an instance this test owns, and the address is never read through.
+        unsafe { crate::check::handed(holder) };
+        // SAFETY: as above, and null is never read through either.
+        let back = unsafe { load(of(holder), at(holder, 16), core::ptr::null()) };
+        assert!(back.is_bottom());
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(holder) };
+    }
+
+    #[test]
+    fn the_mark_is_read_from_the_capability_when_it_is_there() {
+        let _turn = turn();
+        // Where the flag will be once `cap_of` reads a header inline. Nothing has marked the
+        // instance, so a capability carrying the bit is the only thing that can produce a
+        // recovery here, which is what says the fast path is wired up.
+        let holder = alloc(64);
+        let pointee = alloc(128);
+        let dest = Cap { meta: of(holder).meta.with_flags(Meta::HANDED), ..of(holder) };
+        clear(of(holder), at(holder, 16));
+
+        // SAFETY: instances this test owns, and neither address is read through.
+        let back = unsafe { load(dest, at(holder, 16), pointee) };
+        assert!(!back.is_bottom());
+        assert_eq!(back.lo, pointee as u64);
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn storage_given_back_and_handed_out_again_gets_class_y1_back() {
+        let _turn = turn();
+        // The flag is in the header and the allocator writes a whole header per allocation, so
+        // reuse clears it. A weakening that outlived the instance it was granted for would spread
+        // through the heap one free at a time.
+        let holder = alloc(64);
+        let pointee = alloc(128);
+        // SAFETY: an instance this test owns, and the address is never read through.
+        unsafe { crate::check::handed(holder) };
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(holder) };
+
+        let again = alloc(64);
+        clear(of(again), at(again, 16));
+        // SAFETY: an instance this test owns, and neither address is read through.
+        let back = unsafe { load(of(again), at(again, 16), pointee) };
+        assert!(back.is_bottom(), "a fresh header has no flags");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(again);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn what_the_decision_gives_up_is_counted() {
+        let _turn = turn();
+        // The honest half. An integer in a handed instance recovers too, and over an address
+        // nothing watches that is a capability with bounds over everything, which is class Y1
+        // gone. The count is what says how many times a build did that.
+        let holder = alloc(64);
+        clear(of(holder), at(holder, 16));
+        // SAFETY: an instance this test owns, and the address is never read through.
+        unsafe { crate::check::handed(holder) };
+
+        let before = recover::counts();
+        // An integer that is not an address of anything, which is what Y1 is about.
+        let forged = 0x5eed_0000_1000usize as *const c_void;
+        // SAFETY: as above, and `forged` is never read through.
+        let back = unsafe { load(of(holder), at(holder, 16), forged) };
+        let after = recover::counts();
+
+        assert!(!back.is_bottom(), "this is the hole the decision opens, and it is deliberate");
+        assert_eq!(after.handed, before.handed + 1);
+        assert_eq!(after.total(), before.total() + 1, "it is one of the four as well");
+
         // SAFETY: the address `alloc` handed back.
         unsafe { dealloc(holder) };
     }
