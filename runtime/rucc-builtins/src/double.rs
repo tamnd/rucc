@@ -33,9 +33,12 @@
 //!
 //! # What it does with a not a number
 //!
-//! It comes back quieted, and the left one where both operands are one, which is libgcc's convention
-//! and the C's. An operation with no answer at all gives the quiet not a number with an empty
-//! payload.
+//! It comes back quieted, and the left one where both operands are one, which is the C's rule as
+//! well. An operation with no answer at all gives the quiet not a number with an empty payload and a
+//! clear sign. Neither of those two is libgcc's, which answers both out of a per architecture header
+//! while one archive here serves every row of the target matrix, and `runtime/builtins/quad.c` is
+//! where that is written down at length. A subtraction is the one place the sign of a not a number is
+//! not a per machine choice there, and that one is matched.
 
 /// How many bits of the significand the format writes down, the other one being implied.
 pub(crate) const FRACTION: u32 = 52;
@@ -221,11 +224,19 @@ pub extern "C" fn __adddf3(left: f64, right: f64) -> f64 {
     add(left.to_bits(), right.to_bits())
 }
 
+/// The right operand of a subtraction, which is the one it was with its sign flipped, except that a
+/// not a number is handed on as it came in. That one is the answer itself rather than a number being
+/// negated, and soft-fp negates after it has dealt with a not a number, so flipping it would print
+/// minus where GCC prints nothing.
+fn negated(right: u64) -> u64 {
+    if is_nan(right) { right } else { right ^ SIGN }
+}
+
 /// `double __subdf3(double, double)`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __subdf3(left: f64, right: f64) -> f64 {
-    add(left.to_bits(), right.to_bits() ^ SIGN)
+    add(left.to_bits(), negated(right.to_bits()))
 }
 
 /// The product of two doubles, which is exact before it is rounded: two significands of fifty three
@@ -646,7 +657,7 @@ mod tests {
     fn ours(which: u8, left: f64, right: f64) -> f64 {
         match which {
             0 => add(left.to_bits(), right.to_bits()),
-            1 => add(left.to_bits(), right.to_bits() ^ SIGN),
+            1 => add(left.to_bits(), negated(right.to_bits())),
             2 => multiply(left.to_bits(), right.to_bits()),
             _ => divide(left.to_bits(), right.to_bits()),
         }

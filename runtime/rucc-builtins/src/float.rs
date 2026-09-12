@@ -35,12 +35,14 @@
 //!
 //! # What it does with a not a number
 //!
-//! It comes back quieted, and the left one where both operands are one. That is libgcc's
-//! convention, it is what this machine's own arithmetic does with the operands in the same order,
-//! and it is what the C does, so the two sides can be compared bit for bit instead of through a
-//! canonicalization that would hide a real disagreement. An operation with no answer at all, an
-//! infinity less an infinity, a zero times an infinity, or a zero over a zero, gives the quiet not
-//! a number with an empty payload.
+//! It comes back quieted, and the left one where both operands are one. That is what this machine's
+//! own arithmetic does with the operands in the same order and it is what the C does, so the two
+//! sides can be compared bit for bit instead of through a canonicalization that would hide a real
+//! disagreement. It is not libgcc's, which decides that one out of a per architecture header while
+//! one archive here serves every row of the target matrix, and `runtime/builtins/quad.c` is where
+//! that is written down at length. An operation with no answer at all, an infinity less an infinity,
+//! a zero times an infinity, or a zero over a zero, gives the quiet not a number with an empty
+//! payload and a clear sign, which is this library's rule for the same reason.
 
 // The pair of routines at the bottom of this file crosses between the two formats, so it reads the
 // wider format's fields and its rounding from next door rather than writing a second copy of either.
@@ -238,11 +240,19 @@ pub extern "C" fn __addsf3(left: f32, right: f32) -> f32 {
     add(left.to_bits(), right.to_bits())
 }
 
+/// The right operand of a subtraction, which is the one it was with its sign flipped, except that a
+/// not a number is handed on as it came in. That one is the answer itself rather than a number being
+/// negated, and soft-fp negates after it has dealt with a not a number, so flipping it would print
+/// minus where GCC prints nothing.
+fn negated(right: u32) -> u32 {
+    if is_nan(right) { right } else { right ^ SIGN }
+}
+
 /// `float __subsf3(float, float)`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __subsf3(left: f32, right: f32) -> f32 {
-    add(left.to_bits(), right.to_bits() ^ SIGN)
+    add(left.to_bits(), negated(right.to_bits()))
 }
 
 /// The product of two floats, which is exact before it is rounded: two significands of twenty four
@@ -710,7 +720,7 @@ mod tests {
     fn ours(which: u8, left: f32, right: f32) -> f32 {
         match which {
             0 => add(left.to_bits(), right.to_bits()),
-            1 => add(left.to_bits(), right.to_bits() ^ SIGN),
+            1 => add(left.to_bits(), negated(right.to_bits())),
             2 => multiply(left.to_bits(), right.to_bits()),
             _ => divide(left.to_bits(), right.to_bits()),
         }
