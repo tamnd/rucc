@@ -81,11 +81,12 @@
 //!
 //! # What decides which one a call gets
 //!
-//! Nothing here. [`crate::Frames`] is the classification and it already exists: a callee defined
-//! in this unit with no checks left needs no frame, one that still checks something needs the
-//! capabilities, and a callee outside the unit or reached through a pointer is one nothing here can
-//! ask. That is a whole-unit question and this module is a lowering, so the counting came first and
-//! the pass that reads it is a later box on tamnd/rucc#1085.
+//! Nothing here. [`crate::handover`] is the rule: a callee defined in this unit with no checks left
+//! needs no frame, one that still checks something needs the capabilities, and a callee outside the
+//! unit or reached through a pointer is one nothing here can ask. That is a whole-unit question and
+//! this module is a lowering, so it lives there, where the census that has been counting those
+//! buckets since before anything emitted a frame reads it as well. The pass that puts the
+//! instructions in is a later box on tamnd/rucc#1085.
 //!
 //! # The one thing this does not handle
 //!
