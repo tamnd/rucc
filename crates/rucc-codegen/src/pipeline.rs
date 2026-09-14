@@ -39,13 +39,14 @@ use crate::elsewhere::Elsewhere;
 use crate::expand;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, finish};
 use crate::fold;
-use crate::frame::{Frame, Layout};
+use crate::frame::{self, Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::pressure::{Cost, Pressure};
 use crate::quad;
 use crate::reload;
 use crate::retry;
+use crate::slots::{self, Slots};
 use crate::split;
 use crate::switch;
 use crate::varargs;
@@ -217,13 +218,16 @@ pub struct Flags {
     /// shape of the graph says, which `-freorder-blocks` asks for and every level above `-O0`
     /// turns on. See [`crate::layout`].
     pub reorder: bool,
+    /// Whether two things in the frame that are never both wanted may be the same bytes, which
+    /// `-fstack-reuse=none` turns off. See [`crate::slots`].
+    pub reuse: bool,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
-    /// no profiling, no room for a patcher and the blocks in the order the graph's shape gives,
-    /// which is what a convention that has a red zone says at `-O0` when nobody on the command
-    /// line has said otherwise.
+    /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives and
+    /// nothing in the frame sharing with anything, which is what a convention that has a red zone
+    /// says at `-O0` when nobody on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -233,6 +237,7 @@ impl Default for Flags {
             profile: Profile::No,
             patch: Room::default(),
             reorder: false,
+            reuse: false,
         }
     }
 }
@@ -444,12 +449,27 @@ pub fn compile_recording(
     // one way, out of a block that leaves more than one way, has nowhere to put the moves those
     // values turn into, and the allocator asserts rather than guessing.
     split::critical(&mut func);
+
+    // Before allocation, because how far the address of a local gets is a question about values and
+    // a value is written once only until the allocator's rewrite has been through. What is done
+    // with the answer waits until afterwards, since the liveness it is read against is the
+    // allocator's. See [`crate::slots`].
+    let reach = flags
+        .reuse
+        .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
+
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called);
     pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
-    // knows how many of those there are until the allocator has finished running out of registers.
+    // knows how many of those there are until the allocator has finished running out of registers,
+    // and because a spill slot cannot be shared with a local until it is known there is one.
+    let share = reach.map(|reach| {
+        let widths = frame::widths(&layout, &allocation);
+        Slots::share(&reach, &allocation, &stack.locals, &widths)
+    });
+    let layout = Layout { share: share.as_ref(), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
     let scratch = machine.env.scratch(machine.conv.int_class);
     let protect = guard.map(|guard| Protect {

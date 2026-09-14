@@ -158,7 +158,9 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{Func, Opcode};
     use rucc_regalloc::assign::{Assignment, Env};
+    use rucc_regalloc::live::Live;
     use rucc_regalloc::moves::Move;
+    use rucc_regalloc::order::Order;
     use rucc_regalloc::rewrite::{At, Edit};
     use rucc_target::x86_64::{GPR, SYSV};
 
@@ -177,7 +179,9 @@ mod tests {
                 class: GPR,
             })
             .collect();
-        Allocation { assignment: Assignment::empty(0), edits }
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        Allocation { assignment: Assignment::empty(0), edits, order, live }
     }
 
     #[test]

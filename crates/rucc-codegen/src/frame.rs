@@ -91,6 +91,8 @@ use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_target::{CallRegs, PhysReg, RegClass, RegFile};
 
+use crate::slots::{Cell, Slots};
+
 /// One register the prologue puts away in the frame, and where in the frame it goes.
 ///
 /// A pushed register does not need one of these, because where it goes is wherever the stack
@@ -175,6 +177,13 @@ pub struct Layout<'a> {
     /// end of it calls when it fails. The caller sets `leaf` accordingly rather than this working
     /// it out, so that there is one place a frame learns whether it owes an aligned stack pointer.
     pub protect: bool,
+    /// Which locals and spill slots share their bytes with which, or `None` for a frame where
+    /// every one of them gets a run of its own.
+    ///
+    /// Worked out in [`crate::slots`], because what may share is a question about liveness and this
+    /// file is about arithmetic. `None` is the layout there was before that pass existed and is
+    /// what `-fstack-reuse=none` asks for.
+    pub share: Option<&'a Slots>,
 }
 
 impl<'a> Layout<'a> {
@@ -193,6 +202,7 @@ impl<'a> Layout<'a> {
             grows: false,
             red_zone: true,
             protect: false,
+            share: None,
         }
     }
 }
@@ -247,31 +257,45 @@ impl Frame {
             align = align.max(conv.stack_align);
         }
 
-        let mut locals = vec![0; layout.locals.len()];
-        let mut order: Vec<usize> = (0..layout.locals.len()).collect();
+        // One list rather than two, because a local and a spill slot that are never both wanted can
+        // be the same bytes and neither of them can share with something on the other list if the
+        // two lists are placed one after the other. See [`crate::slots`]. A layout that was handed
+        // no plan gets the one where nothing shares anything, which is the frame there was before
+        // that pass existed.
+        let apart;
+        let plan = match layout.share {
+            Some(plan) => plan,
+            None => {
+                apart = Slots::apart(layout.locals, &widths(layout, allocation));
+                &apart
+            }
+        };
+        let mut cells = Vec::with_capacity(plan.cells().len());
+        let mut order: Vec<usize> = (0..plan.cells().len()).collect();
         // Widest alignment first, so that placing each one straight after the last never leaves a
         // hole bigger than the alignment the next one asked for.
-        order.sort_by_key(|&local| std::cmp::Reverse(layout.locals[local].align));
-        for local in order {
-            let Local { size, align: want } = layout.locals[local];
+        order.sort_by_key(|&cell| std::cmp::Reverse(plan.cells()[cell].align));
+        cells.resize(plan.cells().len(), 0);
+        for cell in order {
+            let Cell { size, align: want } = plan.cells()[cell];
             assert!(
                 want.is_power_of_two(),
                 "a local aligned to something that is not a power of 2"
             );
             align = align.max(want);
             top = top.next_multiple_of(want);
-            locals[local] = offset(top);
+            cells[cell] = offset(top);
             top += size;
         }
 
-        let mut slots = Vec::with_capacity(allocation.assignment.slots().len());
-        for &class in allocation.assignment.slots() {
-            let size = width(layout, class);
-            align = align.max(size);
-            top = top.next_multiple_of(size);
-            slots.push(offset(top));
-            top += size;
-        }
+        // Read back out to the two lists the rest of the compiler asks its questions in. A cell
+        // several things share gives all of them the same offset, which is the whole point of it.
+        let placed = |cell: Option<usize>| cells[cell.expect("a plan covering every slot")];
+        let mut locals: Vec<i32> =
+            (0..layout.locals.len()).map(|local| placed(plan.local(local))).collect();
+        let mut slots: Vec<i32> = (0..allocation.assignment.slots().len())
+            .map(|slot| placed(plan.slot(u32::try_from(slot).expect("a frame"))))
+            .collect();
 
         // Above everything the function can reach through a local, which is the whole point of it.
         // A write that runs off the end of an array in this frame passes the canary before it
@@ -538,6 +562,16 @@ fn saved(
 fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
     let bits = layout.file.class(class).map_or(0, |info| info.bits);
     bits.div_ceil(8).max(layout.conv.word).next_power_of_two()
+}
+
+/// How many bytes each of an allocation's spill slots takes on the stack.
+///
+/// The same question as [`width`] asked of a whole allocation at once, and public because
+/// [`crate::slots`] needs it to say how big a cell holding a spilled value has to be, which it has
+/// to know before there is a frame to ask.
+#[must_use]
+pub fn widths(layout: &Layout<'_>, allocation: &Allocation) -> Vec<u32> {
+    allocation.assignment.slots().iter().map(|&class| width(layout, class)).collect()
 }
 
 /// How far past a multiple of an alignment a number is, counted the other way: what has to be

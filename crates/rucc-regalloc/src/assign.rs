@@ -225,6 +225,18 @@ impl Assignment {
         &self.slots
     }
 
+    /// Every value that went somewhere, and where it went.
+    ///
+    /// The assignment read the other way round, which is what a caller wants when the question is
+    /// about the places rather than about the values. The stack slot allocator asks it that way,
+    /// since what it needs is which value is in each slot and the assignment is stored by value.
+    pub fn placed(&self) -> impl Iterator<Item = (Reg, Place)> + '_ {
+        self.places.iter().enumerate().filter_map(|(number, place)| {
+            let number = u32::try_from(number).ok()?;
+            Some((Reg::virtual_reg(number), (*place)?))
+        })
+    }
+
     /// How many values went to the stack.
     #[must_use]
     pub fn spilled(&self) -> usize {
