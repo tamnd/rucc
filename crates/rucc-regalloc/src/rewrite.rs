@@ -55,6 +55,24 @@
 //! the first register of each, since a class holds its own back and nothing on the instruction is
 //! in the other's.
 //!
+//! # What happens when two is not enough after all
+//!
+//! Two runs out on an instruction that reads three registers and writes none, because then there is
+//! no answer to fold back into a register an operand arrived in and the arithmetic above has nothing
+//! to work on. The instruction that does this on x86-64 is the indexed store, whose base, index and
+//! value are three registers it only reads, and at `-O0` all three of them can be stack slots. That
+//! is tamnd/rucc#913, and it stopped brotli and cmocka on the first file that held one.
+//!
+//! What answers it is borrowing: a register of the class the instruction has not named is
+//! taken, whatever is in it is put in a slot of the frame in front of the instruction, and it is
+//! brought back behind it. That asks nothing at all of the register, so it does not matter whether
+//! the value in it is wanted afterwards, whether the callee owes it back, or whether an argument
+//! travels in it, which are the three things that make a register held back hard to find. A third
+//! register held back would cost every function in the program one, and on x86-64 the only one
+//! available is `rax`, which is the return value, so the bill would be a move at every return. This
+//! costs two memory accesses at the one instruction that wanted it and a slot most functions never
+//! take.
+//!
 //! # What a fixed register turns into
 //!
 //! A move each way. The assignment deliberately gave the value some other register, so a division
@@ -79,7 +97,7 @@
 //! file: a move through a temporary is a fact about places, and which register is free to be the
 //! temporary is a fact only this crate has.
 
-use rucc_mir::{Block, Constraint, Func, Inst, Operand, Param, Reg};
+use rucc_mir::{Block, Constraint, Func, Inst, Operand, Param, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
 use crate::assign::{Assignment, Env, Place};
@@ -117,11 +135,16 @@ pub enum At {
 ///
 /// Panics if the entry block has parameters, since there is no edge into it for their moves to go
 /// on and what arrives in a function is the ABI lowering's to say. Panics on a critical edge, on
-/// an edge carrying the wrong number of arguments, and if a class runs out of scratch registers
-/// for one instruction or has fewer than two on an edge that moves a spilled value into a spilled
-/// parameter, all of which are the caller handing it something it was told not to.
+/// an edge carrying the wrong number of arguments, and if a class has fewer than two registers on
+/// an edge that moves a spilled value into a spilled parameter, all of which are the caller handing
+/// it something it was told not to.
+///
+/// The assignment is taken by reference and may gain a slot, which is the one the register borrowed
+/// at an instruction with more spilled operands than the class holds registers back for waits in.
+/// The section above says what the borrowing is, and the slot is asked for here rather than planned
+/// before allocation because most functions never want one.
 #[must_use]
-pub fn rewrite(func: &mut Func, assignment: &Assignment, env: &Env) -> Vec<Edit> {
+pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<Edit> {
     let blocks: Vec<Block> = func.blocks().collect();
     assert!(
         func.entry().is_none_or(|entry| func[entry].params.is_empty()),
@@ -129,10 +152,11 @@ pub fn rewrite(func: &mut Func, assignment: &Assignment, env: &Env) -> Vec<Edit>
     );
 
     let mut edits = Vec::new();
+    let mut spare = Spare::default();
     for &block in &blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         for inst in insts {
-            instruction(func, assignment, env, inst, &mut edits);
+            instruction(func, assignment, env, &mut spare, inst, &mut edits);
         }
     }
 
@@ -152,15 +176,16 @@ pub fn rewrite(func: &mut Func, assignment: &Assignment, env: &Env) -> Vec<Edit>
 /// Rewrites one instruction's operands, and says what has to happen either side of it.
 fn instruction(
     func: &mut Func,
-    assignment: &Assignment,
+    assignment: &mut Assignment,
     env: &Env,
+    spare: &mut Spare,
     inst: Inst,
     edits: &mut Vec<Edit>,
 ) {
     let list = func[inst].operands;
     let mut operands: Vec<Operand> = func[list].to_vec();
-    let mut before: Vec<(Move<Place>, RegClass)> = Vec::new();
-    let mut after: Vec<(Move<Place>, RegClass)> = Vec::new();
+    let mut before = Moves::new();
+    let mut after = Moves::new();
     let mut taken = Taken::new();
 
     // Where the assignment put each operand's value, taken before anything is rewritten, since
@@ -173,12 +198,27 @@ fn instruction(
     // of it has been placed.
     let mut reusing: Vec<usize> = Vec::new();
 
+    // Every register the instruction has named for itself, which is one an operand's value is
+    // already in and one a fixed constraint asked for. Taken before anything is rewritten, for the
+    // same reason the places above are: rewriting is what turns an operand's register into a
+    // physical one and loses which of the two it was.
+    let mut claimed = Claimed::default();
+    for (operand, place) in operands.iter().zip(&places) {
+        if let Place::Reg(at) = *place {
+            claimed.named(operand, at);
+        }
+        if let Constraint::Fixed(at) = operand.constraint {
+            claimed.named(operand, at);
+        }
+    }
+    let mut scratch = Scratch::new(env, assignment, spare, claimed);
+
     for (index, operand) in operands.iter_mut().enumerate() {
         let fixed = match operand.constraint {
             Constraint::Fixed(at) => Some(at),
             _ => None,
         };
-        let at = match (place(assignment, operand.reg), fixed) {
+        let at = match (place(scratch.assignment, operand.reg), fixed) {
             (Place::Reg(at), None) => at,
             (Place::Reg(at), Some(fixed)) => {
                 if at != fixed {
@@ -198,8 +238,10 @@ fn instruction(
                 // and the two are counted apart.
                 let at = match fixed {
                     Some(fixed) => fixed,
-                    None if operand.role.is_def() => taken.written_into(env, operand.class),
-                    None => taken.read_into(env, operand.class),
+                    None if operand.role.is_def() => {
+                        taken.written_into(operand.class, &mut scratch)
+                    }
+                    None => taken.read_into(operand.class, &mut scratch),
                 };
                 push(
                     &mut before,
@@ -227,8 +269,8 @@ fn instruction(
         // assignment only lets one be written over when it is not, which it says by giving the
         // answer that register. So a fresh scratch register there, and the copy below fills it.
         //
-        // Either way the instruction wants two of the class and no more. If the operand it reuses
-        // is on the stack then it is holding one of them already, and if it is not then it is not
+        // Either way this shape wants two of the class and no more. If the operand it reuses is on
+        // the stack then it is holding one of them already, and if it is not then it is not
         // holding one at all.
         //
         // This one is asked for as a read even though the instruction writes it, because the copy
@@ -237,7 +279,7 @@ fn instruction(
         let other = usize::from(other);
         let at = match places[other] {
             Place::Slot(_) => phys(operands[other].reg),
-            Place::Reg(_) => taken.read_into(env, operands[index].class),
+            Place::Reg(_) => taken.read_into(operands[index].class, &mut scratch),
         };
         push(
             &mut before,
@@ -260,9 +302,17 @@ fn instruction(
         }
     }
 
+    // A borrowed register is put away in front of everything else and brought back behind
+    // everything else, since what happens in between is the instruction using it and the moves
+    // that carry its operands in and out. Nothing borrowed at one instruction is still borrowed at
+    // the next, which is what lets the slot be shared.
+    let (saves, restores) = scratch.finish();
+
     func[list].copy_from_slice(&operands);
+    edits.extend(saves.into_iter().map(|(mov, class)| Edit { at: At::Before(inst), mov, class }));
     edits.extend(before.into_iter().map(|(mov, class)| Edit { at: At::Before(inst), mov, class }));
     edits.extend(after.into_iter().map(|(mov, class)| Edit { at: At::After(inst), mov, class }));
+    edits.extend(restores.into_iter().map(|(mov, class)| Edit { at: At::After(inst), mov, class }));
 }
 
 /// How many scratch registers of each class one instruction has been handed, in each of the two
@@ -272,18 +322,21 @@ fn instruction(
 /// and an instruction reading a spilled value out of each of two files would otherwise skip the
 /// first register of the second file for no reason.
 ///
-/// Counted per job as well, and that is the part that keeps two enough. A register a spilled value
-/// is read into is live from in front of the instruction until the instruction reads it. A
+/// Counted per job as well, and that is the part that keeps the count down. A register a spilled
+/// value is read into is live from in front of the instruction until the instruction reads it. A
 /// register the instruction writes its answer into is live from the instruction until the store
 /// behind it. Those two spans do not meet, so one register does both jobs and the counting starts
 /// again rather than carrying on. What that rests on is the machine reading its operands before it
 /// writes its answer, which is true of every instruction the backends here emit and is the same
 /// thing that makes `addq %rax, %rax` mean what it looks like.
 ///
-/// The alternative is holding a third register of each class back, and on this target there is no
-/// third to hold back. `r10` and `r11` are the two the SysV convention neither passes an argument
-/// in nor asks the callee to give back, and a scratch register has to be both, since the rewriter
-/// runs after the prologue has been decided and cannot ask for a register to be saved.
+/// Where the count runs out is an instruction that reads three registers and writes none, because
+/// then there is no answer to fold back into a register an operand arrived in and the trick above
+/// has nothing to work on. On x86-64 that instruction is the indexed store, whose base, index and
+/// value are three registers it only reads, and at `-O0` all three of them can be stack slots. That
+/// is tamnd/rucc#913, and what answers it is [`Scratch::borrow`] rather than a third register held
+/// back, since holding a third back costs every function a register and this costs only the
+/// instruction that wanted one.
 #[derive(Debug, Default)]
 struct Taken {
     /// How many of each class hold a value read in ahead of the instruction.
@@ -298,53 +351,225 @@ impl Taken {
         Self::default()
     }
 
-    /// The next scratch register of a class for a value read in ahead of the instruction.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the class has none left. See [`Self::take`].
-    fn read_into(&mut self, env: &Env, class: RegClass) -> PhysReg {
-        Self::take(&mut self.read, env, class)
+    /// A register of a class for a value read in ahead of the instruction.
+    fn read_into(&mut self, class: RegClass, scratch: &mut Scratch<'_>) -> PhysReg {
+        Self::take(&mut self.read, class, scratch, Role::Use)
     }
 
-    /// The next scratch register of a class for an answer the instruction writes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the class has none left. See [`Self::take`].
-    fn written_into(&mut self, env: &Env, class: RegClass) -> PhysReg {
-        Self::take(&mut self.written, env, class)
+    /// A register of a class for an answer the instruction writes.
+    fn written_into(&mut self, class: RegClass, scratch: &mut Scratch<'_>) -> PhysReg {
+        Self::take(&mut self.written, class, scratch, Role::Def)
     }
 
-    /// The next scratch register of a class out of one of the two counts.
+    /// The next register of a class out of one of the two counts, passing over any the instruction
+    /// has already named itself for a value travelling the same way and borrowing one when the held
+    /// back ones run out.
     ///
-    /// # Panics
+    /// An operand with a fixed constraint names a register the instruction has to have its value
+    /// in, and the move that puts it there is in the same list as the move that would fill a
+    /// scratch register. So handing the same register out for both would lose one of the two
+    /// values, quietly and at run time. It is passed over instead.
     ///
-    /// Panics if the class has none left, which is an instruction wanting more registers for one
-    /// of the two jobs than the target held back. Two is enough for both, since an instruction
-    /// reads at most two values and writes at most one answer that is not one of them.
-    fn take(counts: &mut Vec<usize>, env: &Env, class: RegClass) -> PhysReg {
+    /// Which way the value travels is what decides whether there is a clash at all, and [`Claimed`]
+    /// says why. A register the instruction only writes is free to carry a value in, which is what a
+    /// call wants: a call names every caller saved register as one it writes, and those are the very
+    /// registers held back for scratch.
+    ///
+    /// A clash comes up on a machine where a register held back is one an instruction can also
+    /// insist on, and on x86-64 the way in is inline assembly naming `r10` or `r11`.
+    fn take(
+        counts: &mut Vec<usize>,
+        class: RegClass,
+        scratch: &mut Scratch<'_>,
+        role: Role,
+    ) -> PhysReg {
         let index = usize::from(class.number());
         if counts.len() <= index {
             counts.resize(index + 1, 0);
         }
-        let scratch = *env
-            .scratch(class)
-            .get(counts[index])
-            .expect("an instruction wanting more scratch registers than the class has");
-        counts[index] += 1;
-        scratch
+        let held: &[PhysReg] = scratch.env.scratch(class);
+        while held.get(counts[index]).is_some_and(|&reg| scratch.claimed.clashes(role, class, reg))
+        {
+            counts[index] += 1;
+        }
+        if let Some(&at) = held.get(counts[index]) {
+            counts[index] += 1;
+            return at;
+        }
+        scratch.borrow(class)
+    }
+}
+
+/// The registers the instruction has named for itself, which scratch has to work around.
+///
+/// A register is kept with the class it was named in, because a register number is only a number
+/// into one file and the same one means a different register in another: a call names sixteen vector
+/// registers numbered nought to fifteen and sixteen general purpose ones numbered the same, and
+/// reading the two lists as one leaves the general purpose file looking entirely spoken for.
+///
+/// Reading and writing are kept apart because they clash with different things. A register a value
+/// arrives in is one no move in front of the instruction may write, and a register an answer leaves
+/// in is one no move behind it may write. A call is the case that makes the difference matter: it
+/// names every caller saved register as one it writes, `r10` and `r11` among them, and an indirect
+/// call through a pointer on the stack has to read that pointer into one of exactly those two.
+#[derive(Debug, Default)]
+struct Claimed {
+    /// The registers a value arrives in, with the class each was named in.
+    reads: Vec<(RegClass, PhysReg)>,
+    /// The registers an answer leaves in, with the class each was named in.
+    writes: Vec<(RegClass, PhysReg)>,
+}
+
+impl Claimed {
+    /// Records a register an operand named, on the side its value travels.
+    fn named(&mut self, operand: &Operand, at: PhysReg) {
+        self.side_mut(operand.role).push((operand.class, at));
+    }
+
+    /// Records a register nothing may be handed for the rest of the instruction, which is one
+    /// [`Scratch::borrow`] has just taken.
+    fn taken(&mut self, class: RegClass, at: PhysReg) {
+        self.reads.push((class, at));
+        self.writes.push((class, at));
+    }
+
+    /// Whether handing that register out for a value travelling that way would lose a value.
+    fn clashes(&self, role: Role, class: RegClass, at: PhysReg) -> bool {
+        self.side(role).contains(&(class, at))
+    }
+
+    /// Whether the instruction names that register at all, which is what borrowing has to keep off:
+    /// what is borrowed is put back behind the instruction, over anything left there.
+    fn names(&self, class: RegClass, at: PhysReg) -> bool {
+        self.reads.contains(&(class, at)) || self.writes.contains(&(class, at))
+    }
+
+    /// The list for values travelling that way. The lists are one instruction's long, so a scan
+    /// beats a set.
+    fn side(&self, role: Role) -> &Vec<(RegClass, PhysReg)> {
+        if role.is_def() { &self.writes } else { &self.reads }
+    }
+
+    /// The same, to write to.
+    fn side_mut(&mut self, role: Role) -> &mut Vec<(RegClass, PhysReg)> {
+        if role.is_def() { &mut self.writes } else { &mut self.reads }
+    }
+}
+
+/// Moves waiting to be filed, each with the class of the value it moves.
+///
+/// The class travels with the move because an [`Edit`] carries one and the consumer needs it to pick
+/// the instruction that does the move, and by the time a move is filed the operand it came from is
+/// out of reach.
+type Moves = Vec<(Move<Place>, RegClass)>;
+
+/// The frame slots a borrowed register's value waits in, one list per class.
+///
+/// They belong to the function rather than to an instruction, because a borrowed register is given
+/// back before the next instruction starts and the slot is dead in between, so one slot serves
+/// every instruction in the function that borrows. Most functions never take one at all.
+type Spare = Vec<Vec<u32>>;
+
+/// What it takes to hand a register to one instruction.
+///
+/// It is a struct rather than four arguments because [`Scratch::borrow`] writes to all of them at
+/// once: it reads the environment, takes a slot off the assignment, remembers the register so a
+/// second borrow at the same instruction does not land on it, and files the two moves that make it
+/// safe.
+struct Scratch<'a> {
+    env: &'a Env,
+    /// Where every value went, and where a slot for a borrowed register comes from.
+    assignment: &'a mut Assignment,
+    /// The function's slots for borrowed registers, reused at every instruction.
+    spare: &'a mut Spare,
+    /// Every register the instruction has named, and then every one borrowed here as it is borrowed.
+    claimed: Claimed,
+    /// How many of each class have been borrowed at this instruction, which says which slot the
+    /// next one uses.
+    borrowed: Vec<usize>,
+    /// The moves that put a borrowed register's value away, which go in front of everything else.
+    saves: Moves,
+    /// The moves that bring it back, which go behind everything else.
+    restores: Moves,
+}
+
+impl<'a> Scratch<'a> {
+    /// Nothing borrowed yet at an instruction claiming those registers.
+    fn new(
+        env: &'a Env,
+        assignment: &'a mut Assignment,
+        spare: &'a mut Spare,
+        claimed: Claimed,
+    ) -> Self {
+        Self {
+            env,
+            assignment,
+            spare,
+            claimed,
+            borrowed: Vec::new(),
+            saves: Vec::new(),
+            restores: Vec::new(),
+        }
+    }
+
+    /// A register of the class the instruction is not using, with whatever is in it put away in
+    /// front of the instruction and brought back behind it.
+    ///
+    /// This is what a class runs out to, and it works on any machine because it asks nothing at all
+    /// of the register it takes. Whatever was in it is somewhere else for the length of one
+    /// instruction, so it does not matter whether that value is wanted afterwards, whether the
+    /// callee owes the register back, or whether an argument travels in it, which are the three
+    /// things that make a register held back hard to find. What it costs is two memory accesses at
+    /// the one instruction that wanted it and one slot of the frame, against a register taken off
+    /// every function in the program, and `rucc_codegen::pipeline` says why that trade goes this
+    /// way round on x86-64.
+    ///
+    /// The register is any of the class the instruction has not claimed for itself. A register the
+    /// allocator gave a value that is live right across the instruction is as good as an idle one,
+    /// which is the whole point of putting the contents away first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class has no register the instruction has not already claimed, which is an
+    /// instruction naming every register of a file at once.
+    fn borrow(&mut self, class: RegClass) -> PhysReg {
+        let index = usize::from(class.number());
+        let at = *self
+            .env
+            .order(class)
+            .iter()
+            .find(|&&reg| !self.claimed.names(class, reg))
+            .expect("an instruction naming every register of its class at once");
+
+        if self.borrowed.len() <= index {
+            self.borrowed.resize(index + 1, 0);
+        }
+        if self.spare.len() <= index {
+            self.spare.resize(index + 1, Vec::new());
+        }
+        let nth = self.borrowed[index];
+        if self.spare[index].len() <= nth {
+            let slot = self.assignment.take_slot(class);
+            self.spare[index].push(slot);
+        }
+        let slot = self.spare[index][nth];
+
+        self.borrowed[index] = nth + 1;
+        self.claimed.taken(class, at);
+        self.saves.push((Move::new(Place::Slot(slot), Place::Reg(at)), class));
+        self.restores.push((Move::new(Place::Reg(at), Place::Slot(slot)), class));
+        at
+    }
+
+    /// The moves either side of the instruction, once every register has been handed out.
+    fn finish(self) -> (Moves, Moves) {
+        (self.saves, self.restores)
     }
 }
 
 /// Files a move in front of the instruction or behind it, and turns it round for a value the
 /// instruction writes, since that one travels the other way.
-fn push(
-    before: &mut Vec<(Move<Place>, RegClass)>,
-    after: &mut Vec<(Move<Place>, RegClass)>,
-    operand: &Operand,
-    mov: Move<Place>,
-) {
+fn push(before: &mut Moves, after: &mut Moves, operand: &Operand, mov: Move<Place>) {
     if operand.role.is_def() {
         after.push((Move::new(mov.from, mov.to), operand.class));
     } else {
@@ -447,7 +672,7 @@ fn phys(reg: Reg) -> PhysReg {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Opcode};
-    use rucc_target::x86_64::{GPR, RAX, RDX, REGS, SYSV, XMM};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, REGS, RSI, SYSV, XMM};
 
     use super::*;
     use crate::assign::assign;
@@ -460,7 +685,7 @@ mod tests {
         Env::new().with(GPR, order, scratch)
     }
 
-    /// An environment with that many general purpose registers and one scratch after them.
+    /// An environment with that many general purpose registers and two scratch after them.
     fn narrow(count: usize) -> Env {
         Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 2])
     }
@@ -480,8 +705,8 @@ mod tests {
     fn run(func: &mut Func, env: &Env) -> Vec<String> {
         let order = Order::of(func);
         let live = Live::of(func, &order);
-        let assignment = assign(func, &order, &live, env);
-        rewrite(func, &assignment, env)
+        let mut assignment = assign(func, &order, &live, env);
+        rewrite(func, &mut assignment, env)
             .into_iter()
             .map(|edit| {
                 let at = match edit.at {
@@ -922,6 +1147,121 @@ mod tests {
                 "end of 0: slot1 = rdx",
             ]
         );
+    }
+
+    /// Three values read and none written wants a third register, which is tamnd/rucc#913.
+    ///
+    /// There is no answer here to fold back into the register an operand arrived in, so the trick
+    /// that keeps a two address instruction down to two has nothing to work on and each of the
+    /// three wants a register of its own. The instruction is the indexed store: `a[i] = v` reads a
+    /// base, an index and a value, and at `-O0`, where nothing is coalesced, all three of them are
+    /// stack slots. The rewriter aborted on it, which stopped brotli and cmocka on the first file
+    /// that held one and sqlite3 on `fts5Init`.
+    ///
+    /// The third register is borrowed rather than held back, and the borrowing is what this is
+    /// really about: it takes a register the allocator gave to a value that is live right across
+    /// the instruction, which is safe because that value is put in a slot in front of the
+    /// instruction and brought back behind it.
+    #[test]
+    fn an_instruction_reading_three_spilled_values_borrows_a_register_for_the_third() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let keeper = func.new_vreg(GPR);
+        let base = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, opcode).def(keeper, GPR).finish();
+        for reg in [base, index, value] {
+            func.build(block, opcode)
+                .operand(Operand::write(reg, GPR).with(Constraint::Stack))
+                .finish();
+        }
+        let store =
+            func.build(block, opcode).uses(base, GPR).uses(index, GPR).uses(value, GPR).finish();
+        func.build(block, opcode).uses(keeper, GPR).finish();
+
+        assert_eq!(
+            run(&mut func, &narrow(2)),
+            [
+                "after 1: slot0 = rdx",
+                "after 2: slot1 = rdx",
+                "after 3: slot2 = rdx",
+                "before 4: slot3 = rax",
+                "before 4: rdx = slot0",
+                "before 4: rsi = slot1",
+                "before 4: rax = slot2",
+                "after 4: rax = slot3",
+            ]
+        );
+        assert_eq!(operands(&func, store), ["rdx", "rsi", "rax"]);
+    }
+
+    /// A register the instruction only writes still carries a value in.
+    ///
+    /// A call names every caller saved register as one it writes, and on x86-64 the two held back for
+    /// scratch are both caller saved, so an indirect call through a pointer on the stack has nowhere
+    /// to read the pointer into unless a register named only on the way out is still free on the way
+    /// in. Reading them as spoken for stopped cmocka on its first file.
+    #[test]
+    fn a_register_the_instruction_only_writes_still_carries_a_value_in() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let target = func.new_vreg(GPR);
+        func.build(block, opcode)
+            .operand(Operand::write(target, GPR).with(Constraint::Stack))
+            .finish();
+        let call = func
+            .build(block, opcode)
+            .def(Reg::physical(RDX), GPR)
+            .def(Reg::physical(RSI), GPR)
+            .uses(target, GPR)
+            .finish();
+
+        assert_eq!(run(&mut func, &narrow(2)), ["after 0: slot0 = rdx", "before 1: rdx = slot0"]);
+        assert_eq!(operands(&func, call), ["rdx", "rsi", "rdx"]);
+    }
+
+    /// A scratch register the instruction has already named for itself is passed over.
+    ///
+    /// The move that carries a value into a register a fixed constraint asks for and the move that
+    /// fills a scratch register both go in front of the instruction, so handing the same register
+    /// out twice would lose one of the two values without anything saying so. On x86-64 the way
+    /// into this is inline assembly naming `r10` or `r11`, which are the two the file holds back.
+    #[test]
+    fn a_register_the_instruction_already_named_is_not_handed_out_as_scratch() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let wanted = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        for reg in [wanted, other] {
+            func.build(block, opcode)
+                .operand(Operand::write(reg, GPR).with(Constraint::Stack))
+                .finish();
+        }
+        let read = func
+            .build(block, opcode)
+            .operand(Operand::read(wanted, GPR).with(Constraint::Fixed(RCX)))
+            .uses(other, GPR)
+            .finish();
+
+        // `rcx` is both the first scratch register here and the one the instruction insists on, so
+        // the value it did not ask for by name starts at the second one instead.
+        assert_eq!(
+            run(&mut func, &narrow(1)),
+            [
+                "after 0: slot0 = rcx",
+                "after 1: slot1 = rcx",
+                "before 2: rcx = slot0",
+                "before 2: rdx = slot1"
+            ]
+        );
+        assert_eq!(operands(&func, read), ["rcx", "rdx"]);
     }
 
     #[test]
