@@ -5946,7 +5946,7 @@ impl<'u> Body<'_, 'u> {
     /// weaker one are their own path. The number is gcc's, which is the one `<stdatomic.h>` spells
     /// and the one libatomic's callers pass.
     fn strongest(&mut self, span: Span) -> Value {
-        self.build(span).iconst(Type::I32, SEQ_CST)
+        self.build(span).iconst(Type::int(32), SEQ_CST)
     }
 
     /// The one instruction that does the whole of an atomic read modify write, where the machine
