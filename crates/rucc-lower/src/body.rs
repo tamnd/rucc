@@ -1244,8 +1244,8 @@ impl<'u> Body<'_, 'u> {
     /// them at such a width is refused here, where the name the program wrote is in hand. Letting
     /// it through would reach the back end as an ordered access no rule covers, which is an error
     /// as well and is one that names an instruction rather than anything the program said.
-    fn narrow_enough(&mut self, info: MemInfo, span: Span) -> bool {
-        if matches!(info.size, 1 | 2 | 4 | 8) {
+    fn narrow_enough(&mut self, ty: TypeId, span: Span) -> bool {
+        if matches!(repr::size_of(self.types(), self.target(), ty), 1 | 2 | 4 | 8) {
             return true;
         }
         self.unsupported("an atomic builtin on an object this wide", span);
@@ -5213,7 +5213,7 @@ impl<'u> Body<'_, 'u> {
                 let mut info = self.access(ty);
                 info.order = order;
                 let flags = self.flags(ty);
-                if !self.narrow_enough(info, span) {
+                if !self.narrow_enough(ty, span) {
                     return None;
                 }
                 Some(self.build(span).atomic_load(into, addr, info, flags))
@@ -5225,7 +5225,7 @@ impl<'u> Body<'_, 'u> {
                 let mut info = self.access(stored);
                 info.order = order;
                 let flags = self.flags(stored);
-                if !self.narrow_enough(info, span) {
+                if !self.narrow_enough(stored, span) {
                     return None;
                 }
                 self.build(span).atomic_store(value, addr, info, flags);
@@ -5242,7 +5242,7 @@ impl<'u> Body<'_, 'u> {
                 let mut info = plain;
                 info.order = order;
                 let flags = self.flags(object);
-                if !self.narrow_enough(info, span) {
+                if !self.narrow_enough(object, span) {
                     return None;
                 }
                 let held = self.build(span).atomic_load(into, addr, info, flags);
@@ -5317,7 +5317,7 @@ impl<'u> Body<'_, 'u> {
         let mut info = self.access(object);
         info.order = order;
         let flags = self.flags(object);
-        if !self.narrow_enough(info, span) {
+        if !self.narrow_enough(object, span) {
             return None;
         }
 
@@ -5418,7 +5418,7 @@ impl<'u> Body<'_, 'u> {
         let mut info = plain;
         info.order = order;
         let flags = self.flags(stored);
-        if !self.narrow_enough(info, span) {
+        if !self.narrow_enough(stored, span) {
             return None;
         }
 
