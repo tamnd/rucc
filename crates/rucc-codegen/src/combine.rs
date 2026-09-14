@@ -31,7 +31,7 @@
 //! It is the commonest pair in the machine IR this compiler writes. Counting adjacent instructions
 //! over the corpus at `-O2`, where the first writes what the second reads, the largest family by a
 //! long way is a move into arithmetic, and an addition at eight bytes is the largest single entry
-//! in it. What the pass gets over that corpus is 928 of these at `-O2` and 892 fewer instructions
+//! in it. What the pass gets over that corpus is 928 of these at `-O2` and 920 fewer instructions
 //! once the allocator has had its say, with the difference between the two explained below.
 //!
 //! # Why no rule does it
@@ -106,6 +106,27 @@
 //! expression, so the two are next to each other or nearly, and the measurement in [`WINDOW`] is
 //! that a bound of one already finds nine tenths of what there is and that past sixteen there is
 //! nothing left to find.
+//!
+//! # Where it costs something
+//!
+//! A fold takes out exactly one instruction, so the number of folds and the number of instructions
+//! saved should be the same number, and they are not: 928 folds against 920 instructions over the
+//! corpus at `-O2`, and 1824 against 1638 over the SQLite amalgamation. The gap is the allocator.
+//!
+//! Taking the load out changes which values are live where, so the allocator makes different
+//! choices, and a few of them are worse. Two programs in the corpus come out two instructions
+//! longer at every level above `-O0`, both for the same reason: the folded addition is given a
+//! callee saved register while a caller saved one was free, which buys a push, a pop and a copy for
+//! a value that dies before the next call. That is the allocator preferring the wrong end of its
+//! own list rather than anything this pass did, and it is worth fixing where it is rather than
+//! worth not folding over.
+//!
+//! The trade is the other thing the gap is, and it is a real one rather than an accounting error.
+//! Two instructions become one and the one that is left both reads memory and computes, so it is
+//! two operations in one slot rather than one, which a machine that issues several instructions at
+//! once may not want. The measurement that settles it is run time rather than instruction count,
+//! and section 38.6's scheduler is where that argument belongs, since a scheduler is the pass that
+//! can see whether the slot was going to be used.
 //!
 //! # What it does not do yet
 //!
