@@ -1,6 +1,5 @@
 /* The atomics on an object too wide for the machine to reach in one instruction, which is the
- * four routines libatomic exports without a width in their name and the table of locks under
- * them.
+ * routines libatomic exports and the table of locks under them.
  *
  * Design: spec/12-abi-and-runtime.md section 12.8, and tamnd/rucc#1064. The front end refuses an
  * _Atomic type wider than one instruction today, spec/07-types-and-semantics.md says so and says
@@ -9,10 +8,18 @@
  * wide access into a call to one of these is its own change.
  *
  * The names and the argument order are libatomic's, because an object we produced gets linked
- * against objects GCC produced and there is one atomic object in a program. The four take the
- * size as their first argument and everything else through a pointer, which is what makes them
- * one routine each rather than one per width: the value never goes in a register, so the same
- * code serves a seventeen byte structure and a __int128.
+ * against objects GCC produced and there is one atomic object in a program. Two sets of them. The
+ * four without a width take the size as their first argument and everything else through a
+ * pointer, which is what makes them one routine each rather than one per width: the value never
+ * goes in a register, so the same code serves a seventeen byte structure and a __int128. The ones
+ * with a width in their name take the value itself and answer with one, which is only possible at
+ * a width the machine has a pair of registers for, and there is one such width above the lock free
+ * width so the set below is the sixteen byte one.
+ *
+ * Both sets are here rather than in two files because they have to share the table. A sixteen byte
+ * object can arrive at either one: a compiler is free to emit the generic call for it and gcc emits
+ * the sized call, and a program built out of two objects can have done both. Two tables would make
+ * that the hazard below with the two libraries being the two halves of this file.
  *
  * # The lock, and what it does not give
  *
@@ -205,3 +212,203 @@ _Bool generic_compare_exchange(size_t size, void *object, void *expected, void *
     drop(guard);
     return matched != 0;
 }
+
+/* The set with a width in the name, which is the sixteen byte one and is the only one of them
+ * worth having here. A width the machine reaches in one instruction never becomes a call, and the
+ * widths above sixteen have no integer type to carry a value in and go through the four above.
+ *
+ * The guard is only around the type, which the compiler has on every target in the matrix today.
+ * It is what says whether the width exists at all, and a target without it has no sixteen byte
+ * object for these to be about.
+ */
+#ifdef __SIZEOF_INT128__
+
+/* Unsigned because every operation below is over bits rather than over numbers: the six are
+ * addition, subtraction and the four bitwise ones, and the only one of those that reads a sign is
+ * a shift, which is not one of them. So the type is the one with no overflow to think about.
+ */
+typedef unsigned __int128 u128;
+
+/* The object is reached through an ordinary pointer of the type rather than a byte at a time. It
+ * is the width and the alignment of the type by construction, since nothing else is sixteen bytes
+ * and atomic, so the access is what the machine does with two registers and the lock is what makes
+ * the pair of them one access.
+ *
+ * The volatile on the parameters is libatomic's and it is dropped on the way in. A qualifier says
+ * what the compiler may do between two accesses in one thread, which is a question about the
+ * caller's code and not about these six lines, and what makes the access here indivisible is the
+ * lock either way.
+ */
+u128 __atomic_load_16(const volatile void *object, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *(const u128 *)object;
+    drop(guard);
+    return was;
+}
+
+void __atomic_store_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    (void)order;
+    take(guard);
+    *(u128 *)object = value;
+    drop(guard);
+}
+
+u128 __atomic_exchange_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = value;
+    drop(guard);
+    return was;
+}
+
+/* The expected value arrives by pointer here as it does in the generic one, and for the same
+ * reason: what was there is written back over it when the exchange did not happen.
+ *
+ * The comparison is over the value and not over the representation, which is the one place this
+ * set and the generic one differ and is not a choice either of them made. An object with a value
+ * in a register has no padding left to compare, and sixteen bytes of integer has none to begin
+ * with, so the two answer the same question by different means.
+ *
+ * A weak exchange is allowed to fail with the value it was asked for sitting in the object, and
+ * this one never does. A caller that asked for the weak one is in a loop that goes round again,
+ * so the strong answer costs it nothing and is the answer libatomic gives it too.
+ */
+_Bool __atomic_compare_exchange_16(volatile void *object, void *expected, u128 desired, _Bool weak,
+                                   int success, int failure) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 *want = (u128 *)expected;
+    u128 was;
+    int matched;
+    (void)weak;
+    (void)success;
+    (void)failure;
+    take(guard);
+    was = *at;
+    matched = was == *want;
+    if (matched) {
+        *at = desired;
+    } else {
+        *want = was;
+    }
+    drop(guard);
+    return matched != 0;
+}
+
+/* The six that read, work on what they read and write it back, and answer what was there before.
+ *
+ * The six beside them that answer the value afterwards are each one of these and then the same
+ * operation again over the answer, which is what gcc does when it lowers one of those names onto
+ * the other, and it is right here for the reason it is right there: the value afterwards is a
+ * function of the value before and the operand, both of which are in registers by then, and
+ * working it out costs an instruction rather than a second trip through the lock.
+ */
+u128 __atomic_fetch_add_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = was + value;
+    drop(guard);
+    return was;
+}
+
+u128 __atomic_fetch_sub_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = was - value;
+    drop(guard);
+    return was;
+}
+
+u128 __atomic_fetch_and_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = was & value;
+    drop(guard);
+    return was;
+}
+
+u128 __atomic_fetch_or_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = was | value;
+    drop(guard);
+    return was;
+}
+
+u128 __atomic_fetch_xor_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = was ^ value;
+    drop(guard);
+    return was;
+}
+
+/* The odd one out of the six, which is an and and then a complement rather than one operator.
+ * There is no such operator in C and there is no instruction for it on most machines either, and
+ * it is in the family because the kernel uses it to clear a bit and answer what was there.
+ */
+u128 __atomic_fetch_nand_16(volatile void *object, u128 value, int order) {
+    struct guard *guard = guard_for((const void *)object);
+    u128 *at = (u128 *)object;
+    u128 was;
+    (void)order;
+    take(guard);
+    was = *at;
+    *at = ~(was & value);
+    drop(guard);
+    return was;
+}
+
+u128 __atomic_add_fetch_16(volatile void *object, u128 value, int order) {
+    return __atomic_fetch_add_16(object, value, order) + value;
+}
+
+u128 __atomic_sub_fetch_16(volatile void *object, u128 value, int order) {
+    return __atomic_fetch_sub_16(object, value, order) - value;
+}
+
+u128 __atomic_and_fetch_16(volatile void *object, u128 value, int order) {
+    return __atomic_fetch_and_16(object, value, order) & value;
+}
+
+u128 __atomic_or_fetch_16(volatile void *object, u128 value, int order) {
+    return __atomic_fetch_or_16(object, value, order) | value;
+}
+
+u128 __atomic_xor_fetch_16(volatile void *object, u128 value, int order) {
+    return __atomic_fetch_xor_16(object, value, order) ^ value;
+}
+
+u128 __atomic_nand_fetch_16(volatile void *object, u128 value, int order) {
+    return ~(__atomic_fetch_nand_16(object, value, order) & value);
+}
+
+#endif
