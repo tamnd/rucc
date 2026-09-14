@@ -220,7 +220,11 @@ fn bounds(
 /// in the width its arithmetic was in, and on a target whose `size_t` is narrower or wider than that
 /// the call would be handed the wrong type. Zero extension rather than sign, because the number is a
 /// count of bytes and a negative one is not a thing the caller can have meant.
-fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> Value {
+///
+/// `crate::slot` uses it for the same reason about a different pair of numbers: an offset and a
+/// length that narrow a capability are written in whatever width the front end's arithmetic was in,
+/// and the runtime declares both as `size_t`.
+pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> Value {
     let ty = func[value].ty;
     if ty == word {
         return value;
