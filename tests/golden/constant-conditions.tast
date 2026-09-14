@@ -1,0 +1,119 @@
+decl #0 only_on_32_bit : void(void) function external declared
+decl #1 width : int(void) function external defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            binary == : int
+              const 8 : unsigned long
+              convert arithmetic : unsigned long
+                const 4 : int
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+            return
+              const 32 : int
+      return
+        const 64 : int
+decl #2 never : int(void) function external defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            const 0 : int
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+      if
+        cond
+          convert bool : _Bool
+            const 1 : int
+        then
+          block
+            return
+              const 1 : int
+        else
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+      return
+        const 0 : int
+decl #3 floating : int(void) function external defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            const 0x0p+0 : double
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+      if
+        cond
+          convert bool : _Bool
+            const 0x18p-4 : double
+        then
+          block
+            return
+              const 1 : int
+      return
+        const 0 : int
+decl #5 jumped_into : int(int) function external defined
+  params
+    decl #4 n : int object automatic defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            const 0 : int
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+            label #0 inside
+              expr
+                unary post ++ : int
+                  decl #4 n : int lvalue
+      if
+        cond
+          convert bool : _Bool
+            binary == : int
+              convert lvalue : int
+                decl #4 n : int lvalue
+              const 1 : int
+        then
+          goto #0 inside
+      return
+        convert lvalue : int
+          decl #4 n : int lvalue
+decl #6 maybe_there : int object external static declared
+decl #7 present : int(void) function external defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            unary & : int *
+              decl #6 maybe_there : int lvalue
+        then
+          block
+            return
+              const 1 : int
+      return
+        const 0 : int
