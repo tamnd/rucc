@@ -148,11 +148,14 @@ pub unsafe fn bounds(
 /// evidence that anything is stale and both keep the weaker reading. A null `capability` is the
 /// same answer for the same reason.
 ///
-/// Null is what every call gets today, because nothing in the compiler has a capability in hand at
-/// a check to hand over. The export below says why and tamnd/rucc#1241 is where the rest of it is
-/// tracked. So this half is reachable from the tests and from nowhere else yet, which is on purpose:
-/// the question it answers is settled and testable on its own, and what it is waiting for is a
-/// producer that does not cost a plane walk per access.
+/// Generated code fills it in now. `rucc_safety::origin` takes one capability per pointer where the
+/// pointer is made, `rucc_safety::lower` hands it to the call, and `rucc_safety::slot` gives it four
+/// words of frame, so what arrives here is the capability of the pointer the access went through
+/// rather than a null. Which producer filled it is what decides whether the strong question gets
+/// asked: a pointer an allocator returned carries the version the allocator wrote, and a pointer
+/// nothing in the unit could trace is recovered from the plane and keeps the weaker reading, which
+/// is counted. The remaining boxes of tamnd/rucc#1241 are about moving pointers out of the second
+/// group and into the first.
 ///
 /// When the freeing was another thread's and nothing orders it against this access, the report says
 /// so and names both of them. That is document 03's C4, the use after free a race produced rather
@@ -747,6 +750,7 @@ pub mod exports {
     use core::ffi::c_void;
 
     use crate::fail::Descriptor;
+    use crate::layout::Cap;
 
     /// # Safety
     ///
@@ -765,18 +769,24 @@ pub mod exports {
 
     /// # Safety
     ///
-    /// As [`__rucc_check_bounds`].
+    /// As [`__rucc_check_bounds`], and `capability` is null or the address of a capability the same
+    /// build reserved a slot for and filled.
     ///
-    /// Two arguments rather than three, which is what makes this the one export that does not pass
-    /// on everything the function behind it takes. The capability is null here because no generated
-    /// code has one in hand to give: `rucc_safety::lower` throws the check's capability operand away
-    /// and `rucc_safety::slot` then takes the `cap_of` that fed it out as dead. So this asks the
-    /// weaker of the two questions [`super::live`] answers, which is the one it has always asked,
-    /// and the argument arrives when there is something to put in it. tamnd/rucc#1241.
+    /// The capability comes first because that is the order tamnd/rucc#1241 wrote the call in, and
+    /// it is the one argument here that is not about the access. It arrives filled now:
+    /// `rucc_safety::origin` takes a capability where each pointer is made, `rucc_safety::lower`
+    /// hands it to this call rather than dropping it, and `rucc_safety::slot` gives it four words of
+    /// frame and passes their address. Null is still a thing this takes, since a build whose
+    /// producer could not say anything about a pointer gets the bottom capability, and the weaker
+    /// question is the answer for one of those.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn __rucc_check_live(addr: *const c_void, descriptor: *const Descriptor) {
+    pub unsafe extern "C" fn __rucc_check_live(
+        capability: *const Cap,
+        addr: *const c_void,
+        descriptor: *const Descriptor,
+    ) {
         // SAFETY: as above, and a null capability is one of the two this takes.
-        unsafe { super::live(addr, core::ptr::null(), descriptor) };
+        unsafe { super::live(addr, capability, descriptor) };
     }
 
     /// # Safety

@@ -238,14 +238,26 @@ pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> V
     func[made].results().next().expect("a cast created with one result has one")
 }
 
-/// `check_live` becomes `__rucc_check_live(pointer, descriptor)`.
+/// `check_live` becomes `__rucc_check_live(capability, pointer, descriptor)`.
+///
+/// The first operand is the one this used to throw away, and handing it over is the whole of what
+/// turns the lock and key rule of `spec/safe-memory/08-temporal-safety.md` section 8.3 on in
+/// generated code. Without it the runtime asks whether anybody owns the address, which misses every
+/// access through a stale pointer to a block the allocator has since handed out again. With it the
+/// runtime compares the version the capability was taken at against the version the plane holds,
+/// and that is the access a busy program's use after free is.
+///
+/// It is a `*const Cap` by the time the back end sees it, because [`crate::slot`] gives a capability
+/// four words of frame and passes the address of them, which is what the runtime's own declaration
+/// of every entry point that takes one asks for.
 fn live(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
-    let [_capability, pointer] = func[func[inst].args] else { return };
+    let [capability, pointer] = func[func[inst].args] else { return };
     // No size. The check carries no payload, because whether anybody owns an address is a question
     // about the address rather than about how many bytes are read through it.
     let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
-    call(func, names, inst, "__rucc_check_live", &[Type::PTR, Type::PTR], &[], &[pointer, desc]);
+    let params = &[Type::PTR; 3];
+    call(func, names, inst, "__rucc_check_live", params, &[], &[capability, pointer, desc]);
 }
 
 /// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, descriptor)`.
@@ -1202,21 +1214,23 @@ mod tests {
             format!(
                 "func @read(ptr) -> i32, linkage(external) {{\n\
                  block0(%0: ptr):\n    \
-                 %1 = global_addr @__rucc_safety_desc_0\n    \
-                 %2 = iconst.i64 4\n    \
+                 %1 = alloca, size 32, align 8\n    \
+                 call @__rucc_cap_recover(%1, %0) : (ptr, ptr)\n    \
+                 %2 = global_addr @__rucc_safety_desc_0\n    \
                  %3 = iconst.i64 4\n    \
-                 call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n    \
-                 %4 = global_addr @__rucc_safety_desc_1\n    \
-                 call @__rucc_check_live(%0, %4) : (ptr, ptr)\n    \
-                 %5 = global_addr @__rucc_safety_desc_2\n    \
-                 %6 = iconst.i64 4\n    \
-                 %7 = iconst.i32 {number}\n    \
-                 call @__rucc_check_type(%0, %6, %7, %5) : (ptr, i64, i32, ptr)\n    \
-                 %8 = global_addr @__rucc_safety_desc_3\n    \
-                 %9 = iconst.i64 4\n    \
-                 call @__rucc_check_init(%0, %9, %8) : (ptr, i64, ptr)\n    \
-                 %10 = load.i32 %0, size 4, align 4, tbaa !1\n    \
-                 return %10\n\
+                 %4 = iconst.i64 4\n    \
+                 call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n    \
+                 %5 = global_addr @__rucc_safety_desc_1\n    \
+                 call @__rucc_check_live(%1, %0, %5) : (ptr, ptr, ptr)\n    \
+                 %6 = global_addr @__rucc_safety_desc_2\n    \
+                 %7 = iconst.i64 4\n    \
+                 %8 = iconst.i32 {number}\n    \
+                 call @__rucc_check_type(%0, %7, %8, %6) : (ptr, i64, i32, ptr)\n    \
+                 %9 = global_addr @__rucc_safety_desc_3\n    \
+                 %10 = iconst.i64 4\n    \
+                 call @__rucc_check_init(%0, %10, %9) : (ptr, i64, ptr)\n    \
+                 %11 = load.i32 %0, size 4, align 4, tbaa !1\n    \
+                 return %11\n\
                  }}\n"
             )
         );
@@ -1264,10 +1278,10 @@ mod tests {
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
         assert!(
-            printed.contains("call @__rucc_meta_type(%0, %6, %7) : (ptr, i64, i32)\n"),
+            printed.contains("call @__rucc_meta_type(%0, %7, %8) : (ptr, i64, i32)\n"),
             "{printed}"
         );
-        assert!(printed.contains("call @__rucc_meta_init(%0, %8) : (ptr, i64)\n"), "{printed}");
+        assert!(printed.contains("call @__rucc_meta_init(%0, %9) : (ptr, i64)\n"), "{printed}");
 
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");
@@ -1378,10 +1392,10 @@ mod tests {
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
-        assert!(printed.contains("%2 = iconst.i64 4\n"), "{printed}");
-        assert!(printed.contains("%3 = iconst.i64 1\n"), "{printed}");
+        assert!(printed.contains("%3 = iconst.i64 4\n"), "{printed}");
+        assert!(printed.contains("%4 = iconst.i64 1\n"), "{printed}");
         assert!(
-            printed.contains("call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n"),
+            printed.contains("call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n"),
             "{printed}"
         );
     }
@@ -1397,17 +1411,19 @@ mod tests {
             print_func(&module, &module[id], &names),
             "func @read(ptr) -> i32, linkage(external) {\n\
              block0(%0: ptr):\n    \
-             %1 = global_addr @__rucc_safety_desc_0\n    \
-             %2 = iconst.i64 4\n    \
+             %1 = alloca, size 32, align 8\n    \
+             call @__rucc_cap_recover(%1, %0) : (ptr, ptr)\n    \
+             %2 = global_addr @__rucc_safety_desc_0\n    \
              %3 = iconst.i64 4\n    \
-             call @__rucc_check_bounds(%0, %2, %3, %1) : (ptr, i64, i64, ptr)\n    \
-             %4 = global_addr @__rucc_safety_desc_1\n    \
-             call @__rucc_check_live(%0, %4) : (ptr, ptr)\n    \
-             %5 = global_addr @__rucc_safety_desc_2\n    \
-             %6 = iconst.i64 4\n    \
-             call @__rucc_check_init(%0, %6, %5) : (ptr, i64, ptr)\n    \
-             %7 = load.i32 %0, size 4, align 4\n    \
-             return %7\n\
+             %4 = iconst.i64 4\n    \
+             call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n    \
+             %5 = global_addr @__rucc_safety_desc_1\n    \
+             call @__rucc_check_live(%1, %0, %5) : (ptr, ptr, ptr)\n    \
+             %6 = global_addr @__rucc_safety_desc_2\n    \
+             %7 = iconst.i64 4\n    \
+             call @__rucc_check_init(%0, %7, %6) : (ptr, i64, ptr)\n    \
+             %8 = load.i32 %0, size 4, align 4\n    \
+             return %8\n\
              }\n"
         );
     }
