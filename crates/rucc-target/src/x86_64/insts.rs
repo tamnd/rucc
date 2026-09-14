@@ -797,21 +797,46 @@ impl Form {
         )
     }
 
-    /// Whether an instruction of this form writes to the memory it names.
+    /// Whether an instruction of this form reads or writes memory.
     ///
-    /// Asked by a pass that wants to move a read of memory past an instruction, which is safe
-    /// while nothing in between could have changed what is there. A form that only reads is safe
-    /// to move a read past whatever it reads, since neither of them writes anything, and a form
-    /// that writes is not whatever its address says: knowing two addresses are different is an
-    /// analysis nothing here has and the answer to not having it is to stop.
+    /// Asked by a pass that wants to move a memory access from where it is to somewhere later,
+    /// which is safe while nothing it passes touches memory at all. Reading and writing are one
+    /// question here rather than two, because moving a read past a read is still a reordering of
+    /// two accesses, and the machine IR does not say which accesses the program insisted on: a
+    /// `volatile` read and an ordinary one are the same instruction with the same operands by the
+    /// time anything here can see them.
     ///
-    /// A call is not on this list and is not safe to move a read past either. It is left off
-    /// because what a call does to memory is not something the instruction says, which is the same
-    /// reason [`crate::MachineInsts::calls`] exists, and a pass asking this question has to ask
-    /// that one too.
+    /// [`Lea`] is not on the list and is the reason the question is not simply whether the form has
+    /// an addressing mode. It names an address and computes it and reads nothing there, which is
+    /// the whole of what it is for.
+    ///
+    /// [`Push`], [`Pop`], [`Ret`] and [`Call`] are on it and have no addressing mode at all, which
+    /// is the reason from the other side. What they touch is the stack and the instruction does not
+    /// spell it out.
+    ///
+    /// A call answers `true` here and is still not enough on its own. What a call does to memory is
+    /// not something the instruction says, which is why [`crate::MachineInsts::calls`] exists as a
+    /// separate question, and a pass that has to know what survived a call has to ask that one too.
     #[must_use]
-    pub fn writes_mem(self) -> bool {
-        matches!(self, Store | StoreVec | PopX87 | CtrlX87 | CmpXchg | Rmw | Probe)
+    pub fn touches_mem(self) -> bool {
+        matches!(
+            self,
+            Load | AluRm
+                | Store
+                | LoadVec
+                | StoreVec
+                | PushX87
+                | PopX87
+                | CtrlX87
+                | CmpXchg
+                | Rmw
+                | Probe
+                | Prefetch
+                | Push
+                | Pop
+                | Ret
+                | Call
+        )
     }
 }
 

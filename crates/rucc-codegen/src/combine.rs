@@ -46,17 +46,25 @@
 //! # When the load may move
 //!
 //! The load stops being where it was and starts being part of an instruction further down the
-//! block, so everything between the two has to be something the load can pass. Three things are
-//! not.
+//! block, so everything between the two has to be something the load can pass. Two things are not.
 //!
-//! Anything that writes memory. Whether it writes the bytes this load reads is a question about
-//! two addresses, and telling two addresses apart is an analysis nothing below selection has. So
-//! the walk below stops at a store rather than guessing, and [`MachineInsts::writes_mem`] is the
-//! target's answer to which instructions those are.
+//! Anything that touches memory, whether it reads or writes. A write is the obvious half: whether
+//! it writes the bytes this load reads is a question about two addresses, and telling two addresses
+//! apart is an analysis nothing below selection has, so the walk below stops at a store rather than
+//! guessing. [`MachineInsts::touches_mem`] is the target's answer and [`MachineInsts::calls`] is the
+//! rest of it, since what a call does to memory is not in the instruction at all.
 //!
-//! A call. What a call does to memory is not in the instruction, which is why it is a separate
-//! question to the target from the one above, and the answer to a call is the same as the answer
-//! to a store and arrived at faster.
+//! A read is the half that is easy to argue away and is the one that matters. Moving a read past a
+//! read changes the order two accesses happen in, and the machine IR does not say which accesses
+//! the program insisted on: a `volatile` read and an ordinary one are the same instruction with the
+//! same operands here, as [`crate::copies`] says at more length about the same problem. So
+//! `volatile int a, b; return b - a;` is two loads and a subtract, and folding the first of them
+//! into the subtract would read `b` before `a` when the program said otherwise. Stopping at any
+//! access at all is what rules that out, and it costs almost nothing: the load that the arithmetic
+//! reads is nearly always the last access before it, so it is still the one that folds.
+//!
+//! What follows from that is the shape of the walk. There is one load in hand rather than a list of
+//! them, and it is always the last memory access there was.
 //!
 //! Anything that writes a register the address reads. Machine IR is in SSA form until the
 //! allocator has run, so a virtual register cannot be written twice, but the stack pointer and the
@@ -218,7 +226,10 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "imul_rr_64", into: "imul_rm_64", load: "mov_rm_64", commutes: true },
 ];
 
-/// A load this block has passed that could still end up inside something.
+/// The load this block has passed that could still end up inside something.
+///
+/// One rather than a list of them, because anything that touches memory ends the one being carried,
+/// so the one being carried is always the last memory access there was.
 #[derive(Debug, Clone, Copy)]
 struct Waiting {
     /// The load.
@@ -250,40 +261,40 @@ pub fn loads(
     let mut reads = Reads::of(func);
     let mut done = 0;
     for block in func.blocks().collect::<Vec<_>>() {
-        let mut waiting: Vec<Waiting> = Vec::new();
+        let mut waiting: Option<Waiting> = None;
         for (at, inst) in func.insts(block).collect::<Vec<_>>().into_iter().enumerate() {
             let name = names.resolve(func[inst].opcode.name()).to_owned();
             let bare = machine.bare(&name).to_owned();
-            // Asked before the rewrite below rather than after it, which is the same answer: an
-            // instruction that reads memory where it used to read a register neither becomes a call
-            // nor starts writing anything, and an instruction this target describes is one it still
-            // describes under the other name in the same row of the table.
-            let stops = machine.calls(&name) || !machine.has(&name) || machine.writes_mem(&name);
-            if let Some((load, plan)) = joined(func, &reads, &waiting, machine, names, inst, &bare)
-            {
-                let mut set = Changes::new();
-                set.rewrite(inst, plan);
-                set.remove(load);
-                if set.commit(func, &mut reads, names, machine).is_ok() {
-                    pending.moved(load, &[inst]);
-                    waiting.retain(|carried| carried.inst != load);
-                    done += 1;
+            // Asked before the rewrite below rather than after it, because the rewrite turns an
+            // instruction that touched no memory into one that does, and asking afterwards would
+            // throw away the load that had just gone into it over the load that had just gone into
+            // it. Nothing else about the answer moves: the other end of a row of the fold table is
+            // arithmetic this target describes and is not a call.
+            let barrier = machine.calls(&name) || !machine.has(&name) || machine.touches_mem(&name);
+            if let Some(carried) = waiting {
+                if let Some(plan) = joined(func, &reads, carried, machine, names, inst, &bare) {
+                    let mut set = Changes::new();
+                    set.rewrite(inst, plan);
+                    set.remove(carried.inst);
+                    if set.commit(func, &mut reads, names, machine).is_ok() {
+                        pending.moved(carried.inst, &[inst]);
+                        waiting = None;
+                        done += 1;
+                    }
                 }
             }
-            if stops {
-                waiting.clear();
-                continue;
+            if barrier {
+                waiting = None;
             }
-            let written: Vec<Reg> = func[func[inst].operands]
-                .iter()
-                .filter(|operand| operand.role.is_def())
-                .map(|operand| operand.reg)
-                .collect();
-            waiting.retain(|carried| at - carried.at < WINDOW && !touched(func, carried, &written));
+            if let Some(carried) = waiting {
+                if at - carried.at >= WINDOW || writes_what_it_reads(func, inst, &carried) {
+                    waiting = None;
+                }
+            }
             if let Some(load) = FOLDS.iter().find(|fold| fold.load == bare).map(|fold| fold.load) {
                 let operands = &func[func[inst].operands];
                 if let Some(first) = operands.first().filter(|operand| operand.role.is_def()) {
-                    waiting.push(Waiting { inst, reg: first.reg, load, at });
+                    waiting = Some(Waiting { inst, reg: first.reg, load, at });
                 }
             }
         }
@@ -291,39 +302,50 @@ pub fn loads(
     done
 }
 
-/// Whether this instruction writes a register that load needs left alone.
+/// Whether this instruction writes a register the carried load needs left alone.
 ///
 /// The registers its address reads, and the register it wrote. The second is there for the same
 /// reason the first is: a virtual register cannot be written twice while the IR is in SSA form, and
 /// these are the physical ones a function has before the allocator runs.
-fn touched(func: &Func, carried: &Waiting, written: &[Reg]) -> bool {
+fn writes_what_it_reads(func: &Func, inst: Inst, carried: &Waiting) -> bool {
+    let written: Vec<Reg> = func[func[inst].operands]
+        .iter()
+        .filter(|operand| operand.role.is_def())
+        .map(|operand| operand.reg)
+        .collect();
     func[func[carried.inst].operands].iter().any(|operand| written.contains(&operand.reg))
 }
 
-/// The load that can move into this instruction and what the instruction becomes, or `None`.
+/// What this instruction becomes with the carried load inside it, or `None`.
 ///
 /// Nothing here changes anything. What comes back is a proposal, and whether the target has the
 /// instruction it describes is [`Changes`]'s answer rather than this one.
 fn joined(
     func: &Func,
     reads: &Reads,
-    waiting: &[Waiting],
+    carried: Waiting,
     machine: &MachineInsts,
     names: &mut Interner,
     inst: Inst,
     bare: &str,
-) -> Option<(Inst, Plan)> {
+) -> Option<Plan> {
     let fold = FOLDS.iter().find(|fold| fold.from == bare)?;
+    if carried.load != fold.load || reads.count(carried.reg) != 1 {
+        return None;
+    }
     let operands = func[func[inst].operands].to_vec();
     let [answer, first, second] = operands[..] else { return None };
     // The second source is the one the memory operand replaces, because the answer is tied to the
     // first. Where the load feeds the first source instead and the operation commutes, the two are
     // swapped, which leaves the instruction computing what it computed.
-    let (load, kept) = match found(reads, waiting, fold, second.reg) {
-        Some(load) => (load, first),
-        None if fold.commutes => (found(reads, waiting, fold, first.reg)?, second),
-        None => return None,
+    let kept = if second.reg == carried.reg {
+        first
+    } else if fold.commutes && first.reg == carried.reg {
+        second
+    } else {
+        return None;
     };
+    let load = carried.inst;
     let address = func[func[load].operands][1..].to_vec();
     let mut amode = func[func[load].mem?];
     // The registers an address names are operands behind the ones the instruction writes down, and
@@ -332,25 +354,13 @@ fn joined(
     amode.base = amode.base.map(|at| at + 1);
     amode.index = amode.index.map(|at| at + 1);
     let into = names.intern(&format!("{}{}", machine.prefix, fold.into));
-    Some((
-        load,
-        Plan {
-            opcode: Opcode::new(into),
-            operands: [answer, kept].into_iter().chain(address).collect(),
-            imm: None,
-            amode: Some(amode),
-            symbol: func[load].symbol,
-        },
-    ))
-}
-
-/// The load in the window that wrote that register and is read by nothing else.
-fn found(reads: &Reads, waiting: &[Waiting], fold: &Fold, reg: Reg) -> Option<Inst> {
-    waiting
-        .iter()
-        .find(|carried| carried.reg == reg && carried.load == fold.load)
-        .filter(|carried| reads.count(carried.reg) == 1)
-        .map(|carried| carried.inst)
+    Some(Plan {
+        opcode: Opcode::new(into),
+        operands: [answer, kept].into_iter().chain(address).collect(),
+        imm: None,
+        amode: Some(amode),
+        symbol: func[load].symbol,
+    })
 }
 
 #[cfg(test)]
@@ -517,9 +527,13 @@ mod tests {
         );
     }
 
-    /// Another load between the two, which writes nothing and is passed.
+    /// Another load between the two, which writes nothing and is still not passed.
+    ///
+    /// This is the one that would be wrong if the walk asked only about writes. Where both reads
+    /// are `volatile` the program said which of them happens first, and nothing here can tell that
+    /// program from the one that did not say it, so neither may be reordered.
     #[test]
-    fn a_load_with_another_load_between_it_and_its_reader_folds() {
+    fn a_load_with_another_load_between_it_and_its_reader_stays_a_load() {
         let (mut names, mut func, block) = empty();
         let base = func.new_vreg(GPR);
         let other = func.new_vreg(GPR);
@@ -527,8 +541,29 @@ mod tests {
         load(&mut func, &mut names, block, other);
         alu(&mut func, &mut names, block, "add_rr_64", other, word);
 
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(
+            shape(&func, &names, block),
+            ["x64.mov_rm_64", "x64.mov_rm_64", "x64.add_rr_64"]
+        );
+    }
+
+    /// The second of two loads, read by arithmetic that reads the first as well. Nothing moves past
+    /// anything, which is what makes this one the shape the pass is allowed to take.
+    #[test]
+    fn the_later_of_two_loads_is_the_one_that_folds() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let first = load(&mut func, &mut names, block, base);
+        let second = load(&mut func, &mut names, block, other);
+        alu(&mut func, &mut names, block, "add_rr_64", first, second);
+
         assert_eq!(combine(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64", "x64.add_rm_64"]);
+        let addition = func.insts(block).nth(1).expect("the addition");
+        assert_eq!(func[func[addition].operands][1].reg, first, "the earlier load is still read");
+        assert_eq!(func[func[addition].operands][2].reg, other, "and the later one is the address");
     }
 
     /// A call between the two. What a call does to memory is not in the instruction, so it is the

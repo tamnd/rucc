@@ -48,17 +48,24 @@ pub struct MachineInsts {
     pub takes_imm: fn(&str) -> bool,
     /// Whether an instruction of that name carries an addressing mode.
     pub takes_mem: fn(&str) -> bool,
-    /// Whether an instruction of that name writes to the memory it names.
+    /// Whether an instruction of that name reads or writes memory.
     ///
-    /// Asked by a pass moving a read of memory from where it is to somewhere later, which is safe
-    /// while nothing it passes could have written what it is about to read. The answer is about
-    /// the instruction rather than about the address, because whether two addresses are the same
-    /// place is a question nothing below selection has an analysis for.
+    /// Asked by a pass moving a memory access from where it is to somewhere later, which is safe
+    /// while nothing it passes touches memory at all. Reading and writing are one question rather
+    /// than two, because moving a read past a read is still a reordering of two accesses, and
+    /// machine IR does not say which accesses the program insisted on: a `volatile` read and an
+    /// ordinary one are the same instruction with the same operands by the time a pass here sees
+    /// them.
     ///
-    /// A call answers `false` here and is not safe to move a read past. What a call does to memory
-    /// is not in the instruction at all, which is why [`Self::calls`] is a separate question and
-    /// why a pass asking this one has to ask that one as well.
-    pub writes_mem: fn(&str) -> bool,
+    /// It is a coarser answer than an alias analysis would give and a target does not have to know
+    /// anything it does not already know to give it. Whether two addresses are the same place is a
+    /// question nothing below selection has an analysis for, so the answer to arriving at one is to
+    /// stop rather than to guess.
+    ///
+    /// A call answers `true` here and that is still not the whole answer about a call. What a call
+    /// does to memory is not in the instruction at all, which is why [`Self::calls`] is a separate
+    /// question and why a pass that has to know what survived one has to ask that as well.
+    pub touches_mem: fn(&str) -> bool,
     /// Whether an instruction of that name is a call.
     ///
     /// Asked by a pass that has to know which registers an instruction leaves alone, because a
@@ -97,10 +104,10 @@ impl MachineInsts {
         (self.calls)(self.bare(name))
     }
 
-    /// Whether an instruction of that name writes to memory on this target.
+    /// Whether an instruction of that name reads or writes memory on this target.
     #[must_use]
-    pub fn writes_mem(&self, name: &str) -> bool {
-        (self.writes_mem)(self.bare(name))
+    pub fn touches_mem(&self, name: &str) -> bool {
+        (self.touches_mem)(self.bare(name))
     }
 
     /// Whether this target multiplies an index by that.
