@@ -43,6 +43,7 @@ use rucc_ir::{Extra, Inst, Module, Opcode};
 
 use crate::Counts;
 use crate::boundary::Sites;
+use crate::handover::{self, Frame};
 use crate::wrap::INTERPOSED;
 
 /// The version of the schema the JSON below is written in.
@@ -76,7 +77,9 @@ impl Class {
 /// Document 05 section 5.3 charges every instrumented call one TLS access and up to eight
 /// capability stores, and says the charge goes away when the callee is in this module and has no
 /// checks left. The four buckets below are that rule read off a call site: one says it fires, and
-/// the other three are the three reasons it does not.
+/// the other three are the three reasons it does not. [`crate::handover`] is the rule itself, and
+/// it is there rather than here because the pass that acts on it has to sort a call the same way
+/// this count does.
 ///
 /// Every call in the unit lands in exactly one of the five numbers, so they add up and a reader
 /// can see the denominator instead of taking a percentage on faith. That includes calls to this
@@ -101,6 +104,18 @@ impl Frames {
     #[must_use]
     pub const fn wanted(self) -> usize {
         self.elided + self.checked + self.outside + self.unknown
+    }
+
+    /// Counts one call site.
+    fn tally(&mut self, frame: Frame) {
+        let bucket = match frame {
+            Frame::Elided => &mut self.elided,
+            Frame::Checked => &mut self.checked,
+            Frame::Outside => &mut self.outside,
+            Frame::Unknown => &mut self.unknown,
+            Frame::Pointerless => &mut self.pointerless,
+        };
+        *bucket += 1;
     }
 }
 
@@ -267,13 +282,8 @@ pub fn summarize(
     };
 
     // What every function this unit defines still has to check, which is what decides whether a
-    // call into it wants a frame. It is its own pass because a callee is allowed to be defined
-    // after its caller and the answer has to be the same either way.
-    let left: HashMap<Symbol, usize> = module
-        .funcs()
-        .filter(|&id| !module[id].is_declaration())
-        .map(|id| (module[id].name, checks_left(&module[id])))
-        .collect();
+    // call into it wants a frame.
+    let left = handover::remaining(module);
     // The wrappers are ours and are not the boundary this build failed to model, so they do not
     // belong on the unwrapped list even though every one of them is an undefined symbol here.
     let mut external: Vec<Symbol> = Vec::new();
@@ -336,27 +346,8 @@ pub fn summarize(
                         None if !indirect => summary.indirect += 1,
                         None => {}
                     }
-                    // The first operand of an indirect call is the address it jumps to, which is
-                    // a pointer the callee never receives, so it is not one the frame would hold.
-                    let skip = usize::from(indirect);
-                    let hands_over = func[func[inst].args]
-                        .iter()
-                        .skip(skip)
-                        .any(|&value| func[value].ty.is_ptr());
-                    if !hands_over {
-                        summary.frames.pointerless += 1;
-                    } else {
-                        match callee.and_then(|callee| left.get(&callee)) {
-                            None => {
-                                if indirect || callee.is_none() {
-                                    summary.frames.unknown += 1;
-                                } else {
-                                    summary.frames.outside += 1;
-                                }
-                            }
-                            Some(0) => summary.frames.elided += 1,
-                            Some(_) => summary.frames.checked += 1,
-                        }
+                    if let Some(frame) = handover::wanted(func, inst, &left) {
+                        summary.frames.tally(frame);
                     }
                 }
                 _ => {}
@@ -373,32 +364,6 @@ pub fn summarize(
     // a reason is what a reader looks one up by.
     summary.regions.sort_unstable();
     summary
-}
-
-/// How many checks of any class one function still has standing.
-///
-/// A function with none of them never reads the frame its callers set up, which is the whole
-/// condition document 05 section 5.3 puts on dropping it.
-///
-/// The `restrict` checks are not among them, because what one reads is the scope its own block
-/// opened rather than a capability somebody handed over. A function whose only checks are those
-/// still wants no frame.
-fn checks_left(func: &rucc_ir::Func) -> usize {
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
-    insts
-        .into_iter()
-        .filter(|&inst| {
-            matches!(
-                func[inst].opcode,
-                Opcode::CheckBounds
-                    | Opcode::CheckLive
-                    | Opcode::CheckDeriv
-                    | Opcode::CheckType
-                    | Opcode::CheckInit
-            )
-        })
-        .count()
 }
 
 /// Whether a name is one this compiler put there rather than one the program called.
