@@ -1,0 +1,143 @@
+decl #1 release : void(void **) function external declared
+decl #2 decide : int(void) function external declared
+decl #4 note : void(int) function external declared
+decl #5 at_the_end : void(void) function external defined
+  body
+    block
+      decls
+        decl #6 first : void * object automatic defined cleanup release
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      decls
+        decl #7 second : void * object automatic defined cleanup release
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int)
+            decl #4 note : void(int) function
+          const 1 : int
+decl #8 on_return : int(void) function external defined
+  body
+    block
+      decls
+        decl #9 held : void * object automatic defined cleanup release
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      if
+        cond
+          convert bool : _Bool
+            call : int
+              convert function-decay : int (*)(void)
+                decl #2 decide : int(void) function
+        then
+          block
+            return
+              const 1 : int
+      return
+        const 0 : int
+decl #10 nested : void(void) function external defined
+  body
+    block
+      decls
+        decl #11 outer : void * object automatic defined cleanup release
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      block
+        decls
+          decl #12 inner : void * object automatic defined cleanup release
+            init
+              +0
+                convert null-pointer : void *
+                  const 0 : int
+        expr
+          call : void
+            convert function-decay : void (*)(int)
+              decl #4 note : void(int) function
+            const 2 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int)
+            decl #4 note : void(int) function
+          const 3 : int
+decl #13 in_a_loop : void(void) function external defined
+  body
+    block
+      while
+        cond
+          convert bool : _Bool
+            call : int
+              convert function-decay : int (*)(void)
+                decl #2 decide : int(void) function
+        body
+          block
+            decls
+              decl #14 each : void * object automatic defined cleanup release
+                init
+                  +0
+                    convert null-pointer : void *
+                      const 0 : int
+            if
+              cond
+                convert bool : _Bool
+                  call : int
+                    convert function-decay : int (*)(void)
+                      decl #2 decide : int(void) function
+              then
+                block
+                  continue
+            if
+              cond
+                convert bool : _Bool
+                  call : int
+                    convert function-decay : int (*)(void)
+                      decl #2 decide : int(void) function
+              then
+                block
+                  break
+            expr
+              call : void
+                convert function-decay : void (*)(int)
+                  decl #4 note : void(int) function
+                const 4 : int
+decl #15 jumped_out : int(void) function external defined
+  body
+    block
+      decls
+        decl #16 held : void * object automatic defined cleanup release
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      block
+        decls
+          decl #17 inner : void * object automatic defined cleanup release
+            init
+              +0
+                convert null-pointer : void *
+                  const 0 : int
+        if
+          cond
+            convert bool : _Bool
+              call : int
+                convert function-decay : int (*)(void)
+                  decl #2 decide : int(void) function
+          then
+            block
+              goto #0 done
+        expr
+          call : void
+            convert function-decay : void (*)(int)
+              decl #4 note : void(int) function
+            const 5 : int
+      label #0 done
+        return
+          const 0 : int
