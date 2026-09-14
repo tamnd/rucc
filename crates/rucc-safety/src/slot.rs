@@ -64,6 +64,15 @@
 //! instance its object is in, and a range that is not inside the one it was taken from comes back
 //! permitting nothing.
 //!
+//! And `cap_recover`, which is the fifth box and the last of the producers that has a shape of its
+//! own. It is the plane walk, which is the expensive answer the other four exist to avoid, and it is
+//! also the only answer that is always available, so it is what a pointer whose provenance nothing
+//! kept falls back to. Document 05 section 5.3 is where most of those pointers come from: an
+//! instrumented function called from uninstrumented code finds no frame, and every pointer argument
+//! it was handed is recovered here and counted. The lowering is the same two arguments `cap_of` over
+//! a fresh allocation has, because `rucc_safe_rt::recover` declares the pair as one shape, and the
+//! difference between them is entirely behind the name.
+//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -138,6 +147,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
             (Opcode::CapOf, Some(address)) => allocated(func, names, inst, address),
             (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
             (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
+            (Opcode::CapRecover, Some(address)) => recovered(func, names, inst, address),
             (Opcode::CapStore, _) => stored(func, names, inst),
             _ => {}
         }
@@ -187,7 +197,10 @@ fn prune(func: &mut Func) {
 fn placeable(func: &Func) -> bool {
     for inst in walk(func) {
         let opcode = func[inst].opcode;
-        let placed = matches!(opcode, Opcode::CapNull | Opcode::CapLoad | Opcode::CapNarrow);
+        let placed = matches!(
+            opcode,
+            Opcode::CapNull | Opcode::CapLoad | Opcode::CapNarrow | Opcode::CapRecover
+        );
         if opcode.makes_capability() && !placed && fresh(func, inst).is_none() {
             return false;
         }
@@ -304,6 +317,29 @@ fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) 
     let params = &[Type::PTR; 2];
     let args = &[address, base];
     let data = crate::lower::calling(func, names, "__rucc_cap_made", params, &[], args);
+    let made = func.create_inst(data, &[], func.span(inst));
+    func.insert_before(made, inst);
+    func.remove_inst(inst);
+}
+
+/// `cap_recover` becomes `__rucc_cap_recover(slot, addr)`.
+///
+/// The same two arguments [`allocated`] has and deliberately so, since the runtime declares the pair
+/// as one shape and the only difference between them is which name the pass picks. What differs is
+/// behind the name. `__rucc_cap_made` is a subtract and a load off a header the allocator wrote, and
+/// this one is the plane walk, which is linear in the size of the object and gives back a capability
+/// marked as recovered so that the summary can count it.
+///
+/// So this is the expensive producer and it is also the only one that always has an answer, which is
+/// why it is the one every other box falls back to. Nothing here decides when it is reached. That is
+/// the front end's: a pointer whose provenance the compiler still holds gets one of the cheap
+/// producers, and this is what is left for an address that arrived from outside the instrumented
+/// world. Where the placing is concerned it is the plainest of the five, one pointer in and one slot
+/// out, with neither end of it reading a capability.
+fn recovered(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
+    let &[addr] = &func[func[inst].args] else { return };
+    let args = &[address, addr];
+    let data = crate::lower::calling(func, names, "__rucc_cap_recover", &[Type::PTR; 2], &[], args);
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     func.remove_inst(inst);
@@ -688,6 +724,82 @@ mod tests {
 
         let unit = module(&mut names);
         let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_narrow"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_recovered_capability_is_one_call_with_the_address_it_was_asked_about() {
+        let mut names = Interner::new();
+        let mut func = built(&mut names, |b, _, at| {
+            let args = b.func().push_values(&[at]);
+            let got = b.value(InstData { args, ..InstData::new(Opcode::CapRecover) }, Type::CAP);
+            let args = b.func().push_values(&[got, at, at, got]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        // One slot and nothing writing its words, since the walk is the runtime's and its answer
+        // goes straight into the slot. The null the fixture starts from is unread and went in
+        // `prune`.
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert_eq!(count(&func, Opcode::Store), 0);
+        assert_eq!(count(&func, Opcode::CapRecover), 0);
+        assert!(!any_capability(&func));
+
+        let call = walk(&func)
+            .into_iter()
+            .find(|&inst| func[inst].opcode == Opcode::Call)
+            .expect("the recovery became a call");
+        let args: Vec<Value> = func[func[call].args].to_vec();
+        assert_eq!(args.len(), 2);
+        assert!(slot(&func, args[0]));
+        // The address the opcode was asked about, which is this function's own argument handed over
+        // as it stands. Nothing about it is worked out here, which is the whole point of the walk
+        // being where it is.
+        assert!(matches!(func[args[1]].def, Def::Param { .. }));
+
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_member_of_something_recovered_is_two_slots_and_the_narrow_reads_the_first() {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let mut func = built(&mut names, |b, _, at| {
+            let args = b.func().push_values(&[at]);
+            let whole = b.value(InstData { args, ..InstData::new(Opcode::CapRecover) }, Type::CAP);
+            let off = number(b, 16, word);
+            let len = number(b, 8, word);
+            let args = b.func().push_values(&[whole, off, len]);
+            let member = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
+            let args = b.func().push_values(&[member, at, at, member]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        });
+        frames(&mut func, &mut names, word);
+        assert_eq!(count(&func, Opcode::Alloca), 2);
+        assert_eq!(count(&func, Opcode::CapRecover), 0);
+        assert_eq!(count(&func, Opcode::CapNarrow), 0);
+        // Both numbers are already the target's width, so neither of them is extended.
+        assert_eq!(count(&func, Opcode::ZExt), 0);
+        assert!(!any_capability(&func));
+
+        // A pointer from outside and then a member of it, which is the pair document 05 section 5.3
+        // produces most often. The narrowing reads the slot the recovery filled, so the two walks
+        // are doing over two producers what they already did over a producer and a reader.
+        let calls: Vec<Inst> =
+            walk(&func).into_iter().filter(|&inst| func[inst].opcode == Opcode::Call).collect();
+        assert_eq!(calls.len(), 3);
+        let recovery: Vec<Value> = func[func[calls[0]].args].to_vec();
+        let narrowing: Vec<Value> = func[func[calls[1]].args].to_vec();
+        assert_eq!(narrowing[1], recovery[0]);
+        assert_ne!(narrowing[0], narrowing[1]);
+
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
         assert!(text.contains("__rucc_cap_narrow"), "{text}");
         believed(&unit, &func, &names);
     }
