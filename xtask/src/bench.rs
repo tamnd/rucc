@@ -216,12 +216,15 @@ fn nonblank_lines(out: &[u8]) -> u64 {
 }
 
 /// The five numbers a timing distribution is reported as.
-struct Stats {
-    min: f64,
-    q1: f64,
-    median: f64,
-    q3: f64,
-    max: f64,
+///
+/// Shared with `builtins_bench`, which reports timings the same way and for the same reason, so
+/// that the two benchmarks in this tree cannot come to two definitions of a quartile between them.
+pub(crate) struct Stats {
+    pub(crate) min: f64,
+    pub(crate) q1: f64,
+    pub(crate) median: f64,
+    pub(crate) q3: f64,
+    pub(crate) max: f64,
 }
 
 impl Stats {
@@ -230,7 +233,7 @@ impl Stats {
     /// Linear interpolation between the two neighbouring order statistics, which is what R and
     /// numpy do by default. Any of the nine definitions of a quartile would do here as long as
     /// it is written down, and this one is written down.
-    fn of(values: &mut [f64]) -> Stats {
+    pub(crate) fn of(values: &mut [f64]) -> Stats {
         values.sort_by(f64::total_cmp);
         Stats {
             min: values[0],
@@ -242,7 +245,7 @@ impl Stats {
     }
 
     /// The interquartile range, which is the number that says whether a difference is real.
-    fn iqr(&self) -> f64 {
+    pub(crate) fn iqr(&self) -> f64 {
         self.q3 - self.q1
     }
 }
@@ -338,7 +341,7 @@ fn print_csv(results: &[Measured]) {
 }
 
 /// The commit the numbers belong to, or `unknown` outside a checkout.
-fn commit() -> String {
+pub(crate) fn commit() -> String {
     let out = Command::new("git").args(["rev-parse", "HEAD"]).output();
     match out {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
@@ -348,7 +351,7 @@ fn commit() -> String {
 
 /// The machine the numbers belong to. A benchmark row without one is not comparable to
 /// anything, which is the failure section 16.5 is about.
-fn host() -> String {
+pub(crate) fn host() -> String {
     let out = Command::new("uname").args(["-sm"]).output();
     match out {
         Ok(out) if out.status.success() => {

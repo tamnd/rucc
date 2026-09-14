@@ -14,6 +14,7 @@
 mod aux_plane;
 mod bench;
 mod bisect;
+mod builtins_bench;
 mod builtins_diff;
 mod compress;
 mod corpus;
@@ -58,6 +59,7 @@ tasks:
   abi-differential  compile the signature corpus with both compilers in both directions and run it
   builtins          compile the C runtime support routines into a static library for a target
   builtins-diff     hold the C runtime routines against the Rust reference over the same cases
+  builtins-bench    time the four block routines against the C library's own
   bench             time the throughput floor workload against the reference compiler
   size              measure the distribution against the budget in document 13.1
   disasm            check every instruction we encode against an independent decoder
@@ -104,6 +106,9 @@ fn main() -> ExitCode {
         Some("abi-differential") => differential::differential(),
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("builtins-diff") => builtins_diff::builtins_diff(),
+        Some("builtins-bench") => {
+            builtins_bench::builtins_bench(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("stubs") => stubs::stubs(),
@@ -1228,7 +1233,15 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
         // compiler may recognize and replace with a call to memcpy, and in this file that call
         // would be the function calling itself. This is the flag the Rust crate spells
         // `#![no_builtins]`.
-        .args(["-ffreestanding", "-fno-builtin", "-O2", "--emit=archive", "-o"])
+        //
+        // No strict aliasing because the block routines reach the same bytes through a word and
+        // through a char, which is what a word at a time copy is, and these are the routines the
+        // rule was never meant to be read against. Every libc builds them this way for the same
+        // reason. It is not a flag that has to be believed here either: what it turns off is the
+        // type based layer alone, which `crates/rucc-sema/src/decl.rs` and the alias pass settle
+        // in one place.
+        .args(["-ffreestanding", "-fno-builtin", "-fno-strict-aliasing", "-O2"])
+        .args(["--emit=archive", "-o"])
         .arg(&writing)
         .args(&sources)
         .current_dir(root())
