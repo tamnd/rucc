@@ -123,3 +123,26 @@ __int128 taken(void) {
 void raise(__int128 v) {
   wide += v;
 }
+
+// The builtins at that width, which go to the same four routines. A load and a store are the call
+// with a slot of ours on the value side, an exchange is the routine of that name, and the twelve
+// that read and write back are the loop, since the library has nothing for those. The ordering the
+// program named travels to the call rather than being replaced by the strongest, which is where
+// these differ from the operators above.
+__int128 fetch(void) {
+  return __atomic_load_n(&wide, __ATOMIC_ACQUIRE);
+}
+
+__int128 swap(__int128 v) {
+  return __atomic_exchange_n(&wide, v, __ATOMIC_ACQ_REL);
+}
+
+__int128 bump(__int128 v) {
+  return __atomic_add_fetch(&wide, v, __ATOMIC_SEQ_CST);
+}
+
+// The expected value arrives through the program's own pointer here, and the routine writes what
+// was really there back over it when the exchange did not happen, so there is no branch to write.
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&wide, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
