@@ -32,6 +32,18 @@
 //! the layout the first kind does not exist yet, so a pass that ran earlier would have to either
 //! leave every branch alone or undo the fusion to get at one.
 //!
+//! # How the rewrite is made
+//!
+//! Through [`crate::changes`], one comparison at a time, because one comparison is all a change
+//! here is: a comparison that is already made is already made whatever happened to the one in
+//! front of it, so there is nothing to be all of or none of.
+//!
+//! What the framework is for here is the other half of it, which is the shape. What is left of a
+//! comparison is a different instruction with a different name and one operand rather than three,
+//! and that it is an instruction this machine has is now asked rather than believed. The condition
+//! state is the half nothing can check, because it is not a register and is in no operand vector,
+//! and the argument that the bits are already the bits stays the walk's own.
+//!
 //! # What a block boundary is
 //!
 //! The end of everything this knows. The state a comparison leaves is not a register and nothing
@@ -75,7 +87,9 @@ use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{Compare, FlagInsts, Reads, RegClass, Zeroing};
+use rucc_target::{Compare, FlagInsts, MachineInsts, Reads, RegClass, Zeroing};
+
+use crate::changes::{self, Changes, Plan};
 
 /// A register, and the file it is drawn from.
 ///
@@ -88,7 +102,12 @@ type Place = (RegClass, mir::Reg);
 /// Takes out every comparison whose condition state the instruction in front of it already left.
 ///
 /// Gives back how many went, which the tests read and nothing else does.
-pub fn redundant(func: &mut mir::Func, insts: &FlagInsts, names: &mut Interner) -> usize {
+pub fn redundant(
+    func: &mut mir::Func,
+    insts: &FlagInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+) -> usize {
     // Every name the rewrite could want, before the walk rather than inside it. The walk holds a
     // name it read out of the interner while it edits the function, and interning a new one there
     // would be the same interner borrowed twice.
@@ -99,6 +118,7 @@ pub fn redundant(func: &mut mir::Func, insts: &FlagInsts, names: &mut Interner) 
         .map(|kept| (kept, mir::Opcode::new(names.intern(&format!("{}{kept}", insts.prefix)))))
         .collect();
     let names = &*names;
+    let mut counts = changes::Reads::of(func);
     let mut gone = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
@@ -113,14 +133,17 @@ pub fn redundant(func: &mut mir::Func, insts: &FlagInsts, names: &mut Interner) 
                 let already = left
                     .as_ref()
                     .is_some_and(|had| had.answers(func, insts, names, &sequence, at, entry));
-                if already {
-                    // What is left of the instruction is asked before the rewrite rather than
-                    // after, because one of the two answers is that there is nothing left of it.
-                    let after = stale(func, inst, left);
-                    take(func, &opcodes, inst, entry);
+                // What the earlier instruction left comes to this one's answer, and it is worked
+                // out here rather than after the rewrite because one of the answers to what is
+                // left of an instruction is that there is nothing left of it.
+                let after = stale(func, inst, left);
+                if already && took(func, &opcodes, &mut counts, machine, names, inst, entry) {
                     gone += 1;
                     after
                 } else {
+                    // Either the comparison is one nothing has made yet or it is one the target
+                    // would not have what is left of, and both of those are a comparison that runs
+                    // and leaves its own answer behind.
                     stale(func, inst, Some(Left::made(func, entry, inst)))
                 }
             } else if let Some(zeroing) = insts.zeroed(name) {
@@ -290,32 +313,41 @@ fn picked(func: &mir::Func, inst: mir::Inst, role: Role) -> Vec<(u8, Place)> {
         .collect()
 }
 
-/// Turns a comparison into what is left of it, which is a byte or nothing at all.
+/// Turns a comparison into what is left of it, which is a byte or nothing at all, and says whether
+/// that was a change the target had.
 ///
 /// The byte keeps the register it was going to and the constant goes, because what the constant
 /// was for was the comparison and the comparison is the part that is not happening. Nothing else
 /// about the instruction moves, which is what keeps this a rewrite of one instruction rather than
 /// a rewrite of the block around it.
-fn take(
+///
+/// One change is one set, since a comparison that is already made is already made whatever the one
+/// before it came to. What the set is for here is the other half of [`crate::changes`], which is
+/// the shape: the instruction the byte is left as is one this target has to have, and this is where
+/// that is asked rather than believed.
+fn took(
     func: &mut mir::Func,
     opcodes: &HashMap<&str, mir::Opcode>,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
     inst: mir::Inst,
     entry: &Compare,
-) {
-    let Some(kept) = entry.kept else {
-        func.remove_inst(inst);
-        return;
-    };
-    let Some(&opcode) = opcodes.get(kept) else { return };
-    let byte: Vec<mir::Operand> = func[func[inst].operands]
-        .iter()
-        .filter(|operand| operand.role != Role::Use)
-        .copied()
-        .collect();
-    let operands = func.push_operands(&byte);
-    func[inst].opcode = opcode;
-    func[inst].operands = operands;
-    func[inst].imm = None;
+) -> bool {
+    let mut set = Changes::new();
+    match entry.kept {
+        None => set.remove(inst),
+        Some(kept) => {
+            let Some(&opcode) = opcodes.get(kept) else { return false };
+            let byte: Vec<mir::Operand> = func[func[inst].operands]
+                .iter()
+                .filter(|operand| operand.role != Role::Use)
+                .copied()
+                .collect();
+            set.rewrite(inst, Plan { opcode, operands: byte, imm: None, ..Plan::of(func, inst) });
+        }
+    }
+    set.commit(func, counts, names, machine).is_ok()
 }
 
 /// The name this target knows an instruction by, for an instruction that is one of this target's.
@@ -335,7 +367,7 @@ fn opcode<'a>(
 
 #[cfg(test)]
 mod tests {
-    use rucc_target::x86_64::{FLAGS, GPR};
+    use rucc_target::x86_64::{FLAGS, GPR, MACHINE};
 
     use super::*;
 
@@ -354,7 +386,7 @@ mod tests {
 
     /// The pass, over the machine this crate has a backend for.
     fn takes(func: &mut mir::Func, names: &mut Interner) -> usize {
-        redundant(func, &FLAGS, names)
+        redundant(func, &FLAGS, &MACHINE, names)
     }
 
     /// What every instruction in a block came to, as opcodes with the target's prefix taken off.

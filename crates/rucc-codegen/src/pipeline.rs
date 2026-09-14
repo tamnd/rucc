@@ -529,7 +529,7 @@ pub fn compile_recording(
     // comparison leaves for the instruction behind it to read is not a register and nothing may
     // come between the two, and the layout is the other pass that writes such a pair. Running
     // here means there is nothing left that could put an instruction in the middle of one.
-    compare::redundant(&mut func, machine.flags, names);
+    compare::redundant(&mut func, machine.flags, machine.shapes, names);
     Ok(func)
 }
 
