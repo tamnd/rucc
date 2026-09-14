@@ -46,14 +46,6 @@
 //! than a guess made from the region's class. `fresh` is the shape it recognises, and
 //! `rucc_safe_rt::recover`'s `made` is the load.
 //!
-//! And `cap_load`, which is the third box and the one producer here whose numbers nobody has to work
-//! out at all, because an earlier part of the same program wrote them down. A pointer that lives in
-//! memory has its capability beside it in the aux plane, so reading the pointer and reading the
-//! capability are one event, and the opcode already carries everything the read needs: the
-//! capability of the object the word sits in, the address of the word, and the pointer that came out
-//! of it. `rucc_safe_rt::cap`'s `load` is the read. It is also the only thing this pass places that
-//! reads a capability as well as making one, which is what shapes [`frames`] into two walks.
-//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -97,12 +89,6 @@ const WORD: u64 = 8;
 ///
 /// The three steps of the module documentation in order: take out the capabilities nobody reads,
 /// decide whether what is left is a shape this pass can place, and place it.
-///
-/// The placing is two walks with the substitution between them, and every slot has to be reserved in
-/// the first of them. `cap_load` is why: it produces a capability and reads one, so the walk that
-/// rewrites it needs its operand already pointed at a slot and everything reading its result already
-/// pointed at another. Reserving is the half that can happen before anything has been rewritten, and
-/// a slot is only an `alloca` and a name for it, so nothing is lost by deciding all of them first.
 pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     prune(func);
     if !placeable(func) {
@@ -110,25 +96,19 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     }
     let mut moved: HashMap<Value, Value> = HashMap::new();
     for inst in walk(func) {
-        if !func[inst].opcode.makes_capability() {
-            continue;
+        match func[inst].opcode {
+            Opcode::CapNull => nulled(func, word, inst, &mut moved),
+            Opcode::CapOf => allocated(func, names, inst, &mut moved),
+            _ => {}
         }
-        let Some(result) = func[inst].results().next() else { continue };
-        let Some(address) = reserve(func, inst) else { continue };
-        moved.insert(result, address);
     }
     if moved.is_empty() {
         return;
     }
     substitute(func, &moved);
     for inst in walk(func) {
-        let slot = func[inst].results().next().and_then(|value| moved.get(&value).copied());
-        match (func[inst].opcode, slot) {
-            (Opcode::CapNull, Some(address)) => nulled(func, word, inst, address),
-            (Opcode::CapOf, Some(address)) => allocated(func, names, inst, address),
-            (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
-            (Opcode::CapStore, _) => stored(func, names, inst),
-            _ => {}
+        if func[inst].opcode == Opcode::CapStore {
+            stored(func, names, inst);
         }
     }
 }
@@ -176,13 +156,12 @@ fn prune(func: &mut Func) {
 fn placeable(func: &Func) -> bool {
     for inst in walk(func) {
         let opcode = func[inst].opcode;
-        let known =
-            matches!(opcode, Opcode::CapNull | Opcode::CapLoad) || fresh(func, inst).is_some();
+        let known = opcode == Opcode::CapNull || fresh(func, inst).is_some();
         if opcode.makes_capability() && !known {
             return false;
         }
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
-        if reads && !matches!(opcode, Opcode::CapStore | Opcode::CapLoad) {
+        if reads && opcode != Opcode::CapStore {
             return false;
         }
         // A capability passed along an edge is one whose reader is a block parameter, and a block
@@ -233,7 +212,9 @@ fn substitute(func: &mut Func, moved: &HashMap<Value, Value>) {
 /// Written out as words rather than left to a `memset`, for the same reason: four stores of an
 /// immediate is what the back end would fold a thirty two byte clear into anyway, and going through
 /// the library would put a call on the path of every null.
-fn nulled(func: &mut Func, word: Type, inst: Inst, address: Value) {
+fn nulled(func: &mut Func, word: Type, inst: Inst, moved: &mut HashMap<Value, Value>) {
+    let Some(result) = func[inst].results().next() else { return };
+    let Some(address) = reserve(func, inst) else { return };
     let span = func.span(inst);
     let zero = konst(func, inst, Imm::int(0, word), word);
     for step in 0..BYTES / WORD {
@@ -252,6 +233,7 @@ fn nulled(func: &mut Func, word: Type, inst: Inst, address: Value) {
         let made = func.create_inst(data, &[], span);
         func.insert_before(made, inst);
     }
+    moved.insert(result, address);
     func.remove_inst(inst);
 }
 
@@ -289,34 +271,16 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
 /// In front of the `cap_of` rather than at the top of the function, because that is where the base
 /// pointer is: the call that produced it has run by then and nothing has to be kept live any longer
 /// than it already was. The slot itself is in the entry block for the reason [`reserve`] gives.
-fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
+fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, moved: &mut HashMap<Value, Value>) {
     let Some(base) = fresh(func, inst) else { return };
+    let Some(result) = func[inst].results().next() else { return };
+    let Some(address) = reserve(func, inst) else { return };
     let params = &[Type::PTR; 2];
     let args = &[address, base];
     let data = crate::lower::calling(func, names, "__rucc_cap_made", params, &[], args);
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
-    func.remove_inst(inst);
-}
-
-/// `cap_load` becomes `__rucc_cap_load(slot, container, at, value)`.
-///
-/// The slot in front and the opcode's own three operands after it, in the order they were already
-/// in, because tamnd/rucc#1080 gave the opcode the shape of the call. What the runtime is handed is
-/// the capability of the object the word lives in, the address of the word, and the pointer that was
-/// read out of it, and the first of those three is a slot address by the time this runs rather than
-/// a capability, because [`substitute`] has been over the instruction already.
-///
-/// Beside the instruction and not in place of it, for the reason [`allocated`] gives. The difference
-/// from every other rewrite here is that this one is both ends at once: the operand it reads came
-/// out of a slot some other producer filled, and the result it writes is a slot of its own that a
-/// later reader will be pointed at.
-fn read(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
-    let mut args = vec![address];
-    args.extend_from_slice(&func[func[inst].args]);
-    let data = crate::lower::calling(func, names, "__rucc_cap_load", &[Type::PTR; 4], &[], &args);
-    let made = func.create_inst(data, &[], func.span(inst));
-    func.insert_before(made, inst);
+    moved.insert(result, address);
     func.remove_inst(inst);
 }
 
@@ -531,84 +495,6 @@ mod tests {
         frames(&mut func, &mut names, Type::int(64));
         assert_eq!(count(&func, Opcode::CapOf), 1);
         assert_eq!(count(&func, Opcode::CapStore), 1);
-        assert_eq!(count(&func, Opcode::Alloca), 0);
-        believed(&module(&mut names), &func, &names);
-    }
-
-    /// Whether the value is the address an `alloca` gave back, which is what a slot looks like.
-    fn slot(func: &Func, value: Value) -> bool {
-        matches!(func[value].def, Def::Result { inst, .. } if func[inst].opcode == Opcode::Alloca)
-    }
-
-    #[test]
-    fn a_capability_read_out_of_memory_is_one_call_with_both_slots_in_hand() {
-        let mut names = Interner::new();
-        let mut func = built(&mut names, |b, cap, at| {
-            let args = b.func().push_values(&[cap, at, at]);
-            let got = b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
-            let args = b.func().push_values(&[got, at, at, got]);
-            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
-        });
-        frames(&mut func, &mut names, Type::int(64));
-        // Two slots, and the four stores are the null's. The one the read fills is written by the
-        // runtime, so nothing in the function touches its words.
-        assert_eq!(count(&func, Opcode::Alloca), 2);
-        assert_eq!(count(&func, Opcode::Store), 4);
-        assert_eq!(count(&func, Opcode::CapLoad), 0);
-        assert!(!any_capability(&func));
-
-        // The part the two walks are for. The first argument is the slot this read fills and the
-        // second is the slot the container capability went into, so the operand it reads was
-        // pointed at a slot before the instruction became a call.
-        let call = walk(&func)
-            .into_iter()
-            .find(|&inst| func[inst].opcode == Opcode::Call)
-            .expect("the read became a call");
-        let args: Vec<Value> = func[func[call].args].to_vec();
-        assert_eq!(args.len(), 4);
-        assert_ne!(args[0], args[1]);
-        assert!(slot(&func, args[0]));
-        assert!(slot(&func, args[1]));
-
-        let unit = module(&mut names);
-        let text = print_func(&unit, &func, &names);
-        assert!(text.contains("__rucc_cap_load"), "{text}");
-        assert!(text.contains("__rucc_cap_store"), "{text}");
-        believed(&unit, &func, &names);
-    }
-
-    #[test]
-    fn a_capability_read_beside_one_this_pass_cannot_place_is_left_where_it_was() {
-        let mut names = Interner::new();
-        let mut func = built(&mut names, |b, _, at| {
-            let args = b.func().push_values(&[at]);
-            let taken = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
-            let args = b.func().push_values(&[taken, at, at]);
-            let got = b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
-            let args = b.func().push_values(&[got, at, at, got]);
-            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
-        });
-        frames(&mut func, &mut names, Type::int(64));
-        // The read is one this pass understands and its container is not, and a slot for the read
-        // alone would be a call handed a container operand that is still a capability.
-        assert_eq!(count(&func, Opcode::CapLoad), 1);
-        assert_eq!(count(&func, Opcode::CapOf), 1);
-        assert_eq!(count(&func, Opcode::Alloca), 0);
-        believed(&module(&mut names), &func, &names);
-    }
-
-    #[test]
-    fn a_capability_read_nobody_looks_at_is_taken_out_with_the_one_it_read_from() {
-        let mut names = Interner::new();
-        let mut func = built(&mut names, |b, cap, at| {
-            let args = b.func().push_values(&[cap, at, at]);
-            b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
-        });
-        frames(&mut func, &mut names, Type::int(64));
-        // The fixpoint in `prune` is what takes the pair, since the null is only unread once the
-        // read that was its one reader has gone.
-        assert_eq!(count(&func, Opcode::CapLoad), 0);
-        assert_eq!(count(&func, Opcode::CapNull), 0);
         assert_eq!(count(&func, Opcode::Alloca), 0);
         believed(&module(&mut names), &func, &names);
     }

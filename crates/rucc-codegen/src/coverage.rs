@@ -83,9 +83,6 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // A relocation, which is right because of what the linker does rather than because of what
     // any bitvector equals.
     (Opcode::GlobalAddr, "`crate::lower`, a `lea` off the instruction pointer with a name on it"),
-    // The same instruction against a place in this function rather than a name outside it. What
-    // it addresses is a block, and a block is not a value a pattern can bind.
-    (Opcode::BlockAddr, "`crate::lower`, the same `lea` against a label of this function"),
     // The one thing on this machine that no ordinary instruction can work out, which is why it
     // is built here rather than matched: `%fs` is not a register a rule could name.
     (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
@@ -102,9 +99,6 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::MemEntry, "nothing at all, since memory SSA comes off before the back end runs"),
     // The edges and the two ways of writing down that control does not arrive.
     (Opcode::Jump, "`crate::layout`, since an edge is on the block and not in the block"),
-    // The one terminator selection does write, because what it reads is a value. How many arms it
-    // has is not fixed, and a rule says what an instruction reads rather than where a block goes.
-    (Opcode::IndirectBr, "`crate::lower`, as the jump through the register that holds the address"),
     (Opcode::Unreachable, "nothing at all, which is the answer for a place control does not reach"),
     (Opcode::UnreachableHint, "nothing at all, for the same reason"),
     // Rewritten into the opcodes above before selection ever sees them.
@@ -221,10 +215,6 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // with four zero words written into it and a call handed the addresses of two slots.
     (Opcode::CapNull, "`rucc_safety::slot`, into a frame slot with the bottom capability in it"),
     (Opcode::CapStore, "`rucc_safety::slot`, into the call that writes one into the aux plane"),
-    // The other end of that write, which is the one capability nothing has to work out, because the
-    // store that put it beside the pointer already did. So this is a call too, and it is the only
-    // instruction the pass rewrites that reads a slot and fills one.
-    (Opcode::CapLoad, "`rucc_safety::slot`, into the call that reads one back out again"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.
@@ -235,10 +225,9 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
 ///
 /// This is the count `spec/15-testing.md` section 15.8 asks for. It is not zero yet and the
 /// spec says it should be, which is the honest reading of where the back end is: every one of
-/// these is a feature nobody has written, and all of them but one are opcodes the front end
+/// these is a feature nobody has written, and all but three of them are opcodes the front end
 /// cannot produce either, so a program that reaches one of these is a program that reaches an
-/// unimplemented builtin first. The one is the remainder of two floats, which a program writes
-/// with an operator and which is a call to the maths library rather than an instruction.
+/// unimplemented builtin first.
 pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::Splat, "a vector, and no rule is written about a lane count", "tamnd/rucc#200"),
     (
@@ -246,6 +235,8 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "the same, since what needs one is a vector builtin",
         "tamnd/rucc#200",
     ),
+    (Opcode::BlockAddr, "the address of a label", "tamnd/rucc#353"),
+    (Opcode::IndirectBr, "the branch a computed goto turns into", "tamnd/rucc#353"),
     (
         Opcode::FRem,
         "a call to `fmod`, so a link line question as much as a lowering one",
@@ -269,11 +260,16 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
     // back end can be handed that reaches one. The ones the safety pass lowers are on `ELSEWHERE`,
-    // and three of those left this list without anything emitting them: `cap_null`, `cap_store` and
-    // `cap_load` have a lowering waiting for the pass that will write one, because a capability had
-    // to be a value the back end could hold before any of them could be written down at all, which
-    // is tamnd/rucc#1085.
-    (Opcode::CapNarrow, "a capability, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
+    // and two of those left this list without anything emitting them: `cap_null` and `cap_store`
+    // have a lowering waiting for the pass that will write one, because a capability had to be a
+    // value the back end could hold before either could be written down at all, which is
+    // tamnd/rucc#1085.
+    (
+        Opcode::CapLoad,
+        "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
+        "tamnd/rucc#856",
+    ),
+    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
     (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#856"),
     // The plane writes, which the runtime does for itself today because the only ranges anything
     // asks about are the ones its own allocator handed out. A stack object needs these.
@@ -320,8 +316,9 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
         "tamnd/rucc#326",
     ),
     (
-        "a hundred and twenty eight bits of float, for everything but a move",
-        "the machine has no instruction at that format and every operation on one is a call",
+        "a hundred and twenty eight bits of float",
+        "turned into a call before selection, except a conditional move and the conversions \
+         against an integer that wide",
         "tamnd/rucc#1064",
     ),
     (
