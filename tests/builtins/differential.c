@@ -1631,6 +1631,14 @@ static const uwide QUAD_WIDE_INTEGER_EDGES[] = {
     ((uwide)1 << 127) + 1,
     ~(uwide)0 - 1,
     ~(uwide)0,
+    /* The pair the sticky bit decides between. A value this wide loses its lowest twelve bits going
+     * up, and these two agree in every bit above them: the first is exactly halfway between two
+     * quads and rounds to the even one, and the second is a hair above halfway and rounds up. Only
+     * the bit remembering that something fell off tells them apart, and the rows above do not,
+     * because a round number has nothing down there to remember.
+     */
+    ((uwide)1 << 127) | ((uwide)1 << 14),
+    ((uwide)1 << 127) | ((uwide)1 << 14) | 1,
 };
 
 #define QUAD_WIDE_INTEGER_EDGES_COUNT \
