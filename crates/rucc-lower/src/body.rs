@@ -88,6 +88,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         shared: None,
         marks: Vec::new(),
         next_scope: 0,
+        pinned: HashSet::new(),
         landings: HashMap::new(),
         jumps: Vec::new(),
         grows: false,
@@ -103,9 +104,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         locals: Vec::new(),
         statics: Vec::new(),
         taken: Vec::new(),
+        grows: false,
     };
     scan.stmt(root);
-    let Scan { escaped, locals, statics, taken, .. } = scan;
+    let Scan { escaped, locals, statics, taken, grows, .. } = scan;
     // A label whose address is taken and which is never defined was reported by the checking,
     // and there is no block for one, so it is not somewhere a jump can arrive.
     body.taken = taken.iter().filter_map(|&label| tast[label].stmt).collect();
@@ -122,7 +124,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     body.restrict = Scopes::of_params(tast, body.unit.types, &params, &mut body.unit.cliques);
     // Whether anything in the function grows the stack, which decides what a `goto` can do.
     let declared: Vec<TypeId> = params.iter().chain(locals.iter()).map(|&d| tast[d].ty).collect();
-    body.grows = declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
+    body.grows = grows || declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
     // Before the walk, because it is a question about what the function declares rather than about
     // what it does, and the scan above is where that is already known. What the attribute then
     // costs the function is a slot in its frame and a comparison before each of its returns.
@@ -195,6 +197,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
 /// How many bytes of array make a buffer worth protecting, which is gcc's `ssp-buffer-size` and
 /// which has been eight since the flag was written.
 const BUFFER: u64 = 8;
+
+/// What the pointer `__builtin_alloca` answers is aligned to.
+///
+/// Sixteen, which is what gcc gives it and what the SysV psABI requires of the stack pointer at a
+/// call anyway. The builtin says nothing about what the bytes are going to hold, so the only safe
+/// answer is one that suits anything, and sixteen suits every type this target has.
+const ALLOCA_ALIGN: u32 = 16;
 
 /// Whether this function gets a stack protector, which is a question about the locals it declares.
 ///
@@ -271,7 +280,18 @@ fn holds_array(types: &Types, ty: TypeId) -> bool {
 /// second half is what makes `L: int a[n]; goto L;` give the array back: the label was passed
 /// before the array was made, so it is a place where the array does not exist, and jumping there
 /// leaves its scope even though the block is the same one.
-fn landing(from: &[Mark], to: &[Mark]) -> Landing {
+fn landing(from: &[Mark], to: &[Mark], pinned: &HashSet<u32>) -> Landing {
+    // A pinned scope never gives the stack back, so it is a scope that grew nothing as far as any
+    // jump is concerned. Reading it that way on both sides is also what keeps the comparison
+    // honest: the two paths were recorded at different points of the walk, and a scope that was
+    // pinned in between would otherwise look like two different scopes.
+    let free = |mark: &Mark| Mark {
+        scope: mark.scope,
+        saved: mark.saved.filter(|_| !pinned.contains(&mark.scope)),
+    };
+    let from: Vec<Mark> = from.iter().map(free).collect();
+    let to: Vec<Mark> = to.iter().map(free).collect();
+    let (from, to) = (from.as_slice(), to.as_slice());
     if to.iter().enumerate().any(|(at, mark)| mark.saved.is_some() && from.get(at) != Some(mark)) {
         return Landing::Enters;
     }
@@ -470,6 +490,19 @@ struct Body<'a, 'u> {
     marks: Vec<Mark>,
     /// How many scopes have been opened, which is what gives the next one a name of its own.
     next_scope: u32,
+    /// The scopes an `__builtin_alloca` has taken out of the business of giving the stack back.
+    ///
+    /// Storage an alloca took lives until the function returns, so a scope that was open where one
+    /// was written must not restore the stack pointer at the end of itself: doing that would give
+    /// the storage back while the pointer to it is still live. Every scope open at the alloca goes
+    /// in here and none of them ever restores again, which is what gcc 16.2.0 does at -O0, measured
+    /// rather than reasoned about.
+    ///
+    /// What it costs is a variable length array in one of those scopes keeping its bytes until the
+    /// function returns as well, since one restore gives back everything newer than it and there is
+    /// no restore left to give back only part. That is more stack than the program needed and never
+    /// less, which is the direction to be wrong in.
+    pinned: HashSet<u32>,
     /// What each label the walk has reached is inside, which is what a jump to it has to put the
     /// stack back to. Only collected for a function that grows the stack, since nothing else
     /// asks.
@@ -832,6 +865,15 @@ impl<'u> Body<'_, 'u> {
     /// takes is given back at the end of the scope it was declared in.
     fn dynamic(&mut self, size: Value, align: u32, span: Span) -> Value {
         self.mark(span);
+        self.grow(size, align, span)
+    }
+
+    /// The slot itself, with nothing said about when the bytes come back.
+    ///
+    /// `__builtin_alloca` builds one through here rather than through the caller above, because its
+    /// bytes are never given back before the function returns and the save the caller puts in front
+    /// would be one instruction written for a reader that is never going to exist.
+    fn grow(&mut self, size: Value, align: u32, span: Span) -> Value {
         let info = MemInfo {
             size: 0,
             align,
@@ -875,7 +917,22 @@ impl<'u> Body<'_, 'u> {
     /// Closes the innermost scope, giving back what it grew the stack by.
     fn close(&mut self, span: Span) {
         let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
-        self.restore(mark.saved, span);
+        let saved = self.released(&mark);
+        self.restore(saved, span);
+    }
+
+    /// The stack pointer a scope gives back at the end of itself, which is nothing at all for one
+    /// an `__builtin_alloca` pinned.
+    fn released(&self, mark: &Mark) -> Option<Value> {
+        mark.saved.filter(|_| !self.pinned.contains(&mark.scope))
+    }
+
+    /// Takes every scope that is open now out of the business of giving the stack back, which is
+    /// what a call to `__builtin_alloca` does to the function it is written in.
+    fn pin(&mut self) {
+        for mark in &self.marks {
+            self.pinned.insert(mark.scope);
+        }
     }
 
     /// Gives the stack back down to what it was at `depth` scopes, for a `break` or a
@@ -884,8 +941,8 @@ impl<'u> Body<'_, 'u> {
     /// The outermost of the marks being left is the one to restore, since it is the oldest
     /// stack pointer of them and restoring it takes back everything the inner ones did too.
     fn unwind(&mut self, depth: usize, span: Span) {
-        let saved =
-            self.marks.get(depth..).and_then(|open| open.iter().find_map(|mark| mark.saved));
+        let open = self.marks.get(depth..).unwrap_or_default().to_vec();
+        let saved = open.iter().find_map(|mark| self.released(mark));
         self.restore(saved, span);
     }
 
@@ -1494,7 +1551,7 @@ impl<'u> Body<'_, 'u> {
             let mut wanted = None;
             for target in &jump.targets {
                 let arriving = self.landings.get(target).map_or([].as_slice(), Vec::as_slice);
-                let wants = landing(&jump.from, arriving);
+                let wants = landing(&jump.from, arriving, &self.pinned);
                 wanted = match wanted {
                     // Two labels that want different stacks. One restore cannot be right for
                     // both of them and which one control arrives at is not known here, so this
@@ -3869,6 +3926,14 @@ impl<'u> Body<'_, 'u> {
                 let data = InstData { extra: Extra::Depth(depth), ..InstData::new(opcode) };
                 Some(self.build(span).value(data, Type::PTR))
             }
+            // Bytes off the frame, which is the same instruction a variable length array is and a
+            // different promise about how long they last. The pinning is the whole of that
+            // difference and is why this is not `dynamic` itself.
+            ExprKind::Alloca { size } => {
+                let size = self.value(size);
+                self.pin();
+                Some(self.grow(size, ALLOCA_ALIGN, span))
+            }
             // A fact about the machine rather than about the program, so there is nothing under it
             // to lower first and the whole of it is the one instruction the back end writes.
             ExprKind::ThreadPointer => {
@@ -6138,6 +6203,9 @@ struct Scan<'a> {
     statics: Vec<DeclId>,
     /// The labels the body takes the address of, in the order it takes them.
     taken: Vec<rucc_sema::LabelId>,
+    /// Whether anything in the body calls `__builtin_alloca`, which is the other way a stack moves
+    /// while a function runs and the one that is not visible in what the function declares.
+    grows: bool,
 }
 
 impl Scan<'_> {
@@ -6224,6 +6292,12 @@ impl Scan<'_> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer => {}
+            // The one node that moves the stack pointer without being a declaration, which is why
+            // the question above about what the function declares does not find it.
+            ExprKind::Alloca { size } => {
+                self.grows = true;
+                self.expr(size);
+            }
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {
                     self.taken.push(label);

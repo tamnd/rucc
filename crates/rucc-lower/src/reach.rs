@@ -193,6 +193,7 @@ impl Reach<'_> {
             // not asked, because a definition has to exist for all three.
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => self.mark(decl),
             ExprKind::StmtExpr(body) => self.stmt(body),
+            ExprKind::Alloca { size } => self.expr(size),
             ExprKind::Member { base, .. }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }

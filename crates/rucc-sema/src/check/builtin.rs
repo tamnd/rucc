@@ -56,6 +56,7 @@ use crate::scope::Binding;
 
 mod abs;
 mod aligned;
+mod alloca;
 mod atomic;
 mod bswap;
 mod classify;

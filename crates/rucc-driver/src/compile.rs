@@ -2810,6 +2810,71 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// Bytes off the frame, which is the stack pointer moving down and the answer being where it
+    /// moved to.
+    ///
+    /// The rounding is the alignment: the size is taken up to the next sixteen before it is
+    /// subtracted, so the pointer suits anything the program puts behind it. gcc 16.2.0 rounds the
+    /// same way at `-O0` and spends a division doing it, which is the one place the two differ and
+    /// is about how the rounding is written rather than about what it answers.
+    ///
+    /// There is no call anywhere in either program. An alloca that had reached the linker would
+    /// have found the C library's, which is a real function with a real frame and is not what a
+    /// program writing the builtin asked for.
+    #[test]
+    fn an_alloca_takes_the_bytes_off_the_stack_pointer_and_answers_where_they_are() {
+        let text =
+            asm("void use(void *p); void f(unsigned long n) { use(__builtin_alloca(n)); }\n");
+        assert!(text.contains("andq\t$-16"), "the size is rounded up to sixteen: {text}");
+        assert!(text.contains("subq\t%rdi, %rsp"), "and taken off the stack pointer: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "the only call is the one written: {text}");
+
+        // The plain name, which a program that declares it the way the C library does means the
+        // same thing by. `gcc.c-torture/execute/20010122-1.c` is exactly this program.
+        let plain = concat!(
+            "extern void *alloca(__SIZE_TYPE__);\n",
+            "void use(void *p);\n",
+            "void f(unsigned long n) { use(alloca(n)); }\n",
+        );
+        let text = asm(plain);
+        assert!(text.contains("subq\t%rdi, %rsp"), "the plain name is the same bytes: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "and is not a call either: {text}");
+
+        // And a program that means something of its own by the name keeps it, which is what the
+        // declaration is looked at for.
+        let own = concat!(
+            "static void *alloca(unsigned long n) { return 0; }\n",
+            "void *f(unsigned long n) { return alloca(n); }\n",
+        );
+        assert!(asm(own).contains("\tcall"), "a name the program took back is a call");
+    }
+
+    /// The bytes an alloca took live until the function returns and not until the end of the block
+    /// the call was written in.
+    ///
+    /// That is what makes it different from a variable length array, and the way it is kept is that
+    /// every scope open where the call was written stops giving the stack back. The second program
+    /// is the mixed case: an array in the outer block and an alloca in the inner one, where the
+    /// inner block gives nothing back either even though an array is in scope that ordinarily
+    /// would. gcc 16.2.0 at `-O0` writes no restore at the end of either block, measured rather
+    /// than read off the manual.
+    #[test]
+    fn the_bytes_an_alloca_took_are_still_there_at_the_end_of_the_block_that_took_them() {
+        let inner = "{ use(__builtin_alloca(n)); }";
+        for body in [inner.to_owned(), format!("int a[n]; {inner} use(a);")] {
+            let source = format!("void use(void *p);\nvoid f(unsigned long n) {{ {body} }}\n");
+            let text = asm(&source);
+            // Every instruction that writes the stack pointer, which in a function that gives
+            // nothing back is the alloca taking bytes and the epilogue putting the frame pointer
+            // there. A restore would be a third kind, a move out of a register the save wrote.
+            for line in text.lines().filter(|line| line.trim_end().ends_with(", %rsp")) {
+                let taking = line.contains("subq");
+                let leaving = line.contains("%rbp");
+                assert!(taking || leaving, "nothing puts the stack back: {line} in {text}");
+            }
+        }
+    }
+
     /// Not a rewording of the check above: what the two paths agree about is the point.
     #[test]
     fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {
@@ -4409,8 +4474,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// A builtin nothing lowers is refused where it is written, rather than at the link.
     ///
     /// The names are two with a prototype and one whose type comes from the call it was written in,
-    /// which is also the one whose prefix is not `__builtin_`. It is the last of the atomic family
-    /// that is refused, and the older half of that family has nothing left in it at all. What the
+    /// which is also the one whose prefix is not `__builtin_`. The two with a prototype are what is
+    /// left of the builtins that have one, and the third is the last of the atomic family that is
+    /// refused, whose older half has nothing left in it at all. What the
     /// message has to carry is the name, because the whole complaint about the link error this
     /// replaces is that the name in it was one the compiler chose.
     #[test]
@@ -4419,7 +4485,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         for (builtin, call) in [
             ("__builtin_object_size", "(int)__builtin_object_size(&counter, 0)"),
-            ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
+            ("__builtin_dynamic_object_size", "(int)__builtin_dynamic_object_size(&counter, 0)"),
             ("__atomic_signal_fence", "(__atomic_signal_fence(5), 0)"),
         ] {
             let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
@@ -4438,14 +4504,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// is for but is what a definition in front of us means.
     #[test]
     fn what_is_refused_is_the_call_and_not_the_name() {
-        let text = ir("unsigned long n = sizeof(__builtin_alloca(8));\n");
+        let text = ir("unsigned long n = sizeof(__builtin_object_size(0, 0));\n");
         assert!(text.contains("global @n : i64 = 8,"), "{text}");
 
         let text = ir(concat!(
-            "void *__builtin_alloca(unsigned long n) { return 0; }\n",
-            "void *f(void) { return __builtin_alloca(8); }\n",
+            "unsigned long __builtin_object_size(const void *p, int kind) { return 0; }\n",
+            "unsigned long f(void) { return __builtin_object_size(0, 0); }\n",
         ));
-        assert!(text.contains("call @__builtin_alloca"), "{text}");
+        assert!(text.contains("call @__builtin_object_size"), "{text}");
     }
 
     /// A `static` function nothing refers to is not emitted, and one that is refered to is.

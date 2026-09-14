@@ -665,6 +665,11 @@ impl Checker<'_> {
         if let Some(value) = self.frame_address_builtin(function, &args, signature.ret, span) {
             return value;
         }
+        // Bytes off this function's own frame, which is the stack pointer moving and not a call to
+        // anything. In `check/builtin/alloca.rs`, with what makes it different from a local.
+        if let Some(value) = self.alloca_builtin(callee, function, &args, signature.ret, span) {
+            return value;
+        }
         // Where the running thread's own storage starts, which is a register read and not a call
         // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
         if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {

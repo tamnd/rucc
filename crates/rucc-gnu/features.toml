@@ -1080,10 +1080,11 @@ notes = "The address of the block of storage the running thread has, which on x8
 name = "__builtin_alloca"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "void *(size_t)"
 used_by = ["glibc", "systemd"]
-tests = []
+tests = ["rucc-driver::an_alloca_takes_the_bytes_off_the_stack_pointer_and_answers_where_they_are", "rucc-driver::the_bytes_an_alloca_took_are_still_there_at_the_end_of_the_block_that_took_them"]
+notes = "The stack pointer moved down by the size rounded up to sixteen, which is the same instruction a variable length array is and a different promise about how long the bytes last: these live until the function returns and an array lives until the end of its block. That is what an alloca in a loop means and it is the whole reason to write one. The lowering keeps the promise by taking every scope open where the call was written out of the business of restoring the stack pointer, which is what gcc 16.2.0 at -O0 does, measured rather than read off the manual. The signature is kept because the call is checked against it and is where the conversion of the argument to a size_t comes from, and the node is put in its place after that in check/builtin/alloca.rs. The alignment of the answer is sixteen because the builtin says nothing about what the bytes will hold, so the only safe answer is one that suits every type the target has. The plain name alloca means this too, under the rule the absolute value family is answered by: only where the callee is a function with external linkage declared with exactly the type the C library gives it, and not under -fno-builtin or -ffreestanding. gcc expands the plain name inline as well, and gcc.c-torture/execute/20010122-1.c is a program that would fail to link if it did not."
 
 [[feature]]
 name = "__builtin_va_list"
