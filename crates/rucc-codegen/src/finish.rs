@@ -189,7 +189,7 @@ impl<'a> Convention<'a> {
 /// by looking at them is guesswork, and a pass that guesses wrong about a store to a volatile
 /// variable deletes a read the program insisted on. So what the allocator asked for is recorded as
 /// it is written, and a later pass that is only allowed to touch the allocator's own moves has the
-/// list rather than a heuristic. See [`crate::reload`], which is the one pass that reads this.
+/// list rather than a heuristic. See [`crate::copies`], which is the one pass that reads this.
 #[derive(Debug, Default)]
 pub struct Moves(HashMap<Inst, Edit>);
 
