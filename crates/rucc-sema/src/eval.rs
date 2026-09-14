@@ -185,6 +185,13 @@ impl<'a> Eval<'a> {
             // A null pointer constant keeps the value it had, since the whole point of the
             // conversion is that the value was already zero.
             ExprKind::Convert { kind: Conversion::NullPointer, operand } => self.eval(operand),
+            // `&&label`, which GNU C makes an address constant of the same family as the two
+            // above. It is here rather than in the lvalue walk because a label is not an lvalue
+            // and `&&` is one token: there is nothing under it to take the address of, so there
+            // is no operand to walk down to.
+            ExprKind::LabelAddr(label) => {
+                Ok(Const::Address(Address { base: Base::Label(label), offset: 0 }))
+            }
             // Reading an object, which is not a constant however `const` the object is:
             // `const int n = 1; int a[n];` is a variable length array in C, and it is this arm
             // that makes it one. A named constant is the exception C23 added and the reason
@@ -1253,6 +1260,7 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
             let base = match address.base {
                 Base::Decl(decl) => decl.index(),
                 Base::Str(id) => id.index(),
+                Base::Label(label) => label.index(),
             };
             format!("&#{base} + {}", address.offset)
         }
@@ -1529,6 +1537,7 @@ mod tests {
                 let base = match address.base {
                     Base::Decl(decl) => decl.index(),
                     Base::Str(id) => id.index(),
+                    Base::Label(label) => label.index(),
                 };
                 Some((base, address.offset))
             }

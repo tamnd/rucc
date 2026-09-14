@@ -202,6 +202,19 @@ pub struct Func {
     /// that do nothing is indistinguishable from any other run of them once it is in the stream,
     /// so which one was reserved has to be said rather than looked for.
     pub patch: Option<Patch>,
+    /// The name each block something outside the function refers to was given, in block order.
+    ///
+    /// What asks for one is GNU's address of a label in the initializer of an object with static
+    /// storage duration. The `lea` a label address is inside a function needs none of this,
+    /// because both ends of that distance are in the same section and the assembler works it out.
+    /// An image is the other case: it is in another section, so what it holds is a relocation, and
+    /// a relocation names a symbol, so the block has to have one.
+    ///
+    /// Carried from the IR function this was lowered from for the reason [`Func::binding`] is
+    /// carried: the assembler and the object writer are handed functions and nothing else, so a
+    /// machine function that does not carry this is one whose relocation names a symbol nobody
+    /// ever defines.
+    pub labels: Vec<(Block, Symbol)>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -230,6 +243,7 @@ impl Func {
             visibility: Visibility::Default,
             cfi: Vec::new(),
             patch: None,
+            labels: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
@@ -271,6 +285,15 @@ impl Func {
     }
 
     // Blocks.
+
+    /// The name a block was given, or `None` for a block nothing outside the function refers to.
+    ///
+    /// A linear walk, because [`Func::labels`] is empty in every function no image points into and
+    /// is as long as the dispatch table in the handful that are.
+    #[must_use]
+    pub fn block_name(&self, block: Block) -> Option<Symbol> {
+        self.labels.iter().find(|&&(at, _)| at == block).map(|&(_, name)| name)
+    }
 
     /// Creates a block with no parameters and nothing in it, at the end of the layout.
     pub fn create_block(&mut self) -> Block {

@@ -187,6 +187,42 @@ pub fn write(
         split.push((section, at));
     }
 
+    // The places inside a function that have names of their own, which is where a label whose
+    // address an image holds is. After the functions, because the section one goes in is the
+    // section of the function it is inside and that is what the walk above worked out.
+    for label in &text.labels {
+        let after = text.funcs.partition_point(|func| func.start <= label.at);
+        let Some(index) = after.checked_sub(1) else {
+            let why = format!("'{}' is at {} and in front of every function", label.name, label.at);
+            return Err(Error::Refused { why });
+        };
+        let func = &text.funcs[index];
+        let (section, at) = if sections.functions {
+            // From the start of the section rather than from the symbol, which is the same
+            // correction a relocation inside a function gets below.
+            let base = func.start - func.patch.map_or(0, |patch| patch.before);
+            (split[index].0, (label.at - base) as u64)
+        } else {
+            (whole, label.at as u64)
+        };
+        let id = obj.add_symbol(Symbol {
+            name: label.name.clone().into_bytes(),
+            value: at,
+            // A label has no length. What is at it is the rest of the function, and a size here
+            // would be a claim that the bytes after it are a thing of their own.
+            size: 0,
+            kind: SymbolKind::Label,
+            // Never offered to another file. The name is one the compiler minted and what it
+            // points at is the middle of a function, so the only thing that resolves against it
+            // is the image in this same file that asked for it.
+            scope: SymbolScope::Compilation,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        });
+        symbols.insert(label.name.clone(), id);
+    }
+
     // Where each variable's image landed in the section it went into, kept because a relocation in
     // an image counts from the start of the image and one in a file counts from the start of the
     // section. A variable that is not in a section has no entry, since nothing in a merged one can

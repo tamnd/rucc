@@ -101,6 +101,21 @@ even:
   return total + 1;
 }
 
+// The same address written into an object with static storage duration, which is what a threaded
+// interpreter really builds its dispatch table out of. This one is a relocation naming a place
+// inside the function rather than an instruction, so the block it names is given a symbol and is
+// live whatever the edges say, since the jump that arrives there can be in another function.
+int threaded(int n) {
+  static void *const table[] = {&&one, &&two};
+  int total = 0;
+  goto *table[n & 1];
+one:
+  total = n;
+  goto *table[1];
+two:
+  return total + 2;
+}
+
 // Assembly with no operands, which is implicitly `volatile` because there is no result to say
 // it was needed and dropping it would drop the only thing it did.
 void barrier(void) { __asm__("mfence" ::: "memory"); }

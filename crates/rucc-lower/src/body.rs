@@ -176,6 +176,17 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         body.seal_once(block);
     }
 
+    // And the name each label an image holds the address of was given, which is here rather than
+    // where the address was taken because an image is lowered before the body is walked: an
+    // initializer is part of the declaration and the block a label starts is made by reaching the
+    // label. So the name was minted then and the block it belongs to is known only now.
+    for &label in &taken {
+        let Some(symbol) = body.unit.named_label(label) else { continue };
+        let Some(stmt) = tast[label].stmt else { continue };
+        let block = body.label_block(stmt);
+        body.func.name_block(block, symbol);
+    }
+
     let Body { ssa, .. } = body;
     ssa.finish(func);
     prune(func);
@@ -286,6 +297,15 @@ fn prune(func: &mut Func) {
     let mut reached = vec![false; func.counts().blocks];
     reached[entry.index()] = true;
     let mut stack = vec![entry];
+    // A block an image holds the address of is kept whatever the edges say. What arrives there is a
+    // `goto *p` that can be in another function entirely, which is the whole point of writing the
+    // address into an object with static storage duration, so there is nothing here to find.
+    for (block, _) in func.named_blocks().collect::<Vec<_>>() {
+        if !reached[block.index()] {
+            reached[block.index()] = true;
+            stack.push(block);
+        }
+    }
     while let Some(block) = stack.pop() {
         let insts: Vec<Inst> = func.insts(block).collect();
         for inst in insts {
@@ -3954,9 +3974,17 @@ impl<'u> Body<'_, 'u> {
             // reached. Where one goes is [`Self::complex_into`]'s to say.
             Const::Complex { .. } | Const::ComplexInt { .. } => None,
             Const::Address(address) => {
+                // The address of a label is the one base that is a place in this function rather
+                // than an object the linker knows by name, so it is the instruction that says so
+                // and not a reference to a symbol. A fold reached it because `&&l` is a constant
+                // wherever it is written, including where a value is what is wanted.
                 let symbol = match address.base {
                     rucc_sema::Base::Decl(decl) => self.unit.symbol_of(decl),
                     rucc_sema::Base::Str(id) => self.unit.string(id),
+                    rucc_sema::Base::Label(label) => {
+                        let addr = self.label_addr(label, span)?;
+                        return Some(self.offset(addr, address.offset as u64, span));
+                    }
                 };
                 let addr = self.global_addr(symbol, span);
                 Some(self.offset(addr, address.offset as u64, span))

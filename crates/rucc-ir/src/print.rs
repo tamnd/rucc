@@ -296,8 +296,28 @@ impl<'a> Printer<'a> {
             }
             self.block(func, block);
         }
+        self.labels(func);
         self.facts(func);
         self.out.push_str("}\n");
+    }
+
+    /// The name each block an image holds the address of was given, after the last block.
+    ///
+    /// At the end and not on the block's own line for the reason the facts are: a name is
+    /// something outside the function said about a block rather than part of what the block is,
+    /// and a function no image points into prints exactly as it did before names existed. It is in
+    /// the text at all because it is the one thing about a block that cannot be worked out again
+    /// from the blocks, so a round trip that dropped it would lose a fact the object file needs.
+    fn labels(&mut self, func: &Func) {
+        let mut first = true;
+        for (block, name) in func.named_blocks() {
+            if first {
+                self.out.push_str("\nlabels:\n");
+                first = false;
+            }
+            let number = self.blocks[block.index()];
+            let _ = writeln!(self.out, "    block{number} = @{}", self.names.resolve(name));
+        }
     }
 
     /// What is known about the values something is known about, after the last block.

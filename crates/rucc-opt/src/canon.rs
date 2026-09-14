@@ -75,7 +75,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Type, Value};
+use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
@@ -136,6 +136,7 @@ impl Pass for Canon {
 /// nothing.
 fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
+        let computed = computed(func);
         let jobs = wanted(func, an, |loops, cfg, id| {
             let header = loops.header(id);
             if loops.preheader(cfg, id).is_some() {
@@ -147,6 +148,12 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
                 .copied()
                 .filter(|&pred| !loops.contains(id, pred))
                 .collect();
+            // All of them or none, since a header with one of these left on it is a header with a
+            // predecessor from outside, so the block put on the others is not a preheader and the
+            // round after this would ask for it again.
+            if outside.iter().any(|pred| computed.contains(pred)) {
+                return None;
+            }
             (!outside.is_empty()).then_some((header, outside))
         });
         if jobs.is_empty() {
@@ -166,9 +173,13 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
 /// what stays refused is a loop with several headers, which is irreducibility and is not a loop.
 fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
+        let computed = computed(func);
         let jobs = wanted(func, an, |loops, cfg, id| {
             let header = loops.header(id);
             let from = loops.latches(id).to_vec();
+            if from.iter().any(|latch| computed.contains(latch)) {
+                return None;
+            }
             let single = from.len() == 1 && cfg.successors(from[0]).len() == 1 && from[0] != header;
             (!from.is_empty() && !single).then_some((header, from))
         });
@@ -190,6 +201,7 @@ fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stat
 /// pointed the other way.
 fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
+        let computed = computed(func);
         let jobs = wanted(func, an, |loops, cfg, id| {
             for exit in loops.exits(id) {
                 let outside: Vec<Block> = cfg
@@ -205,6 +217,11 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
                         .copied()
                         .filter(|&pred| loops.contains(id, pred))
                         .collect();
+                    // The next exit rather than nothing at all, because each of these is asked
+                    // about on its own and one that cannot be dedicated does not stop another.
+                    if inside.iter().any(|pred| computed.contains(pred)) {
+                        continue;
+                    }
                     return Some((exit.to, inside));
                 }
             }
@@ -533,6 +550,26 @@ fn apply(
     out
 }
 
+/// Every block that ends in a computed `goto`, whose edges are not edges a block can be put on.
+///
+/// Where one of these arrives is the address in the register, and that address is the address of the
+/// block the `&&label` named. So a block put in front of that one is a block the jump goes straight
+/// past: the arguments handed to it are never handed on, and the values the label expected to find
+/// are whatever was left in the registers. Nothing later can repair it either, because by then the
+/// only record that the edge was ever direct is gone.
+///
+/// That costs a loop with a `goto *p` in it its preheader, its single latch, or a dedicated exit,
+/// and so costs it every pass that asks for one. It is the same trade document 07.1 makes for a loop
+/// with several headers: the shape is refused rather than guessed at, and a computed `goto` inside a
+/// loop is rare enough that the passes it turns off are not worth the risk of a wrong one.
+fn computed(func: &Func) -> HashSet<Block> {
+    func.blocks()
+        .filter(|&block| {
+            func.terminator(block).is_some_and(|last| func[last].opcode == Opcode::IndirectBr)
+        })
+        .collect()
+}
+
 /// Puts a new block between the given predecessors and the block, carrying the same arguments.
 ///
 /// The new block takes a parameter for each of the target's parameters and passes them straight on,
@@ -792,6 +829,90 @@ mod tests {
 
         let second = canon(&mut func);
         assert!(!second.changed(), "and the second run has nothing left to do");
+    }
+
+    #[test]
+    fn a_header_a_computed_goto_enters_gets_no_preheader() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]).with_returns(&[]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let one = func.create_block();
+        let two = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let done = func.create_block();
+        let c = func.append_param(entry, Type::int(1));
+        Builder::new(&mut func, entry).br_if(c, one, &[], two, &[]);
+        Builder::new(&mut func, one).jump(head, &[]);
+        let addr = Builder::new(&mut func, two).block_addr(head);
+        Builder::new(&mut func, two).indirect_br(addr, &[head]);
+        Builder::new(&mut func, head).br_if(c, body, &[], done, &[]);
+        Builder::new(&mut func, body).jump(head, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let before = format!("{func:?}");
+        let stats = canon(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::PREHEADER), 0);
+        assert_eq!(before, format!("{func:?}"), "the edge is left exactly where it was");
+    }
+
+    #[test]
+    fn a_latch_that_ends_in_a_computed_goto_is_left_alone() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]).with_returns(&[]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let split = func.create_block();
+        let left = func.create_block();
+        let right = func.create_block();
+        let done = func.create_block();
+        let c = func.append_param(entry, Type::int(1));
+        Builder::new(&mut func, entry).jump(head, &[]);
+        Builder::new(&mut func, head).br_if(c, split, &[], done, &[]);
+        Builder::new(&mut func, split).br_if(c, left, &[], right, &[]);
+        Builder::new(&mut func, left).jump(head, &[]);
+        let addr = Builder::new(&mut func, right).block_addr(head);
+        Builder::new(&mut func, right).indirect_br(addr, &[head]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let (_cfg, _dom, loops) = forest(&func);
+        let id = loops.all().next().expect("there is a loop");
+        assert_eq!(loops.latches(id).len(), 2, "two back edges to start with");
+
+        let before = format!("{func:?}");
+        let stats = canon(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::LATCH), 0);
+        assert_eq!(before, format!("{func:?}"), "and both of them are still where they were");
+    }
+
+    #[test]
+    fn an_exit_a_computed_goto_leaves_through_is_left_alone() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]).with_returns(&[]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let pre = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let after = func.create_block();
+        let c = func.append_param(entry, Type::int(1));
+        // `after` is reached by leaving the loop and by a branch that never entered it, which is
+        // the shape the exit step splits, and it is left alone because one of the two ways out of
+        // the loop is a computed goto.
+        Builder::new(&mut func, entry).br_if(c, pre, &[], after, &[]);
+        Builder::new(&mut func, pre).jump(head, &[]);
+        Builder::new(&mut func, head).br_if(c, body, &[], after, &[]);
+        let addr = Builder::new(&mut func, body).block_addr(after);
+        Builder::new(&mut func, body).indirect_br(addr, &[after, head]);
+        Builder::new(&mut func, after).ret(&[]);
+
+        let before = format!("{func:?}");
+        let stats = canon(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::EXIT), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::LATCH), 0);
+        assert_eq!(before, format!("{func:?}"), "and nothing went on either edge");
     }
 
     #[test]

@@ -40,7 +40,7 @@ use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
-use rucc_object::{Extent, FUNC_ALIGN, Patch, Reference, Reloc, Text};
+use rucc_object::{Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
 
 use crate::Error;
 use crate::format::{binding, visibility};
@@ -205,6 +205,14 @@ impl Assembler<'_> {
         let end = self.func.cfi_end();
         for block in self.func.blocks() {
             self.blocks[block.index()] = self.text.bytes.len();
+            // And the name an image knows the block by, as a symbol at the same byte. The number
+            // the jumps above use is worked out here and stays here, because both ends of a jump
+            // are in this section. An image is in another one, so what it holds is a relocation
+            // and a relocation names a symbol, which is what this is.
+            if let Some(label) = self.func.block_name(block) {
+                let name = self.names.resolve(label).to_owned();
+                self.text.labels.push(Marker { name, at: self.text.bytes.len() });
+            }
             for inst in self.func.insts(block) {
                 // Before it is encoded, because what is wanted is where it begins and after this
                 // it has already been written. A landing pad is in front of it in a function that

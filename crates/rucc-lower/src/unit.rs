@@ -37,7 +37,7 @@ use rucc_ir::{
 };
 use rucc_sema::{
     Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
-    InitList, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
+    InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible};
@@ -267,6 +267,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         diagnostics: Vec::new(),
         strings: HashMap::new(),
         statics: HashMap::new(),
+        labels: HashMap::new(),
         done: HashSet::new(),
         aliases: Vec::new(),
         aliased: HashSet::new(),
@@ -310,6 +311,15 @@ pub(crate) struct Unit<'a> {
     strings: HashMap<StrId, Symbol>,
     /// The name each object with no linkage was given.
     statics: HashMap<DeclId, Symbol>,
+    /// The name each label an image holds the address of was given.
+    ///
+    /// A label is a place inside a function and has no name in the object file, because a jump to
+    /// one is a distance the assembler works out and never a symbol. An image is the one thing
+    /// that cannot do that: it is in another section, so what it holds is a relocation, and a
+    /// relocation names a symbol. So a label an image points at gets one, minted here because the
+    /// image is lowered before the body is walked and the block the label starts does not exist
+    /// yet when the name is first asked for.
+    labels: HashMap<LabelId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
     done: HashSet<DeclId>,
     /// The declarations that are a second name for something rather than a thing of their own,
@@ -1185,6 +1195,7 @@ impl Unit<'_> {
                         self.symbol_of(decl)
                     }
                     Base::Str(id) => self.string(id),
+                    Base::Label(label) => self.label_name(label),
                 };
                 let addend = i64::try_from(address.offset).unwrap_or(0);
                 let size = u32::try_from(size).unwrap_or(0);
@@ -1222,6 +1233,27 @@ impl Unit<'_> {
         self.module.add_global(global);
         self.strings.insert(id, symbol);
         symbol
+    }
+
+    /// The name a label an image holds the address of is known by, minting one the first time.
+    ///
+    /// The number is what makes two labels in two functions two names, the same way it does for a
+    /// `static` inside a function. Nothing but the relocation and the definition the back end
+    /// writes for it ever reads this, so the spelling only has to be one the object format lets a
+    /// local symbol have, and the leading dot is what keeps it out of the symbol table on the
+    /// formats that have the convention.
+    pub(crate) fn label_name(&mut self, label: LabelId) -> Symbol {
+        if let Some(&symbol) = self.labels.get(&label) {
+            return symbol;
+        }
+        let symbol = self.names.intern(&format!(".Llbl.{}", self.labels.len()));
+        self.labels.insert(label, symbol);
+        symbol
+    }
+
+    /// The name a label was given, or `None` for a label no image points at.
+    pub(crate) fn named_label(&self, label: LabelId) -> Option<Symbol> {
+        self.labels.get(&label).copied()
     }
 
     /// The name the C library gives a function the program named with the `__builtin_` prefix,

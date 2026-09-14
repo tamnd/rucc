@@ -100,6 +100,14 @@ pub enum Base {
     Decl(DeclId),
     /// A string literal, which has static storage duration and no name of its own.
     Str(StrId),
+    /// A label of the function this was written in, whose address GNU C lets a program take.
+    ///
+    /// The one base that is a place inside a function rather than an object. What it names still
+    /// has an address nobody knows until the link, so it belongs here for the same reason the two
+    /// above do, and the only thing it cannot have is an offset that means anything: adding to the
+    /// address of a label is arithmetic on a `void *`, which has no element to scale by, and
+    /// landing in the middle of an instruction is not somewhere a jump may go.
+    Label(LabelId),
 }
 
 /// A label, and the statement it names.
