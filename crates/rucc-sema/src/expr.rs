@@ -423,6 +423,20 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+    /// `__builtin_alloca(n)`, which takes `n` bytes of the frame and answers where they are.
+    ///
+    /// It is a node rather than a call for the reason the ones above it are: there is no function
+    /// of the name for a call to reach. The size is an expression and not a number, which is the
+    /// whole point of it, and a constant one is still this rather than an ordinary local because
+    /// what makes the two different is when the storage goes away rather than how big it is.
+    ///
+    /// The storage lives until the function returns and not until the end of the block it was
+    /// written in, which is the one thing about it that is not obvious and the one thing the
+    /// lowering has to be careful about. See `check/builtin/alloca.rs`.
+    Alloca {
+        /// How many bytes to take, which is the only argument.
+        size: ExprId,
+    },
 }
 
 /// Which of the two things about a frame one of the address builtins asks for.

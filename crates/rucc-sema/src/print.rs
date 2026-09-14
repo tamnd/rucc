@@ -490,6 +490,7 @@ impl<'a> Printer<'a> {
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
+            ExprKind::Alloca { .. } => "alloca".to_owned(),
         }
     }
 
@@ -510,6 +511,7 @@ impl<'a> Printer<'a> {
             ExprKind::CompoundLiteral(decl) => self.decl(decl),
             ExprKind::StmtExpr(body) => self.stmt(body),
             ExprKind::Member { base, .. }
+            | ExprKind::Alloca { size: base }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }
             | ExprKind::VaStart { list: base }
