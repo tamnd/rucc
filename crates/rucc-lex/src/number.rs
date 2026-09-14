@@ -60,7 +60,9 @@
 //! bits do not depend on the machine the compiler runs on. The type decides the format and the
 //! target decides what some of the types are: `long double` is the x87 eighty bit format on
 //! x86-64 Linux and true quad precision on AArch64 Linux, and both of them say 128 bits wide,
-//! which is why [`TargetInfo::long_double_format`] exists.
+//! which is why [`TargetInfo::long_double_format`] exists. The target also decides which of the
+//! types exist at all: `f16` is not a suffix on a machine with no `_Float16`, and gcc turns it
+//! away there as a suffix it does not support rather than as one it has never heard of.
 //!
 //! The suffixes were measured on gcc 13.3 on x86-64 Linux, with `_Generic` for the type and by
 //! printing the bytes for the format. `f` is `float` and `l` is `long double`, and then the
@@ -314,8 +316,8 @@ pub enum FloatError {
     /// A `df`, `dd` or `dl` suffix. The constant is well formed and this compiler has nowhere
     /// to put a decimal floating value yet.
     DecimalFloat,
-    /// A suffix naming a type this target does not have, which is `w` anywhere but x86 and
-    /// `f128x` everywhere.
+    /// A suffix naming a type this target does not have, which is `w` anywhere but x86, `f128x`
+    /// everywhere, and `f16`, `f128`, `q` and `f64x` on the machines that have no such type.
     UnsupportedType,
 }
 
@@ -331,9 +333,10 @@ impl FloatError {
             FloatError::NoDigits => "no digits in floating constant",
             FloatError::TooManyPoints => "too many decimal points in number",
             FloatError::DecimalFloat => "decimal floating constants are not supported yet",
-            FloatError::UnsupportedType => {
-                "the type of this floating constant is not supported on this target"
-            }
+            // gcc's words, and it says them about the suffix rather than about the type. It is
+            // the same sentence for `1.0w` on AArch64 and `1.0f128` on armv7 and `1.0f128x`
+            // anywhere, which was measured rather than guessed.
+            FloatError::UnsupportedType => "unsupported non-standard suffix on floating constant",
         }
     }
 }
@@ -731,7 +734,7 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
             // One type per constant, so `1.0fl` is not a constant and neither is `1.0ff`.
             _ if ty.is_some() => return Err(FloatError::InvalidSuffix),
             b'f' | b'F' => {
-                let (named, taken, extra) = float_n(rest)?;
+                let (named, taken, extra) = float_n(rest, target)?;
                 ty = Some(named);
                 remarks = remarks.with(extra);
                 taken
@@ -741,6 +744,10 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                 1
             }
             b'q' | b'Q' => {
+                // The same type the `f128` suffix names, so it goes where that type goes.
+                if !target.has_float128 {
+                    return Err(FloatError::UnsupportedType);
+                }
                 ty = Some(FloatConstantType::Float128);
                 remarks = remarks.with(Remarks::EXTENDED_SUFFIX);
                 1
@@ -779,7 +786,10 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
 /// `_FloatNx` types when digits follow.
 ///
 /// Returns the type, how many bytes it took and what is worth saying about it.
-fn float_n(rest: &[u8]) -> Result<(FloatConstantType, usize, Remarks), FloatError> {
+fn float_n(
+    rest: &[u8],
+    target: &TargetInfo,
+) -> Result<(FloatConstantType, usize, Remarks), FloatError> {
     let mut end = 1;
     while rest.get(end).is_some_and(u8::is_ascii_digit) {
         end += 1;
@@ -791,6 +801,14 @@ fn float_n(rest: &[u8]) -> Result<(FloatConstantType, usize, Remarks), FloatErro
     // is not, however odd that looks next to the `F` being free.
     let extended = rest.get(end) == Some(&b'x');
     let ty = match (&rest[1..end], extended) {
+        // A suffix naming a type the target does not have is a suffix the target does not have,
+        // which is one message in gcc and not two: the constant is turned away where it is
+        // written rather than given the type and refused later.
+        (b"16", false) if !target.has_float16 => return Err(FloatError::UnsupportedType),
+        (b"128", false) if !target.has_float128 => return Err(FloatError::UnsupportedType),
+        (b"64", true) if target.float64x_format.is_none() => {
+            return Err(FloatError::UnsupportedType);
+        }
         (b"16", false) => FloatConstantType::Float16,
         (b"32", false) => FloatConstantType::Float32,
         (b"64", false) => FloatConstantType::Float64,
@@ -1152,12 +1170,42 @@ mod tests {
 
     #[test]
     fn a_type_the_target_does_not_have_is_refused_by_name() {
-        // gcc says "'_Float128x' is not supported on this target" rather than calling the
-        // suffix invalid, and it is supported on no target here.
+        // gcc calls this one unsupported rather than invalid, and it is unsupported on every
+        // target: `_Float128x` is a type nothing here has.
         assert_eq!(float("1.0f128x"), Err(FloatError::UnsupportedType));
         // `__float80` is the x87 format, which only x86 has.
         assert_eq!(floating("1.0w", Std::C23, &aarch64()), Err(FloatError::UnsupportedType));
         assert!(float("1.0w").is_ok());
+    }
+
+    #[test]
+    fn a_suffix_goes_where_the_type_it_names_goes() {
+        // The rows are gcc 13's, measured with the cross compilers. armv7 has no type wider than
+        // a `double`, so all three of these are refused there, and i686 has the quad and not the
+        // half, so one of them is.
+        // The three field triple cannot spell either of these machines, so they come from the
+        // tuple, which spells all forty two rows.
+        let arm =
+            TargetInfo::for_tuple("armv7-linux-gnueabihf".parse().expect("a row in the table"));
+        let i686 = TargetInfo::for_tuple("i686-linux-gnu".parse().expect("a row in the table"));
+        for text in ["1.0f16", "1.0f128", "1.0q", "1.0f64x"] {
+            assert_eq!(
+                floating(text, Std::C23, &arm),
+                Err(FloatError::UnsupportedType),
+                "{text} on armv7"
+            );
+            assert!(float(text).is_ok(), "{text} on x86-64");
+        }
+        assert_eq!(
+            floating("1.0f16", Std::C23, &i686),
+            Err(FloatError::UnsupportedType),
+            "the half is the one i686 has no format for"
+        );
+        assert!(floating("1.0f128", Std::C23, &i686).is_ok());
+        // The interchange types every machine has keep working on the machine that has least.
+        for text in ["1.0f32", "1.0f64", "1.0f32x"] {
+            assert!(floating(text, Std::C23, &arm).is_ok(), "{text} on armv7");
+        }
     }
 
     #[test]

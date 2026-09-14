@@ -1041,10 +1041,15 @@ const fn characteristics(format: Format) -> &'static Characteristics {
 /// The `float.h` characteristics.
 ///
 /// Nine families of them, which is `float`, `double` and `long double` and the six C23 named
-/// them after. Only two of the nine depend on the target, and they are the two whose format is
-/// a target property: `long double`, which is x87 on x86-64 Linux, quad on AArch64 and RISC-V
-/// Linux and a `double` on Apple and on Windows, and `_Float64x`, which is the widest format the
-/// processor has and so does not follow `long double` down on the targets that shrink it.
+/// them after. Two of the nine have a format the target decides: `long double`, which is x87 on
+/// x86-64 Linux, quad on AArch64 and RISC-V Linux and a `double` on Apple and on Windows, and
+/// `_Float64x`, which is the widest format the processor has and so does not follow `long
+/// double` down on the targets that shrink it.
+///
+/// Three more have a target that decides whether they are there at all. `_Float64x` is missing
+/// on a machine with nothing wider than a `double`, and `_Float16` and `_Float128` are missing
+/// wherever the machine has no such format, which is four of the seven rows for the half and one
+/// of them for the quad.
 ///
 /// `__FLT128X_*__` is deliberately missing. `_Float128x` is a type no target gcc supports has,
 /// so gcc defines nothing for it and neither does this.
@@ -1073,10 +1078,18 @@ fn floats(d: &mut Defs, target: &TargetInfo) {
     family(d, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
     family(d, "LDBL", characteristics(target.long_double_format), |value| format!("{value}L"));
 
-    family(d, "FLT16", &HALF, |value| format!("{value}F16"));
+    // The two named types that are not on every machine, each written where the type is and left
+    // out where it is not. A program reads `__FLT128_MANT_DIG__` to find out whether it may write
+    // the type, which is what glibc's `<float.h>` and `<math.h>` do, so the macros and the type
+    // have to agree or the header asks for something the compiler will refuse.
+    if target.has_float16 {
+        family(d, "FLT16", &HALF, |value| format!("{value}F16"));
+    }
     family(d, "FLT32", &SINGLE, |value| format!("{value}F32"));
     family(d, "FLT64", &DOUBLE, |value| format!("{value}F64"));
-    family(d, "FLT128", &QUAD, |value| format!("{value}F128"));
+    if target.has_float128 {
+        family(d, "FLT128", &QUAD, |value| format!("{value}F128"));
+    }
     family(d, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
     // Nothing at all on a target whose widest format is a `double`, which is what gcc does
     // there: `_Float64x` is not a type on that machine and the family that describes it is not a
@@ -1124,6 +1137,12 @@ mod tests {
     fn set_for(triple: &str) -> String {
         let triple: Triple = triple.parse().expect("a triple the compiler supports");
         built_in(&TargetInfo::new(triple), &Predef::new())
+    }
+
+    /// The same, for a machine the three field triple cannot spell.
+    fn set_for_tuple(tuple: &str) -> String {
+        let target = TargetInfo::for_tuple(tuple.parse().expect("a row in the target table"));
+        built_in(&target, &Predef::new())
     }
 
     fn has(text: &str, line: &str) -> bool {
@@ -1379,6 +1398,35 @@ mod tests {
         // `_Float128x` is a type no target has, so gcc defines nothing for it and neither
         // does this.
         assert!(!linux.contains("__FLT128X_"));
+    }
+
+    #[test]
+    fn the_family_for_a_named_type_is_written_where_the_type_is_and_nowhere_else() {
+        // gcc 13's rows, measured with the cross compilers: the half is on x86-64, AArch64 and
+        // RISC-V, and the quad is on every one of the seven but armv7. A program asks the macro
+        // to find out whether it may write the type, so a row where the two disagree is a header
+        // that asks for a type the compiler then refuses.
+        let has_family = |target: &str, prefix: &str| {
+            set_for_tuple(target).contains(&format!("#define __{prefix}_MANT_DIG__ "))
+        };
+        assert!(has_family("x86_64-linux-gnu", "FLT16"));
+        assert!(has_family("aarch64-linux-gnu", "FLT16"));
+        assert!(has_family("riscv64-linux-gnu", "FLT16"));
+        assert!(!has_family("i686-linux-gnu", "FLT16"));
+        assert!(!has_family("s390x-linux-gnu", "FLT16"));
+        assert!(!has_family("armv7-linux-gnueabihf", "FLT16"));
+
+        assert!(has_family("i686-linux-gnu", "FLT128"));
+        assert!(has_family("s390x-linux-gnu", "FLT128"));
+        assert!(!has_family("armv7-linux-gnueabihf", "FLT128"));
+
+        // The families every machine has are still there on the machine that has least, and so
+        // is `_Float64x` on the machines that have a format for it.
+        let arm = set_for_tuple("armv7-linux-gnueabihf");
+        for prefix in ["FLT", "DBL", "LDBL", "FLT32", "FLT64", "FLT32X"] {
+            assert!(arm.contains(&format!("#define __{prefix}_MANT_DIG__ ")), "__{prefix}_");
+        }
+        assert!(!arm.contains("__FLT64X_"));
     }
 
     #[test]
