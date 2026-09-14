@@ -218,7 +218,7 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // something does read is a slot, and the only one of those the pass can fill so far is a
     // capability for a pointer an allocator just returned, which is a load out of that instance's
     // own header rather than anything worked out from the address.
-    (Opcode::CapOf, "`rucc_safety::slot`, into a call for a fresh allocation and gone otherwise"),
+    (Opcode::CapOf, "`rucc_safety::slot`, into the header read at an allocation site or the walk"),
     // The two ends of a capability that something does read. A capability is four words of frame
     // and the value that stands for one is the slot's address, so the pair below is an `alloca`
     // with four zero words written into it and a call handed the addresses of two slots.
