@@ -31,7 +31,7 @@
 //! It is the commonest pair in the machine IR this compiler writes. Counting adjacent instructions
 //! over the corpus at `-O2`, where the first writes what the second reads, the largest family by a
 //! long way is a move into arithmetic, and an addition at eight bytes is the largest single entry
-//! in it. What the pass gets over that corpus is 928 of these at `-O2` and 920 fewer instructions
+//! in it. What the pass gets over that corpus is 865 of these at `-O2` and 845 fewer instructions
 //! once the allocator has had its say, with the difference between the two explained below.
 //!
 //! # Why no rule does it
@@ -110,16 +110,18 @@
 //! block, which section 37.3 records as GCC's own answer: `max-combine-insns` is four and has been
 //! for decades.
 //!
-//! It also costs nothing. The pair this pass is about is written by the selector out of one
-//! expression, so the two are next to each other or nearly, and the measurement in [`WINDOW`] is
-//! that a bound of one already finds nine tenths of what there is and that past sixteen there is
-//! nothing left to find.
+//! It is also nearly all of it already at one. The measurement in [`WINDOW`] is that a bound of one
+//! finds 852 folds over the corpus and a bound of thirty two finds 865, which follows from the rule
+//! above about memory rather than from anything about how the selector writes code: the load that
+//! folds is the last access to memory before the arithmetic, and the last access before it is
+//! usually the instruction in front of it. The window is there to bound the walk and it earns
+//! thirteen folds along the way.
 //!
 //! # Where it costs something
 //!
 //! A fold takes out exactly one instruction, so the number of folds and the number of instructions
-//! saved should be the same number, and they are not: 928 folds against 920 instructions over the
-//! corpus at `-O2`, and 1824 against 1638 over the SQLite amalgamation. The gap is the allocator.
+//! saved should be the same number, and they are not: 865 folds against 845 instructions over the
+//! corpus at `-O2`, and 1609 against 1444 over the SQLite amalgamation. The gap is the allocator.
 //!
 //! Taking the load out changes which values are live where, so the allocator makes different
 //! choices, and a few of them are worse. Two programs in the corpus come out two instructions
@@ -165,15 +167,16 @@ use crate::fold::Pending;
 ///
 /// ```text
 ///   1     2     4     8    16    32
-/// 852   890   914   918   928   928
+/// 852   858   863   864   865   865
 /// ```
 ///
 /// Sixteen, because that is where the curve stops. Doubling it again finds nothing, and the pass
 /// still costs a fixed amount per instruction, which is what the bound is for.
 ///
-/// The shape of the curve is the shape of the problem. A load and the arithmetic that reads it come
-/// out of the selector next to each other, so a window of one already finds nine tenths of them,
-/// and the rest are the ones something unrelated was written between.
+/// The curve is that flat because of the rule about memory rather than because of anything the
+/// selector does. The load that folds is the last access to memory before the arithmetic, and
+/// almost always that is the instruction immediately in front of it. What the room past one buys is
+/// the thirteen where a register was written or a constant made in between.
 pub const WINDOW: usize = 16;
 
 /// One arithmetic instruction that could read its second source out of memory, and the load that
