@@ -327,9 +327,18 @@ impl Checker<'_> {
                 (_, Some(kind), _) => self.types.int(kind),
                 (_, _, Some(kind)) => self.types.float(kind),
                 // A floating type the target does not have. `_Float128x` is one no target gcc
-                // supports has, and `__float80` is one only x86 has, and gcc turns both of them
-                // away in the same words.
-                (Scalar::Float128x | Scalar::Float80, _, _) => {
+                // supports has, `__float80` is one only x86 has, and the three named ones are
+                // there on some machines and not on others. gcc turns all of them away in the
+                // same words, which are not the words for a type that is coming later.
+                (
+                    Scalar::Float128x
+                    | Scalar::Float80
+                    | Scalar::Float16
+                    | Scalar::Float128
+                    | Scalar::Float64x,
+                    _,
+                    _,
+                ) => {
                     self.unavailable_type(spell_scalar(scalar), span);
                     self.types.float(FloatKind::Double)
                 }
@@ -388,9 +397,24 @@ impl Checker<'_> {
                     );
                     self.complex_double()
                 }
-                // A floating type this compiler or this target does not have, which is the two
-                // the real arm turns away as well. The complexity is not what is wrong with
-                // either of them, so the message is the one the half would get.
+                // A floating type this target does not have, which is the same list the real arm
+                // turns away. The complexity is not what is wrong with any of them, so the
+                // message is the one the half would get, which is what gcc says about
+                // `_Complex _Float128` on armv7 too.
+                (
+                    Scalar::Float128x
+                    | Scalar::Float80
+                    | Scalar::Float16
+                    | Scalar::Float128
+                    | Scalar::Float64x,
+                    _,
+                    _,
+                ) => {
+                    self.unavailable_type(spell_scalar(scalar), span);
+                    self.complex_double()
+                }
+                // Anything else with no type behind it, which is nothing today: every scalar is
+                // either an integer, a floating type, or named in one of the arms above.
                 _ => {
                     self.unsupported_type(&format!("the type `{}`", spell_scalar(scalar)), span);
                     self.complex_double()
@@ -1372,22 +1396,27 @@ fn int_kind(scalar: Scalar) -> Option<IntKind> {
 
 /// The floating type a built-in names, if the target has it.
 ///
-/// The two that depend on the target are the ones spelled for a format rather than for a rank.
+/// The ones that depend on the target are the ones spelled for a format rather than for a rank.
 /// `__float80` is gcc's name for the x87 type and exists only where that type does, and there
 /// it is the same type as `long double` rather than a second one beside it, which is what gcc
 /// makes it and what `_Generic` can be used to see. `_Float128x` is a type no target gcc
 /// supports has at all, which is why it is missing here rather than mapped to something.
+///
+/// `_Float16`, `_Float128` and `_Float64x` are the three the machine decides. Only `float`,
+/// `double`, `long double` and the two interchange types at their widths are on every row, and
+/// the other three come and go with the formats the target has. The fields say which, and they
+/// carry the gcc 13 rows they were measured from.
 fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
     match scalar {
         Scalar::Float => Some(FloatKind::Float),
         Scalar::Double => Some(FloatKind::Double),
         Scalar::LongDouble => Some(FloatKind::LongDouble),
-        Scalar::Float16 => Some(FloatKind::Float16),
+        Scalar::Float16 if target.has_float16 => Some(FloatKind::Float16),
         Scalar::Float32 => Some(FloatKind::Float32),
         Scalar::Float64 => Some(FloatKind::Float64),
-        Scalar::Float128 => Some(FloatKind::Float128),
+        Scalar::Float128 if target.has_float128 => Some(FloatKind::Float128),
         Scalar::Float32x => Some(FloatKind::Float32x),
-        Scalar::Float64x => Some(FloatKind::Float64x),
+        Scalar::Float64x if target.float64x_format.is_some() => Some(FloatKind::Float64x),
         Scalar::Float80 if target.long_double_format == Format::X87Extended => {
             Some(FloatKind::LongDouble)
         }
@@ -1466,6 +1495,12 @@ mod tests {
         /// The same, for a test whose answer is a property of the target.
         pub(super) fn for_target(triple: &str) -> Fixture {
             let target = TargetInfo::new(triple.parse::<Triple>().expect("a triple"));
+            Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
+        }
+
+        /// The same again, for a machine the three field triple cannot spell.
+        pub(super) fn for_tuple(tuple: &str) -> Fixture {
+            let target = TargetInfo::for_tuple(tuple.parse().expect("a row in the target table"));
             Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
         }
 
@@ -1684,6 +1719,66 @@ mod tests {
                 "'__float80' is not supported on this target",
             ]
         );
+    }
+
+    #[test]
+    fn the_named_floating_types_are_refused_on_a_machine_that_has_no_format_for_them() {
+        // armv7 has nothing wider than a `double` and no half precision format either, so gcc
+        // has none of these three types there and says the same sentence about each. The
+        // complex spelling gets the same sentence, because the complexity is not what is wrong.
+        let mut fixture = Fixture::for_tuple("armv7-linux-gnueabihf");
+        let float16 = fixture.keywords(&[BuiltinSet::FLOAT16]);
+        let float128 = fixture.keywords(&[BuiltinSet::FLOAT128]);
+        let float64x = fixture.keywords(&[BuiltinSet::FLOAT64X]);
+        let complex128 = fixture.keywords(&[BuiltinSet::COMPLEX, BuiltinSet::FLOAT128]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, float16, plain), "double");
+        assert_eq!(built(&mut checker, float128, plain), "double");
+        assert_eq!(built(&mut checker, float64x, plain), "double");
+        assert_eq!(built(&mut checker, complex128, plain), "_Complex double");
+        assert_eq!(
+            messages(&checker),
+            [
+                "'_Float16' is not supported on this target",
+                "'_Float128' is not supported on this target",
+                "'_Float64x' is not supported on this target",
+                "'_Float128' is not supported on this target",
+            ]
+        );
+
+        // The interchange types at the two widths every machine has are still there, and so is
+        // `_Float32x`, which is a `double` under another name.
+        let mut fixture = Fixture::for_tuple("armv7-linux-gnueabihf");
+        let kept = [
+            (BuiltinSet::FLOAT32, "_Float32"),
+            (BuiltinSet::FLOAT64, "_Float64"),
+            (BuiltinSet::FLOAT32X, "_Float32x"),
+        ];
+        let specs: Vec<_> = kept.iter().map(|&(keyword, _)| fixture.keywords(&[keyword])).collect();
+        let plain = fixture.declarator(Some("x"), &[]);
+        let mut checker = fixture.checker();
+        for (specs, expected) in specs.into_iter().zip(kept.iter().map(|&(_, name)| name)) {
+            assert_eq!(built(&mut checker, specs, plain), expected);
+        }
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_target_that_has_one_named_type_and_not_the_other_keeps_the_one_it_has() {
+        // i686 has quad precision in software and no half precision format, because gcc aims at
+        // the baseline and SSE2 is not in i686's. So the two types part company on this row, and
+        // that is the reason they are two target properties rather than one.
+        let mut fixture = Fixture::for_tuple("i686-linux-gnu");
+        let float16 = fixture.keywords(&[BuiltinSet::FLOAT16]);
+        let float128 = fixture.keywords(&[BuiltinSet::FLOAT128]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, float128, plain), "_Float128");
+        assert_eq!(built(&mut checker, float16, plain), "double");
+        assert_eq!(message(&checker), "'_Float16' is not supported on this target");
     }
 
     #[test]

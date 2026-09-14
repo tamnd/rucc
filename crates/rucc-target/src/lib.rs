@@ -503,6 +503,33 @@ pub struct TargetInfo {
     /// The type does not exist there and neither reference defines the macros that describe it,
     /// so the honest answer is that there is no format rather than a `double` in its place.
     pub float64x_format: Option<Format>,
+    /// Whether the target has `_Float16`.
+    ///
+    /// The named types are not all universal the way `_Float32` and `_Float64` are. gcc 13 has
+    /// this one on x86-64, AArch64 and RISC-V and does not have it on i686, armv7, ppc64le or
+    /// s390x, which was measured by compiling a declaration of it with each of those cross
+    /// compilers. The `__FLT16_*__` macros and the `f16` suffix are defined on exactly the rows
+    /// where the type is, so all three ask this one field.
+    ///
+    /// i686 is the row worth explaining. gcc aims at the baseline of the target rather than at
+    /// whatever chip is under it, and half precision on x86 needs SSE2, which is in the baseline
+    /// of x86-64 and not in the baseline of i686. So the two x86 rows disagree, and a `-msse2`
+    /// on the command line would move the 32-bit one, which is a thing this compiler has no
+    /// place to say yet.
+    pub has_float16: bool,
+    /// Whether the target has `_Float128`.
+    ///
+    /// Every row but 32-bit ARM among the seven measured against gcc 13. x86-64 and i686 have it
+    /// in software, and AArch64, RISC-V, s390x and ppc64le have it because quad precision is
+    /// already the format of something on those machines. armv7 has no format wider than a
+    /// `double` at all, so the type is not there and gcc says so.
+    ///
+    /// This is the ISO spelling. gcc's `__float128` is a narrower thing and is not this field:
+    /// that name exists on x86 and PowerPC only, and on AArch64, RISC-V and s390x gcc offers
+    /// `_Float128` in its place when a program writes it. `__SIZEOF_FLOAT128__` follows the
+    /// vendor name rather than the type, which is why it is missing on rows where the type is
+    /// there.
+    pub has_float128: bool,
     /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
     ///
     /// It is 16 on Windows, so a wide string there is UTF-16 and a character outside the basic
@@ -724,6 +751,8 @@ impl TargetInfo {
             long_double_width: bits(layout.long_double.size),
             long_double_format: layout.long_double.format,
             float64x_format: float64x_format(target),
+            has_float16: has_float16(target),
+            has_float128: has_float128(target),
             wchar_width: bits(layout.wchar_size),
             wchar_is_signed: layout.wchar_is_signed,
             bit_int_granule: bit_int_granule(target),
@@ -776,6 +805,48 @@ fn float64x_format(target: TargetTuple) -> Option<Format> {
         // Nothing on these machines is wider than a `double`, so there is no type here to
         // describe and neither reference defines the macros that would describe it.
         tuple::Arch::Arm | tuple::Arch::Arm64Ec | tuple::Arch::Wasm32 => None,
+    }
+}
+
+/// Whether the target has `_Float16`.
+fn has_float16(target: TargetTuple) -> bool {
+    match target.arch() {
+        // Half precision is in the baseline of these: SSE2 on x86-64, the FP16 storage format
+        // every ARMv8 has, and RISC-V, where gcc gives the type whether or not the hardware has
+        // the instructions to go with it.
+        tuple::Arch::X86_64
+        | tuple::Arch::Aarch64
+        | tuple::Arch::Arm64Ec
+        | tuple::Arch::Riscv64
+        | tuple::Arch::Riscv32 => true,
+        // i686 for the reason the field gives, which is the baseline and not the chip, and the
+        // rest are machines gcc 13 has not written the type for.
+        tuple::Arch::X86
+        | tuple::Arch::Arm
+        | tuple::Arch::LoongArch64
+        | tuple::Arch::PowerPc64
+        | tuple::Arch::S390x
+        | tuple::Arch::Wasm32 => false,
+    }
+}
+
+/// Whether the target has `_Float128`.
+fn has_float128(target: TargetTuple) -> bool {
+    match target.arch() {
+        // Either the machine already has quad precision, which is the AArch64, RISC-V, s390x and
+        // PowerPC answer, or the compiler provides it in software, which is what x86 does.
+        tuple::Arch::X86_64
+        | tuple::Arch::X86
+        | tuple::Arch::Aarch64
+        | tuple::Arch::Arm64Ec
+        | tuple::Arch::Riscv64
+        | tuple::Arch::Riscv32
+        | tuple::Arch::LoongArch64
+        | tuple::Arch::PowerPc64
+        | tuple::Arch::S390x => true,
+        // The same two rows that have no `_Float64x`, and for the same reason: nothing on the
+        // machine is wider than a `double` and neither reference offers a type that is.
+        tuple::Arch::Arm | tuple::Arch::Wasm32 => false,
     }
 }
 
@@ -1150,6 +1221,34 @@ mod tests {
         let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse().unwrap());
         assert_eq!(windows.long_double_format, Format::Double);
         assert_eq!(windows.float64x_format, Some(Format::X87Extended));
+    }
+
+    #[test]
+    fn the_named_floating_types_are_not_on_every_machine() {
+        // gcc 13, measured with the cross compilers rather than reasoned about. `_Float16` is on
+        // three of these seven and `_Float128` is on six, and the two lists are not the same
+        // list, which is why there are two fields.
+        // The three field triple spells three architectures, and four of these rows are not
+        // among them, so this asks the tuple the way the layout tests do.
+        let of = |tuple: &str| TargetInfo::for_tuple(tuple.parse().expect("a row in the table"));
+        let rows = [
+            ("x86_64-linux-gnu", true, true),
+            ("i686-linux-gnu", false, true),
+            ("aarch64-linux-gnu", true, true),
+            ("armv7-linux-gnueabihf", false, false),
+            ("powerpc64le-linux-gnu", false, true),
+            ("riscv64-linux-gnu", true, true),
+            ("s390x-linux-gnu", false, true),
+        ];
+        for (tuple, float16, float128) in rows {
+            let target = of(tuple);
+            assert_eq!(target.has_float16, float16, "{tuple} `_Float16`");
+            assert_eq!(target.has_float128, float128, "{tuple} `_Float128`");
+        }
+        // The operating system has nothing to do with it, the way it has nothing to do with
+        // `_Float64x`, so Apple and Windows keep both types.
+        assert!(of("aarch64-apple-darwin").has_float16);
+        assert!(of("x86_64-pc-windows-msvc").has_float128);
     }
 
     #[test]
