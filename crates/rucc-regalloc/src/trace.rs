@@ -501,9 +501,9 @@ mod tests {
     fn allocate(func: &mut Func, env: &Env) -> (Shape, Assignment, Vec<Edit>) {
         let order = Order::of(func);
         let live = Live::of(func, &order);
-        let assignment = assign(func, &order, &live, env);
+        let mut assignment = assign(func, &order, &live, env);
         let taken = shape(func);
-        let edits = rewrite(func, &assignment, env);
+        let edits = rewrite(func, &mut assignment, env);
         (taken, assignment, edits)
     }
 

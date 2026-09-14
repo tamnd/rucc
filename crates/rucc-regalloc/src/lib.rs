@@ -64,9 +64,8 @@ pub struct Allocation {
 ///
 /// # Panics
 ///
-/// Panics on a function the caller was told not to hand it, which is one with a critical edge,
-/// one whose entry block has parameters, or one wanting more scratch registers at an instruction
-/// than the environment holds back. See [`rewrite::rewrite`].
+/// Panics on a function the caller was told not to hand it, which is one with a critical edge or
+/// one whose entry block has parameters. See [`rewrite::rewrite`].
 ///
 /// In a debug build it also panics on an assignment [`check`] finds a problem with, which is a bug
 /// in this crate rather than anything the caller did. `spec/10-backend.md` section 10.4 asks for
@@ -85,7 +84,7 @@ pub struct Allocation {
 pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Allocation {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
-    let assignment = assign::assign(func, &order, &live, env);
+    let mut assignment = assign::assign(func, &order, &live, env);
     if cfg!(debug_assertions) {
         let problems = check::check(func, &order, &live, &assignment);
         assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
@@ -93,7 +92,7 @@ pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Alloca
     // What the rewrite is about to lose, taken while it is still there. Only in a build that is
     // going to read it, since the snapshot is a copy of every operand list in the function.
     let shape = cfg!(debug_assertions).then(|| trace::shape(func));
-    let edits = rewrite::rewrite(func, &assignment, env);
+    let edits = rewrite::rewrite(func, &mut assignment, env);
     if let Some(shape) = shape {
         let faults = trace::trace(func, &shape, &assignment, &edits);
         assert!(faults.is_empty(), "in '{called}': {}", trace::report(&faults));

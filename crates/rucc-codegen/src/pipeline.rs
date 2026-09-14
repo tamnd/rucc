@@ -88,17 +88,23 @@ pub struct Machine {
 /// The scratch registers held back from the allocator on x86-64.
 ///
 /// Two, because a move on an edge may have to break a cycle and a spilled value has to be read
-/// into something, and those can want a register at the same instruction. Two is also what the
-/// instruction wanting most wants, which is one that reads two spilled values and writes a third,
-/// and `rewrite` says why the answer goes back into a register an operand arrived in rather than
-/// asking for a third.
+/// into something, and those can want a register at the same instruction. Two is also what nearly
+/// every instruction wants, including the one that looks larger: an instruction that reads two
+/// spilled values and writes a third sends the answer back into a register an operand arrived in
+/// rather than asking for one of its own, and `rewrite` says why that is allowed.
 ///
 /// It is not two because two was enough to start with and nobody looked again. There is no third
 /// to hold back. A scratch register has to be one the convention passes nothing in, since the
 /// rewriter puts moves in wherever it likes, and one the callee does not owe back, since the
-/// rewriter runs after the prologue has been decided and cannot ask for a register to be saved.
-/// On SysV that is `r10` and `r11` and nothing else, so if the rewriter ever does want a third the
-/// answer is not to take one here.
+/// rewriter runs after the prologue has been decided and cannot ask for a register to be saved. On
+/// SysV that is `r10`, `r11` and `rax`, and `rax` is not one to take: it is the return value, so
+/// holding it back costs a move at every return in the program, which is a price paid everywhere
+/// for a shape that turns up almost nowhere.
+///
+/// An instruction that wants a third is the indexed store with its base, its index and its value
+/// all on the stack, which is tamnd/rucc#913. `rewrite` answers that one by borrowing a register
+/// and putting back what was in it, which costs two memory accesses at the instruction that wanted
+/// it and nothing anywhere else.
 const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
 /// How many of each class are held back.
