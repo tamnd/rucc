@@ -217,6 +217,12 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     (Opcode::CheckRestrictWrite, "`rucc_safety::lower`, the same call, saying it wrote"),
     (Opcode::RestrictEnter, "`rucc_safety::lower`, into the call that opens the block's record"),
     (Opcode::RestrictLeave, "`rucc_safety::lower`, into the call that closes it again"),
+    // The two markers, and the only pair on this list that is lowered into nothing. A declared
+    // region is not code, it is the reason some code carries no checks, so by the time the back end
+    // sees it the whole of its effect has already happened. What it costs is the count document 10
+    // section 10.2 asks for, and `rucc_safety::summary` takes that before the back end runs.
+    (Opcode::SafeRegionBegin, "`rucc_safety::lower`, into nothing, once the count has been taken"),
+    (Opcode::SafeRegionEnd, "`rucc_safety::lower`, the same, which is to say nothing"),
     (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
     (Opcode::CapExtentBack, "`rucc_safety::lower`, the same call about the bytes below an address"),
     // The capability the checks were reading, which the same pass takes out once they are calls,
@@ -306,9 +312,11 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     // and the five that make a capability all left this list without anything emitting them, which
     // is the whole of tamnd/rucc#1085's lowering half: each has a lowering waiting for the pass that
     // will write one, because a capability had to be a value the back end could hold before any of
-    // them could be written down at all.
-    // The plane writes, which the runtime does for itself today because the only ranges anything
-    // asks about are the ones its own allocator handed out. A stack object needs these.
+    // them could be written down at all. The two region markers left the same way and for a
+    // different reason, which is that what they cost is a count rather than a lowering.
+    // What is left is the plane writes, which the runtime does for itself today because the only
+    // ranges anything asks about are the ones its own allocator handed out. A stack object needs
+    // these, since nothing in the runtime sees a frame being set up or torn down.
     (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#856"),
     (
         Opcode::MetaEnd,
@@ -320,12 +328,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "the same, and the state a range is in while a device owns it, which is S2's",
         "tamnd/rucc#856",
     ),
-    (
-        Opcode::SafeRegionBegin,
-        "nothing at all, once the count document 10 section 10.2 asks for has been taken",
-        "tamnd/rucc#856",
-    ),
-    (Opcode::SafeRegionEnd, "the same, which is to say nothing", "tamnd/rucc#856"),
 ];
 
 /// A width no rule is written at, why, and the issue that closes it.
