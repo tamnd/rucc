@@ -1968,15 +1968,18 @@ impl<'u> Body<'_, 'u> {
     /// already removed these at `-O1` and above, which is why the failure was only ever seen in a
     /// build that did not ask for optimization.
     ///
-    /// Only a number answers. An address does not, because the address of a weak symbol is null
-    /// when nothing defined it, and `if (&maybe_there)` is a question the linker answers rather
-    /// than one the compiler can. A condition the folder had something to say about does not
-    /// answer either, since the ordinary path is the one that reports, and taking the answer here
-    /// would drop what it reported on the floor.
+    /// Only a number answers, and a fold that went looking for an address does not, even when
+    /// what came back is a number. The folder assumes no object is at zero, which is what turns
+    /// `if (&a)` into a true it never was asked to prove, and the assumption is wrong for exactly
+    /// the symbol a program writes this about: a weak one is at zero when nothing defined it, and
+    /// `if (&pthread_create)` is the idiom. That question belongs to the linker and to run time,
+    /// so it keeps its branch. A condition the folder had something to say about does not answer
+    /// either, since the ordinary path is the one that reports, and taking the answer here would
+    /// drop what it reported on the floor.
     fn folded_condition(&self, cond: ExprId) -> Option<bool> {
         let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
         let folded = eval.constant(cond);
-        if !eval.finish().is_empty() {
+        if eval.addressed() || !eval.finish().is_empty() {
             return None;
         }
         match folded {

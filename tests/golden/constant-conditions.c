@@ -46,8 +46,9 @@ int jumped_into(int n) {
   return n;
 }
 
-// The address of a weak symbol is null when nothing defined it, which is a question the linker
-// answers rather than one the folder can, so this branch stays.
+// The folder assumes no object is at zero, and the symbol a program asks this about is the one
+// that can be: a weak symbol is at zero when nothing defined it. So a condition that went looking
+// for an address keeps its branch and the question is left to run time.
 extern int maybe_there __attribute__((weak));
 
 int present(void) {

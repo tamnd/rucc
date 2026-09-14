@@ -100,6 +100,7 @@ pub struct Eval<'a> {
     target: &'a TargetInfo,
     names: &'a Interner,
     diagnostics: Vec<Diagnostic>,
+    addressed: bool,
 }
 
 impl<'a> Eval<'a> {
@@ -111,7 +112,21 @@ impl<'a> Eval<'a> {
         target: &'a TargetInfo,
         names: &'a Interner,
     ) -> Eval<'a> {
-        Eval { tast, types, target, names, diagnostics: Vec::new() }
+        Eval { tast, types, target, names, diagnostics: Vec::new(), addressed: false }
+    }
+
+    /// Whether the folding went looking for the address of something.
+    ///
+    /// An address is a promise the linker keeps rather than a number this compiler knows, and the
+    /// one thing the folding assumes about every one of them is that it is not zero, which is
+    /// what makes `&a != 0` fold to true and `if (&a)` fold with it. That assumption does not
+    /// hold for a weak symbol, whose address is zero exactly when nothing defined it, and the
+    /// idiom that asks is `if (&pthread_create)`. So a caller that is about to decide something
+    /// the program can see, rather than work out a value the program wrote down, asks this first
+    /// and leaves the question to run time when the answer is yes.
+    #[must_use]
+    pub fn addressed(&self) -> bool {
+        self.addressed
     }
 
     /// The value of an expression.
@@ -190,6 +205,7 @@ impl<'a> Eval<'a> {
             // and `&&` is one token: there is nothing under it to take the address of, so there
             // is no operand to walk down to.
             ExprKind::LabelAddr(label) => {
+                self.addressed = true;
                 Ok(Const::Address(Address { base: Base::Label(label), offset: 0 }))
             }
             // Reading an object, which is not a constant however `const` the object is:
@@ -745,6 +761,7 @@ impl<'a> Eval<'a> {
     /// own offset to whatever holds it and a subscript adds its index scaled by the element, so
     /// what comes out is the object at the bottom and the distance travelled to reach it.
     fn place(&mut self, expr: ExprId) -> Result<Address, NotConstant> {
+        self.addressed = true;
         match self.tast[expr].kind {
             ExprKind::Error => Err(NotConstant { at: expr, poisoned: true }),
             // An automatic object has no address until the frame holding it exists, so it is
