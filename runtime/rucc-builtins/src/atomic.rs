@@ -290,10 +290,12 @@ mod tests {
         for size in SIZES {
             let mut object = bytes(1, size);
             let mut into = vec![0xAA; size];
+            // SAFETY: both buffers are `size` bytes long and neither overlaps the other.
             unsafe { load(size, object.as_mut_ptr(), into.as_mut_ptr()) };
             assert_eq!(into, object, "load at {size}");
 
             let value = bytes(2, size);
+            // SAFETY: both buffers are `size` bytes long and neither overlaps the other.
             unsafe { store(size, object.as_mut_ptr(), value.as_ptr()) };
             assert_eq!(object, value, "store at {size}");
         }
@@ -306,6 +308,7 @@ mod tests {
             let was = object.clone();
             let value = bytes(4, size);
             let mut into = vec![0xAA; size];
+            // SAFETY: all three buffers are `size` bytes long and none overlaps another.
             unsafe { exchange(size, object.as_mut_ptr(), value.as_ptr(), into.as_mut_ptr()) };
             assert_eq!(into, was, "the old value at {size}");
             assert_eq!(object, value, "the new value at {size}");
@@ -322,6 +325,8 @@ mod tests {
             let was = object.clone();
             let mut both = bytes(6, size);
             let pointer = both.as_mut_ptr();
+            // SAFETY: both buffers are `size` bytes long, and the value and the answer being the
+            // same buffer is the case under test rather than an accident.
             unsafe { exchange(size, object.as_mut_ptr(), pointer, pointer) };
             assert_eq!(object, was, "at {size}");
             assert_eq!(both, was, "at {size}");
@@ -334,6 +339,7 @@ mod tests {
             let mut object = bytes(7, size);
             let mut expected = object.clone();
             let desired = bytes(8, size);
+            // SAFETY: all three buffers are `size` bytes long and none overlaps another.
             let matched = unsafe {
                 compare_exchange(size, object.as_mut_ptr(), expected.as_mut_ptr(), desired.as_ptr())
             };
@@ -351,6 +357,7 @@ mod tests {
             let was = object.clone();
             let mut expected = bytes(10, size);
             let desired = bytes(11, size);
+            // SAFETY: all three buffers are `size` bytes long and none overlaps another.
             let matched = unsafe {
                 compare_exchange(size, object.as_mut_ptr(), expected.as_mut_ptr(), desired.as_ptr())
             };
@@ -368,6 +375,7 @@ mod tests {
         let mut object = [0u8; 1];
         let mut expected = [1u8; 1];
         let desired = [2u8; 1];
+        // SAFETY: all three buffers are a byte long, which is more than the zero the call reads.
         let matched = unsafe {
             compare_exchange(0, object.as_mut_ptr(), expected.as_mut_ptr(), desired.as_ptr())
         };
@@ -385,7 +393,7 @@ mod tests {
         for at in 0..LOCKS * 4 {
             let address = (0x1000 + at * 16) as *const u8;
             let entry = (guard_for(address) as *const Guard as usize - TABLE.as_ptr() as usize)
-                / core::mem::size_of::<Guard>();
+                / size_of::<Guard>();
             seen[entry] = true;
         }
         assert!(seen.iter().all(|hit| *hit), "{seen:?}");
@@ -414,12 +422,16 @@ mod tests {
                 let raw = held.0.get().cast::<u8>();
                 for _ in 0..ROUNDS {
                     let mut expected = [0u8; WIDTH];
+                    // SAFETY: the counter and the buffer are both `WIDTH` bytes long, and the
+                    // other threads reach the same counter only through these same routines.
                     unsafe { load(WIDTH, raw, expected.as_mut_ptr()) };
                     loop {
                         let mut desired = expected;
                         let count =
                             usize::from_ne_bytes(desired[..8].try_into().unwrap()).wrapping_add(1);
                         desired[..8].copy_from_slice(&count.to_ne_bytes());
+                        // SAFETY: the counter and both buffers are `WIDTH` bytes long, and the
+                        // other threads reach the same counter only through these same routines.
                         let done = unsafe {
                             compare_exchange(WIDTH, raw, expected.as_mut_ptr(), desired.as_ptr())
                         };
@@ -433,6 +445,7 @@ mod tests {
         for thread in running {
             thread.join().unwrap();
         }
+        // SAFETY: every thread has been joined, so this is the only reader left.
         let ended = unsafe { *object.0.get() };
         let word = |at: usize| usize::from_ne_bytes(ended[at..at + 8].try_into().unwrap());
         assert_eq!(word(0), THREADS * ROUNDS);
