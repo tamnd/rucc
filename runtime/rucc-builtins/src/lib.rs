@@ -47,12 +47,13 @@
 //! two are: no machine has an instruction at that format, so those thirteen are calls on every target
 //! rather than only on a target with no floating point unit. The conversions at that format are here
 //! too, which is the twelve against an integer at each of the three widths and in each direction, and
-//! the four that cross between a quad and a `float` or a `double`. The first of the atomics is here as
-//! well, which is the four routines libatomic exports without a width in their name and the table of
-//! locks under them, and is what an access to an object too wide for one instruction becomes. The rest
-//! of section 12.8, which is the remaining `__int128` arithmetic, the eighty bit conversions and the
-//! atomics that do carry a width, is not written, and the set is driven by what the target ladder in
-//! `spec/14-target-ladder.md` actually calls.
+//! the four that cross between a quad and a `float` or a `double`. The atomics are here as well, which
+//! is the twenty routines libatomic exports at a width no machine reaches in one instruction and the
+//! table of locks under them: the four with no width in their name that take a size and work through
+//! pointers, and the sixteen at sixteen bytes that take the value itself, four of them the same
+//! operations and twelve of them the read and update pairs. The rest of section 12.8, which is the
+//! remaining `__int128` arithmetic and the eighty bit conversions, is not written, and the set is
+//! driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
 // A `memcpy` written as a loop is a loop the optimizer is allowed to recognize and replace with

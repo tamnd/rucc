@@ -186,6 +186,46 @@ void wide_exchange(size_t size, void *object, void *value, void *into,
 _Bool wide_compare_exchange(size_t size, void *object, void *expected, void *desired, int success,
                             int failure) __asm__("__atomic_compare_exchange");
 
+/* And the sixteen with a width in their name, which take the value itself rather than a pointer to
+ * it and answer with one, and are the set a sixteen byte object reaches.
+ *
+ * Labels again, and for a sharper reason than the four above. These names are builtins in the
+ * system compiler too, and a call to one of them written as itself is a call the compiler is free
+ * to answer on the spot: gcc expands a sixteen byte atomic inline where the machine has an
+ * instruction for it, and a harness whose calls were expanded would compare the compiler against
+ * itself and never reach the archive at all.
+ */
+uwide wide16_load(const volatile void *object, int order) __asm__("__atomic_load_16");
+void wide16_store(volatile void *object, uwide value, int order) __asm__("__atomic_store_16");
+uwide wide16_exchange(volatile void *object, uwide value, int order) __asm__("__atomic_exchange_16");
+_Bool wide16_compare_exchange(volatile void *object, void *expected, uwide desired, _Bool weak,
+                              int success,
+                              int failure) __asm__("__atomic_compare_exchange_16");
+uwide wide16_fetch_add(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_fetch_add_16");
+uwide wide16_fetch_sub(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_fetch_sub_16");
+uwide wide16_fetch_and(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_fetch_and_16");
+uwide wide16_fetch_or(volatile void *object, uwide value,
+                      int order) __asm__("__atomic_fetch_or_16");
+uwide wide16_fetch_xor(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_fetch_xor_16");
+uwide wide16_fetch_nand(volatile void *object, uwide value,
+                        int order) __asm__("__atomic_fetch_nand_16");
+uwide wide16_add_fetch(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_add_fetch_16");
+uwide wide16_sub_fetch(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_sub_fetch_16");
+uwide wide16_and_fetch(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_and_fetch_16");
+uwide wide16_or_fetch(volatile void *object, uwide value,
+                      int order) __asm__("__atomic_or_fetch_16");
+uwide wide16_xor_fetch(volatile void *object, uwide value,
+                       int order) __asm__("__atomic_xor_fetch_16");
+uwide wide16_nand_fetch(volatile void *object, uwide value,
+                        int order) __asm__("__atomic_nand_fetch_16");
+
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
  * the others. This one is byte at a time today and the cases outlive that.
@@ -1928,6 +1968,151 @@ static void atomics(int size) {
     say("atomic", size, digest);
 }
 
+/* The sixteen with a width in their name, which are the other half of the same set and the half a
+ * sixteen byte object reaches when the compiler is gcc.
+ *
+ * These take the value itself rather than a pointer to it and answer with one, so there is nothing
+ * to get wrong on the value side and what is left to ask about is the arithmetic and the object. The
+ * object still sits between two canaries, because sixteen bytes is a width the machine nearly
+ * reaches and a routine that wrote seventeen of them would otherwise be invisible. It sits in a
+ * structure rather than in an array so that it is aligned the way the type wants without this file
+ * having to say so.
+ */
+static struct {
+    unsigned char before[PAD];
+    uwide object;
+    unsigned char after[PAD];
+} at_wide;
+
+static unsigned long long mix_room(unsigned long long digest) {
+    digest = mix(digest, at_wide.before, sizeof at_wide.before);
+    digest = mix_wide(digest, at_wide.object);
+    return mix(digest, at_wide.after, sizeof at_wide.after);
+}
+
+static void room_start(uwide value) {
+    fill_canary(at_wide.before, sizeof at_wide.before);
+    fill_canary(at_wide.after, sizeof at_wide.after);
+    at_wide.object = value;
+}
+
+/* One pair of values through all sixteen routines.
+ *
+ * The first four run as a chain, the way the four generic ones above do: the load reads what was put
+ * there, the store puts the other value there, the exchange puts the first one back and answers with
+ * the second, and then the two compare and exchanges are the failing case and the succeeding one.
+ * The failing case is handed the complement of what is there, which is never what is there, and it
+ * writes the object back over the expected value, which is the only thing that makes the succeeding
+ * case succeed.
+ *
+ * The twelve after that each start from the same object again, because an update whose answer was
+ * wrong would otherwise move the object for every routine behind it and turn one difference into
+ * twelve.
+ */
+static unsigned long long sized(unsigned long long digest, uwide object, uwide value) {
+    uwide expected;
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_load(&at_wide.object, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    wide16_store(&at_wide.object, value, __ATOMIC_SEQ_CST);
+    digest = mix_room(digest);
+
+    digest = mix_wide(digest, wide16_exchange(&at_wide.object, object, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    expected = ~at_wide.object;
+    digest = mix_number(digest, wide16_compare_exchange(&at_wide.object, &expected, value, 0,
+                                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    digest = mix_wide(digest, expected);
+    digest = mix_room(digest);
+
+    digest = mix_number(digest, wide16_compare_exchange(&at_wide.object, &expected, value, 0,
+                                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    digest = mix_wide(digest, expected);
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_add(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_sub(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_and(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_or(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_xor(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_fetch_nand(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_add_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_sub_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_and_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_or_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_xor_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    room_start(object);
+    digest = mix_wide(digest, wide16_nand_fetch(&at_wide.object, value, __ATOMIC_SEQ_CST));
+    digest = mix_room(digest);
+
+    cases += 17;
+    return digest;
+}
+
+#define SIZED_ROUNDS 8
+#define SIZED_CASES 256
+
+static void sized_atomics(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int round = 0; round < SIZED_ROUNDS; round++) {
+        for (int i = 0; i < SIZED_CASES; i++) {
+            digest = sized(digest, random_wide(), random_wide());
+        }
+    }
+    say("atomicsized", 16, digest);
+}
+
+/* And the same sixteen over the values worth asking about by name, which for an addition that has to
+ * carry the whole way up and a subtraction that has to borrow the whole way down is where the answer
+ * is decided. The table is the one the divisions use, since a sixteen byte atomic and a sixteen byte
+ * division are wrong at the same places.
+ */
+static void sized_corners(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < CORNERS; i++) {
+        for (int j = 0; j < CORNERS; j++) {
+            digest = sized(digest, corners[i], corners[j]);
+        }
+    }
+    say("atomicsizedcorner", 16, digest);
+}
+
 /* And the lock under those four, held against itself, which is the only thing in this file that
  * runs on more than one thread.
  *
@@ -2018,6 +2203,99 @@ static void counting_threads(void) {
     say("atomiccounter", ATOMIC_COUNTER, digest);
 }
 
+/* And the two sets against each other, which is the only group here that would notice them keeping
+ * two tables instead of one.
+ *
+ * A sixteen byte object can arrive at either set. A compiler is free to emit the generic call for
+ * it, gcc emits the sized call, and a program built out of two objects compiled by two compilers can
+ * have done both, so the two sets have to lock against each other and not only against themselves.
+ * Two threads here add one through the sized addition and two add one through the generic compare
+ * and exchange, and the answer is the number of additions. With a table each, each pair would be
+ * locked against its own half and against nothing else, and the count would come out short.
+ *
+ * Short, not wrong every time, and the round count is the part of this group that was measured
+ * rather than picked. What has to happen for an addition to go missing is that one half writes the
+ * object between the other half's read and write, and with a table each that window is the few
+ * instructions inside each routine rather than the whole of it. Two thousand rounds, which is what
+ * the group above uses, did not find it at all. Two hundred thousand found it five times out of
+ * six. A million found it six times out of six, and costs under a second because the whole of a
+ * round is a locked read and a locked write.
+ */
+#define MIXED_THREADS 4
+#define MIXED_ROUNDS 1000000
+
+static struct {
+    unsigned char before[PAD];
+    uwide object;
+    unsigned char after[PAD];
+} mixed;
+
+static void *mixed_sized(void *ignored) {
+    (void)ignored;
+    for (int round = 0; round < MIXED_ROUNDS; round++) {
+        wide16_fetch_add(&mixed.object, 1, __ATOMIC_SEQ_CST);
+    }
+    return NULL;
+}
+
+static void *mixed_generic(void *ignored) {
+    (void)ignored;
+    for (int round = 0; round < MIXED_ROUNDS; round++) {
+        uwide expected;
+        wide_load(sizeof mixed.object, &mixed.object, &expected, __ATOMIC_SEQ_CST);
+        for (;;) {
+            uwide desired = expected + 1;
+            if (wide_compare_exchange(sizeof mixed.object, &mixed.object, &expected, &desired,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                break;
+            }
+            /* Read the object again rather than trusting the write back, for the reason written out
+             * in the group above: a routine that got the write back wrong would hang here otherwise.
+             */
+            wide_load(sizeof mixed.object, &mixed.object, &expected, __ATOMIC_SEQ_CST);
+        }
+    }
+    return NULL;
+}
+
+/* A thread that will not start is counted on this one instead, the same way as above, and which
+ * half it was going to be is remembered so that the two halves stay even.
+ */
+static void mixed_threads(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    pthread_t running[MIXED_THREADS];
+    int started = 0;
+    int missed_sized = 0;
+    int missed_generic = 0;
+    fill_canary(mixed.before, sizeof mixed.before);
+    fill_canary(mixed.after, sizeof mixed.after);
+    mixed.object = 0;
+    for (int i = 0; i < MIXED_THREADS; i++) {
+        void *(*body)(void *) = (i % 2 == 0) ? mixed_sized : mixed_generic;
+        if (pthread_create(&running[started], NULL, body, NULL) == 0) {
+            started++;
+        } else if (i % 2 == 0) {
+            missed_sized++;
+        } else {
+            missed_generic++;
+        }
+    }
+    for (int i = 0; i < missed_sized; i++) {
+        mixed_sized(NULL);
+    }
+    for (int i = 0; i < missed_generic; i++) {
+        mixed_generic(NULL);
+    }
+    for (int i = 0; i < started; i++) {
+        pthread_join(running[i], NULL);
+    }
+    digest = mix(digest, mixed.before, sizeof mixed.before);
+    digest = mix_wide(digest, mixed.object);
+    digest = mix(digest, mixed.after, sizeof mixed.after);
+    cases += MIXED_THREADS * MIXED_ROUNDS;
+    say("atomicmixed", 16, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -2091,7 +2369,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ATOMIC_SIZES_COUNT; i++) {
         atomics(ATOMIC_SIZES[i]);
     }
+    sized_atomics();
+    sized_corners();
     counting_threads();
+    mixed_threads();
     printf("cases %ld\n", cases);
     return 0;
 }
