@@ -7,10 +7,10 @@
  * between a float and an __int128 is a call, and these eight names are what it calls. They are
  * libgcc's names, for the reason every other name in this directory is.
  *
- * The widths here are float and double. The eighty bit float is left out because this machine has
- * no register that holds one and the backend says so, which is tamnd/rucc#326, and binary128 is
- * left out because the arithmetic underneath it is not written yet. __floattixf, __fixxfti and the
- * quad spellings arrive with those.
+ * The widths here are float and double. The four at binary128 are the same conversions and are in
+ * quad.c instead, because they are written out of that file's arithmetic rather than out of the
+ * machine's. The eighty bit float is left out because this machine has no register that holds one
+ * and the backend says so, which is tamnd/rucc#326, so __floattixf and __fixxfti arrive with that.
  *
  * # What is not handled
  *

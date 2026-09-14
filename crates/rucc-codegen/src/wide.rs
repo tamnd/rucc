@@ -49,10 +49,12 @@
 //! A conversion to or from a floating point value is the other one, for a plainer reason: the
 //! machine's own conversion reaches sixty four bits and no further, so there is no instruction to
 //! split into. Those are the eight names `runtime/builtins/convert.c` defines, one for each of a
-//! signed and an unsigned integer against a `float` and a `double` in each direction. An eighty bit
-//! float is not among them, because this machine has no register that holds one and the back end
-//! says so, which is tamnd/rucc#326, so a function converting at that width is left alone here and
-//! refused below the way every function of this width used to be.
+//! signed and an unsigned integer against a `float` and a `double` in each direction, and the four
+//! `runtime/builtins/quad.c` defines for a `_Float128`, which has no instruction of its own at any
+//! width and so is a call here for both reasons at once. An eighty bit float is not among them,
+//! because this machine has no register that holds one and the back end says so, which is
+//! tamnd/rucc#326, so a function converting at that width is left alone here and refused below the
+//! way every function of this width used to be.
 //!
 //! The call is built with the halves already in it, four parameters of sixty four bits for the two
 //! operands of a divide and two results for the answer, or two parameters and a float, or a float
@@ -248,10 +250,10 @@ fn can_split(func: &Func, order: &HashMap<Inst, usize>, at: usize, inst: Inst) -
     if data.opcode == Opcode::SExt && reads.iter().any(|&value| func[value].ty.bits() < 8) {
         return false;
     }
-    // The runtime has a conversion for a `float` and for a `double` and for nothing else, so every
-    // other format is refused here rather than turned into a call to a name nothing defines. An
-    // eighty bit float is the one a program reaches without asking for it, since `long double` is
-    // that type on this target, and it is tamnd/rucc#326 rather than an oversight.
+    // The runtime has a conversion for a `float`, for a `double` and for a `_Float128`, and for
+    // nothing else, so every other format is refused here rather than turned into a call to a name
+    // nothing defines. An eighty bit float is the one a program reaches without asking for it, since
+    // `long double` is that type on this target, and it is tamnd/rucc#326 rather than an oversight.
     if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
         && converted(func, inst).is_none()
     {
@@ -294,7 +296,7 @@ fn converted(func: &Func, inst: Inst) -> Option<Float> {
         return None;
     }
     match only.format() {
-        Some(format @ (Float::F32 | Float::F64)) => Some(format),
+        Some(format @ (Float::F32 | Float::F64 | Float::F128)) => Some(format),
         _ => None,
     }
 }
@@ -614,22 +616,30 @@ fn from_float(
 }
 
 /// The routine that turns an integer this wide into a float of that format.
+///
+/// Three formats, since [`converted`] answers with no others, and the quad is the last arm rather
+/// than a named one so that a format added to that list arrives here as a routine that does not
+/// exist rather than as a name that is wrong.
 fn going_up(signed: bool, format: Float) -> &'static str {
     match (signed, format) {
+        (true, Float::F32) => "__floattisf",
         (true, Float::F64) => "__floattidf",
-        (true, _) => "__floattisf",
+        (true, _) => "__floattitf",
+        (false, Float::F32) => "__floatuntisf",
         (false, Float::F64) => "__floatuntidf",
-        (false, _) => "__floatuntisf",
+        (false, _) => "__floatuntitf",
     }
 }
 
 /// The routine that turns a float of that format into an integer this wide.
 fn coming_down(signed: bool, format: Float) -> &'static str {
     match (signed, format) {
+        (true, Float::F32) => "__fixsfti",
         (true, Float::F64) => "__fixdfti",
-        (true, _) => "__fixsfti",
+        (true, _) => "__fixtfti",
+        (false, Float::F32) => "__fixunssfti",
         (false, Float::F64) => "__fixunsdfti",
-        (false, _) => "__fixunssfti",
+        (false, _) => "__fixunstfti",
     }
 }
 
@@ -1345,18 +1355,21 @@ mod tests {
 
     /// Each conversion between this width and a float becomes a call to the routine of that name.
     ///
-    /// Eight of them, which is a signed and an unsigned integer against a `float` and a `double` in
-    /// each direction, and the table is here rather than in a comment because the names are the
-    /// whole of what this has to get right.
+    /// Twelve of them, which is a signed and an unsigned integer against a `float`, a `double` and a
+    /// `_Float128` in each direction, and the table is here rather than in a comment because the
+    /// names are the whole of what this has to get right.
     #[test]
     fn each_conversion_between_this_width_and_a_float_calls_the_routine_of_that_name() {
         let double = Type::float(Float::F64);
         let single = Type::float(Float::F32);
+        let quad = Type::float(Float::F128);
         for (opcode, float, routine) in [
             (Opcode::SIToFP, double, "__floattidf"),
             (Opcode::SIToFP, single, "__floattisf"),
             (Opcode::UIToFP, double, "__floatuntidf"),
             (Opcode::UIToFP, single, "__floatuntisf"),
+            (Opcode::SIToFP, quad, "__floattitf"),
+            (Opcode::UIToFP, quad, "__floatuntitf"),
         ] {
             let mut names = Interner::new();
             let (mut func, entry, params) = shell(&mut names, &[wide()], &[float]);
@@ -1374,6 +1387,8 @@ mod tests {
             (Opcode::FPToSI, single, "__fixsfti"),
             (Opcode::FPToUI, double, "__fixunsdfti"),
             (Opcode::FPToUI, single, "__fixunssfti"),
+            (Opcode::FPToSI, quad, "__fixtfti"),
+            (Opcode::FPToUI, quad, "__fixunstfti"),
         ] {
             let mut names = Interner::new();
             let (mut func, entry, params) = shell(&mut names, &[float], &[wide()]);
@@ -1416,6 +1431,38 @@ mod tests {
         assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__fixdfti(%0)"), "the float goes over as it is: {text}");
+        assert!(text.contains("return %1, %2"), "and two halves come back: {text}");
+    }
+
+    /// A conversion against a quad is that same shape, with the quad crossing whole.
+    ///
+    /// Worth its own test because the two sides of it are wide for different reasons. The integer is
+    /// a pair here because no register holds a hundred and twenty eight bits of integer, and the
+    /// quad is one value because a vector register holds all of it, so the call this pass writes has
+    /// two operands and one result going up and one operand and two results coming down.
+    #[test]
+    fn a_conversion_against_a_quad_hands_over_the_pair_and_the_quad_whole() {
+        let quad = Type::float(Float::F128);
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide()], &[quad]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::UIToFP, params[0], quad);
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__floatuntitf(%0, %1)"), "two halves go over: {text}");
+        assert!(text.contains("return %2"), "and one quad comes back: {text}");
+
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::FPToSI, params[0], wide());
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__fixtfti(%0)"), "the quad goes over as it is: {text}");
         assert!(text.contains("return %1, %2"), "and two halves come back: {text}");
     }
 

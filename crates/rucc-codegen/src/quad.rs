@@ -34,11 +34,16 @@
 //!
 //! An operation at this format whose routine is not in the archive is left exactly as it was and
 //! refused below by name, the same way [`crate::wide`] leaves a conversion at eighty bits alone.
-//! That is a conversion against a `__int128`, whose four routines are not written yet, a conversion
-//! against a `_Float16` or an eighty bit float, and a `select` of two quads, which is a move the
-//! rule set has no conditional form of. A refusal naming the instruction is the outcome every one
-//! of those had before this pass existed and it is still the right one: the alternative is a call
-//! to a routine no archive defines, which is a link that fails further from the cause.
+//! That is a conversion against a `_Float16` or an eighty bit float, and a `select` of two quads,
+//! which is a move the rule set has no conditional form of. A refusal naming the instruction is the
+//! outcome every one of those had before this pass existed and it is still the right one: the
+//! alternative is a call to a routine no archive defines, which is a link that fails further from
+//! the cause.
+//!
+//! A conversion against a `__int128` is not in that list and is not this pass's work either.
+//! [`crate::wide`] runs above here and turns one into a call to `__floattitf`, `__floatuntitf`,
+//! `__fixtfti` or `__fixunstfti`, with the integer as the pair of words the convention passes it in,
+//! so by the time this pass looks there is nothing at that width left to refuse.
 
 use rucc_base::Interner;
 use rucc_ir::{
@@ -326,9 +331,10 @@ fn narrow(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// 12.8 measures rather than assumes, so a program that widens an integer through this format and
 /// back has the integer it started with.
 ///
-/// A `__int128` is not widened into anything and is left alone, because the routine that would take
-/// one is not written. [`crate::wide`] leaves it alone as well, so what the program gets is the
-/// refusal naming the conversion, which is `tamnd/rucc#1064`.
+/// A `__int128` never gets this far. [`crate::wide`] has already turned a conversion at that width
+/// into a call of its own, to the one routine in this family whose answer is not exact: a hundred
+/// and thirteen significant bits hold every integer the four below deal in and do not hold every
+/// value of a `__int128`, so that one rounds and these four do not.
 fn from_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
@@ -392,7 +398,8 @@ fn to_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// The width of the routine that serves an integer of this width, where one does.
 ///
 /// A width at or below thirty two is served by the thirty two bit routine and one above it by the
-/// sixty four bit routine, and a hundred and twenty eight is served by nothing here. Every width
+/// sixty four bit routine, and a hundred and twenty eight is served by nothing here because nothing
+/// at that width arrives: [`crate::wide`] has written its call already by then. Every width
 /// reaching this pass is one of the machine's own, because [`crate::widths`] has already rounded an
 /// integer of forty bits up into one of sixty four, so the only widths this sees are one, eight,
 /// sixteen, thirty two, sixty four and a hundred and twenty eight.

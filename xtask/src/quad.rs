@@ -46,12 +46,12 @@ const TASK: &str = "quad";
 /// has.
 ///
 /// The arithmetic and the negation are five, the comparisons are seven, the conversions against the
-/// two narrower floats are four, and the conversions against an integer are eight, a signed and an
-/// unsigned one at thirty two bits and at sixty four in each direction. The fixture reaches all of
-/// them, which for the seventh comparison takes `__builtin_isunordered`: no operator C has asks only
-/// whether two values can be ordered, because each of the six has an answer for an unordered pair
-/// built into which routine it calls.
-const ROUTINES: [&str; 24] = [
+/// two narrower floats are four, and the conversions against an integer are twelve, a signed and an
+/// unsigned one at thirty two bits, at sixty four and at a hundred and twenty eight in each
+/// direction. The fixture reaches all of them, which for the seventh comparison takes
+/// `__builtin_isunordered`: no operator C has asks only whether two values can be ordered, because
+/// each of the six has an answer for an unordered pair built into which routine it calls.
+const ROUTINES: [&str; 28] = [
     "__addtf3",
     "__subtf3",
     "__multf3",
@@ -76,6 +76,10 @@ const ROUTINES: [&str; 24] = [
     "__fixunstfsi",
     "__fixtfdi",
     "__fixunstfdi",
+    "__floattitf",
+    "__floatuntitf",
+    "__fixtfti",
+    "__fixunstfti",
 ];
 
 /// Builds the fixture every way, runs all four programs, and compares what they printed.
@@ -113,8 +117,8 @@ for level in 0 1 2; do
     nm -u \"ours-O$level.o\" | awk -v side=\"ours-O$level\" \\
         '$NF ~ /^__(add|sub|mul|div|neg|eq|ne|lt|le|gt|ge|unord)tf[23]$/ \\
             || $NF ~ /^__(extend[sd]ftf2|trunctf[sd]f2)$/ \\
-            || $NF ~ /^__fix(uns)?tf(si|di)$/ \\
-            || $NF ~ /^__float(un)?[sd]itf$/ { print side \" calls \" $NF }'
+            || $NF ~ /^__fix(uns)?tf(si|di|ti)$/ \\
+            || $NF ~ /^__float(un)?[sdt]itf$/ { print side \" calls \" $NF }'
 done
 \"$out/reference\" | sed 's/^/reference /'
 for level in 0 1 2; do
