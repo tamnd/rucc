@@ -62,6 +62,7 @@ use core::ffi::c_void;
 
 use crate::alloc::{self, Region};
 use crate::fail::Descriptor;
+use crate::layout::{Cap, Meta};
 use crate::plane::{self, Version};
 use crate::types::{self, TypeId};
 
@@ -128,16 +129,30 @@ pub unsafe fn bounds(
     }
 }
 
-/// Judgement J1, the lifetime half: something owns `addr` right now.
+/// Judgement J1, the lifetime half: the capability the access goes through still names the
+/// instance that owns `addr`.
 ///
-/// Which is weaker than the judgement document 04 section 4.4 states. The judgement is that the
-/// capability the access goes through still names the owner, and this only says there is an owner,
-/// because S1 has no capability in flight to compare against. What it catches is every access to
-/// storage that has been freed and not handed out again, every access to storage that was never
-/// allocated, and every access to the allocator's own headers, which between them is use after free
-/// and the wilder half of a wild pointer. What it misses is an access through a stale pointer to an
-/// address that has since been given to somebody else, and that is caught by S2 the moment a
-/// capability carries a version.
+/// Two questions in one, and they fail differently. The first is whether anybody at all owns the
+/// address, which catches every access to storage that has been freed and not handed out again,
+/// every access to storage that was never allocated, and every access to the allocator's own
+/// headers. The second is the lock and key rule of `spec/safe-memory/08-temporal-safety.md` section
+/// 8.3: the version the capability was taken at against the version the plane holds now. That is
+/// the half that catches an access through a stale pointer to an address the allocator has since
+/// given to somebody else, which is the common shape of a use after free in a program that is busy
+/// enough to reuse a block, and until the capability reached this function there was nothing here
+/// to compare against.
+///
+/// It is asked only of a capability that names an instance. A bottom one names none, and a
+/// recovered one carries the version of whatever the plane said at the moment the boundary lost
+/// track, which is an answer about the address rather than about the pointer, so neither is
+/// evidence that anything is stale and both keep the weaker reading. A null `capability` is the
+/// same answer for the same reason.
+///
+/// Null is what every call gets today, because nothing in the compiler has a capability in hand at
+/// a check to hand over. The export below says why and tamnd/rucc#1241 is where the rest of it is
+/// tracked. So this half is reachable from the tests and from nowhere else yet, which is on purpose:
+/// the question it answers is settled and testable on its own, and what it is waiting for is a
+/// producer that does not cost a plane walk per access.
 ///
 /// When the freeing was another thread's and nothing orders it against this access, the report says
 /// so and names both of them. That is document 03's C4, the use after free a race produced rather
@@ -158,11 +173,24 @@ pub unsafe fn bounds(
 ///
 /// # Safety
 ///
-/// As [`bounds`].
-pub unsafe fn live(addr: *const c_void, descriptor: *const Descriptor) {
+/// As [`bounds`], and `capability` is null or the address of a capability the same build reserved
+/// a slot for and filled.
+pub unsafe fn live(addr: *const c_void, capability: *const Cap, descriptor: *const Descriptor) {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
-    if plane::owned(owner(&region, addr)) {
+    let holder = owner(&region, addr);
+    if plane::owned(holder) {
+        // SAFETY: this function's own contract about `capability`, passed straight on.
+        if !unsafe { stale(capability, holder) } {
+            return;
+        }
+        // Reported without a witness, unlike the path below, because the epoch plane holds the
+        // last thing anybody did to these bytes and on storage that has been handed out again that
+        // is the new owner's allocation rather than the free this pointer outlived. Naming the
+        // thread that allocated as the thread that freed would be worse than saying nothing.
+        //
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) };
         return;
     }
     let mine = crate::epoch::here();
@@ -684,6 +712,27 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
+/// Whether the capability names an instance other than the one that owns the address now.
+///
+/// False for every capability that names no instance, which is the bottom one and the recovered
+/// one, so a build where the compiler could not work out where a pointer came from is left with
+/// the answer it had before rather than given a refusal it cannot stand behind. [`live`] says why.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn stale(capability: *const Cap, holder: Version) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    if held.is_bottom() || held.meta.flags() & Meta::RECOVERED != 0 {
+        return false;
+    }
+    held.ver != holder
+}
+
 /// The fourteen names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
@@ -717,10 +766,17 @@ pub mod exports {
     /// # Safety
     ///
     /// As [`__rucc_check_bounds`].
+    ///
+    /// Two arguments rather than three, which is what makes this the one export that does not pass
+    /// on everything the function behind it takes. The capability is null here because no generated
+    /// code has one in hand to give: `rucc_safety::lower` throws the check's capability operand away
+    /// and `rucc_safety::slot` then takes the `cap_of` that fed it out as dead. So this asks the
+    /// weaker of the two questions [`super::live`] answers, which is the one it has always asked,
+    /// and the argument arrives when there is something to put in it. tamnd/rucc#1241.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_check_live(addr: *const c_void, descriptor: *const Descriptor) {
-        // SAFETY: as above.
-        unsafe { super::live(addr, descriptor) };
+        // SAFETY: as above, and a null capability is one of the two this takes.
+        unsafe { super::live(addr, core::ptr::null(), descriptor) };
     }
 
     /// # Safety
@@ -894,10 +950,19 @@ mod tests {
         unsafe { super::bounds(addr, size, align, &raw const ROW) }
     }
 
-    /// The liveness check, the same way.
+    /// The liveness check, the same way, with no capability to compare against.
+    ///
+    /// Which is the weaker of the two questions [`super::live`] asks and is every test written
+    /// before the capability reached it. [`held`] is the other one.
     fn live(addr: *const c_void) {
-        // SAFETY: as above.
-        unsafe { super::live(addr, &raw const ROW) }
+        // SAFETY: as above, and a null capability is one of the two this takes.
+        unsafe { super::live(addr, core::ptr::null(), &raw const ROW) }
+    }
+
+    /// The liveness check over an access that goes through a capability.
+    fn held(addr: *const c_void, capability: &Cap) {
+        // SAFETY: as above, and the capability outlives the call.
+        unsafe { super::live(addr, capability, &raw const ROW) }
     }
 
     /// The derivation check, the same way, over a stride of one byte.
@@ -1474,6 +1539,60 @@ mod tests {
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
         assert!(refused(|| live(at(ptr, 0))));
+    }
+
+    #[test]
+    fn a_read_through_a_stale_pointer_into_a_reused_block_is_refused() {
+        let _turn = turn();
+        // The half of use after free an address on its own cannot answer, which is what the
+        // version compare is here for. The block goes back and comes out again, so the plane says
+        // somebody owns it, and the only thing that says it is not the somebody this pointer was
+        // made for is the version the capability was taken at.
+        let ptr = alloc(64);
+        let held_for = crate::recover::made(ptr);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        let again = alloc(64);
+        assert_eq!(again, ptr, "the allocator is expected to hand the same block back");
+        assert!(refused(|| held(at(ptr, 0), &held_for)));
+        // The pointer the second allocation gave out reads the same bytes and is not refused,
+        // which is what says this is about the pointer rather than about the address.
+        assert!(!refused(|| held(at(again, 0), &crate::recover::made(again))));
+        // SAFETY: `again` is a live instance.
+        unsafe { dealloc(again) };
+    }
+
+    #[test]
+    fn a_capability_that_says_nothing_leaves_the_answer_about_the_address_alone() {
+        let _turn = turn();
+        // Bottom names no instance and a recovered one carries whatever the plane said when the
+        // boundary lost track, so neither is evidence that a pointer is stale. The same read the
+        // test above refuses goes through under both, which is the conservative direction.
+        let ptr = alloc(64);
+        let made = crate::recover::made(ptr);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        let again = alloc(64);
+        assert_eq!(again, ptr, "the allocator is expected to hand the same block back");
+        assert!(!refused(|| held(at(ptr, 0), &Cap::BOTTOM)));
+        let lost = Cap::new(made.lo, made.ext, made.ver, made.meta.with_flags(Meta::RECOVERED));
+        assert!(!refused(|| held(at(ptr, 0), &lost)));
+        // SAFETY: `again` is a live instance.
+        unsafe { dealloc(again) };
+    }
+
+    #[test]
+    fn a_capability_for_a_block_that_has_not_been_freed_refuses_nothing() {
+        let _turn = turn();
+        // The compare has to be silent on every ordinary access or it would refuse the whole
+        // program, so it is worth a test of its own rather than only the negative halves above.
+        let ptr = alloc(64);
+        let held_for = crate::recover::made(ptr);
+        for offset in [0, 8, 32, 63] {
+            assert!(!refused(|| held(at(ptr, offset), &held_for)), "offset {offset}");
+        }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
     }
 
     #[test]
