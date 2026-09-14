@@ -40,6 +40,29 @@
 //! function, and taking an instruction out is refused while anything still reads what it wrote.
 //! That last one is what the set is for, so [`Changes`] is the thing that knows it rather than
 //! each pass.
+//!
+//! # Reading a register somewhere else
+//!
+//! A pass that takes an instruction out has to send whatever read it somewhere, and what that is
+//! is one register in place of another in an instruction that is otherwise the instruction it
+//! already was. That is [`Changes::rename`], and it is a proposal of its own rather than a plan
+//! with one operand changed, because the shape is what the description has something to say about
+//! and a rename changes no shape. An instruction this machine has with one register in an operand
+//! is one it has with another of the same class, so the class is the whole of what is checked.
+//!
+//! It is also the only way to say it about the instructions whose operand vector the description
+//! does not name, which on this machine is a call. How many registers a call passes is a fact about
+//! the signature rather than about the instruction, so `crates/rucc-target/src/x86_64/insts.rs`
+//! writes nothing down for it and a plan for one would be turned down for a shape nobody ever
+//! claimed.
+//!
+//! # The arguments an edge carries
+//!
+//! Those are reads too, and they are in no operand vector. A block's parameters are where the
+//! values a block is reached with arrive, the arguments on the edge are where they come from, and
+//! a pass sending every reader of a register somewhere else has these to send as well.
+//! [`Changes::carry`] is that, and like a plan it is by value: what the edge would carry rather
+//! than what to do to what it carries.
 
 use std::collections::HashMap;
 
@@ -113,6 +136,12 @@ pub enum Refusal {
     Scale(mir::Inst),
     /// Taking that instruction out would leave something reading a register it wrote.
     Read(mir::Inst),
+    /// A rename would put a register of one class where the instruction reads another.
+    Class(mir::Inst),
+    /// The set says twice what one edge carries, or the block it leaves has no such edge.
+    Edge(mir::Block, usize),
+    /// What the set would have an edge carry is not as many values as the block it goes to takes.
+    Args(mir::Block, usize),
 }
 
 /// How many times each register is read, kept across the commits of one pass.
@@ -172,8 +201,22 @@ impl Reads {
 enum What {
     /// Becomes that.
     Rewrite(Plan),
+    /// Reads the second register wherever it reads the first, and is otherwise the instruction it
+    /// already is.
+    Rename { from: mir::Reg, into: mir::Reg },
     /// Goes.
     Remove,
+}
+
+/// What a set would have one edge carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Carried {
+    /// The block the edge leaves.
+    from: mir::Block,
+    /// Which of that block's edges, in the order the block holds them.
+    at: usize,
+    /// The registers it would carry, one per parameter of the block it goes to.
+    args: Vec<mir::Reg>,
 }
 
 /// A set of changes to one function, proposed together and taken together.
@@ -184,6 +227,7 @@ enum What {
 #[derive(Debug, Clone, Default)]
 pub struct Changes {
     changes: Vec<(mir::Inst, What)>,
+    carries: Vec<Carried>,
 }
 
 impl Changes {
@@ -193,21 +237,37 @@ impl Changes {
         Self::default()
     }
 
-    /// How many instructions the set is about.
+    /// How many changes the set is about, counting the edges along with the instructions.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.changes.len()
+        self.changes.len() + self.carries.len()
     }
 
     /// Whether the set is about nothing, which commits and changes nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.carries.is_empty()
     }
 
     /// Proposes that the instruction become that.
     pub fn rewrite(&mut self, inst: mir::Inst, plan: Plan) {
         self.changes.push((inst, What::Rewrite(plan)));
+    }
+
+    /// Proposes that the instruction read the second register wherever it reads the first.
+    ///
+    /// Only where it reads it. What an instruction writes is what the rest of the function knows it
+    /// by, and changing that is a different proposal from this one.
+    pub fn rename(&mut self, inst: mir::Inst, from: mir::Reg, into: mir::Reg) {
+        self.changes.push((inst, What::Rename { from, into }));
+    }
+
+    /// Proposes that the edge leaving that block carry those registers.
+    ///
+    /// Which edge is its position in the block's own list of them, which is what
+    /// [`mir::Func::succs_mut`] hands back and what the terminator's conditions are written against.
+    pub fn carry(&mut self, from: mir::Block, at: usize, args: Vec<mir::Reg>) {
+        self.carries.push(Carried { from, at, args });
     }
 
     /// Proposes that the instruction go.
@@ -236,10 +296,27 @@ impl Changes {
                 return Some(Refusal::Gone(inst));
             }
         }
+        for (at, carried) in self.carries.iter().enumerate() {
+            let edge = (carried.from, carried.at);
+            if self.carries[..at].iter().any(|other| (other.from, other.at) == edge) {
+                return Some(Refusal::Edge(carried.from, carried.at));
+            }
+            let Some(call) = func[carried.from].succs.get(carried.at) else {
+                return Some(Refusal::Edge(carried.from, carried.at));
+            };
+            if func[call.block].params.len() != carried.args.len() {
+                return Some(Refusal::Args(carried.from, carried.at));
+            }
+        }
         for &(inst, ref what) in &self.changes {
             match what {
                 What::Rewrite(plan) => {
                     if let Some(refusal) = shaped(inst, plan, names, machine) {
+                        return Some(refusal);
+                    }
+                }
+                What::Rename { from, into } => {
+                    if let Some(refusal) = renamed(func, inst, *from, *into) {
                         return Some(refusal);
                     }
                 }
@@ -253,8 +330,8 @@ impl Changes {
         None
     }
 
-    /// Takes the set if the target and the function will have it, and gives back how many
-    /// instructions it touched.
+    /// Takes the set if the target and the function will have it, and gives back how many changes
+    /// it made.
     ///
     /// # Errors
     ///
@@ -270,18 +347,17 @@ impl Changes {
         if let Some(refusal) = self.refused(func, reads, names, machine) {
             return Err(refusal);
         }
-        let touched = self.changes.len();
+        let touched = self.len();
         for (inst, what) in self.changes {
-            for operand in &func[func[inst].operands] {
-                if operand.role == Role::Use {
-                    reads.lost(operand.reg);
-                }
+            let (lost, gained) = moved(func, inst, &what);
+            for reg in lost {
+                reads.lost(reg);
+            }
+            for reg in gained {
+                reads.gained(reg);
             }
             match what {
                 What::Rewrite(plan) => {
-                    for reg in plan.reads() {
-                        reads.gained(reg);
-                    }
                     let operands = func.push_operands(&plan.operands);
                     let imm = plan.imm.map(|value| func.add_imm(value));
                     let mem = plan.amode.map(|amode| func.add_amode(amode));
@@ -292,8 +368,25 @@ impl Changes {
                     data.mem = mem;
                     data.symbol = plan.symbol;
                 }
+                What::Rename { from, into } => {
+                    let operands = func[inst].operands;
+                    for operand in &mut func[operands] {
+                        if operand.role == Role::Use && operand.reg == from {
+                            operand.reg = into;
+                        }
+                    }
+                }
                 What::Remove => func.remove_inst(inst),
             }
+        }
+        for carried in self.carries {
+            for &arg in &func[carried.from].succs[carried.at].args {
+                reads.lost(arg);
+            }
+            for &arg in &carried.args {
+                reads.gained(arg);
+            }
+            func.succs_mut(carried.from)[carried.at].args = carried.args;
         }
         Ok(touched)
     }
@@ -301,26 +394,64 @@ impl Changes {
     /// Whether anything the set leaves behind reads a register that instruction writes.
     ///
     /// The counts are of the function as it stands, so what the set is about has to be taken off
-    /// them: a read in an instruction this set removes is a read that is going, and a read in one
-    /// it rewrites is going if the plan does not have it back. What is left after that is the
-    /// reads nothing in this set is doing anything about, and one of those is enough to keep the
-    /// instruction where it is.
+    /// them: a read something in the set stops doing is a read that is going, and one it takes up
+    /// is a read that is arriving. What is left after that is the reads nothing in this set is
+    /// doing anything about, and one of those is enough to keep the instruction where it is.
     fn read_after(&self, func: &mir::Func, reads: &Reads, inst: mir::Inst) -> bool {
         func[func[inst].operands].iter().filter(|operand| operand.role.is_def()).any(|operand| {
             let mut left = reads.count(operand.reg);
+            let mut settle = |lost: &[mir::Reg], gained: &[mir::Reg]| {
+                let goes = lost.iter().filter(|&&reg| reg == operand.reg).count();
+                left = left.saturating_sub(goes);
+                left += gained.iter().filter(|&&reg| reg == operand.reg).count();
+            };
             for &(other, ref what) in &self.changes {
-                for read in func[func[other].operands].iter().filter(|o| o.role == Role::Use) {
-                    if read.reg == operand.reg {
-                        left = left.saturating_sub(1);
-                    }
-                }
-                if let What::Rewrite(plan) = what {
-                    left += plan.reads().filter(|&reg| reg == operand.reg).count();
-                }
+                let (lost, gained) = moved(func, other, what);
+                settle(&lost, &gained);
+            }
+            for carried in &self.carries {
+                settle(&func[carried.from].succs[carried.at].args, &carried.args);
             }
             left != 0
         })
     }
+}
+
+/// The reads one change takes away from its instruction and the reads it gives it.
+///
+/// Of the instruction as it stands, since that is what the counts being kept up to date are of. A
+/// plan is the whole operand vector, so every read the instruction had goes and every read the plan
+/// has arrives. A rename is the reads of the one register, which become that many of the other. A
+/// removal is every read it had and nothing back.
+fn moved(func: &mir::Func, inst: mir::Inst, what: &What) -> (Vec<mir::Reg>, Vec<mir::Reg>) {
+    let held: Vec<mir::Reg> = func[func[inst].operands]
+        .iter()
+        .filter(|operand| operand.role == Role::Use)
+        .map(|operand| operand.reg)
+        .collect();
+    match what {
+        What::Rewrite(plan) => (held, plan.reads().collect()),
+        What::Rename { from, into } => {
+            let gone: Vec<mir::Reg> = held.into_iter().filter(|reg| reg == from).collect();
+            let back = vec![*into; gone.len()];
+            (gone, back)
+        }
+        What::Remove => (held, Vec::new()),
+    }
+}
+
+/// Why a rename would not be taken, or `None` if it would.
+///
+/// A rename changes no shape, so the description has nothing to say about it beyond the one thing
+/// it says about every register operand, which is the class. A physical register has no class in
+/// the function to check against, and by the time there are any of those the allocator has already
+/// had the say about which registers an instruction may name.
+fn renamed(func: &mir::Func, inst: mir::Inst, from: mir::Reg, into: mir::Reg) -> Option<Refusal> {
+    let class = func.class_of(into)?;
+    func[func[inst].operands]
+        .iter()
+        .any(|operand| operand.role == Role::Use && operand.reg == from && operand.class != class)
+        .then_some(Refusal::Class(inst))
 }
 
 /// Why the target would not have that instruction, or `None` if it would.
@@ -763,6 +894,111 @@ mod tests {
         assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64"]);
         assert_eq!(reads.count(address), 0, "nothing reads the address the lea wrote");
         assert_eq!(reads.count(base), 1, "the load reads what the lea read");
+    }
+
+    /// A rename with the removal it is there for, which is the shape every pass that takes an
+    /// instruction out and sends its readers somewhere else hands over.
+    #[test]
+    fn a_rename_that_takes_the_last_reader_off_an_instruction_lets_it_go() {
+        let (mut names, mut func, block) = empty();
+        let (first, into) = copy(&mut func, &mut names, block);
+        let source = func[func[first].operands][1].reg;
+        let out = func.new_vreg(GPR);
+        let mov = func[first].opcode;
+        let second = func.build(block, mov).def(out, GPR).uses(into, GPR).finish();
+
+        let mut set = Changes::new();
+        set.rename(second, into, source);
+        set.remove(first);
+        let mut reads = Reads::of(&func);
+        assert_eq!(set.commit(&mut func, &mut reads, &names, &MACHINE), Ok(2));
+
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rr_64"]);
+        assert_eq!(func[func[second].operands][1].reg, source, "the reader was not sent on");
+        assert_eq!(reads.count(into), 0, "nothing reads what the copy wrote");
+        assert_eq!(reads.count(source), 1, "the reader reads what the copy read");
+    }
+
+    /// The same removal with the rename left out, which is the mistake the set is there to catch.
+    #[test]
+    fn a_removal_whose_reader_is_not_renamed_is_refused() {
+        let (mut names, mut func, block) = empty();
+        let (first, into) = copy(&mut func, &mut names, block);
+        let out = func.new_vreg(GPR);
+        let mov = func[first].opcode;
+        func.build(block, mov).def(out, GPR).uses(into, GPR).finish();
+
+        let mut set = Changes::new();
+        set.remove(first);
+        assert_eq!(refused(&func, &names, &set), Some(Refusal::Read(first)));
+    }
+
+    /// A rename that would have an instruction read a register of another class. The operand says
+    /// which class it is, the function says which class the register is, and an instruction whose
+    /// operands disagree with that is one the allocator has no registers for.
+    #[test]
+    fn a_rename_into_a_register_of_another_class_is_refused() {
+        let (mut names, mut func, block) = empty();
+        let (mov, _) = copy(&mut func, &mut names, block);
+        let source = func[func[mov].operands][1].reg;
+        let float = func.new_vreg(XMM);
+
+        let mut set = Changes::new();
+        set.rename(mov, source, float);
+        assert_eq!(refused(&func, &names, &set), Some(Refusal::Class(mov)));
+    }
+
+    /// What an edge carries is where the answer of a conversion in one block reaches a reader in
+    /// another, and sending it somewhere else is the same change as renaming an operand.
+    #[test]
+    fn an_edge_carries_what_the_set_says_and_the_instruction_it_read_goes() {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
+        let (mov, into) = copy(&mut func, &mut names, block);
+        let source = func[func[mov].operands][1].reg;
+        let arrived = func.new_vreg(GPR);
+        func.params_mut(next).push(mir::Param { reg: arrived, class: GPR });
+        *func.succs_mut(block) = vec![mir::BlockCall::with(next, vec![into])];
+
+        let mut set = Changes::new();
+        set.carry(block, 0, vec![source]);
+        set.remove(mov);
+        let mut reads = Reads::of(&func);
+        assert_eq!(set.commit(&mut func, &mut reads, &names, &MACHINE), Ok(2));
+
+        assert!(shape(&func, &names, block).is_empty(), "the copy is still there");
+        assert_eq!(func[block].succs[0].args, vec![source]);
+        assert_eq!(reads.count(into), 0);
+        assert_eq!(reads.count(source), 1, "the edge reads what the copy read");
+    }
+
+    /// An edge that block does not have, which is a set built against a function that has been
+    /// laid out since.
+    #[test]
+    fn an_edge_that_is_not_there_is_refused() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block);
+
+        let mut set = Changes::new();
+        set.carry(block, 0, Vec::new());
+        assert_eq!(refused(&func, &names, &set), Some(Refusal::Edge(block, 0)));
+    }
+
+    /// An edge carrying a different number of values than the block it goes to takes. The
+    /// parameters are where they arrive, so one that arrives nowhere is a function nothing after
+    /// this could read.
+    #[test]
+    fn an_edge_carrying_the_wrong_number_of_values_is_refused() {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
+        let (_, into) = copy(&mut func, &mut names, block);
+        let arrived = func.new_vreg(GPR);
+        func.params_mut(next).push(mir::Param { reg: arrived, class: GPR });
+        *func.succs_mut(block) = vec![mir::BlockCall::with(next, vec![into])];
+
+        let mut set = Changes::new();
+        set.carry(block, 0, vec![into, into]);
+        assert_eq!(refused(&func, &names, &set), Some(Refusal::Args(block, 0)));
     }
 
     /// An argument an edge carries is a read like any other and is in no operand vector, which is
