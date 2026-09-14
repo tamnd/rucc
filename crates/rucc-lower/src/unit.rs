@@ -522,7 +522,9 @@ impl Unit<'_> {
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
         };
-        global.visibility = self.seen(decl);
+        // A tentative definition counts as one, because it is one: `int x;` at file scope puts a
+        // symbol in this object and the linker never has to look anywhere else for it.
+        global.visibility = self.seen(decl, state != Definition::Declared);
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
         global.init = match state {
@@ -583,7 +585,11 @@ impl Unit<'_> {
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
             Linkage::External => IrLinkage::External,
         };
-        func.visibility = self.seen(decl);
+        // The same question as for an object, and the same answer, with one wrinkle: an inline
+        // definition this unit does not emit is a declaration here, since C 6.7.4p7 sends the
+        // calls to whatever unit holds the external definition, so it is not this file's to
+        // describe. That is the condition the body is lowered under, a few lines below.
+        func.visibility = self.seen(decl, body.is_some() && node.inline.emits());
         // An inline definition is not an external definition, so what goes in the module is the
         // declaration and not the body. C 6.7.4p7 says the calls in this unit go to the definition
         // some other unit holds, which is what the declaration gives them, and glibc's headers
@@ -683,7 +689,9 @@ impl Unit<'_> {
         // Its own answer, because the attribute is written on the alias and an alias is a symbol
         // of its own. `weak, alias, visibility("hidden")` is a name a library keeps to itself
         // while the thing it points at stays exported, which is how glibc writes half of them.
-        alias.visibility = self.seen(decl);
+        // Always a definition. An alias is a symbol this object puts at an address in this object,
+        // and one whose target is merely declared was refused a few lines above.
+        alias.visibility = self.seen(decl, true);
         self.module.add_alias(alias);
     }
 
@@ -783,16 +791,26 @@ impl Unit<'_> {
     /// attribute wins wherever it was written, and that is the whole reason a library compiled
     /// with `-fvisibility=hidden` can still export the dozen names it means to export.
     ///
-    /// Every symbol gets an answer, including a declaration of something defined elsewhere. That
-    /// is what gcc does too and it is not a technicality: a hidden reference is one the link has
-    /// to satisfy inside the library, which is the half of the flag that makes the calls cheaper
-    /// rather than the half that shortens the table.
-    fn seen(&self, decl: DeclId) -> IrVisibility {
+    /// The default reaches what this unit defines and stops there, which is the `defined`
+    /// argument and is the whole of tamnd/rucc#1234. `-fvisibility=hidden` is a claim about the
+    /// names this file puts into the library, and a name it only mentions is one it knows nothing
+    /// about: `stderr` is in libc however the file that reads it was compiled, and calling it
+    /// hidden tells the linker to resolve it inside this object, which it cannot do. The attribute
+    /// on a declaration is a different thing and still counts, because a program that writes it
+    /// has said where the definition is going to come from.
+    ///
+    /// Measured against gcc 16.2.0 rather than read off the manual, since the manual says the flag
+    /// applies to declarations and does not say which ones. For `extern int plain;` beside
+    /// `__attribute__((visibility("hidden"))) extern int marked;` at `-fPIC -fvisibility=hidden`,
+    /// gcc writes `plain` as `GLOBAL DEFAULT UND` and reaches it through the global offset table,
+    /// and writes `marked` as `GLOBAL HIDDEN UND` and reaches it from the instruction pointer.
+    fn seen(&self, decl: DeclId, defined: bool) -> IrVisibility {
         match self.tast[decl].visibility {
             Some(Visibility::Default) => IrVisibility::Default,
             Some(Visibility::Hidden) => IrVisibility::Hidden,
             Some(Visibility::Protected) => IrVisibility::Protected,
-            None => self.visibility,
+            None if defined => self.visibility,
+            None => IrVisibility::Default,
         }
     }
 
