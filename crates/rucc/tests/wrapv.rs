@@ -158,24 +158,24 @@ fn the_older_flag_is_both_of_the_newer_ones() {
 /// And a pass that reads the licence does less work with it withdrawn, which is the point.
 ///
 /// The count of a loop whose counter goes up one at a time rests on the counter not turning round,
-/// so a build where it may turn round cannot have the count, and a check that would have been
-/// hoisted out of the loop stays inside it. Measured through the safety summary because that is
-/// where this compiler reports what it took out, and the number is compared against the same build
-/// without the flag rather than written down, since what matters is the difference the flag makes.
+/// so a build where it may turn round cannot have the count and cannot do the thing the count is
+/// for. What the splitter does with it is ask the runtime once in front of the loop how many bytes
+/// the walk has room for, and send the iterations that fit down a copy of the body with no checks
+/// in it. That question is the measurement, since it is the whole of what the licence bought: it is
+/// there in the plain build and it is not there with the licence withdrawn, and the loop is then
+/// the one loop it always was with its check still inside it.
+///
+/// Counting what the safety summary says is left over is what this used to do, and it stopped
+/// saying anything once the splitter started reaching this loop, because splitting copies the body
+/// and the copy that keeps the checks counts the same as a loop that was never split at all. The
+/// number went the right way for a while through how the two builds happened to duplicate blocks
+/// rather than because one of them had checked less.
 #[test]
-fn withdrawing_the_licence_keeps_a_check_the_optimizer_would_have_hoisted() {
-    let emit = ["-O2", "-fsafety=detect", "--emit=safety-summary"];
-    let bounds = |flags: &[&str]| {
-        let text = run("hoist", &emit, flags, LOOP);
-        let line = text
-            .lines()
-            .find(|line| line.trim_start().starts_with("\"bounds\""))
-            .unwrap_or_else(|| panic!("the summary has a line for the bounds checks:\n{text}"));
-        let at = line.find("\"remaining\":").expect("the line says how many are left");
-        let rest = line[at..].trim_start_matches("\"remaining\":").trim_start();
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse::<u32>().expect("how many are left is a number")
+fn withdrawing_the_licence_stops_the_optimizer_sizing_the_walk_in_front_of_the_loop() {
+    let windows = |flags: &[&str]| {
+        let text = run("hoist", &["-O2", "-fsafety=detect", "--emit=ir"], flags, LOOP);
+        text.lines().filter(|line| line.contains("cap_extent")).count()
     };
-    let kept = bounds(&[]);
-    assert!(kept < bounds(&["-fwrapv"]), "the flag changed nothing, {kept} either way");
+    assert!(windows(&[]) > 0, "nothing sized the walk in the plain build");
+    assert_eq!(windows(&["-fwrapv"]), 0, "the flag left a window in front of the loop");
 }

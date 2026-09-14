@@ -857,9 +857,21 @@ fn walked(
         (_, &[capability, pointer]) => (capability, None, pointer),
         _ => return Err(NOT_A_SWEEP),
     };
-    if operand_of(func, capability, Opcode::CapOf, 0) != Some(source.unwrap_or(pointer)) {
+    let Some(named) = operand_of(func, capability, Opcode::CapOf, 0) else {
         return Err(NOT_A_SWEEP);
-    }
+    };
+    // Which object the check is about, when that is not the address it names. A derivation check
+    // writes it down and the two have to agree. Every other check names one address and leaves it to
+    // the capability, which is about that address when the capability was taken there and about
+    // something the address was derived from when it was taken once at the pointer the object came
+    // from and shared down the walk. The second is what `rucc_safety::origin` produces, and it asks
+    // the same question a derivation check asks, so it is answered by the same three rules below
+    // rather than by a fourth written for it.
+    let source = match source {
+        Some(from) if named != from => return Err(NOT_A_SWEEP),
+        Some(from) => Some(from),
+        None => (named != pointer).then_some(named),
+    };
     // A liveness check reads no bytes, so the window it needs is the one byte its address is in.
     // A bounds check carries how many it reads in its payload. A derivation check reads no bytes
     // either, and the byte its address is in is the narrower of the two windows document 03 section
@@ -911,8 +923,8 @@ fn walked(
     let (apart, reach, ahead) = match source {
         None => (apart, reach, None),
         Some(from) if started(base, apart, from) => (apart, reach, None),
-        Some(from) => match paired(func, scev, id, base, apart, walk, from) {
-            Some((apart, reach)) => (apart, reach, None),
+        Some(from) => match paired(func, scev, id, base, Cover { apart, reach }, walk, from) {
+            Some(cover) => (cover.apart, cover.reach, None),
             None => match trailing(func, scev, id, base, apart, walk, from) {
                 Some((apart, ahead)) => (apart, reach, Some(ahead)),
                 None => return Err(NOT_FROM_THE_START),
@@ -947,6 +959,19 @@ fn started(base: Anchor, apart: Plain, from: Value) -> bool {
     base == Anchor::Value(from) && flat(apart) == Some(0)
 }
 
+/// Where the first iteration's window starts, and how many bytes of it the guard has to ask for.
+///
+/// The two travel together because [`paired`] moves the one and widens the other in the same
+/// breath, and because putting the window somewhere else without saying how wide it now is would
+/// be the mistake that function's doc comment warns about.
+#[derive(Clone, Copy, Debug)]
+struct Cover {
+    /// How far past the anchor the window begins.
+    apart: Plain,
+    /// How many bytes past that the query has to cover.
+    reach: i128,
+}
+
 /// One window that holds the pointer a derivation check is about and where its walk begins.
 ///
 /// `p = p + k` is the commonest derivation there is and [`started`] refuses every one of them,
@@ -961,6 +986,14 @@ fn started(base: Anchor, apart: Plain, from: Value) -> bool {
 /// first iteration. That is the same claim [`windowed`] already asks about an access that many
 /// bytes wide, written about two pointers instead of about the bytes under one, and the pass asks
 /// it in exactly that form rather than inventing a second one.
+///
+/// How wide the access is comes into it, which it did not while this was only ever asked about a
+/// derivation check. A derivation check reads nothing and the byte its address is in is the whole of
+/// what it wants, so the window was the gap and one byte on the end of it. A bounds check carries a
+/// count, and a capability taken where the object came from rather than at the address being checked
+/// brings one here, so the far end is whichever is further of the byte the other pointer is in and
+/// the end of the access. Getting that wrong is a window narrower than the bytes the loop reads,
+/// which is the one mistake in this file that a guard cannot catch.
 ///
 /// What it earns is what a derivation check wants. The lower end is inside the object the query was
 /// about, so the capability the check names is that object, and the upper end is inside it too, so
@@ -993,19 +1026,20 @@ fn paired(
     scev: &mut Scev<'_>,
     id: LoopId,
     base: Anchor,
-    apart: Plain,
+    cover: Cover,
     walk: Walk,
     from: Value,
-) -> Option<(Plain, i128)> {
+) -> Option<Cover> {
     let Walk::By(step) = walk else { return None };
     let (anchor, behind, along) = following(func, scev, id, from).ok()?;
     if anchor != base || (along != step && along != 0) {
         return None;
     }
-    let (near, far) = (flat(behind)?, flat(apart)?);
-    let reach = near.abs_diff(far).checked_add(1)?;
-    let apart = Plain { value: None, read: None, scale: 0, offset: near.min(far) };
-    Some((apart, i128::try_from(reach).ok()?))
+    let (near, far) = (flat(behind)?, flat(cover.apart)?);
+    let low = near.min(far);
+    let high = near.checked_add(1)?.max(far.checked_add(cover.reach)?);
+    let apart = Plain { value: None, read: None, scale: 0, offset: low };
+    Some(Cover { apart, reach: high.checked_sub(low)? })
 }
 
 /// The same window when the gap between the two pointers is a distance the loop works out.
@@ -2995,6 +3029,41 @@ mod tests {
         along
     }
 
+    /// Points the capability the bounds check in `block` names at `from` rather than at the address
+    /// being checked.
+    ///
+    /// The shape `rucc_safety::origin` produces, where a capability is taken once at the pointer the
+    /// object came from and every address derived from it shares that one. The `cap_of` moves with
+    /// it, since a capability about a pointer defined outside the loop is one the optimizer hoists
+    /// out of the loop anyway and leaving it inside would be testing a shape nothing emits.
+    fn taken_at(func: &mut Func, block: Block, from: Value) {
+        let check = func
+            .insts(block)
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the loop checks the address it works out");
+        let held = func[func[check].args][0];
+        let made = super::inst_of(func, held);
+        func[made].args = func.push_values(&[from]);
+    }
+
+    /// Moves the walk one stride along, so the address is `&a[i + 1]` rather than `&a[i]`.
+    fn shifted(func: &mut Func, block: Block) {
+        let add = func
+            .insts(block)
+            .find(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .expect("the loop works out an address");
+        let (array, scaled) = (func[func[add].args][0], func[func[add].args][1]);
+        let mut build = Builder::new(func, block);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let along = build.binary(Opcode::Add, scaled, by, Flags::NSW);
+        for value in [by, along] {
+            let inst = super::inst_of(func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, add);
+        }
+        func[add].args = func.push_values(&[array, along]);
+    }
+
     /// The address the loop works out and the pointer it started from.
     fn arithmetic(func: &Func, block: Block) -> (Value, Value) {
         let add = func
@@ -3367,6 +3436,77 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
         assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost it");
         sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_bounds_check_whose_capability_was_taken_where_the_object_came_from_is_taken() {
+        // `rucc_safety::origin` takes one capability at `a` and every address off it shares that
+        // one, so the check names `a` where it used to name the address being checked. The walk
+        // begins on `a` here, which is the first of the three rules a derivation check already
+        // goes through, and the window is the same window it always was.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (array, _) = arithmetic(&func, head);
+        taken_at(&mut func, head, array);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_bounds_check_whose_capability_was_taken_where_a_handed_walk_started_is_taken_too() {
+        // `a[start + i]` with the capability on `a`. The window goes on `a`, which is the object
+        // the check is about, and the guard takes off how far in the walk begins. Which is the
+        // third of the three rules, reached from a bounds check rather than from a derivation
+        // check, and it is the commonest shape a subscript in a loop has.
+        let (mut names, mut func, blocks) = offsetting(Flags::NSW);
+        let head = blocks[1];
+        let (array, _) = arithmetic(&func, head);
+        taken_at(&mut func, head, array);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_window_that_holds_a_capability_and_an_access_is_as_wide_as_the_access() {
+        // `a[i + 1]` with the capability on `a`, so the pair is a whole access apart and the window
+        // has to reach from `a` to the end of the first read. The rule it goes through was written
+        // for a derivation check, which reads nothing, and it made the window the gap and one byte
+        // on the end. That is four bytes short here, and a window short of what the loop reads is
+        // the one mistake in this file the guard cannot catch, since the guard sends every
+        // iteration inside the window down the half that does not check.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (array, _) = arithmetic(&func, head);
+        shifted(&mut func, head);
+        taken_at(&mut func, head, array);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+
+        let (_, asked) = *all(&func, Opcode::CapExtent).first().expect("the walk was sized");
+        let extent = asked_of(&func, asked);
+        let window = all(&func, Opcode::Sub)
+            .into_iter()
+            .find(|&(_, inst)| func[func[inst].args][0] == extent)
+            .map(|(_, inst)| func[func[inst].args][1])
+            .and_then(|value| number(&func, value))
+            .expect("the guard takes the window off what it measured");
+        assert_eq!(window, WIDTH * 2, "the window holds the pointer and the whole first access");
+        sound(&func, &mut names);
+    }
+
+    /// What the runtime answered, out of the instruction that asked it.
+    fn asked_of(func: &Func, inst: Inst) -> Value {
+        func[inst].results().next().expect("the query gives one number")
     }
 
     #[test]

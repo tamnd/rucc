@@ -169,6 +169,10 @@ const MISALIGNED: &str = "bounds check kept, its step is not a whole number of i
 /// What is reported when the rule declines the range the loop sweeps.
 const TOO_WIDE: &str = "bounds check kept, the range the loop sweeps is too wide for the rule";
 
+/// What is reported for a check whose capability is about an object the walk starts along from.
+const NOT_ITS_CAPABILITY: &str =
+    "bounds check kept, its capability is about a pointer the walk does not start on";
+
 /// The pass.
 #[derive(Debug)]
 pub struct Hoist;
@@ -400,9 +404,9 @@ fn planned(
     let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
         return Err(NOT_A_SWEEP);
     };
-    if operand_of(func, capability, Opcode::CapOf, 0) != Some(pointer) {
+    let Some(named) = operand_of(func, capability, Opcode::CapOf, 0) else {
         return Err(NOT_A_SWEEP);
-    }
+    };
     let Extra::Mem(held) = func[check].extra else { return Err(NOT_A_SWEEP) };
     let info = func[held];
 
@@ -474,6 +478,18 @@ fn planned(
         // cover and does not yet.
         Evolution::Unknown => return Err(NOT_FOLLOWED),
     };
+    // Which instance the check is about has to be the instance the one in front will be about, and
+    // the one in front is written with a `cap_of` of the address it starts at. A capability taken at
+    // the check's own pointer is that instance on the first iteration, which is where the hoisted
+    // check goes, and that is the shape `rucc-safety` used to emit everywhere. A capability taken
+    // where the object came from, which is what `rucc_safety::origin` emits now, is that instance
+    // only when the walk starts on the pointer it names. A walk that starts along from it is
+    // refused, because the address the hoisted check is written at could be in some object further
+    // on, and then the question in front is about whoever owns that and the check inside was about
+    // whoever owns the pointer the capability names.
+    if named != pointer && (base != Anchor::Value(named) || offset != 0) {
+        return Err(NOT_ITS_CAPABILITY);
+    }
     Ok(Plan { preheader, base, offset, span, info, check })
 }
 
@@ -1406,6 +1422,68 @@ mod tests {
         // Four bytes and not sixty four. Every iteration asked about the same four.
         assert_eq!(extent(&func, left[0].1), 4, "one access, since the address never moved");
         sound(&func, &mut names);
+    }
+
+    /// Points the capability the check in `block` names at `from` rather than at the address being
+    /// checked.
+    ///
+    /// What `rucc_safety::origin` writes, once a capability belongs to a pointer rather than to an
+    /// access: the walk inside the loop is checked through the capability the pointer it came off
+    /// got, and there is one of those for the whole function.
+    fn taken_at(func: &mut Func, block: Block, from: Value) {
+        let check = func
+            .insts(block)
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the loop checks the address it works out");
+        let held = func[func[check].args][0];
+        let made = inst_of(func, held);
+        func[made].args = func.push_values(&[from]);
+    }
+
+    /// Moves the walk one stride along, so the address is `&a[i + 1]` rather than `&a[i]`.
+    fn shifted(func: &mut Func, block: Block) {
+        let add = func
+            .insts(block)
+            .find(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .expect("the loop works out an address");
+        let (array, scaled) = (func[func[add].args][0], func[func[add].args][1]);
+        let mut build = Builder::new(func, block);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let along = build.binary(Opcode::Add, scaled, by, Flags::NSW);
+        for value in [by, along] {
+            let inst = inst_of(func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, add);
+        }
+        func[add].args = func.push_values(&[array, along]);
+    }
+
+    #[test]
+    fn a_check_whose_capability_was_taken_where_the_walk_starts_is_hoisted_like_any_other() {
+        // The common shape, once a capability belongs to a pointer: the walk starts on the pointer
+        // the capability was taken at. The check in front goes at that same address, so it asks
+        // after the instance the capability names and the answer is the answer.
+        let (mut names, mut func, blocks) = walking(16, WIDTH, 4, 4);
+        let array = func[blocks[0]].params[0];
+        taken_at(&mut func, blocks[1], array);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(checks(&func).len(), 1, "one check, and it is the one that was put in front");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_check_whose_capability_was_taken_behind_where_the_walk_starts_stays() {
+        // And the refusal. The walk starts one element in, so the check in front would be written
+        // at `a + 4` and would be about whoever owns that address. The capability is about whoever
+        // owns `a`, and on an array of four bytes those are two different objects.
+        let (_, mut func, blocks) = walking(16, WIDTH, 4, 4);
+        let array = func[blocks[0]].params[0];
+        shifted(&mut func, blocks[1]);
+        taken_at(&mut func, blocks[1], array);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::NOT_ITS_CAPABILITY), 1);
     }
 
     #[test]
