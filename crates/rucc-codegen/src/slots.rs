@@ -434,6 +434,11 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
 /// touched somewhere above, and handed the edges out of each block it says which are touched
 /// somewhere below. The sweep goes the way the edges point so that a straight line settles in one
 /// pass and only a loop costs a second.
+///
+/// A block is allowed to be its own neighbour, which is what a loop of one block is, and the row it
+/// is working on is a copy for that reason. Reading a block's own answer back is a no change either
+/// way, since the answer being built is the one being read, but what a block touches does come back
+/// to itself around a back edge and that is the half that has to arrive. tamnd/rucc#1207.
 fn spread(
     edges: &[Vec<usize>],
     touched: &[Vec<u64>],
@@ -446,7 +451,7 @@ fn spread(
         going = false;
         for at in 0..edges.len() {
             let at = if forward { at } else { edges.len() - 1 - at };
-            let mut row = std::mem::take(&mut out[at]);
+            let mut row = out[at].clone();
             for &from in &edges[at] {
                 for word in 0..words {
                     let had = row[word];
@@ -886,6 +891,31 @@ mod tests {
         building.through(body, addr);
         building.func.build(body, building.nop).finish();
         building.func.succs_mut(body).push(BlockCall::to(header));
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    /// A loop of one block, which is a block that is its own predecessor and its own successor.
+    /// The walk over the graph has to take that rather than fall over it, and what comes back is
+    /// the same answer the two block loop above gets: the body runs again, so a local touched at
+    /// the bottom of it is wanted at the top. tamnd/rucc#1207.
+    #[test]
+    fn a_block_that_is_its_own_neighbour_is_a_loop_like_any_other() {
+        let (mut building, block) = Building::new();
+        let loops = building.func.create_block();
+        building.func.build(block, building.nop).finish();
+        building.func.succs_mut(block).push(BlockCall::to(loops));
+
+        // One local touched at the top of the block and the other at the bottom. The edge back to
+        // the top is what puts the second one over the first.
+        let held = building.local(loops, 1);
+        building.through(loops, held);
+        let addr = building.local(loops, 0);
+        building.through(loops, addr);
+        building.func.build(loops, building.nop).finish();
+        building.func.succs_mut(loops).push(BlockCall::to(loops));
         let (reach, allocation) = building.allocate(2, 4);
 
         let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
