@@ -73,6 +73,13 @@
 //! a fresh allocation has, because `rucc_safe_rt::recover` declares the pair as one shape, and the
 //! difference between them is entirely behind the name.
 //!
+//! And `cap_publish` and `cap_clear`, which are the pair that takes a capability out of this
+//! function and are the only two here that are not about where four words are kept. A call is where
+//! the slot representation runs out, because the callee has its own frame and no way to see into
+//! this one, so section 5.3 hands the capabilities over out of band and the lowering is a copy into
+//! a frame in thread local storage. [`mod@crate::frame`] is all of that, including why saying there
+//! is no frame is an instruction rather than the absence of one.
+//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -136,10 +143,14 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
         let Some(address) = reserve(func, inst) else { continue };
         moved.insert(result, address);
     }
-    if moved.is_empty() {
+    // A `cap_clear` is the one thing here that is not about a capability at all, so a function
+    // whose only safety instruction is one still has something to lower.
+    let clears = walk(func).into_iter().any(|inst| func[inst].opcode == Opcode::CapClear);
+    if moved.is_empty() && !clears {
         return;
     }
     substitute(func, &moved);
+    let mut frame: Option<Value> = None;
     for inst in walk(func) {
         let slot = func[inst].results().next().and_then(|value| moved.get(&value).copied());
         match (func[inst].opcode, slot) {
@@ -149,6 +160,18 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
             (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
             (Opcode::CapRecover, Some(address)) => recovered(func, names, inst, address),
             (Opcode::CapStore, _) => stored(func, names, inst),
+            (Opcode::CapPublish, _) => {
+                let at = match frame {
+                    Some(at) => at,
+                    None => {
+                        let Some(at) = crate::frame::reserve(func, inst) else { continue };
+                        frame = Some(at);
+                        at
+                    }
+                };
+                crate::frame::hand_over(func, names, word, inst, at);
+            }
+            (Opcode::CapClear, _) => crate::frame::cleared(func, names, inst),
             _ => {}
         }
     }
@@ -205,7 +228,17 @@ fn placeable(func: &Func) -> bool {
             return false;
         }
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
-        if reads && !matches!(opcode, Opcode::CapStore | Opcode::CapLoad | Opcode::CapNarrow) {
+        let consumes = matches!(
+            opcode,
+            Opcode::CapStore | Opcode::CapLoad | Opcode::CapNarrow | Opcode::CapPublish
+        );
+        if reads && !consumes {
+            return false;
+        }
+        // And a publish has two things to be right about beyond its operands being capabilities,
+        // both of which [`crate::frame::placeable`] is where they are argued: it has to be in front
+        // of a call, and it cannot describe more arguments than the frame holds.
+        if opcode == Opcode::CapPublish && !crate::frame::placeable(func, inst) {
             return false;
         }
         // A capability passed along an edge is one whose reader is a block parameter, and a block
@@ -425,7 +458,7 @@ fn reserve(func: &mut Func, inst: Inst) -> Option<Value> {
 }
 
 /// The address `bytes` along from `address`, which for the first word is the address itself.
-fn offset(func: &mut Func, inst: Inst, address: Value, bytes: u64, word: Type) -> Value {
+pub(crate) fn offset(func: &mut Func, inst: Inst, address: Value, bytes: u64, word: Type) -> Value {
     if bytes == 0 {
         return address;
     }
@@ -438,7 +471,7 @@ fn offset(func: &mut Func, inst: Inst, address: Value, bytes: u64, word: Type) -
 }
 
 /// Puts an integer constant in front of `inst` and gives back what it produced.
-fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+pub(crate) fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
     let extra = Extra::Imm(func.add_imm(imm));
     let data = InstData { extra, ..InstData::new(Opcode::IConst) };
     let made = func.create_inst(data, &[ty], func.span(inst));
@@ -802,6 +835,141 @@ mod tests {
         assert!(text.contains("__rucc_cap_recover"), "{text}");
         assert!(text.contains("__rucc_cap_narrow"), "{text}");
         believed(&unit, &func, &names);
+    }
+
+    /// A function that calls `g(at)`, with `extra` putting instructions in front of the call.
+    ///
+    /// The capability and the pointer are handed over the way [`built`] hands them over, so a test
+    /// decides for itself what the call is told about them, which is the whole of what the frame
+    /// pair is for.
+    fn passing(names: &mut Interner, extra: impl FnOnce(&mut Builder<'_>, Value, Value)) -> Func {
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let sig = func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = names.intern("g");
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let cap = b.value(InstData::new(Opcode::CapNull), Type::CAP);
+        extra(&mut b, cap, at);
+        let args = b.func().push_values(&[at]);
+        let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
+        b.inst(data, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    /// Where in the function that instruction is, counting from the entry block.
+    fn place(func: &Func, inst: Inst) -> usize {
+        walk(func).into_iter().position(|at| at == inst).expect("the instruction is in the body")
+    }
+
+    #[test]
+    fn the_capabilities_a_call_hands_over_are_copied_into_one_frame() {
+        let mut names = Interner::new();
+        let mut func = passing(&mut names, |b, cap, _| {
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapPublish), 0);
+        // Two reservations, which are the capability's own slot and the frame. The frame is the
+        // function's rather than the call's, so a second call would not add a third.
+        assert_eq!(count(&func, Opcode::Alloca), 2);
+        // Four zero words for the null capability, then the count and the spare half word beside
+        // it. The capability itself goes over as a copy rather than as four more stores, because
+        // what is being moved is a slot the pass does not otherwise look inside.
+        assert_eq!(count(&func, Opcode::Store), 6);
+        assert_eq!(count(&func, Opcode::Memcpy), 1);
+        assert!(!any_capability(&func));
+
+        // The publish in front of the call and the outer frame put back after it, which is the
+        // half that has to happen whether or not the callee read anything.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        let publish = text.find("__rucc_frame_publish").expect("the frame is published");
+        let callee = text.find("call @g(").expect("the call is still there");
+        let restore = text.find("__rucc_frame_restore").expect("the outer frame is put back");
+        assert!(publish < callee, "{text}");
+        assert!(callee < restore, "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn the_frame_is_put_back_from_the_link_the_publish_wrote() {
+        let mut names = Interner::new();
+        let mut func = passing(&mut names, |b, cap, _| {
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        // One read, and it is of the frame rather than of anything the program wrote. It has to be
+        // after the call, since what it is reading is the link the runtime filled in, and the call
+        // it feeds has to be after that again.
+        let reads: Vec<Inst> =
+            walk(&func).into_iter().filter(|&inst| func[inst].opcode == Opcode::Load).collect();
+        assert_eq!(reads.len(), 1);
+        let calls: Vec<Inst> =
+            walk(&func).into_iter().filter(|&inst| func[inst].opcode == Opcode::Call).collect();
+        assert_eq!(calls.len(), 3);
+        assert!(place(&func, calls[1]) < place(&func, reads[0]));
+        assert!(place(&func, reads[0]) < place(&func, calls[2]));
+        let read = func[reads[0]].results().next().expect("a read gives one value back");
+        assert_eq!(func[func[calls[2]].args].to_vec(), vec![read]);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_call_nobody_can_vouch_for_is_told_there_is_no_frame() {
+        let mut names = Interner::new();
+        let mut func = passing(&mut names, |b, _, _| {
+            b.inst(InstData::new(Opcode::CapClear), &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapClear), 0);
+        // Nothing is reserved, because saying there is no frame is not a statement about any
+        // capability and the null the fixture starts from is unread and went in `prune`.
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        assert_eq!(count(&func, Opcode::CapNull), 0);
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_frame_clear"), "{text}");
+        assert!(!text.contains("__rucc_frame_publish"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_publish_that_is_in_front_of_nothing_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let mut func = built(&mut names, |b, cap, _| {
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        // There is no call for it to be about, and adjacency is the whole of the tie between the
+        // two, so there is nothing to hand the capability to and the conservative answer is the
+        // same one a producer this pass cannot write gets.
+        assert_eq!(count(&func, Opcode::CapPublish), 1);
+        assert_eq!(count(&func, Opcode::CapNull), 1);
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_publish_describing_more_arguments_than_the_frame_holds_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let mut func = passing(&mut names, |b, cap, _| {
+            let caps = vec![cap; crate::frame::ARGS + 1];
+            let args = b.func().push_values(&caps);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        // A refusal rather than a truncation. Dropping the capabilities past the eighth would be a
+        // silent weakening, and this way the back end says it cannot lower the instruction.
+        assert_eq!(count(&func, Opcode::CapPublish), 1);
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
     }
 
     #[test]

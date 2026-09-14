@@ -230,6 +230,34 @@ pub enum Opcode {
     /// about. Everything else, the limit operand and why an answer short of the truth is allowed,
     /// is [`Opcode::CapExtent`]'s.
     CapExtentBack,
+    /// The capabilities of a call's pointer arguments, handed over beside the arguments.
+    ///
+    /// Document 05 section 5.3 is the whole of why this is an instruction of its own rather than
+    /// more operands on the call. An instrumented function's calling convention is unchanged, so a
+    /// pointer argument goes in the register it always went in and `sizeof(void *)` is still eight,
+    /// which is what lets an object this compiler built link against one nobody instrumented. The
+    /// capability therefore travels out of band, in a small per thread frame the caller writes and
+    /// the callee reads, indexed by argument position.
+    ///
+    /// One operand per pointer argument, in the order the call passes them, and no operand for the
+    /// arguments that are not pointers. A call handing over more pointers than the frame has room
+    /// for describes the ones that fit and the callee recovers the rest, which is a weakening the
+    /// summary counts rather than a refusal. How many fit is the runtime's number and
+    /// `rucc_safety::frame` is where the compiler keeps it, so nothing here is a bound on the
+    /// operand count.
+    ///
+    /// It goes immediately in front of the call it is about, which is how the two are tied
+    /// together, the same way [`Opcode::MetaRelease`] is tied to the atomic it goes in front of.
+    CapPublish,
+    /// There is no frame for this call, which is what a callee that might not be instrumented gets.
+    ///
+    /// The other half of [`Opcode::CapPublish`] and not the absence of one. Publishing to a callee
+    /// that never reads the frame leaves it in place for whatever that callee calls back into, and
+    /// a callback entered from uninstrumented code holding somebody else's capabilities is worse
+    /// than one entered holding none. So a call the compiler cannot say reads frames says there is
+    /// nothing rather than saying nothing at all, and document 10 section 10.8's callback recovers
+    /// its arguments the way an entry from outside always does.
+    CapClear,
     /// An access is within its capability's bounds, aligned, and permitted.
     ///
     /// The size and the alignment are the access's, and they are in the memory payload rather
@@ -554,6 +582,8 @@ impl Opcode {
             Self::CapRecover => "cap_recover",
             Self::CapExtent => "cap_extent",
             Self::CapExtentBack => "cap_extent_back",
+            Self::CapPublish => "cap_publish",
+            Self::CapClear => "cap_clear",
             Self::CheckBounds => "check_bounds",
             Self::CheckLive => "check_live",
             Self::CheckType => "check_type",
@@ -854,6 +884,8 @@ impl Opcode {
             | Self::SetjmpMarker
             | Self::LongjmpMarker
             | Self::CapStore
+            | Self::CapPublish
+            | Self::CapClear
             | Self::CheckBounds
             | Self::CheckLive
             | Self::CheckType
@@ -885,12 +917,14 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// Five of the eight `cap` instructions. The other three consume one instead: `cap_store`
-    /// writes it beside a pointer, and `cap_extent` and `cap_extent_back` ask it a question about
-    /// itself and answer with a number. The reason this is a question about the opcode rather than
-    /// about the
-    /// result type is that the verifier asks it the other way round: it walks the results looking
-    /// for a `cap` and needs to know whether the instruction under it was entitled to make one.
+    /// Five of the ten `cap` instructions. The other five consume one instead, or none at all:
+    /// `cap_store` writes one beside a pointer, `cap_extent` and `cap_extent_back` ask one a
+    /// question about itself and answer with a number, `cap_publish` hands a call's worth of them
+    /// to a callee, and `cap_clear` takes no operands because saying there is no frame is not a
+    /// statement about any capability. The reason this is a question about the opcode rather than
+    /// about the result type is that the verifier asks it the other way round: it walks the results
+    /// looking for a `cap` and needs to know whether the instruction under it was entitled to make
+    /// one.
     #[must_use]
     pub const fn makes_capability(self) -> bool {
         matches!(
@@ -1099,6 +1133,8 @@ static ALL: &[Opcode] = &[
     Opcode::CapRecover,
     Opcode::CapExtent,
     Opcode::CapExtentBack,
+    Opcode::CapPublish,
+    Opcode::CapClear,
     Opcode::CheckBounds,
     Opcode::CheckLive,
     Opcode::CheckType,

@@ -1563,6 +1563,23 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+            // The capabilities a call hands over, one per pointer argument in the order the call
+            // passes them. How many there are is the call's business rather than this
+            // instruction's, and how many the frame has room for is the runtime's, so the only
+            // shape left to check is that every operand really is a capability and that there is at
+            // least one of them, since a publish describing nothing is a `cap_clear` spelled at
+            // length and the two of them mean opposite things to the callee.
+            Opcode::CapPublish => {
+                if self.takes_at_least(opcode, arity, 1) {
+                    for n in 0..arity {
+                        self.capability(opcode, arg(n), n);
+                    }
+                }
+            }
+            // And saying there is no frame, which is about the call rather than about any value.
+            Opcode::CapClear => {
+                self.takes(opcode, arity, 0);
+            }
             Opcode::CapNarrow => {
                 if self.takes(opcode, arity, 3) {
                     self.capability(opcode, arg(0), 0);
@@ -1718,6 +1735,18 @@ impl<'a> Verifier<'a> {
         }
         self.error(format!(
             "{} takes {one} or {other} operands and this one has {got}",
+            opcode.name()
+        ));
+        false
+    }
+
+    /// Reports the number of operands when an opcode has a floor rather than a count.
+    fn takes_at_least(&mut self, opcode: Opcode, got: usize, least: usize) -> bool {
+        if got >= least {
+            return true;
+        }
+        self.error(format!(
+            "{} takes {least} operands or more and this one has {got}",
             opcode.name()
         ));
         false
