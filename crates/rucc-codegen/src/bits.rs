@@ -95,6 +95,18 @@
 //! pass answering a question it was not asked and reporting a number that says it found widenings
 //! it had not. What this is about is a register something reads less of than was put in it.
 //!
+//! # How the rewrite is made
+//!
+//! One conversion at a time, as a set of changes [`crate::changes`] either takes or turns down.
+//! The set is the readers sent to the source and the conversion taken out, and those two are worth
+//! nothing apart: a reader left behind reads a register nothing writes any more. So the set is
+//! where the question is asked, and a reader this pass failed to find is a set that is refused
+//! rather than a function with a hole in it.
+//!
+//! The readers an edge holds are in the set the same way. A conversion in one block whose reader is
+//! in another is the case this pass is here for, and the argument the edge carries is how the value
+//! gets there, so sending it somewhere else is half of what taking the conversion out means.
+//!
 //! # Where it runs
 //!
 //! After selection and before allocation, which is the window where the machine instructions exist
@@ -106,7 +118,9 @@ use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_mir as mir;
-use rucc_target::{BitInsts, Constraint, Role};
+use rucc_target::{BitInsts, Constraint, MachineInsts, Role};
+
+use crate::changes::{Changes, Reads};
 
 /// How much of a register a read that could be of any of it wants.
 ///
@@ -120,10 +134,21 @@ const EVERYTHING: u32 = u32::MAX;
 /// Each one that goes takes its readers with it: they are pointed at the source instead, which
 /// holds the same bits as the result did for as far as anything was looking.
 ///
+/// One conversion is one set of changes, which is [`crate::changes`] asked the question this pass
+/// would otherwise be trusted about. Sending the readers of a register somewhere else and taking
+/// the instruction that wrote it out are worth nothing apart, and a reader this missed is a set
+/// the framework turns down rather than an instruction taken out from under something still
+/// reading it.
+///
 /// Run after lowering and before allocation. Running it once is enough, because the analysis is
 /// over the whole function at once and a chain of conversions is settled by the fixpoint rather
 /// than by a second run.
-pub fn dead(func: &mut mir::Func, insts: &BitInsts, names: &Interner) -> usize {
+pub fn dead(
+    func: &mut mir::Func,
+    insts: &BitInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+) -> usize {
     let wanted = demand(func, insts, names);
     let mut sent: HashMap<mir::Reg, mir::Reg> = HashMap::new();
     let mut gone: Vec<mir::Inst> = Vec::new();
@@ -146,11 +171,82 @@ pub fn dead(func: &mut mir::Func, insts: &BitInsts, names: &Interner) -> usize {
     if gone.is_empty() {
         return 0;
     }
-    rename(func, &chased(&sent));
-    for &inst in &gone {
-        func.remove_inst(inst);
+    let sent = chased(&sent);
+    let readers = Readers::of(func, &sent);
+    let mut reads = Reads::of(func);
+    let mut taken = 0;
+    for inst in gone {
+        let Some((def, _)) = conversion(func, inst) else { continue };
+        let Some(&into) = sent.get(&def) else { continue };
+        let mut set = Changes::new();
+        for &reader in readers.insts.get(&def).into_iter().flatten() {
+            // A reader that has gone is one an earlier conversion in a chain took with it, and the
+            // read it was doing went with it.
+            if func.block_of(reader).is_some() {
+                set.rename(reader, def, into);
+            }
+        }
+        for &(from, at) in readers.edges.get(&def).into_iter().flatten() {
+            let args = func[from].succs[at]
+                .args
+                .iter()
+                .map(|&arg| if arg == def { into } else { arg })
+                .collect();
+            set.carry(from, at, args);
+        }
+        set.remove(inst);
+        if set.commit(func, &mut reads, names, machine).is_ok() {
+            taken += 1;
+        }
     }
-    gone.len()
+    taken
+}
+
+/// Everything that reads each of the registers a conversion wrote.
+///
+/// Worked out in one walk rather than per conversion, because a function with a thousand of these
+/// in it would otherwise be walked a thousand times. It is the readers as they were when the walk
+/// ran, which is enough: a rename adds a read of the register it sends a reader to, and by the time
+/// that register's own conversion is the one being taken out the reader is found from the function
+/// rather than from here.
+#[derive(Debug, Default)]
+struct Readers {
+    /// The instructions that read it, each named once however many of its operands do.
+    insts: HashMap<mir::Reg, Vec<mir::Inst>>,
+    /// The edges that carry it, as the block each leaves and its position in that block's list.
+    edges: HashMap<mir::Reg, Vec<(mir::Block, usize)>>,
+}
+
+impl Readers {
+    /// Every read of every register in the map, which is the registers the conversions wrote.
+    fn of(func: &mir::Func, sent: &HashMap<mir::Reg, mir::Reg>) -> Self {
+        let mut found = Self::default();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                for operand in &func[func[inst].operands] {
+                    if operand.role != Role::Use || !sent.contains_key(&operand.reg) {
+                        continue;
+                    }
+                    let readers = found.insts.entry(operand.reg).or_default();
+                    if !readers.contains(&inst) {
+                        readers.push(inst);
+                    }
+                }
+            }
+            for (at, call) in func[block].succs.iter().enumerate() {
+                for arg in &call.args {
+                    if !sent.contains_key(arg) {
+                        continue;
+                    }
+                    let edges = found.edges.entry(*arg).or_default();
+                    if !edges.contains(&(block, at)) {
+                        edges.push((block, at));
+                    }
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Where a conversion holds the register it reads.
@@ -295,36 +391,9 @@ fn chased(sent: &HashMap<mir::Reg, mir::Reg>) -> HashMap<mir::Reg, mir::Reg> {
         .collect()
 }
 
-/// Sends every read of a register that is going to whatever holds the bits it held.
-///
-/// The arguments an edge carries are reads like any other and are not in any operand vector, which
-/// is the one place this is easy to get wrong.
-fn rename(func: &mut mir::Func, sent: &HashMap<mir::Reg, mir::Reg>) {
-    for block in func.blocks().collect::<Vec<_>>() {
-        for inst in func.insts(block).collect::<Vec<_>>() {
-            let operands = func[inst].operands;
-            for operand in &mut func[operands] {
-                if operand.role != Role::Use {
-                    continue;
-                }
-                if let Some(&into) = sent.get(&operand.reg) {
-                    operand.reg = into;
-                }
-            }
-        }
-        for call in func.succs_mut(block) {
-            for arg in &mut call.args {
-                if let Some(&into) = sent.get(arg) {
-                    *arg = into;
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use rucc_target::x86_64::{BITS, GPR, RDI};
+    use rucc_target::x86_64::{BITS, GPR, MACHINE, RDI};
 
     use super::*;
 
@@ -343,7 +412,7 @@ mod tests {
 
     /// The pass, over the machine this crate has a backend for.
     fn takes(func: &mut mir::Func, names: &Interner) -> usize {
-        dead(func, &BITS, names)
+        dead(func, &BITS, &MACHINE, names)
     }
 
     /// What every instruction in a block came to, as opcodes.

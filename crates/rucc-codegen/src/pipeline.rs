@@ -380,7 +380,7 @@ pub fn compile_recording(
     // out is one whose readers are sent to its source, and one of those readers may be an address
     // computation, so asking which bits are read first means the fold sees the addresses as they
     // will be rather than as they were.
-    bits::dead(&mut func, machine.bits, names);
+    bits::dead(&mut func, machine.bits, machine.shapes, names);
 
     // After selection, because the address instruction and the one that reads it are both machine
     // instructions only once selection has written them, and before allocation, because what makes
