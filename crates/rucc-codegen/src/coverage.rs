@@ -233,6 +233,12 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // pointer from outside the instrumented world falls back to. Same two arguments as the fresh
     // allocation above, since the runtime declares the pair as one shape.
     (Opcode::CapRecover, "`rucc_safety::slot`, into the call that walks the planes for one"),
+    // The two ends of a call, which is where a capability stops being this function's business.
+    // Neither of them is a capability instruction in the sense the five above are: one copies a
+    // call's worth of them into a frame in thread local storage and publishes it, and the other
+    // says there is no frame at all, which is what a callee nobody can vouch for gets.
+    (Opcode::CapPublish, "`rucc_safety::frame`, into the frame a call hands its callee"),
+    (Opcode::CapClear, "`rucc_safety::frame`, into the call that says there is no frame"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.

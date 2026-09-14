@@ -94,6 +94,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-safety/0.10.39")]
 
 pub mod boundary;
+pub mod frame;
 pub mod lower;
 pub mod plane;
 pub mod promise;
