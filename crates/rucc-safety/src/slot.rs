@@ -112,10 +112,10 @@
 //! # Why the dead ones go first
 //!
 //! Because most of them are dead. Every `cap_of` in a function was put there to feed a check, and
-//! by the time this runs every check is a call that does not read one, so the walk that used to
-//! remove them by opcode removes them by nobody reading them instead. Running it to a fixpoint is
-//! what handles a chain, since a `cap_narrow` of a `cap_of` leaves the `cap_of` unread only once
-//! the `cap_narrow` has gone.
+//! by the time this runs a check is a call, which reads one only where the runtime entry point it
+//! became takes one. So the walk that used to remove them by opcode removes them by nobody reading
+//! them instead. Running it to a fixpoint is what handles a chain, since a `cap_narrow` of a
+//! `cap_of` leaves the `cap_of` unread only once the `cap_narrow` has gone.
 
 use std::collections::{HashMap, HashSet};
 
@@ -309,7 +309,7 @@ fn placeable(func: &Func) -> bool {
                 | Opcode::CapPublish
                 | Opcode::CapYield
         );
-        if reads && !consumes {
+        if reads && !consumes && !expecting(func, inst) {
             return false;
         }
         // And a publish has two things to be right about beyond its operands being capabilities,
@@ -327,6 +327,42 @@ fn placeable(func: &Func) -> bool {
         }
         if opcode == Opcode::CapResult && !crate::frame::given(func, inst) {
             return false;
+        }
+    }
+    true
+}
+
+/// Whether a call reads its capabilities in the one position this pass can leave alone.
+///
+/// A check the lowering has already turned into a call is the only reader of a capability here that
+/// is not itself a capability instruction, and there is one because `__rucc_check_live` is handed
+/// the capability rather than having it dropped. Nothing has to be rewritten for it: [`substitute`]
+/// walks every instruction's operands, so the call comes out pointed at the slot like anything else
+/// does, and the entry point was declared taking a `ptr` because the address of the slot is what
+/// arrives. What has to hold is that the parameter standing for the operand really is that `ptr`,
+/// since a signature saying `cap` would be one the back end has no calling convention for, and the
+/// verifier rejects the module for it a few passes later rather than here.
+///
+/// A call passing a capability the signature does not name is not one of these. The list a variadic
+/// call passes beyond its parameters is untyped by definition, so there is nothing to agree with,
+/// and the honest answer for a shape this pass was not written for is to leave the function alone.
+fn expecting(func: &Func, inst: Inst) -> bool {
+    if !matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall) {
+        return false;
+    }
+    let Extra::Call(at) = func[inst].extra else { return false };
+    let signature = func[at].signature;
+    // An indirect call goes through an address it passes as its first operand, and no parameter
+    // stands for that one.
+    let indirect = usize::from(func[inst].opcode == Opcode::CallIndirect);
+    for (index, &value) in func[func[inst].args].iter().enumerate() {
+        if !func[value].ty.is_cap() {
+            continue;
+        }
+        let named = index.checked_sub(indirect).and_then(|nth| func[signature].params.get(nth));
+        match named {
+            Some(param) if param.ty == Type::PTR => {}
+            _ => return false,
         }
     }
     true
@@ -610,6 +646,7 @@ pub(crate) fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use rucc_base::Symbol;
     use rucc_ir::{Builder, CallInfo, Module, Signature, print_func, verify_func};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -673,6 +710,21 @@ mod tests {
         func
     }
 
+    /// Adds a call of `callee` reading those values, under that signature.
+    ///
+    /// What the check lowering leaves behind, which is the one reader of a capability here that is
+    /// not a capability instruction. The signature is given separately from the arguments so a test
+    /// can declare one that does not describe what is passed, which is the case this pass has to
+    /// refuse rather than rewrite.
+    fn calling(b: &mut Builder<'_>, callee: Symbol, sig: Signature, args: &[Value]) {
+        let sig = b.func().add_signature(sig);
+        let callee = Some(callee);
+        let varargs = b.func().push_abis(&[]);
+        let info = b.func().add_call(CallInfo { callee, signature: sig, varargs });
+        let args = b.func().push_values(args);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+    }
+
     /// How many instructions with that opcode the function holds.
     fn count(func: &Func, opcode: Opcode) -> usize {
         walk(func).into_iter().filter(|&inst| func[inst].opcode == opcode).count()
@@ -710,6 +762,56 @@ mod tests {
         let text = print_func(&unit, &func, &names);
         assert!(text.contains("__rucc_cap_store"), "{text}");
         believed(&unit, &func, &names);
+    }
+
+    /// A check that has already become a call still gets its capability pointed at the slot.
+    ///
+    /// `__rucc_check_live` is the first entry point handed one, so this is the shape the rest of the
+    /// checks will arrive in as they follow. Nothing special happens to it: the call is an ordinary
+    /// reader as far as the substitution is concerned, and what has to hold is that the pass agrees
+    /// to place the function at all rather than leaving a `cap` where the back end would meet one.
+    #[test]
+    fn a_call_declared_taking_the_address_is_pointed_at_the_slot() {
+        let mut names = Interner::new();
+        let live = names.intern("__rucc_check_live");
+        let mut func = built(&mut names, |b, cap, at| {
+            calling(b, live, Signature::new().with_params(&[Type::PTR; 3]), &[cap, at, at]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert_eq!(count(&func, Opcode::CapNull), 0);
+        assert!(!any_capability(&func));
+
+        let call = walk(&func)
+            .into_iter()
+            .find(|&inst| func[inst].opcode == Opcode::Call)
+            .expect("the check was already a call");
+        let slot = walk(&func)
+            .into_iter()
+            .find(|&inst| func[inst].opcode == Opcode::Alloca)
+            .and_then(|inst| func[inst].results().next())
+            .expect("the capability got a slot");
+        assert_eq!(func[func[call].args][0], slot);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    /// And a call passing one where its signature names nothing is left alone.
+    ///
+    /// The unnamed half of a variadic call is untyped, so there is no parameter to agree with and no
+    /// way to know the callee reads an address. Leaving the function as it was keeps that out of the
+    /// back end, where a `cap` is a type nothing has been taught.
+    #[test]
+    fn a_call_passing_a_capability_the_signature_does_not_name_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let odd = names.intern("printf");
+        let mut func = built(&mut names, |b, cap, at| {
+            let sig = Signature::new().with_params(&[Type::PTR]).variadic();
+            calling(b, odd, sig, &[at, cap]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        assert_eq!(count(&func, Opcode::CapNull), 1);
+        assert!(any_capability(&func));
     }
 
     #[test]
