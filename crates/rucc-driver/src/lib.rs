@@ -1452,6 +1452,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 rucc_opt::Gates::default().add(on, spec).map_err(err)?;
                 opts.pass_gates.push((on, spec.to_owned()));
             }
+            // gcc's spelling for a pass this compiler has under a shorter name. It goes above the
+            // two arms below rather than into the pile of gcc pass names further down, because the
+            // pass is here: dropping the flag would leave a build that asked for unrolling without
+            // it, and refusing it stops the build outright, which is what libtommath's makefile
+            // ran into. `-funroll-all-loops` is deliberately not in here: gcc's is the one that
+            // unrolls without a trip count, which is a different and usually worse thing.
+            "-funroll-loops" => opts.passes.push(("unroll".to_owned(), true)),
+            "-fno-unroll-loops" => opts.passes.push(("unroll".to_owned(), false)),
             _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-fno-".len()..].to_owned(), false));
             }
@@ -3292,6 +3300,17 @@ mod tests {
     fn a_pass_name_this_compiler_has_is_still_read_as_a_pass() {
         let (opts, _) = compile(&["-c", "-fno-dce", "a.c"]);
         assert_eq!(opts.passes, vec![("dce".to_owned(), false)]);
+    }
+
+    /// gcc's name for the unroller reaches the unroller, in both directions. libtommath puts
+    /// `-funroll-loops` in `CFLAGS` unconditionally, and before this it was an unknown option and
+    /// the build stopped on its first file.
+    #[test]
+    fn the_gcc_spelling_of_the_unroller_turns_the_unroller_on_and_off() {
+        let (opts, _) = compile(&["-c", "-funroll-loops", "a.c"]);
+        assert_eq!(opts.passes, vec![("unroll".to_owned(), true)]);
+        let (opts, _) = compile(&["-c", "-fno-unroll-loops", "a.c"]);
+        assert_eq!(opts.passes, vec![("unroll".to_owned(), false)]);
     }
 
     /// The encoding of the source is not a question about speed, so the one name that describes
