@@ -149,6 +149,16 @@ unsigned int __fixunstfsi(_Float128 value);
 long long __fixtfdi(_Float128 value);
 unsigned long long __fixunstfdi(_Float128 value);
 
+/* And the same conversions against the widest integer there is, which are the four in the set where
+ * the format does not hold every value of the type on the other side. They are declared with the two
+ * families above rather than beside the 128-bit integer routines further up, because what they are
+ * written out of is this format's arithmetic.
+ */
+_Float128 __floattitf(wide value);
+_Float128 __floatuntitf(uwide value);
+wide __fixtfti(_Float128 value);
+uwide __fixunstfti(_Float128 value);
+
 /* And the two pairs that cross between that format and each of the two below it, which are the same
  * shape as the pair further up and are the only other things in the set that need two formats at once.
  */
@@ -1500,6 +1510,16 @@ static unsigned long long up_quad(unsigned long long digest, unsigned long long 
     return digest;
 }
 
+/* And one through the pair up at the width where the significand runs out, which is the only place in
+ * this family where the answer is a rounding of the value rather than the value.
+ */
+static unsigned long long up_quad_wide(unsigned long long digest, uwide value) {
+    digest = mix_quad(digest, __floattitf((wide)value));
+    digest = mix_quad(digest, __floatuntitf(value));
+    cases += 2;
+    return digest;
+}
+
 /* One pattern through the four conversions down, including the patterns with no answer, for the reason
  * the narrower families give: both sides of this comparison are implementations of these routines, so
  * the zero they hand back where C has no answer is a convention they can both be held to.
@@ -1510,22 +1530,37 @@ static unsigned long long down_quad(unsigned long long digest, uwide pattern) {
     digest = mix_number(digest, (long long)__fixunstfsi(value));
     digest = mix_number(digest, __fixtfdi(value));
     digest = mix_wide(digest, (uwide)__fixunstfdi(value));
-    cases += 4;
+    /* And the pair at the widest integer, which is where the answer needs every bit of a pair of words
+     * and where the exponents with an answer at all run up to a hundred and twenty seven.
+     */
+    digest = mix_wide(digest, (uwide)__fixtfti(value));
+    digest = mix_wide(digest, __fixunstfti(value));
+    cases += 6;
     return digest;
 }
 
 /* A pattern whose exponent is spread over the range where going down has an answer to give: from
- * 2^-27, which truncates to zero, up to 2^67, which is past all four types. The fraction and the sign
- * are random bits, since a negative value is its own case in each of the four.
+ * 2^-27, which truncates to zero, up to 2^67, which is past the four narrow types. The fraction and
+ * the sign are random bits, since a negative value is its own case in each of them.
  */
 static uwide quad_in_range(void) {
     return quad_at(16356 + (next_random() % 95));
 }
 
+/* And the same band around where the two widest types end, from 2^112 to 2^131, which is the only
+ * place the range check in those two decides anything: every exponent the band above reaches is one
+ * they both hold.
+ */
+static uwide quad_in_wide_range(void) {
+    return quad_at(16495 + (next_random() % 20));
+}
+
 /* The patterns exactly at the top of each integer type and the ones either side of them, which is
  * where the range check in each routine going down gets decided. Unlike the double precision table,
- * every one of these four tops is a quad exactly and the pattern below it is one step below it, since
- * the spacing here does not reach one until 2^112.
+ * every one of these six tops is a quad exactly and the pattern below it is one step below it, since
+ * the spacing here does not reach one until 2^112. That last part stops holding at the two widest
+ * tops, where the spacing is 2^15 and the pattern below 2^127 is that far below it, which is the
+ * neighbour the routines there decide between anyway.
  */
 static const uwide QUAD_BOUNDS[] = {
     QUAD(0x401DFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* either side of 2^31 */
@@ -1540,6 +1575,12 @@ static const uwide QUAD_BOUNDS[] = {
     QUAD(0x403EFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^64 */
     QUAD(0x403F000000000000, 0x0000000000000000),
     QUAD(0x403F000000000000, 0x0000000000000001),
+    QUAD(0x407DFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^127 */
+    QUAD(0x407E000000000000, 0x0000000000000000),
+    QUAD(0x407E000000000000, 0x0000000000000001),
+    QUAD(0x407EFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), /* of 2^128 */
+    QUAD(0x407F000000000000, 0x0000000000000000),
+    QUAD(0x407F000000000000, 0x0000000000000001),
     QUAD(0x3FFE000000000000, 0x0000000000000000), /* a half */
     QUAD(0x3FFF000000000000, 0x0000000000000000), /* one */
     QUAD(0x3FFF800000000000, 0x0000000000000000), /* one and a half */
@@ -1572,6 +1613,29 @@ static const unsigned long long QUAD_INTEGER_EDGES[] = {
 
 #define QUAD_INTEGER_EDGES_COUNT ((int)(sizeof QUAD_INTEGER_EDGES / sizeof QUAD_INTEGER_EDGES[0]))
 
+/* The integers where the widest type ends, and the ones where the significand does. This table is the
+ * entry the one above says it has no room for: a quad holds every integer below 2^113 and stops holding
+ * every one at that point, so the rows around there are where the pair going up at this width rounds,
+ * and the rows around 2^127 are where the signed reading of the same bits turns negative.
+ */
+static const uwide QUAD_WIDE_INTEGER_EDGES[] = {
+    ((uwide)1 << 112),
+    ((uwide)1 << 113) - 1,
+    ((uwide)1 << 113),
+    ((uwide)1 << 113) + 1,
+    ((uwide)1 << 113) + 2,
+    ((uwide)1 << 113) + 3,
+    ((uwide)1 << 126),
+    ((uwide)1 << 127) - 1,
+    ((uwide)1 << 127),
+    ((uwide)1 << 127) + 1,
+    ~(uwide)0 - 1,
+    ~(uwide)0,
+};
+
+#define QUAD_WIDE_INTEGER_EDGES_COUNT \
+    ((int)(sizeof QUAD_WIDE_INTEGER_EDGES / sizeof QUAD_WIDE_INTEGER_EDGES[0]))
+
 #define QUAD_INT_CASES 1024
 
 static void quad_integers(int round) {
@@ -1584,14 +1648,20 @@ static void quad_integers(int round) {
          * where their format stops holding every integer, and this one has nowhere to put it.
          */
         digest = up_quad(digest, value >> 40);
+        /* And the pair at the widest type, handed a value whose own width is random, since what those
+         * two do depends on whether the value has more bits in it than the significand holds.
+         */
+        digest = up_quad_wide(digest, random_wide());
         digest = down_quad(digest, random_quad());
         digest = down_quad(digest, quad_in_range());
+        digest = down_quad(digest, quad_in_wide_range());
     }
     say("quadint", round, digest);
 }
 
 /* The edges by name: every corner pattern down at both signs, every integer edge up with its
- * negation, and the patterns either side of each type's top down at both signs.
+ * negation, every wide integer edge up with its negation as well, and the patterns either side of each
+ * type's top down at both signs.
  */
 static void quad_corner_integers(void) {
     unsigned long long digest = 14695981039346656037ull;
@@ -1602,6 +1672,10 @@ static void quad_corner_integers(void) {
     for (int i = 0; i < QUAD_INTEGER_EDGES_COUNT; i++) {
         digest = up_quad(digest, QUAD_INTEGER_EDGES[i]);
         digest = up_quad(digest, 0ull - QUAD_INTEGER_EDGES[i]);
+    }
+    for (int i = 0; i < QUAD_WIDE_INTEGER_EDGES_COUNT; i++) {
+        digest = up_quad_wide(digest, QUAD_WIDE_INTEGER_EDGES[i]);
+        digest = up_quad_wide(digest, (uwide)0 - QUAD_WIDE_INTEGER_EDGES[i]);
     }
     for (int i = 0; i < QUAD_BOUNDS_COUNT; i++) {
         digest = down_quad(digest, QUAD_BOUNDS[i]);

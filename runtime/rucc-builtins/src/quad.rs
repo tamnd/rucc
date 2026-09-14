@@ -626,30 +626,37 @@ pub extern "C" fn __unordtf2(left: Quad, right: Quad) -> i32 {
     i32::from(is_nan(bits_of(left)) || is_nan(bits_of(right)))
 }
 
-/// The largest magnitude each of the four integer types holds. A signed type holds one more going
+/// The largest magnitude each of the six integer types holds. A signed type holds one more going
 /// down than it does going up, which is why the sign and the magnitude travel separately below.
 const SIGNED_32: u128 = 1 << 31;
 const SIGNED_64: u128 = 1 << 63;
+const SIGNED_128: u128 = 1 << 127;
 const UNSIGNED_32: u128 = u32::MAX as u128;
 const UNSIGNED_64: u128 = u64::MAX as u128;
+const UNSIGNED_128: u128 = u128::MAX;
 
 /// The quad nearest an integer, with the sign handed in separately so that the caller can take the
 /// magnitude of the most negative value of its type without overflowing it.
 ///
 /// One line, for the reason the two narrower files give: an integer already is a significand and a
-/// scale of zero, and `round_from` turns those into the nearest quad. What is different here is that
-/// the rounding never does anything, since a hundred and thirteen bits hold every sixty four bit
-/// integer exactly, so all four of these are exact where two of the four one format down are not.
-fn quad_from_integer(sign: u128, magnitude: u64) -> u128 {
-    round_from(sign, Wide::narrow(u128::from(magnitude)), 0, false)
+/// scale of zero, and `round_from` turns those into the nearest quad. Four of the six callers below
+/// are exact, since a hundred and thirteen bits hold every sixty four bit integer with room over, and
+/// the two that hand over a `__int128` are the ones the rounding in `round_from` is there for.
+fn quad_from_integer(sign: u128, magnitude: u128) -> u128 {
+    round_from(sign, Wide::narrow(magnitude), 0, false)
 }
 
 /// The part of a quad that is on the integer side of the point, as a sign and a magnitude.
 ///
+/// `widest` is the largest power of two the caller's type has room for, which is sixty three for the
+/// four narrow routines and a hundred and twenty seven for the two wide ones. It is asked for rather
+/// than assumed because refusing before the shift is what keeps the shift inside a `u128`: a
+/// significand is a hundred and thirteen bits wide and a scale can take it far past the top of one.
+///
 /// `None` where there is no integer part to hand back at all, which is an infinity, a not a number,
-/// and a magnitude past what the widest of the four types holds. A value below one is not that case:
-/// its integer part is zero, which is an answer.
-fn integer_from_quad(bits: u128) -> Option<(u128, u128)> {
+/// and a magnitude past what that type holds. A value below one is not that case: its integer part is
+/// zero, which is an answer.
+fn integer_from_quad(bits: u128, widest: i32) -> Option<(u128, u128)> {
     if (bits >> FRACTION) & TOP == TOP {
         return None;
     }
@@ -658,12 +665,9 @@ fn integer_from_quad(bits: u128) -> Option<(u128, u128)> {
     if parts.significand == 0 {
         return Some((sign, 0));
     }
-    // Which power of two the highest bit of the value is worth. Nothing above sixty three has an
-    // answer in any of the four types, and refusing here rather than after the shift is also what
-    // keeps the shift inside a `u128`, since a significand is a hundred and thirteen bits wide and a
-    // scale can take it far past the top of one.
+    // Which power of two the highest bit of the value is worth.
     let leading = parts.scale + parts.significand.ilog2() as i32;
-    if leading > 63 {
+    if leading > widest {
         return None;
     }
     if parts.scale >= 0 {
@@ -675,27 +679,31 @@ fn integer_from_quad(bits: u128) -> Option<(u128, u128)> {
     }
 }
 
-/// What the two signed routines share: the integer part held to the bounds of the caller's type.
+/// What the three signed routines share: the integer part held to the bounds of the caller's type.
 /// `bound` is the largest magnitude that type holds going down, and one more than the largest it
 /// holds going up.
 ///
 /// `None` where the value has no answer that type can hold, which the entry points turn into the zero
 /// that section 12.8 records as the shared convention for a case C leaves undefined.
 fn truncate(bits: u128, bound: u128) -> Option<i128> {
-    let (sign, magnitude) = integer_from_quad(bits)?;
+    let (sign, magnitude) = integer_from_quad(bits, bound.ilog2() as i32)?;
     let negative = sign != 0 && magnitude != 0;
     let largest = if negative { bound } else { bound - 1 };
     if magnitude > largest {
         return None;
     }
-    Some(if negative { -(magnitude as i128) } else { magnitude as i128 })
+    // Wrapping, for the one value where the negation has nowhere to go: the most negative `__int128`
+    // is the negation of a magnitude the type does not hold going up, and wrapping lands on it. The
+    // shipped C takes one off, negates and puts one back, which is the same answer written for a
+    // language that has no such word.
+    Some(if negative { (magnitude as i128).wrapping_neg() } else { magnitude as i128 })
 }
 
-/// What the two unsigned routines share. A negative value is undefined for these in C, so it is the
+/// What the three unsigned routines share. A negative value is undefined for these in C, so it is the
 /// same zero as the out of range case, and a negative value whose integer part is zero is not that:
 /// the answer there is zero because that is the value.
 fn truncate_unsigned(bits: u128, bound: u128) -> Option<u128> {
-    let (sign, magnitude) = integer_from_quad(bits)?;
+    let (sign, magnitude) = integer_from_quad(bits, bound.ilog2() as i32)?;
     if sign != 0 && magnitude != 0 {
         return None;
     }
@@ -709,27 +717,41 @@ fn truncate_unsigned(bits: u128, bound: u128) -> Option<u128> {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __floatsitf(value: i32) -> Quad {
-    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, u64::from(value.unsigned_abs())))
+    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, u128::from(value.unsigned_abs())))
 }
 
 /// `_Float128 __floatunsitf(unsigned int)`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __floatunsitf(value: u32) -> Quad {
-    quad_of(quad_from_integer(0, u64::from(value)))
+    quad_of(quad_from_integer(0, u128::from(value)))
 }
 
 /// `_Float128 __floatditf(long long)`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __floatditf(value: i64) -> Quad {
-    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, value.unsigned_abs()))
+    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, u128::from(value.unsigned_abs())))
 }
 
 /// `_Float128 __floatunditf(unsigned long long)`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __floatunditf(value: u64) -> Quad {
+    quad_of(quad_from_integer(0, u128::from(value)))
+}
+
+/// `_Float128 __floattitf(__int128)`, which is one of the two here that rounds.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floattitf(value: i128) -> Quad {
+    quad_of(quad_from_integer(if value < 0 { SIGN } else { 0 }, value.unsigned_abs()))
+}
+
+/// `_Float128 __floatuntitf(unsigned __int128)`, the other one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __floatuntitf(value: u128) -> Quad {
     quad_of(quad_from_integer(0, value))
 }
 
@@ -759,6 +781,20 @@ pub extern "C" fn __fixtfdi(value: Quad) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn __fixunstfdi(value: Quad) -> u64 {
     truncate_unsigned(bits_of(value), UNSIGNED_64).map_or(0, |answer| answer as u64)
+}
+
+/// `__int128 __fixtfti(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixtfti(value: Quad) -> i128 {
+    truncate(bits_of(value), SIGNED_128).unwrap_or(0)
+}
+
+/// `unsigned __int128 __fixunstfti(_Float128)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __fixunstfti(value: Quad) -> u128 {
+    truncate_unsigned(bits_of(value), UNSIGNED_128).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1475,14 +1511,14 @@ mod tests {
         match which {
             0 => quad_from_integer(
                 if (value as i32) < 0 { SIGN } else { 0 },
-                u64::from((value as i32).unsigned_abs()),
+                u128::from((value as i32).unsigned_abs()),
             ),
-            1 => quad_from_integer(0, u64::from(value as u32)),
+            1 => quad_from_integer(0, u128::from(value as u32)),
             2 => quad_from_integer(
                 if (value as i64) < 0 { SIGN } else { 0 },
-                (value as i64).unsigned_abs(),
+                u128::from((value as i64).unsigned_abs()),
             ),
-            _ => quad_from_integer(0, value),
+            _ => quad_from_integer(0, u128::from(value)),
         }
     }
 
@@ -1552,21 +1588,21 @@ mod tests {
         for _ in 0..20_000 {
             let value = stream.next();
             let signed = value as i64;
-            let unsigned = quad_from_integer(0, value);
+            let unsigned = quad_from_integer(0, u128::from(value));
             assert_eq!(truncate_unsigned(unsigned, UNSIGNED_64), Some(u128::from(value)));
-            let magnitude = signed.unsigned_abs();
+            let magnitude = u128::from(signed.unsigned_abs());
             let quad = quad_from_integer(if signed < 0 { SIGN } else { 0 }, magnitude);
             assert_eq!(truncate(quad, SIGNED_64), Some(i128::from(signed)));
             // And the same value one word narrower, which is where the thirty two bit routines live.
             let narrow = (value >> 32) as u32;
             assert_eq!(
-                truncate_unsigned(quad_from_integer(0, u64::from(narrow)), UNSIGNED_32),
+                truncate_unsigned(quad_from_integer(0, u128::from(narrow)), UNSIGNED_32),
                 Some(u128::from(narrow))
             );
             let narrow = narrow as i32;
             let quad = quad_from_integer(
                 if narrow < 0 { SIGN } else { 0 },
-                u64::from(narrow.unsigned_abs()),
+                u128::from(narrow.unsigned_abs()),
             );
             assert_eq!(truncate(quad, SIGNED_32), Some(i128::from(narrow)));
         }
@@ -1579,7 +1615,7 @@ mod tests {
         let mut stream = Stream(0x1405_7b7e_f767_814f);
         for _ in 0..20_000 {
             let value = stream.next();
-            let (significand, scale) = exact_of(quad_from_integer(0, value));
+            let (significand, scale) = exact_of(quad_from_integer(0, u128::from(value)));
             // A significand is a hundred and thirteen bits and the integer is at most sixty four, so
             // the scale is negative and the integer sits in the top of the significand. Exact means
             // nothing was dropped on the way, which is every bit below the point being zero.
@@ -1606,7 +1642,7 @@ mod tests {
         let largest_unsigned = quad_from_integer(0, 4_294_967_295);
         assert_eq!(truncate_unsigned(largest_unsigned, UNSIGNED_32), Some(4_294_967_295));
         assert_eq!(truncate_unsigned(quad_from_integer(0, 4_294_967_296), UNSIGNED_32), None);
-        let largest_long = quad_from_integer(0, i64::MAX as u64);
+        let largest_long = quad_from_integer(0, i64::MAX as u128);
         assert_eq!(truncate(largest_long, SIGNED_64), Some(i128::from(i64::MAX)));
         assert_eq!(truncate(quad_from_integer(0, 1 << 63), SIGNED_64), None);
         assert_eq!(
@@ -1614,7 +1650,7 @@ mod tests {
             Some(i128::from(i64::MIN))
         );
         assert_eq!(
-            truncate_unsigned(quad_from_integer(0, u64::MAX), UNSIGNED_64),
+            truncate_unsigned(quad_from_integer(0, u128::from(u64::MAX)), UNSIGNED_64),
             Some(u128::from(u64::MAX))
         );
         // Two to the sixty four, which is the first value past the widest type and is not an integer
@@ -1630,6 +1666,31 @@ mod tests {
         assert_eq!(truncate(three_halves | SIGN, SIGNED_32), Some(-1));
         assert_eq!(truncate_unsigned(three_halves, UNSIGNED_32), Some(1));
         assert_eq!(truncate_unsigned(three_halves | SIGN, UNSIGNED_32), None);
+    }
+
+    /// The two widest types, which are the two the format does not hold every value of.
+    ///
+    /// Everything above is written around a hundred and thirteen bits holding every integer the four
+    /// narrow routines are handed. A `__int128` is the type where that stops: going up rounds, and
+    /// the rounding can take a value the type holds to one it does not, which is a case none of the
+    /// four has and is the one worth naming.
+    #[test]
+    fn the_widest_type_rounds_on_the_way_up_and_the_rounding_can_leave_the_type() {
+        // A hundred and thirteen bits are still exact, since that is the width of the significand.
+        let held = (1u128 << 113) - 1;
+        assert_eq!(truncate_unsigned(quad_from_integer(0, held), UNSIGNED_128), Some(held));
+        // One more than that is exactly halfway between two quads, so the even one wins and the
+        // answer that comes back down is not the value that went up.
+        let halfway = (1u128 << 113) + 1;
+        assert_eq!(truncate_unsigned(quad_from_integer(0, halfway), UNSIGNED_128), Some(1 << 113));
+        // The most negative value of the signed type is a quad exactly, and its magnitude is one the
+        // type does not hold going up, which is the case the negation has to wrap for.
+        assert_eq!(truncate(quad_from_integer(SIGN, 1 << 127), SIGNED_128), Some(i128::MIN));
+        assert_eq!(truncate(quad_from_integer(0, 1 << 127), SIGNED_128), None);
+        // And the largest value of each type, which rounds up to the power of two above it and comes
+        // back as the convention rather than as itself.
+        assert_eq!(truncate(quad_from_integer(0, i128::MAX as u128), SIGNED_128), None);
+        assert_eq!(truncate_unsigned(quad_from_integer(0, u128::MAX), UNSIGNED_128), None);
     }
 
     #[test]

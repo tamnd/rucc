@@ -34,6 +34,13 @@ void *memcpy(void *to, const void *from, unsigned long size);
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
+/* The widest integer, which the conversions at the end of `integers` are the only use of. Both
+ * compilers this fixture is built with have the type on this machine, so it is spelled here without a
+ * guard the way the rest of the file spells a `long long`.
+ */
+typedef __int128 i128;
+typedef unsigned __int128 u128;
+
 /* How many rounds of random cases, and how many cases in one. The product is what the cases number
  * in the output is, and the split into rounds is so that a difference says which round it started
  * at, which is what makes a run reproducible from the seed.
@@ -88,6 +95,14 @@ static u64 mix_word(u64 digest, u64 value) {
         digest *= 1099511628211ull;
     }
     return digest;
+}
+
+/* Both words of the widest integer, low one first, so that an answer that is right in one word and
+ * wrong in the other is a difference here rather than a digest that happens to agree.
+ */
+static u64 mix_wide(u64 digest, u128 value) {
+    digest = mix_word(digest, (u64)value);
+    return mix_word(digest, (u64)(value >> 64));
 }
 
 static u64 mix_double(u64 digest, double value) {
@@ -316,19 +331,22 @@ static void formats(int round) {
     report("twosteps", round, through);
 }
 
-/* The conversions against an integer, both ways and at both widths and both signednesses.
+/* The conversions against an integer, both ways and at all three widths and both signednesses.
  *
- * Going up, every integer is exact at this format, so what these ask is whether the right routine
- * was called rather than how it rounded. Coming down is where the range matters: a value whose
- * integer part the type cannot hold is undefined, so the exponent is kept inside the type and the
- * band starts below one, where the answer is a zero however many bits are under it.
+ * Going up, every integer narrower than the widest type is exact at this format, so what those ask
+ * is whether the right routine was called rather than how it rounded. Coming down is where the
+ * range matters: a value whose integer part the type cannot hold is undefined, so the exponent is
+ * kept inside the type and the band starts below one, where the answer is a zero however many bits
+ * are under it.
  *
- * Three bands rather than one, because the type the answer lands in is what bounds it: a value
- * under 2^62 is inside every pair at sixty four bits, one under 2^31 is inside the pair at thirty
- * two, and the narrowest case here is a `short`, which holds less than 2^15.
+ * Four bands rather than one, because the type the answer lands in is what bounds it: a value under
+ * 2^126 is inside the pair at a hundred and twenty eight bits, one under 2^62 is inside every pair
+ * at sixty four, one under 2^31 is inside the pair at thirty two, and the narrowest case here is a
+ * `short`, which holds less than 2^15.
  */
 static void integers(int round) {
     u64 from_signed = 0, from_unsigned = 0, to_signed = 0, to_unsigned = 0, narrow = 0;
+    u64 from_widest = 0, to_widest = 0;
     for (int i = 0; i < CASES; i++) {
         u64 bits = next_random();
         int small = (int)bits;
@@ -350,12 +368,27 @@ static void integers(int round) {
         narrow = mix_word(narrow, (u64)(u32)(int)small_value);
         narrow = mix_word(narrow, (u64)(unsigned int)(small_value < 0 ? -small_value : small_value));
         narrow = mix_word(narrow, (u64)(unsigned char)(short)tiny_value);
-        cases += 8;
+
+        /* And the same both ways at the widest type, which is the one place in this family where
+         * the answer going up is a rounding of the value rather than the value: a hundred and
+         * thirteen significant bits hold every integer the types above deal in and do not hold
+         * every one of these. The operand is a random word pair with a random number of its top
+         * bits gone, so that both sides of that are asked.
+         */
+        u128 widest = (((u128)next_random() << 64) | next_random()) >> (next_random() % 128);
+        from_widest = mix_quad(from_widest, (_Float128)(i128)widest);
+        from_widest = mix_quad(from_widest, (_Float128)widest);
+        _Float128 wide_value = quad_at(16380 + next_random() % 129);
+        to_widest = mix_wide(to_widest, (u128)(i128)wide_value);
+        to_widest = mix_wide(to_widest, (u128)(wide_value < 0 ? -wide_value : wide_value));
+        cases += 12;
     }
     report("fromint", round, from_signed);
     report("fromuint", round, from_unsigned);
+    report("fromwide", round, from_widest);
     report("toint", round, to_signed);
     report("touint", round, to_unsigned);
+    report("towide", round, to_widest);
     report("tonarrow", round, narrow);
 }
 

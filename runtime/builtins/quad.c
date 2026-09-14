@@ -724,6 +724,9 @@ int __unordtf2(_Float128 left, _Float128 right) {
  * The four undefined cases answer zero, which is the convention the other two files keep and which
  * section 12.8 records as a convention rather than a promise: an infinity, a not a number, and a
  * magnitude past what the caller's type holds all come back as zero.
+ *
+ * The four at the end of the file, which are the same conversions against a `__int128`, are where both
+ * of those sentences stop being true, and each of them says so where it is.
  */
 
 /* How many bits an integer needs, which is one more than the power of two its highest bit is worth. A
@@ -917,3 +920,173 @@ unsigned long long __fixunstfdi(_Float128 value) {
     }
     return magnitude;
 }
+
+/* And the same four conversions against a `__int128`, which are the two places in this file where the
+ * paragraph above does not hold.
+ *
+ * Going up rounds. A hundred and thirteen significant bits hold every integer the four routines above
+ * are handed and do not hold every value of this one, so these two are where the rounding in
+ * `round_and_pack` has something to do, and the sticky bit under the significand is what a value with
+ * more than a hundred and thirteen bits in it comes down to. Coming down has an answer at exponents up
+ * to a hundred and twenty seven, which is above the fraction width, so the significand moves up as
+ * well as down and the case the paragraph above says cannot arise here is the one these two have.
+ *
+ * The type itself appears in these four signatures and nowhere else in the file. What the top of the
+ * file rules out is the arithmetic being written in it, and none of that changes here: every value
+ * below is still a pair of words and every operation on one is still written out. These four are the
+ * conversions whose operand or answer is the type, so they exist where the type does, which is what
+ * the macro below asks. A target without it needs none of them, since a program there cannot write
+ * the cast that calls one.
+ */
+#ifdef __SIZEOF_INT128__
+
+typedef unsigned __int128 uwide;
+
+static struct wide pair_of(uwide value) {
+    return make((u64)(value >> 64), (u64)value);
+}
+
+static uwide wide_of(struct wide value) {
+    return ((uwide)value.high << 64) | (uwide)value.low;
+}
+
+/* How many bits a pair needs, which is its high word's width with a word under it. */
+static int width_of_pair(struct wide value) {
+    return value.high != 0 ? 64 + width_of(value.high) : width_of(value.low);
+}
+
+/* A pair shifted up by a distance that can be a word or more, which `shift_up` cannot be asked for
+ * because it would shift a word by sixty four. Nothing above the top is kept and no caller here wants
+ * any: both of them have made sure of what is up there before asking.
+ */
+static struct wide pair_shifted_up(struct wide value, int up) {
+    if (up >= 64) {
+        return make(value.low << (up - 64), 0);
+    }
+    if (up == 0) {
+        return value;
+    }
+    return shift_up(value, up);
+}
+
+/* And down, keeping nothing, which is the truncation towards zero that a conversion coming down is.
+ * `drop_low` is the same shift at the distances it has.
+ */
+static struct wide pair_dropped_down(struct wide value, int down) {
+    if (down >= 64) {
+        return make(0, value.high >> (down - 64));
+    }
+    if (down == 0) {
+        return value;
+    }
+    return drop_low(value, down);
+}
+
+/* The quad nearest a magnitude this wide, with the sign handed in separately for the reason
+ * `quad_of_integer` takes it that way.
+ *
+ * The leading one goes where `round_and_pack` wants it, which is a hundred and fifteen bits up, so a
+ * magnitude of up to that many bits moves up and a wider one moves down. Moving down is where the
+ * rounding comes from: `shift_down` keeps whatever falls off in the lowest bit, which is the sticky
+ * bit, and the two bits above it are the guard and the round bit, which is the group `round_and_pack`
+ * weighs.
+ */
+static _Float128 quad_of_pair(u64 sign, struct wide magnitude) {
+    if (is_zero_wide(magnitude)) {
+        return quad_of(make(sign, 0));
+    }
+    int top = width_of_pair(magnitude) - 1;
+    struct wide significand;
+    if (top <= LEADING) {
+        significand = pair_shifted_up(magnitude, LEADING - top);
+    } else {
+        significand = shift_down(magnitude, top - LEADING);
+    }
+    return round_and_pack(sign, top + BIAS, significand);
+}
+
+_Float128 __floattitf(__int128 value) {
+    uwide magnitude = value < 0 ? (uwide)0 - (uwide)value : (uwide)value;
+    return quad_of_pair(value < 0 ? SIGN_HIGH : 0, pair_of(magnitude));
+}
+
+_Float128 __floatuntitf(unsigned __int128 value) {
+    return quad_of_pair(0, pair_of(value));
+}
+
+/* The part of a quad that is on the integer side of the point at this width, which is
+ * `integer_of_quad` with the two things that width changes done differently.
+ *
+ * The exponent with an answer reaches a hundred and twenty seven rather than sixty three, and from a
+ * hundred and twelve up the significand moves up rather than down, since that is where the value
+ * passes the fraction width and the bits it wants are above the ones the format wrote down.
+ */
+static int pair_of_quad(_Float128 value, u64 *sign, struct wide *magnitude) {
+    struct wide pattern = pattern_of(value);
+    *sign = pattern.high & SIGN_HIGH;
+    *magnitude = make(0, 0);
+    if (exponent_of(pattern) == TOP) {
+        return 0;
+    }
+    struct wide significand;
+    int stored;
+    unpack(pattern, &significand, &stored);
+    int exponent = stored - BIAS;
+    if (exponent < 0) {
+        return 1;
+    }
+    if (exponent > 127) {
+        return 0;
+    }
+    if (exponent >= FRACTION) {
+        *magnitude = pair_shifted_up(significand, exponent - FRACTION);
+    } else {
+        *magnitude = pair_dropped_down(significand, FRACTION - exponent);
+    }
+    return 1;
+}
+
+/* The largest magnitude a signed value of this width holds going down, which is one more than the
+ * largest it holds going up, and is the pair 2^127 is.
+ */
+#define SIGNED_128_HIGH 0x8000000000000000ull
+
+__int128 __fixtfti(_Float128 value) {
+    u64 sign;
+    struct wide magnitude;
+    struct wide bound = make(SIGNED_128_HIGH, 0);
+    if (!pair_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && !is_zero_wide(magnitude)) {
+        if (above(magnitude, bound)) {
+            return 0;
+        }
+        /* One less than the magnitude, negated, and one more taken off, for the reason `__fixtfsi`
+         * writes it that way.
+         */
+        return -(__int128)wide_of(subtract_wide(magnitude, make(0, 1))) - 1;
+    }
+    if (at_least(magnitude, bound)) {
+        return 0;
+    }
+    return (__int128)wide_of(magnitude);
+}
+
+/* No bound is tested here, unlike the three unsigned routines above, because this is the one type
+ * whose bound is the width of the pair itself: `pair_of_quad` has already refused every exponent above
+ * a hundred and twenty seven, so what it hands back is a value this type holds.
+ */
+unsigned __int128 __fixunstfti(_Float128 value) {
+    u64 sign;
+    struct wide magnitude;
+    if (!pair_of_quad(value, &sign, &magnitude)) {
+        return 0;
+    }
+    if (sign != 0 && !is_zero_wide(magnitude)) {
+        return 0;
+    }
+    return wide_of(magnitude);
+}
+
+#endif
