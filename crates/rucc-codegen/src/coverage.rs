@@ -215,6 +215,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // with four zero words written into it and a call handed the addresses of two slots.
     (Opcode::CapNull, "`rucc_safety::slot`, into a frame slot with the bottom capability in it"),
     (Opcode::CapStore, "`rucc_safety::slot`, into the call that writes one into the aux plane"),
+    // The other end of that write, which is the one capability nothing has to work out, because the
+    // store that put it beside the pointer already did. So this is a call too, and it is the only
+    // instruction the pass rewrites that reads a slot and fills one.
+    (Opcode::CapLoad, "`rucc_safety::slot`, into the call that reads one back out again"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.
@@ -260,16 +264,11 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
     // back end can be handed that reaches one. The ones the safety pass lowers are on `ELSEWHERE`,
-    // and two of those left this list without anything emitting them: `cap_null` and `cap_store`
-    // have a lowering waiting for the pass that will write one, because a capability had to be a
-    // value the back end could hold before either could be written down at all, which is
-    // tamnd/rucc#1085.
-    (
-        Opcode::CapLoad,
-        "a capability, whose runtime shape `spec/safe-memory/05-representation.md` decides",
-        "tamnd/rucc#856",
-    ),
-    (Opcode::CapNarrow, "the same, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
+    // and three of those left this list without anything emitting them: `cap_null`, `cap_store` and
+    // `cap_load` have a lowering waiting for the pass that will write one, because a capability had
+    // to be a value the back end could hold before any of them could be written down at all, which
+    // is tamnd/rucc#1085.
+    (Opcode::CapNarrow, "a capability, and arithmetic on the bounds it holds", "tamnd/rucc#856"),
     (Opcode::CapRecover, "the same, and a read of the shadow planes", "tamnd/rucc#856"),
     // The plane writes, which the runtime does for itself today because the only ranges anything
     // asks about are the ones its own allocator handed out. A stack object needs these.
