@@ -118,6 +118,20 @@ impl PendingFacts {
     }
 }
 
+/// Everything one function's body said, read but not yet built.
+struct Parsed<'a> {
+    blocks: Vec<PendingBlock<'a>>,
+    names: Vec<PendingName>,
+    facts: Vec<PendingFacts>,
+}
+
+/// The name one block was given, read but not yet built. The block is still its number.
+struct PendingName {
+    line: u32,
+    block: u32,
+    name: Symbol,
+}
+
 /// An instruction, read but not yet built. Every value is still the number it was written as.
 struct PendingInst<'a> {
     opcode: Opcode,
@@ -451,8 +465,8 @@ impl<'a, 'n> Parser<'a, 'n> {
         }
         self.expect("{")?;
         self.end_of_line()?;
-        let (blocks, facts) = self.body()?;
-        self.build(&mut func, &blocks, &facts)?;
+        let parsed = self.body()?;
+        self.build(&mut func, &parsed)?;
         module.add_func(func);
         Ok(())
     }
@@ -553,17 +567,33 @@ impl<'a, 'n> Parser<'a, 'n> {
     }
 
     /// The blocks of a function, up to the closing brace.
-    fn body(&mut self) -> Result<(Vec<PendingBlock<'a>>, Vec<PendingFacts>), ParseError> {
+    fn body(&mut self) -> Result<Parsed<'a>, ParseError> {
         let mut blocks: Vec<PendingBlock<'a>> = Vec::new();
+        let mut names: Vec<PendingName> = Vec::new();
         let mut facts: Vec<PendingFacts> = Vec::new();
         loop {
             self.skip_blank_lines();
             if self.eat("}") {
                 self.end_of_line()?;
-                return Ok((blocks, facts));
+                return Ok(Parsed { blocks, names, facts });
             }
             if self.at_end() {
                 return self.fail("the function is not closed");
+            }
+            if self.peek_word() == "labels" {
+                // The names come after the last block, the same way the facts do, and read the
+                // same way: all of them, and then back round for whatever follows.
+                self.word();
+                self.expect(":")?;
+                self.end_of_line()?;
+                loop {
+                    self.skip_blank_lines();
+                    if !self.peek_word().starts_with("block") {
+                        break;
+                    }
+                    names.push(self.name_line()?);
+                }
+                continue;
             }
             if self.peek_word() == "facts" {
                 // The facts come after the last block and are the last thing in the body, so
@@ -611,6 +641,16 @@ impl<'a, 'n> Parser<'a, 'n> {
                 None => return self.fail("an instruction before any block"),
             }
         }
+    }
+
+    /// One line of the labels section: a block, and the name an image knows it by.
+    fn name_line(&mut self) -> Result<PendingName, ParseError> {
+        let line = self.line;
+        let block = self.block_ref()?;
+        self.expect("=")?;
+        let name = self.symbol()?;
+        self.end_of_line()?;
+        Ok(PendingName { line, block, name })
     }
 
     /// One line of the facts section: a value, and what is known about it.
@@ -1018,18 +1058,16 @@ impl<'a, 'n> Parser<'a, 'n> {
     // Building the function.
 
     /// Works out every value's type, then creates the blocks and instructions in print order.
-    fn build(
-        &mut self,
-        func: &mut Func,
-        blocks: &[PendingBlock<'a>],
-        facts: &[PendingFacts],
-    ) -> Result<(), ParseError> {
+    fn build(&mut self, func: &mut Func, parsed: &Parsed<'a>) -> Result<(), ParseError> {
+        let Parsed { blocks, names, facts } = parsed;
         let count = self.check_numbering(blocks)?;
         let types = self.value_types(blocks, count)?;
 
+        let mut built: Vec<Block> = Vec::with_capacity(blocks.len());
         let mut next = 0;
         for pending in blocks {
             let block = func.create_block();
+            built.push(block);
             for &(number, ty) in &pending.params {
                 if number != next {
                     self.line = self.line_of(blocks, number);
@@ -1050,7 +1088,32 @@ impl<'a, 'n> Parser<'a, 'n> {
                 next += inst.results.len() as u32;
             }
         }
+        self.build_names(func, names, &built)?;
         self.build_facts(func, facts, next)?;
+        Ok(())
+    }
+
+    /// Puts what the labels section said onto the blocks it said it about.
+    ///
+    /// After the blocks, for the reason the facts are: a name says which block by its number and
+    /// the block has to exist before it can be named. The numbers are the ones the body used, so
+    /// the list built above is what turns one back into a block.
+    fn build_names(
+        &mut self,
+        func: &mut Func,
+        names: &[PendingName],
+        built: &[Block],
+    ) -> Result<(), ParseError> {
+        for pending in names {
+            self.line = pending.line;
+            let Some(&block) = built.get(pending.block as usize) else {
+                return self.fail(format!("block{} is named and never defined", pending.block));
+            };
+            if func.block_name(block).is_some() {
+                return self.fail(format!("block{} is named twice", pending.block));
+            }
+            func.name_block(block, pending.name);
+        }
         Ok(())
     }
 
@@ -1910,6 +1973,54 @@ block0(%0: ptr):
              block0(%0: ptr, %1: i64):\n    meta_transfer %0, %1, to hardware\n    return\n}}\n"
         );
         assert_eq!(error(&text), "line 8: `hardware` is not somewhere a range can go");
+    }
+
+    #[test]
+    fn a_named_block_comes_back_byte_for_byte() {
+        // The names are what a relocation in a static initializer points at, so they are part of
+        // the function and not a note beside it, and a round trip that lost them would be a
+        // module that compiles to a table of addresses of nothing.
+        let text = format!(
+            "{HEADER}
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    %1 = block_addr block1
+    indirect_br %1, block1, block2
+
+block1:
+    return
+
+block2:
+    return
+
+labels:
+    block1 = @.Llbl.0
+    block2 = @.Llbl.1
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_name_on_a_block_that_does_not_exist_is_turned_down() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr), linkage(external) {{\n\
+             block0(%0: ptr):\n    return\n\nlabels:\n    block3 = @.Llbl.0\n}}\n"
+        );
+        assert_eq!(error(&text), "line 11: block3 is named and never defined");
+    }
+
+    #[test]
+    fn a_block_named_twice_is_turned_down() {
+        // One name per block, because the name is the symbol a relocation resolves through and a
+        // block with two of them is two addresses for one place.
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr), linkage(external) {{\n\
+             block0(%0: ptr):\n    return\n\nlabels:\n    block0 = @.Llbl.0\n    \
+             block0 = @.Llbl.1\n}}\n"
+        );
+        assert_eq!(error(&text), "line 12: block0 is named twice");
     }
 
     #[test]

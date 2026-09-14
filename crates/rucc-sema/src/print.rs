@@ -410,6 +410,7 @@ impl<'a> Printer<'a> {
                     let base = match address.base {
                         Base::Decl(decl) => format!("decl #{}", decl.index()),
                         Base::Str(id) => format!("string {}", self.tast[id].spell()),
+                        Base::Label(label) => format!("label {}", self.label(label)),
                     };
                     format!("const address {base} + {}", address.offset)
                 }

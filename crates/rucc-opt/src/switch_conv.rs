@@ -238,6 +238,11 @@ fn plan(func: &Func, cfg: &Cfg, inst: Inst) -> Result<Plan, &'static str> {
         if cfg.predecessors(call.block).len() != 1 {
             return Err(ARM_IS_SHARED);
         }
+        // And a block an image holds the address of is shared whatever the graph says, because what
+        // arrives there is a `goto *p` that can be in another function.
+        if func.block_name(call.block).is_some() {
+            return Err(ARM_IS_SHARED);
+        }
         let (way, args) = tail(func, call.block)?;
         if *hands.get_or_insert(way) != way {
             return Err(ARMS_DIFFER);

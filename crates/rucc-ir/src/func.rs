@@ -81,6 +81,7 @@ pub struct Func {
     va_objects: Vec<VaInfo>,
     signatures: Vec<Signature>,
     facts: Vec<(Value, Facts)>,
+    labels: Vec<(Block, Symbol)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -119,6 +120,7 @@ impl Func {
             va_objects: Vec::new(),
             signatures: vec![signature],
             facts: Vec::new(),
+            labels: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -679,6 +681,40 @@ impl Func {
     /// Every value something is known about, in value order.
     pub fn known(&self) -> impl Iterator<Item = (Value, Facts)> + '_ {
         self.facts.iter().copied()
+    }
+
+    /// Gives a block a name of its own, which is how an image written before the program runs
+    /// says it holds the address of a place inside this function.
+    ///
+    /// What asks for this is GNU's address of a label in the initializer of an object with static
+    /// storage duration, which is how every threaded interpreter builds its dispatch table. The
+    /// address a `lea` produces needs none of this, because both ends of that distance are in the
+    /// same section and the object writer works it out for itself. An image is the other case: it
+    /// is in another section, so what it holds is a relocation, and a relocation names a symbol.
+    ///
+    /// One name per block. Two labels on the same statement are two labels and one block, and the
+    /// image asks for a name rather than for a particular one, so the second ask keeps the first
+    /// answer. Nothing outside this table ever sees the name, which is why it may be anything the
+    /// object format lets a local symbol be called.
+    pub fn name_block(&mut self, block: Block, name: Symbol) {
+        let found = self.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw());
+        if let Err(at) = found {
+            self.labels.insert(at, (block, name));
+        }
+    }
+
+    /// The name a block was given, or `None` for a block nothing took the address of.
+    #[must_use]
+    pub fn block_name(&self, block: Block) -> Option<Symbol> {
+        match self.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => Some(self.labels[at].1),
+            Err(_) => None,
+        }
+    }
+
+    /// Every block that has a name, in block order.
+    pub fn named_blocks(&self) -> impl Iterator<Item = (Block, Symbol)> + '_ {
+        self.labels.iter().copied()
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {

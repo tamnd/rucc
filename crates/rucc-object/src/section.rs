@@ -108,6 +108,8 @@ pub struct Text {
     pub funcs: Vec<Extent>,
     /// Every place in the bytes that names something the linker has to find.
     pub relocs: Vec<Reloc>,
+    /// Every place inside a function that has a name of its own, in the order they were written.
+    pub labels: Vec<Marker>,
     /// What the whole section has to be aligned to, which is the largest alignment any function
     /// in it asked for.
     ///
@@ -126,6 +128,7 @@ impl Default for Text {
             bytes: Vec::new(),
             funcs: Vec::new(),
             relocs: Vec::new(),
+            labels: Vec::new(),
             align: FUNC_ALIGN,
             unwind: Unwind::default(),
         }
@@ -168,6 +171,24 @@ pub struct Patch {
     /// How many bytes of the function are in front of [`Extent::start`], which is where its symbol
     /// is and where an unwinder is told the function begins.
     pub before: usize,
+}
+
+/// Where a place inside a function that has a name of its own ended up.
+///
+/// What asks for one is GNU's address of a label in the initializer of an object with static
+/// storage duration. A label is somewhere a jump goes and a jump is a distance the assembler works
+/// out, so no ordinary label is in the symbol table at all. An image is the other case: it is in
+/// another section, so what it holds is a relocation, and a relocation names a symbol.
+///
+/// The name is never one the program wrote, so nothing outside this file looks it up and it is
+/// always local: it is here for a relocation in this same file to resolve against, and a linker
+/// that offered it to another file would be offering the middle of a function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    /// The name, which is whatever the compiler minted for it.
+    pub name: String,
+    /// Where it is, as an offset into the same bytes [`Extent::start`] is one into.
+    pub at: usize,
 }
 
 /// Where one function ended up.

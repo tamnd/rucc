@@ -6,6 +6,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 global @table : bytes 12 = { i32 11, i32 22, i32 33 }, align 8, linkage(external), constant
 global @table_end : bytes 0 = {}, align 1, linkage(internal), constant
 global @table_count : i32 = 3, align 4, linkage(external), constant
+global @table.0 : bytes 16 = { addr.8 @.Llbl.0, addr.8 @.Llbl.1 }, align 8, linkage(internal), constant
 global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.2 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
@@ -170,6 +171,39 @@ block2(%28: i32):
     %29 = iconst.i32 1
     %30 = add.nsw %28, %29
     return %30
+}
+
+func @threaded(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = global_addr @table.0
+    %3 = iconst.i32 1
+    %4 = and %0, %3
+    %5 = sext.i64 %4
+    %6 = iconst.i64 8
+    %7 = mul.nsw %5, %6
+    %8 = ptr_add %2, %7
+    %9 = load %8, align 8, tbaa !2
+    indirect_br %9, block1, block2(%1)
+
+block1:
+    %10 = global_addr @table.0
+    %11 = iconst.i32 1
+    %12 = sext.i64 %11
+    %13 = iconst.i64 8
+    %14 = mul.nsw %12, %13
+    %15 = ptr_add %10, %14
+    %16 = load %15, align 8, tbaa !2
+    indirect_br %16, block1, block2(%0)
+
+block2(%17: i32):
+    %18 = iconst.i32 2
+    %19 = add.nsw %17, %18
+    return %19
+
+labels:
+    block1 = @.Llbl.0
+    block2 = @.Llbl.1
 }
 
 func @barrier(), linkage(external) {

@@ -503,6 +503,12 @@ fn passes_through(func: &Func, cfg: &Cfg, head: Block, block: Block) -> Option<B
     if !func[block].params.is_empty() {
         return None;
     }
+    // A block an image holds the address of has a way in the graph does not show: what arrives
+    // there is a `goto *p` that can be in another function, so the one predecessor below is not the
+    // only one and the block is not one this pass may take out.
+    if func.block_name(block).is_some() {
+        return None;
+    }
     match cfg.predecessors(block) {
         [only] if *only == head => {}
         _ => return None,

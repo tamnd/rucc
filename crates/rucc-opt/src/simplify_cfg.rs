@@ -394,6 +394,15 @@ fn stranded(func: &Func, an: &mut Analyses) -> Vec<Block> {
     let mut seen = vec![false; cfg.capacity()];
     seen[entry.index()] = true;
     let mut stack = vec![entry];
+    // And every block an image names, whatever the entry reaches. The `indirect_br` that arrives at
+    // one of those can be in another function, so unlike a `block_addr` below there is nothing in
+    // this function that says the block is still wanted.
+    for (block, _) in func.named_blocks() {
+        if !seen[block.index()] {
+            seen[block.index()] = true;
+            stack.push(block);
+        }
+    }
     let mut reached = Vec::new();
     while let Some(block) = stack.pop() {
         for &succ in cfg.successors(block) {
@@ -944,9 +953,14 @@ fn chains(func: &Func, an: &mut Analyses) -> Vec<Vec<Block>> {
         .collect()
 }
 
-/// Every block some `block_addr` names.
+/// Every block some `block_addr` names, and every block an image names.
+///
+/// The second kind is the one with nothing in the function to find. An image is in another section
+/// and what it holds is a relocation, so the `goto *p` that arrives at the block can be in a
+/// function this one cannot see, and a block merged into the one above it would be a name pointing
+/// at the wrong instruction.
 fn addressed(func: &Func) -> HashSet<Block> {
-    let mut taken = HashSet::new();
+    let mut taken: HashSet<Block> = func.named_blocks().map(|(block, _)| block).collect();
     for block in func.blocks() {
         for inst in func.insts(block) {
             if func[inst].opcode != Opcode::BlockAddr {
@@ -1547,6 +1561,28 @@ mod tests {
         // one way in too, and stayed.
         assert_eq!(stats.count(Kind::Optimized, super::MERGED), 1);
         assert_eq!(blocks(&func), [0, 2]);
+    }
+
+    #[test]
+    fn a_block_an_image_names_is_not_merged_away_either() {
+        // The case with nothing in the function to find. No `block_addr` names this block, only a
+        // relocation in another section does, so the whole of what keeps it is the name, and a
+        // merge would leave that name on an instruction in the middle of the block above.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let middle = func.create_block();
+        let labelled = func.create_block();
+        Builder::new(&mut func, entry).jump(middle, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        build.iconst(Type::int(32), 1);
+        build.jump(labelled, &[]);
+        Builder::new(&mut func, labelled).ret(&[]);
+        func.name_block(labelled, names.intern(".Llbl.0"));
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::MERGED), 1);
+        assert_eq!(blocks(&func), [0, 2]);
+        assert_eq!(func.block_name(labelled), Some(names.intern(".Llbl.0")));
     }
 
     #[test]

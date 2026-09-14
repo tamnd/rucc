@@ -166,6 +166,13 @@ impl Writer<'_> {
         let end = func.cfi_end();
         for (index, block) in func.blocks().enumerate() {
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
+            // And the name an image knows the block by, as a second label on the same address. The
+            // block's own label is written by this file and is a number, which is no good to a
+            // relocation in another section: what that names is a symbol, and the name here is the
+            // one the front end minted for it when it lowered the image.
+            if let Some(label) = func.block_name(block) {
+                let _ = writeln!(self.out, "{}:", self.names.resolve(label));
+            }
             for inst in func.insts(block) {
                 // The other half of the room, which is named here rather than laid down here: the
                 // instructions it is made of are in the entry block like any others, and all that

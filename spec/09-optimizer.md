@@ -146,6 +146,8 @@ The pass manager is deliberately boring: a fixed, printed sequence per level, wi
 
 **Verification.** The IR verifier from document 08 runs after every pass in debug and CI builds.
 
+**The edge out of a computed goto.** Document 08 section 8.3 has the one CFG edit no pass may make: nothing goes on an edge that leaves an `indirect_br`, because the jump arrives at an address rather than along an edge and a block put in front of the label is a block it goes past. What that costs is a loop with a `goto *p` in it, which gets no preheader, no single latch and no dedicated exit, and so gets none of the loop passes in 9.6. Canonicalization declines the whole loop rather than the edge, since a header with one of these edges still on it is not a header with one predecessor from outside and a half made preheader would be asked for again every round. The same rule stops a pass folding away a block a relocation names, which is a block an arrival can reach from another function, so the block is live whatever the graph says and is not one to merge, thread or take a single predecessor out of.
+
 **A pass must earn its slot.** The rule, enforced socially and by the benchmark job in document 16: a new pass ships at a given `-O` level only with a measurement showing it pays for its compile time on the benchmark set. Passes that are correct and useless are how compilers get slow, and every compiler has a dozen of them because nobody ever measured. We measure at merge time.
 
 ## 9.11 What is deliberately absent

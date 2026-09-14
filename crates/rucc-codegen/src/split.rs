@@ -207,6 +207,14 @@ pub fn indirect(
             }
         }
     }
+    // And the names, for the same reason. A block an image points at is one a `goto *p` arrives at,
+    // so a name left on the label's own block would be an address in a table that skips the moves,
+    // which is the one way into the block that would not have made them.
+    for (block, _) in &mut func.labels {
+        if let Some(&entry) = entries.get(block) {
+            *block = entry;
+        }
+    }
     entries.len()
 }
 

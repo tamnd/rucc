@@ -639,6 +639,13 @@ impl<'a> Lowering<'a> {
         for block in self.order() {
             self.block(block)?;
         }
+        // And the name each block an image holds the address of was given, which nothing in the
+        // walk above would ask for: the `lea` a label address is inside the function needs no
+        // symbol, and the one thing that does is a relocation in another section.
+        let named: Vec<(Block, Symbol)> = self.source.named_blocks().collect();
+        let labels: Vec<(mir::Block, Symbol)> =
+            named.into_iter().map(|(block, name)| (self.out_block(block), name)).collect();
+        self.out.labels = labels;
         Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired, blocks: self.blocks })
     }
 
