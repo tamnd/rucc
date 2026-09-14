@@ -35,8 +35,8 @@ use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLite
 use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
-    compatible, is_arithmetic, is_array, is_complete, is_complex, is_function, is_integer,
-    is_pointer, is_record, is_scalar, is_void, pointee, real_part,
+    compatible, is_arithmetic, is_array, is_atomic, is_complete, is_complex, is_function,
+    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, real_part,
 };
 
 use crate::check::expr::typeop::Measure;
@@ -456,7 +456,13 @@ impl Checker<'_> {
         // commutativity of the subscript is a fact about pointer arithmetic and a vector is not
         // doing any.
         let in_vector = rucc_types::is_vector(&self.types, self.tast[base].ty);
-        let base = if in_vector { base } else { self.value(base) };
+        // An atomic vector is the one base that is a vector and still takes the read, because a
+        // lane of one is not something a program may reach on its own: the lock an access takes is
+        // around the whole vector. So the whole of it is read under the ordering and the lane comes
+        // out of what that read gave back, which costs the program the assignment to a lane and
+        // nothing else.
+        let whole = in_vector && is_atomic(&self.types, self.tast[base].ty);
+        let base = if in_vector && !whole { base } else { self.value(base) };
         let index = self.value(index);
         if self.is_poisoned(base) || self.is_poisoned(index) {
             return self.poison(span);
@@ -753,6 +759,23 @@ impl Checker<'_> {
             return self.poison(span);
         }
         let ty = self.tast[base].ty;
+        // A member of an atomic structure is undefined behaviour by 6.5.2.3p5, and the reason is
+        // the lock: the whole object is what an access to one takes the lock around, so a read of
+        // four bytes out of the middle of it is not under that lock and is not atomic. gcc refuses
+        // this as well, rather than reading the member and leaving the program to find out.
+        if let TypeKind::Atomic(held) = self.types.kind(self.types.canonical(ty))
+            && matches!(self.types.kind(self.types.canonical(held)), TypeKind::Record(_))
+        {
+            let name = self.text(name).to_owned();
+            self.report(
+                Diagnostic::error(
+                    format!("accessing a member '{name}' of an atomic structure or union"),
+                    span,
+                )
+                .with_code("E0502"),
+            );
+            return self.poison(span);
+        }
         let TypeKind::Record(record) = self.types.kind(self.types.canonical(ty)) else {
             let name = self.text(name).to_owned();
             self.report(
@@ -911,8 +934,16 @@ impl Checker<'_> {
                 // imaginary half a value until the imaginary constants arrive. The lvalue
                 // conversion is skipped in that case, since converting the operand to a value is
                 // exactly what would throw the object away.
+                //
+                // Not where the object is atomic, though, because half of one is not something a
+                // program may reach: the lock an access to it takes is around the whole object.
+                // So the conversion happens after all, the whole of the object is read under the
+                // ordering, and the half is taken out of the value that read gives back. What a
+                // program loses by that is the assignment, since the result is no longer an
+                // lvalue, and there is no way to write half of an atomic object anyway.
                 let half = self.tast[operand].category == Category::Lvalue
-                    && is_complex(&self.types, self.tast[operand].ty);
+                    && is_complex(&self.types, self.tast[operand].ty)
+                    && !is_atomic(&self.types, self.tast[operand].ty);
                 let operand = if half { operand } else { self.value(operand) };
                 if self.is_poisoned(operand) {
                     return self.poison(span);

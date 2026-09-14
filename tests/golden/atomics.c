@@ -146,3 +146,36 @@ __int128 bump(__int128 v) {
 _Bool swing(__int128 *want, __int128 v) {
   return __atomic_compare_exchange_n(&wide, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
 }
+
+// An object with no value of its own, which is read by address wherever it appears. A read of one
+// is a copy of the whole of it into a temporary made under the ordering, and every reader then
+// reads the temporary, so the object is touched once however many times the program names it.
+struct Pair {
+  int a, b;
+};
+
+_Atomic struct Pair pair;
+
+struct Pair paired(void) {
+  return pair;
+}
+
+void pairing(struct Pair v) {
+  pair = v;
+}
+
+// Wider than an instruction reaches, so the same copy goes to the same routines the wide scalar
+// above goes to, with the program's own object on one side and a temporary of ours on the other.
+struct Three {
+  int a, b, c;
+};
+
+_Atomic struct Three three;
+
+struct Three threefold(void) {
+  return three;
+}
+
+void threading(struct Three v) {
+  three = v;
+}

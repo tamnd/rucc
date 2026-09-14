@@ -42,8 +42,8 @@ use rucc_session::Std;
 use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
-    TypeId, TypeKind, adjust_parameter, is_complete, is_complex, is_function, is_integer,
-    is_pointer, is_scalar, is_void, layout,
+    TypeId, TypeKind, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void,
+    layout,
 };
 
 use crate::check::{Checker, Promoted};
@@ -588,6 +588,19 @@ impl Checker<'_> {
     }
 
     /// `_Atomic(T)`, which is a type and not a qualifier and which two things cannot be.
+    ///
+    /// Nothing about the object itself is refused here any more. The width used to be: an object
+    /// the machine does not reach all of in one instruction was turned down where it was written,
+    /// because gcc calls libatomic for one of those, libatomic takes a lock out of a table keyed by
+    /// the address, and a program half of whose accesses take that lock and half of which do not is
+    /// not atomic at all. `runtime/builtins/atomic.c` is that table now, under libatomic's names,
+    /// so a wide access is a call into it. A structure, a union, a complex object and a vector were
+    /// turned down after that, because the walk has no single value for one and an access to one is
+    /// a copy rather than a read. That is what the copy under the lock is for, and section 7.9 of
+    /// the spec has the shape of it.
+    ///
+    /// What is left are the three the language itself refuses, which are an array, a function and a
+    /// type that already carries a qualifier.
     fn atomic_type(&mut self, inner: TypeId, span: Span) -> TypeId {
         let canonical = self.types.canonical(inner);
         let what = if rucc_types::is_array(&self.types, canonical) {
@@ -597,48 +610,10 @@ impl Checker<'_> {
         } else if !self.types.quals(inner).is_none() {
             "'_Atomic' applied to a qualified type"
         } else {
-            if let Some(what) = self.atomic_trouble(canonical) {
-                self.unsupported_type(what, span);
-            }
             return self.types.atomic(inner);
         };
         self.report(Diagnostic::error(what.to_string(), span).with_code("E0527"));
         inner
-    }
-
-    /// What is wrong with an atomic object of that type, where anything is.
-    ///
-    /// The width used to be the whole of this question. An object the machine does not reach all of
-    /// in one instruction was refused here, because gcc calls libatomic for those, libatomic takes
-    /// a lock out of a table keyed by the address, and a program half of whose accesses take that
-    /// lock and half of which do not is not atomic at all. The table is here now, in
-    /// `runtime/builtins/atomic.c` and section 12.8 of the spec, and it is libatomic's table with
-    /// libatomic's names, so a wide access is a call into it and an object rucc compiled and an
-    /// object gcc compiled agree about which lock they are under.
-    ///
-    /// What is left are the types the lowering has no single value for. A structure or a union is a
-    /// copy rather than a value, and the atomic copy is the piece of this work that is not written
-    /// yet. A complex object is a pair of values and a vector is a row of them, and a call that
-    /// hands the runtime one object cannot be handed two.
-    ///
-    /// An incomplete type has nothing wrong with it, because there is nothing to measure yet and
-    /// this declaration is not the one that completes it: `_Atomic struct s *p;` is a pointer and
-    /// says nothing about the object. The lowering asks its own form of the question at the access,
-    /// by which point the type is complete or there is no access.
-    fn atomic_trouble(&self, canonical: TypeId) -> Option<&'static str> {
-        if !is_complete(&self.types, canonical) {
-            return None;
-        }
-        if is_complex(&self.types, canonical) {
-            return Some("an atomic complex object");
-        }
-        if rucc_types::is_vector(&self.types, canonical) {
-            return Some("an atomic vector object");
-        }
-        if !is_scalar(&self.types, canonical) {
-            return Some("an atomic structure or union");
-        }
-        None
     }
 
     /// A `struct` or a `union`, referred to by tag or declared by one.

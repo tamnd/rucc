@@ -181,25 +181,75 @@ long double get(void) { return ld; }
     assert!(text.contains("__atomic_load"), "{text}");
 }
 
-/// An object the walk has no single value for is still refused where it is written. The runtime
-/// would take the lock for a structure quite happily, since the four routines it calls work
-/// through a pointer and a size, but an aggregate access is a copy rather than a read and there is
-/// nowhere to put what came back.
+/// An object the walk has no single value for is a copy rather than a read, and a copy of one
+/// under the lock is what the runtime's routines are for: they take an address and a count of
+/// bytes and never ask what is in there. Twelve bytes is not a width any instruction has, so both
+/// ends of this are a call.
 #[test]
-fn a_type_with_no_value_is_refused() {
-    let said = refusal(
+fn a_structure_too_wide_for_an_instruction_is_a_call() {
+    let text = asm(
         "struct",
         "\
 struct S { int a, b, c; };
 _Atomic struct S big;
+struct S get(void) { return big; }
+void put(struct S v) { big = v; }
 ",
     );
-    assert!(said.contains("structure or union"), "{said}");
-    assert!(said.contains("E0519"), "{said}");
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+}
 
-    let said = refusal("complex", "_Atomic _Complex double z;\n");
-    assert!(said.contains("complex"), "{said}");
-    assert!(said.contains("E0519"), "{said}");
+/// One that does fit is the instruction, because `_Atomic` raises the alignment of an object to
+/// its own size wherever that is a power of two, so eight bytes of structure sits on eight and the
+/// machine reaches all of it at once. What moves is the representation rather than a value, so it
+/// goes through the integer of that width and the two `int`s are never named.
+#[test]
+fn a_structure_an_instruction_reaches_is_that_instruction() {
+    let text = asm(
+        "narrow-struct",
+        "\
+struct P { int a, b; };
+_Atomic struct P pair;
+struct P get(void) { return pair; }
+void put(struct P v) { pair = v; }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("movq"), "{text}");
+    assert!(text.contains("mfence"), "{text}");
+}
+
+/// A complex object is the same copy, and sixteen bytes of it is the call.
+#[test]
+fn a_complex_object_is_copied_the_same_way() {
+    let text = asm(
+        "complex",
+        "\
+_Atomic _Complex double z;
+_Complex double get(void) { return z; }
+void put(_Complex double v) { z = v; }
+",
+    );
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+}
+
+/// A member of one is refused, 6.5.2.3p5, and the reason is the lock: what an access to an atomic
+/// object takes the lock around is the whole object, so four bytes out of the middle of one are
+/// not under it and are not atomic. gcc refuses the same expression.
+#[test]
+fn a_member_of_an_atomic_structure_is_refused() {
+    let said = refusal(
+        "member",
+        "\
+struct S { int a, b, c; };
+_Atomic struct S big;
+int first(void) { return big.a; }
+",
+    );
+    assert!(said.contains("accessing a member"), "{said}");
+    assert!(said.contains("E0502"), "{said}");
 }
 
 /// The builtins go to the same table at that width, which is what makes the operators and the
