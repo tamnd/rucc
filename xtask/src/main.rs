@@ -24,9 +24,11 @@ mod dso;
 mod fuzz;
 mod implib;
 mod pressure;
+mod quad;
 mod real_libc;
 mod runner;
 mod safety;
+mod sides;
 mod size;
 mod stubs;
 mod unwind;
@@ -64,6 +66,7 @@ tasks:
   dso               build a shared library out of what we emit, link a program against it, run it
   unwind            walk a stack through frames we wrote and count what came back
   wide              compile 128-bit arithmetic with both compilers, run both, compare
+  quad              compile binary128 arithmetic with both compilers, run both, compare
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   fuzz              generate C programs with one memory error each and hold both builds to it
@@ -107,6 +110,7 @@ fn main() -> ExitCode {
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
         Some("wide") => wide::wide(),
+        Some("quad") => quad::quad(),
         Some("safety") => safety::safety(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
@@ -1506,6 +1510,14 @@ fn ci() -> Result<()> {
     match runner::Runner::find("the wide arithmetic differential") {
         Ok(_) => wide::wide()?,
         Err(why) => skipped.push(("wide", why.to_string())),
+    }
+    // The same thing for the format no machine computes with at all, where every operation rather
+    // than four of them is a call. The routines are held against a Rust reference one layer down by
+    // `builtins-diff`, so what this adds is whether the call the pass wrote is the call the
+    // operation meant, which is a question about this compiler and not about the arithmetic.
+    match runner::Runner::find("the binary128 arithmetic differential") {
+        Ok(_) => quad::quad()?,
+        Err(why) => skipped.push(("quad", why.to_string())),
     }
     match runner::Runner::find("the safety suite") {
         Ok(_) => safety::safety()?,

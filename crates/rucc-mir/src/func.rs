@@ -710,7 +710,6 @@ impl InstBuilder<'_> {
             scale: mem.scale.max(1),
             disp: mem.disp,
             symbol: mem.symbol,
-            block: mem.block,
             reach: mem.reach,
             segment: mem.segment,
         };
