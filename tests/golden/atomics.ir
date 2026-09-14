@@ -308,7 +308,7 @@ block0:
     %0 = alloca, size 8, align 8
     %1 = global_addr @pair
     %2 = atomic_load.i64 %1, align 8, seq_cst
-    store %2 -> %0, align 8
+    store %2 -> %0, align 4
     %3 = load.i64 %0, align 4
     return %3
 }
@@ -318,7 +318,7 @@ block0(%0: i64):
     %1 = alloca, size 8, align 4
     store %0 -> %1, align 4
     %2 = global_addr @pair
-    %3 = load.i64 %1, align 8
+    %3 = load.i64 %1, align 4
     atomic_store %3 -> %2, align 8, seq_cst
     return
 }
