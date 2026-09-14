@@ -2360,7 +2360,10 @@ decl #0 x : int object external static defined
         let stores = |mnemonic: &str| text.matches(&format!("\t{mnemonic}\t%")).count();
         assert!(text.contains(", 8(%r"), "the second slot, not the first: {text}");
         assert!(!text.contains(", 0(%r"), "{text}");
-        assert_eq!(stores("movsd"), 8, "every vector register: {text}");
+        // All sixteen bytes of each vector register, which is what gcc writes and what a `va_arg`
+        // of a `_Float128` reads back, so the mnemonic is the one that moves a whole register.
+        assert_eq!(stores("movaps"), 8, "every vector register: {text}");
+        assert_eq!(stores("movsd"), 0, "and the whole of each one: {text}");
 
         // And the area is one of the function's own stack objects, so the frame holds it.
         assert!(text.contains("\tsubq\t$"), "{text}");

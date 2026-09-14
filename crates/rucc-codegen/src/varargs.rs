@@ -37,12 +37,12 @@
 //! offsets, the area is the document's one hundred and seventy six bytes, and the eight bytes
 //! between two general purpose slots and the sixteen between two vector ones are the document's too.
 //!
-//! What is not the document's is what goes in the upper half of a vector slot, and the answer here
-//! is nothing at all. A slot is sixteen bytes wide because the register is, and the low eight are
-//! the whole of what any reader of a list looks at, since the widest thing `va_arg` names in this
-//! compiler is a `double`. So the spill writes eight bytes per vector register rather than sixteen
-//! and leaves the eight above them holding whatever the frame held. A reader that wanted all sixteen
-//! would be reading a vector type, which is issue #200 and is not a thing yet.
+//! The upper half of a vector slot is the document's too, and what is in it is the top of a
+//! `_Float128`. A slot is sixteen bytes wide because the register is, and a quad is the one type
+//! here that fills one, so the spill writes all sixteen bytes of every vector register and a
+//! `va_arg` of a quad reads all sixteen back. gcc writes the same sixteen with the same instruction,
+//! which is what makes a list built here readable by a walk somebody else compiled. Anything wider
+//! than a register would be a vector type, which is issue #200 and is not a thing yet.
 //!
 //! # What is here and what is next door
 //!
@@ -71,9 +71,10 @@
 //! out of the frame the way it builds an `alloca`. The spill that fills the save area is written
 //! there for the same reason.
 
+use rucc_base::float::Format;
 use rucc_ir::{
-    Block, Builder, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
-    Restrict, Type, Value,
+    Block, Builder, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
+    Opcode, Restrict, Type, Value,
 };
 use rucc_target::{CallRegs, Slot};
 
@@ -219,11 +220,20 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
         x87(func, inst, area);
         return;
     }
+    // A `_Float128` is the one value wider than a general purpose register that a single register
+    // still holds. It is class SSE followed by SSEUP, which name one vector register between them,
+    // so it walks the vector half the way a `double` does and takes the whole of a slot instead of
+    // the low half of one. Where it stops being a wider `double` is the caller's argument area,
+    // which gives it two words aligned to two rather than the one word every value the machine
+    // computes in gets.
+    let quad = ty.is_float() && ty.bits() == 128;
     // A scalar of a width a register holds, which is every type the algorithm below is right about.
     // An `__int128` takes two slots with an alignment rule of its own, which is a second algorithm
     // rather than a wider reading of this one, so it is left alone here and refused by name further
     // down.
-    if !ty.is_scalar() || ty.bits() > 64 || !(ty.is_int() || ty.is_float() || ty.is_ptr()) {
+    if !quad
+        && (!ty.is_scalar() || ty.bits() > 64 || !(ty.is_int() || ty.is_float() || ty.is_ptr()))
+    {
         return;
     }
     let float = ty.is_float();
@@ -265,14 +275,18 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
     build.store(stepped, counter, info(4, 4), Flags::default());
     build.jump(join, &[found]);
 
-    // The memory path: the argument is where the caller left it, and the pointer steps on by a
-    // word, because the caller's argument area is a run of whole words whatever is in them.
+    // The memory path: the argument is where the caller left it, and the pointer steps on past it.
+    // By a word for everything the machine computes in, because the caller's argument area is a run
+    // of whole words whatever is in them, and by two words rounded up to two for a quad, which is
+    // the slot the class gets from a function that names it as well as from one that does not.
     let mut build = Builder::new(func, overflowed).at(span);
-    let pointer = offset(&mut build, list, OVERFLOW);
-    let here = build.load(Type::PTR, pointer, info(8, 8), Flags::default());
-    let word = build.iconst(Type::int(64), i128::from(area.word));
-    let onward = added(&mut build, here, word);
-    build.store(onward, pointer, info(8, 8), Flags::default());
+    let (slot, want) = if quad {
+        (u64::from(VECTOR_SLOT), VECTOR_SLOT)
+    } else {
+        (u64::from(area.word), area.word)
+    };
+    let at = overflow(&mut build, list, area, slot, want);
+    let here = build.unary(Opcode::IntToPtr, at, Type::PTR);
     build.jump(join, &[here]);
 
     // And the load the program actually wrote, over the address the two paths agreed on, with
@@ -373,8 +387,19 @@ fn object(func: &mut Func, inst: Inst, area: Area) {
     // object whose last eightbyte is a part of one: five bytes travel in a whole register and
     // come out of the area as a whole register, so the buffer has eight bytes for them to land
     // in and the three past the object are never read.
+    // It is also aligned to whatever the widest slot has to be stored at rather than to whatever
+    // the object asked for, which is the same number for every object a C program can write and is
+    // not the same statement. A slot holding a whole vector register moves as a `movaps`, and a
+    // `movaps` faults on an address that is not a multiple of sixteen, so the buffer says sixteen
+    // because the copy needs it and not because the type happened to ask.
     let reach = slots.iter().map(|&slot| slot.offset() + width(slot)).max().unwrap_or(0);
-    let room = buffer(func, inst, reach.max(size), align);
+    let wants = slots
+        .iter()
+        .map(|&slot| slot_align(area, is_float(slot), width(slot)))
+        .max()
+        .unwrap_or(1)
+        .max(align);
+    let room = buffer(func, inst, reach.max(size), wants);
 
     // Everything below the instruction, taken out before anything is built, because a builder
     // appends to a block and the register form ends this one at a branch.
@@ -386,7 +411,8 @@ fn object(func: &mut Func, inst: Inst, area: Area) {
 
     let (ends, address) = match room {
         Some(room) if !slots.is_empty() => {
-            registers(func, block, inst, Read { list, area, slots: &slots, size, align, room })
+            let read = Read { list, area, slots: &slots, size, align, room, wants };
+            registers(func, block, inst, read)
         }
         _ => {
             let mut build = Builder::new(func, block).at(span);
@@ -420,10 +446,13 @@ struct Read<'a> {
     slots: &'a [Slot],
     /// How many bytes the object is.
     size: u64,
-    /// What it is aligned to.
+    /// What it is aligned to, which is what the caller's argument area put it at.
     align: u32,
     /// The buffer of the function's own the register form copies the object into.
     room: Value,
+    /// What that buffer is aligned to, which is the object's alignment or what the widest slot
+    /// needs, whichever is the larger.
+    wants: u32,
 }
 
 /// Whether the classification is one this knows how to read out of the save area.
@@ -435,12 +464,30 @@ struct Read<'a> {
 fn fits(slots: &[Slot], area: Area) -> bool {
     let mut counts = [0, 0];
     for &slot in slots {
-        if width(slot) > u64::from(area.word) {
+        let float = is_float(slot);
+        if !in_a_register(slot) || width(slot) > u64::from(area.stride(float)) {
             return false;
         }
-        counts[usize::from(is_float(slot))] += 1;
+        counts[usize::from(float)] += 1;
     }
     counts[0] <= area.holds(false) && counts[1] <= area.holds(true)
+}
+
+/// Whether a slot is one of the registers a variadic callee spills.
+///
+/// The width does not say on its own. A `long double` is ten bytes and would sit inside a vector
+/// slot with room to spare, and it is class X87, which has no register among the fourteen, so a
+/// classification carrying one is a classification this walk cannot read. The formats a vector
+/// register does hold are named rather than the ones it does not, so a format added later is one
+/// this leaves alone until somebody says where it travels.
+fn in_a_register(slot: Slot) -> bool {
+    match slot {
+        Slot::Integer { .. } => true,
+        Slot::Float { format, .. } => matches!(
+            format,
+            Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad
+        ),
+    }
 }
 
 /// The register form: the room in the save area is asked about once per file, and the object is
@@ -529,15 +576,13 @@ fn copied(build: &mut Builder<'_>, read: Read<'_>, counts: [u32; 2]) -> Value {
         let Some(from) = nexts[file] else { continue };
         let step = i64::from(area.stride(float) * seen[file]);
         seen[file] += 1;
-        // As an integer of the slot's width whatever the file it came from, because what this is
-        // is a copy of the object's bytes and nothing here reads them as anything.
         let bytes = width(slot);
-        let ty = Type::int(u32::try_from(bytes).unwrap_or(1) * 8);
+        let ty = moved_as(area, float, bytes);
+        let aligned = slot_align(area, float, bytes);
         let at = offset(build, from, step);
-        let value =
-            build.load(ty, at, info(bytes, area.stride(float).min(area.word)), Flags::default());
+        let value = build.load(ty, at, info(bytes, aligned), Flags::default());
         let into = offset(build, read.room, i64::try_from(slot.offset()).unwrap_or(0));
-        let holds = info(bytes, part(read.align, slot.offset()));
+        let holds = info(bytes, part(read.wants, slot.offset()));
         build.store(value, into, holds, Flags::default());
     }
 
@@ -624,6 +669,30 @@ fn is_float(slot: Slot) -> bool {
 /// How many registers of a file an object takes.
 fn taken_of(slots: &[Slot], float: bool) -> u32 {
     u32::try_from(slots.iter().filter(|&&slot| is_float(slot) == float).count()).unwrap_or(0)
+}
+
+/// What one slot's bytes are moved as.
+///
+/// An integer of the slot's width whatever file it came from, because what this is is a copy of the
+/// object's bytes and nothing here reads them as anything. A slot the whole width of a vector
+/// register is the exception and has to be: there is no integer that wide on this machine, and the
+/// file the bytes are already in is the one that moves all sixteen of them at once.
+fn moved_as(area: Area, float: bool, bytes: u64) -> Type {
+    if float && bytes > u64::from(area.word) {
+        return Type::float(Float::F128);
+    }
+    Type::int(u32::try_from(bytes).unwrap_or(1) * 8)
+}
+
+/// What the address of a slot in the save area is known to be aligned to.
+///
+/// The area begins on a vector slot boundary and every slot in it is a whole number of its file's
+/// strides along from there, so a value as wide as its file's stride sits at a multiple of the
+/// stride and everything narrower sits at a multiple of a word. The wide case is the one that has
+/// to be right, since what moves a whole vector register is a `movaps` and a `movaps` faults on an
+/// address that is not a multiple of sixteen rather than being slow about it.
+fn slot_align(area: Area, float: bool, bytes: u64) -> u32 {
+    if bytes > u64::from(area.word) { area.stride(float) } else { area.word }
 }
 
 /// How many bytes one slot moves, which is its own width rounded up to one the machine has a load
@@ -1022,13 +1091,73 @@ mod tests {
 
     /// A classification this cannot read out of the area is left alone, which is what makes the
     /// function refused by name further down rather than compiled into half a walk.
+    ///
+    /// Class X87 is the one to ask about, because the width alone would say yes: ten bytes sit
+    /// inside a vector slot with room to spare, and there is no x87 register among the fourteen a
+    /// variadic callee spills, so there is nothing in the area for this to read.
     #[test]
     fn a_classification_that_does_not_fit_the_area_is_left_alone() {
-        let wide = [Slot::Float { offset: 0, format: Format::Quad }];
-        let (mut names, mut func) = object(16, 16, &wide);
+        let x87 = [Slot::Float { offset: 0, format: Format::X87Extended }];
+        let (mut names, mut func) = object(16, 16, &x87);
         let before = printed(&func, &mut names);
         lists(&mut func, &SYSV);
         assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A `_Float128` walks the vector half with a slot of the whole register.
+    ///
+    /// One register and not two, which is the same answer the classification gives a quad passed to
+    /// a function that names it: the offset stops at the last slot rather than the last but one,
+    /// and it steps on by sixteen. What is read is sixteen bytes of float, which is a `movaps`
+    /// further down and is the instruction gcc reads the same slot with.
+    #[test]
+    fn a_quad_takes_a_whole_vector_slot_of_the_save_area() {
+        let (mut names, mut func) = built(Opcode::VaArg, Type::float(rucc_ir::Float::F128), 1);
+        lists(&mut func, &SYSV);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_arg"), "the va_arg is gone: {text}");
+        assert!(text.contains("iconst.i32 160"), "a hundred and seventy six less one slot: {text}");
+        assert!(text.contains("iconst.i32 16"), "and the counter steps by a whole one: {text}");
+        assert!(text.contains("load.f128"), "read as the sixteen bytes it is: {text}");
+    }
+
+    /// And the argument area gives it two words aligned to two, which is where it stops being a
+    /// wider `double`. Every other value the machine computes in is where the pointer already is
+    /// and steps it on by a word.
+    #[test]
+    fn a_quad_the_registers_ran_out_before_is_rounded_up_to_sixteen() {
+        let (mut names, mut func) = built(Opcode::VaArg, Type::float(rucc_ir::Float::F128), 1);
+        lists(&mut func, &SYSV);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i64 15"), "up to the next sixteen: {text}");
+        assert!(text.contains("iconst.i64 -16"), "and down to a multiple of it: {text}");
+        assert!(text.contains(" = and "), "which is an add and a mask: {text}");
+
+        let (mut names, mut func) = built(Opcode::VaArg, Type::float(rucc_ir::Float::F64), 1);
+        lists(&mut func, &SYSV);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains(" = and "), "a double is where the pointer already is: {text}");
+        assert!(text.contains("iconst.i64 8"), "and steps it on by a word: {text}");
+    }
+
+    /// An object holding a quad is one slot of the vector file, so the question is a single one
+    /// and the copy moves all sixteen bytes at once.
+    ///
+    /// The buffer it lands in is sixteen byte aligned, which is what the store needs rather than
+    /// what the object asked for, although for this object the two are the same number.
+    #[test]
+    fn an_object_holding_a_quad_is_copied_out_as_one_whole_register() {
+        let quad = [Slot::Float { offset: 0, format: Format::Quad }];
+        let (mut names, mut func) = object(16, 16, &quad);
+        lists(&mut func, &SYSV);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_object"), "{text}");
+        assert_eq!(text.matches("br_if").count(), 1, "one file, so one question: {text}");
+        assert!(text.contains("iconst.i32 160"), "a hundred and seventy six less one slot: {text}");
+        assert!(text.contains("load.f128"), "moved as the register it is in: {text}");
+        assert!(text.contains("alloca, size 16, align 16"), "a buffer a movaps accepts: {text}");
     }
 
     /// What reads the object goes on reading the value it already read, the same way it does for a

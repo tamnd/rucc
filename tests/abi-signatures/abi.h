@@ -357,5 +357,28 @@ struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2);
 union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1);
 #endif
 
+/* Ten quads past the dots, which is the va_arg walk over the one type whose slot in the register
+ * save area is the whole of a vector register rather than the low half of one. Eight of them are
+ * in the area and the last two are where the caller left them, so this asks about both ends of
+ * the walk and about the sixteen byte alignment the argument area owes the type. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 qv_quads_past_the_registers(int a0, ...);
+#endif
+
+/* A quad with a double either side of it past the dots, which is where the offset into the
+ * vector half has to move by sixteen for one of them and by eight for the others. A walk that
+ * stepped the counter by the same amount for all three reads the second double out of the top of
+ * the quad. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+double qv_quad_between_doubles(int a0, ...);
+#endif
+
+/* The struct holding one read off the list, which is the other half of the walk: an aggregate
+ * that arrived in registers is copied out of the save area into a buffer, and this is the only
+ * object in the corpus whose one slot is sixteen bytes wide. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_one qv_struct_holding_a_quad(int a0, ...);
+#endif
+
 
 #endif

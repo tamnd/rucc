@@ -712,5 +712,27 @@ int main(void)
 			abi_fail("q_union_and_quad", "return.q");
 	}
 #endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		_Float128 r = qv_quads_past_the_registers(6295606, 797.25f128, 798.25f128, 799.25f128, 800.25f128, 801.25f128, 802.25f128, 803.25f128, 804.25f128, 805.25f128, 806.25f128);
+		if (r != 807.25f128)
+			abi_fail("qv_quads_past_the_registers", "return");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		double r = qv_quad_between_doubles(6390634, 809.25, 810.25f128, 811.25, 812.25f128, 813.25);
+		if (r != 814.25)
+			abi_fail("qv_quad_between_doubles", "return");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		struct quad_one v0 = { 816.25f128 };
+		struct quad_one r = qv_struct_holding_a_quad(6446067, v0, 6461905);
+		if (r.x != 818.25f128)
+			abi_fail("qv_struct_holding_a_quad", "return.x");
+	}
+#endif
 	return abi_failures == 0 ? 0 : 1;
 }
