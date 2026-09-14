@@ -597,8 +597,8 @@ impl Checker<'_> {
         } else if !self.types.quals(inner).is_none() {
             "'_Atomic' applied to a qualified type"
         } else {
-            if !self.lock_free(canonical) {
-                self.unsupported_type("an atomic type this compiler has no instruction for", span);
+            if let Some(what) = self.atomic_trouble(canonical) {
+                self.unsupported_type(what, span);
             }
             return self.types.atomic(inner);
         };
@@ -606,30 +606,39 @@ impl Checker<'_> {
         inner
     }
 
-    /// Whether an object of the type is one the machine reaches all of in a single instruction,
-    /// which is what an access to an atomic object has to be.
+    /// What is wrong with an atomic object of that type, where anything is.
     ///
-    /// gcc has libatomic for the rest, which takes a lock out of a table keyed by the address of
-    /// the object, and there is no libatomic here. Half a program taking that lock and half of it
-    /// not is not atomic at all, so the types there is no instruction for are refused where they
-    /// are written rather than where they are read, which is the one place a programmer can do
-    /// something about it.
+    /// The width used to be the whole of this question. An object the machine does not reach all of
+    /// in one instruction was refused here, because gcc calls libatomic for those, libatomic takes
+    /// a lock out of a table keyed by the address, and a program half of whose accesses take that
+    /// lock and half of which do not is not atomic at all. The table is here now, in
+    /// `runtime/builtins/atomic.c` and section 12.8 of the spec, and it is libatomic's table with
+    /// libatomic's names, so a wide access is a call into it and an object rucc compiled and an
+    /// object gcc compiled agree about which lock they are under.
     ///
-    /// An incomplete type answers yes, because there is nothing to measure yet and this
-    /// declaration is not the one that completes it: `_Atomic struct s *p;` is a pointer and says
-    /// nothing about how wide the object is. The lowering asks the same question again at the
-    /// access, by which point the type is complete or there is no access.
-    fn lock_free(&self, canonical: TypeId) -> bool {
+    /// What is left are the types the lowering has no single value for. A structure or a union is a
+    /// copy rather than a value, and the atomic copy is the piece of this work that is not written
+    /// yet. A complex object is a pair of values and a vector is a row of them, and a call that
+    /// hands the runtime one object cannot be handed two.
+    ///
+    /// An incomplete type has nothing wrong with it, because there is nothing to measure yet and
+    /// this declaration is not the one that completes it: `_Atomic struct s *p;` is a pointer and
+    /// says nothing about the object. The lowering asks its own form of the question at the access,
+    /// by which point the type is complete or there is no access.
+    fn atomic_trouble(&self, canonical: TypeId) -> Option<&'static str> {
         if !is_complete(&self.types, canonical) {
-            return true;
+            return None;
         }
-        if !is_scalar(&self.types, canonical) || is_complex(&self.types, canonical) {
-            return false;
+        if is_complex(&self.types, canonical) {
+            return Some("an atomic complex object");
         }
-        let Ok(measured) = layout(&self.types, canonical, self.cx.target) else {
-            return true;
-        };
-        matches!(measured.size, 1 | 2 | 4 | 8)
+        if rucc_types::is_vector(&self.types, canonical) {
+            return Some("an atomic vector object");
+        }
+        if !is_scalar(&self.types, canonical) {
+            return Some("an atomic structure or union");
+        }
+        None
     }
 
     /// A `struct` or a `union`, referred to by tag or declared by one.

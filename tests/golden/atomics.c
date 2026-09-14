@@ -105,3 +105,21 @@ int local(int v) {
   n += v;
   return n;
 }
+
+// A width no machine reaches in one go, which is a call into the runtime's table of locks rather
+// than an instruction. The object travels through its address and the value through a slot of our
+// own, so a read is the call and then an ordinary load of the slot, and a compound assignment is
+// the same compare and exchange loop as above with both halves of it being calls.
+_Atomic __int128 wide;
+
+void widen(__int128 v) {
+  wide = v;
+}
+
+__int128 taken(void) {
+  return wide;
+}
+
+void raise(__int128 v) {
+  wide += v;
+}
