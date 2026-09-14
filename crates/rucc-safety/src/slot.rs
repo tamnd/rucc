@@ -152,6 +152,10 @@ const WORD: u64 = 8;
 /// rewrites it needs its operand already pointed at a slot and everything reading its result already
 /// pointed at another. Reserving is the half that can happen before anything has been rewritten, and
 /// a slot is only an `alloca` and a name for it, so nothing is lost by deciding all of them first.
+///
+/// Retyping the block parameters goes between the substitution and the second walk, because a
+/// capability carried along an edge is a value nothing here gives a slot to and everything here has
+/// just been taught to read as an address.
 pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     prune(func);
     if !placeable(func) {
@@ -173,6 +177,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
         return;
     }
     substitute(func, &moved);
+    parameters(func);
     let mut frame: Option<Value> = None;
     let mut given: Option<Value> = None;
     for inst in walk(func) {
@@ -323,18 +328,36 @@ fn placeable(func: &Func) -> bool {
         if opcode == Opcode::CapResult && !crate::frame::given(func, inst) {
             return false;
         }
-        // A capability passed along an edge is one whose reader is a block parameter, and a block
-        // parameter is not a value this pass gives a slot to. Nothing builds one today, since the
-        // verifier keeps a `cap` out of every signature and the front end has no way to name one,
-        // but a pass that started to would otherwise find its capability quietly replaced by an
-        // address of the wrong type.
-        for call in func.successors(inst) {
-            if func[call.args].iter().any(|&value| func[value].ty.is_cap()) {
-                return false;
+    }
+    true
+}
+
+/// Points every `cap` typed block parameter at a slot instead.
+///
+/// A capability that is live across a branch is a value like any other to the optimizer, which runs
+/// between the insertion pass and this one and will thread a jump or coalesce a parameter without
+/// caring what the value is, so a block parameter of type `cap` is a shape that turns up on real
+/// code. It used to leave the whole function unplaced. On the SQLite amalgamation that was 268
+/// functions, and a function this pass gives up on keeps every `cap_of` in it, which the back end
+/// has no rule for.
+///
+/// There is nothing to place here, only something to rename. Every capability in the function is in
+/// a slot by the time this runs and a slot is an address, so the parameter carries the address of
+/// whichever slot the incoming capability is in and its type says so. [`substitute`] has already
+/// rewritten the arguments on every edge into the block, so what arrives is an address on all of
+/// them, and every reader of the parameter is a consumer that wants an address by now.
+///
+/// The slot being an `alloca` in the entry block is what makes this sound rather than clever. It is
+/// live wherever the branch can go, so handing its address along an edge outlives nothing, and the
+/// producer wrote the four words before the branch was taken.
+fn parameters(func: &mut Func) {
+    for block in func.blocks().collect::<Vec<Block>>() {
+        for value in func[block].params.clone() {
+            if func[value].ty.is_cap() {
+                func.retype(value, Type::PTR);
             }
         }
     }
-    true
 }
 
 /// Every value an instruction reads, counting the arguments it passes to the blocks it branches to.
@@ -1313,6 +1336,68 @@ mod tests {
         assert_eq!(count(&func, Opcode::CapOf), 1);
         assert_eq!(count(&func, Opcode::CapNull), 1);
         assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    /// A capability made in one block and read in another, handed along the edge between them.
+    ///
+    /// Written by hand rather than produced, because nothing in the insertion pass builds this and
+    /// what does build it is the optimizer running in between, which is not something a unit test
+    /// of this file should have to stand up.
+    fn handed_along(names: &mut Interner, round: bool) -> Func {
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let next = func.create_block();
+        let done = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let held = func.append_param(next, Type::CAP);
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[at]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        b.jump(next, &[cap]);
+
+        let mut b = Builder::new(&mut func, next);
+        let args = b.func().push_values(&[held, at, at, held]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        if round {
+            let again = b.iconst(Type::I1, 1);
+            b.br_if(again, next, &[held], done, &[]);
+        } else {
+            b.jump(done, &[]);
+        }
+
+        Builder::new(&mut func, done).ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_capability_handed_along_an_edge_carries_the_address_of_its_slot_instead() {
+        // The parameter is the one value here that has no slot of its own, and it does not need
+        // one: what arrives on the edge is the address of the slot the producer filled, so the
+        // parameter goes on carrying whichever of them the branch came from.
+        let mut names = Interner::new();
+        let mut func = handed_along(&mut names, false);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        assert_eq!(count(&func, Opcode::CapStore), 0);
+        let next = func.blocks().nth(1).expect("the function has three blocks");
+        let held = func[next].params[0];
+        assert_eq!(func[held].ty, Type::PTR, "the parameter says what it now carries");
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_capability_carried_round_a_loop_is_placed_the_same_way() {
+        // The edge back into the header passes the parameter itself, so the one slot the producer
+        // filled in front of the loop is what every iteration reads. That is the whole of what the
+        // loop adds, and it is why there is nothing to copy round.
+        let mut names = Interner::new();
+        let mut func = handed_along(&mut names, true);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        assert_eq!(count(&func, Opcode::CapStore), 0);
+        assert_eq!(count(&func, Opcode::Alloca), 1, "one slot for the one capability");
         believed(&module(&mut names), &func, &names);
     }
 }
