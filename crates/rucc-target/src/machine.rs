@@ -48,6 +48,14 @@ pub struct MachineInsts {
     pub takes_imm: fn(&str) -> bool,
     /// Whether an instruction of that name carries an addressing mode.
     pub takes_mem: fn(&str) -> bool,
+    /// Whether an instruction of that name is a call.
+    ///
+    /// Asked by a pass that has to know which registers an instruction leaves alone, because a
+    /// call is the one instruction whose operands do not answer that. The registers a convention
+    /// does not preserve are gone across one, and the ones an argument travelled in are written
+    /// down as reads rather than as writes, so a pass reading the operand vector would be told a
+    /// value in an argument register survives a call it does not survive.
+    pub calls: fn(&str) -> bool,
     /// What an addressing mode on this target may multiply its index by.
     ///
     /// A list rather than a range because the machines that have an index have a handful of
@@ -70,6 +78,12 @@ impl MachineInsts {
     #[must_use]
     pub fn has(&self, name: &str) -> bool {
         (self.operands)(self.bare(name)).is_some()
+    }
+
+    /// Whether an instruction of that name is a call on this target.
+    #[must_use]
+    pub fn calls(&self, name: &str) -> bool {
+        (self.calls)(self.bare(name))
     }
 
     /// Whether this target multiplies an index by that.
