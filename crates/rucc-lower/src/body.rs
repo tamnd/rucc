@@ -6133,7 +6133,7 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// What the atomic object itself is aligned to, which is what the qualifier raised it to.
-    fn object_align(&mut self, ty: TypeId) -> u32 {
+    fn object_align(&self, ty: TypeId) -> u32 {
         repr::align_of(self.types(), self.target(), ty)
     }
 
@@ -6146,7 +6146,7 @@ impl<'u> Body<'_, 'u> {
     /// reaches it. Telling the load out of that slot it is eight is telling it something that is
     /// not so, and a target whose wide load faults on a misaligned address is where that gets
     /// found rather than here.
-    fn buffer_align(&mut self, ty: TypeId) -> u32 {
+    fn buffer_align(&self, ty: TypeId) -> u32 {
         let inner = self.underlying(ty);
         repr::align_of(self.types(), self.target(), inner)
     }
