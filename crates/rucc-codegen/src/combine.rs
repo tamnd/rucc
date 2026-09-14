@@ -28,9 +28,11 @@
 //! fewer value for the allocator to find a place for, and the bytes come down because an addressing
 //! mode costs what it costs whichever instruction carries it and the load's own opcode byte goes.
 //!
-//! It is the commonest pair in the machine IR this compiler writes. Over the corpus at `-O2` there
-//! are 3249 places where a `movq` is followed immediately by an `addq` that reads what it wrote,
-//! and that is one width of one operation.
+//! It is the commonest pair in the machine IR this compiler writes. Counting adjacent instructions
+//! over the corpus at `-O2`, where the first writes what the second reads, the largest family by a
+//! long way is a move into arithmetic, and an addition at eight bytes is the largest single entry
+//! in it. What the pass gets over that corpus is 928 of these at `-O2` and 892 fewer instructions
+//! once the allocator has had its say, with the difference between the two explained below.
 //!
 //! # Why no rule does it
 //!
@@ -102,7 +104,8 @@
 //!
 //! It also costs nothing. The pair this pass is about is written by the selector out of one
 //! expression, so the two are next to each other or nearly, and the measurement in [`WINDOW`] is
-//! that going past eight instructions finds nothing at all.
+//! that a bound of one already finds nine tenths of what there is and that past sixteen there is
+//! nothing left to find.
 //!
 //! # What it does not do yet
 //!
@@ -129,11 +132,20 @@ use crate::fold::Pending;
 
 /// How far a load is carried looking for the instruction that takes it in.
 ///
-/// Measured over the corpus at `-O2`. Four instructions finds 4062 of them, eight finds 4103, and
-/// sixteen finds the same 4103 as eight. The pairs this pass is about come out of the selector
-/// next to each other, so what the extra room finds is the few that something unrelated was
-/// scheduled between, and past eight there is nothing left to find.
-pub const WINDOW: usize = 8;
+/// Measured over the corpus at `-O2`, which folds this many loads at each bound:
+///
+/// ```text
+///   1     2     4     8    16    32
+/// 852   890   914   918   928   928
+/// ```
+///
+/// Sixteen, because that is where the curve stops. Doubling it again finds nothing, and the pass
+/// still costs a fixed amount per instruction, which is what the bound is for.
+///
+/// The shape of the curve is the shape of the problem. A load and the arithmetic that reads it come
+/// out of the selector next to each other, so a window of one already finds nine tenths of them,
+/// and the rest are the ones something unrelated was written between.
+pub const WINDOW: usize = 16;
 
 /// One arithmetic instruction that could read its second source out of memory, and the load that
 /// would fill it.
