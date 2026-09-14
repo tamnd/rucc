@@ -170,6 +170,7 @@ enum PendingExtra<'a> {
     Rmw(RmwOp, MemInfo),
     Order(MemOrder),
     Prefetch(PrefetchHint),
+    Depth(u32),
     Class(StorageClass),
     Owner(Owner),
     Node(Meta),
@@ -792,6 +793,16 @@ impl<'a, 'n> Parser<'a, 'n> {
                 }
                 PendingExtra::Prefetch(hint)
             }
+            // `frame_address depth 0`. Nothing in front of it, because these take no operands: how
+            // far up to walk is the whole of what they carry.
+            ExtraKind::Depth => {
+                self.expect("depth")?;
+                let word = self.word();
+                let Ok(depth) = word.parse::<u32>() else {
+                    return self.fail(format!("`{word}` is not a depth"));
+                };
+                PendingExtra::Depth(depth)
+            }
             // The plane writes. Each reads its range and then the one thing it needs beyond it,
             // written with a name in front the way the fields of an access are.
             ExtraKind::Class => {
@@ -1292,6 +1303,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Rmw(op, info) => Extra::Rmw(*op, func.add_mem(*info)),
             PendingExtra::Order(order) => Extra::Order(*order),
             PendingExtra::Prefetch(hint) => Extra::Prefetch(*hint),
+            PendingExtra::Depth(depth) => Extra::Depth(*depth),
             PendingExtra::Class(class) => Extra::Class(*class),
             PendingExtra::Owner(owner) => Extra::Owner(*owner),
             PendingExtra::Node(node) => Extra::Node(*node),
@@ -2336,6 +2348,7 @@ global @x : cap = 0, align 8, linkage(internal)
                 Opcode::FCmp => ExtraKind::FloatPred,
                 Opcode::Fence => ExtraKind::Order,
                 Opcode::Prefetch => ExtraKind::Prefetch,
+                Opcode::FrameAddress | Opcode::ReturnAddress => ExtraKind::Depth,
                 Opcode::AtomicRmw => ExtraKind::Rmw,
                 Opcode::Switch => ExtraKind::Switch,
                 Opcode::InlineAsm => ExtraKind::Asm,

@@ -1050,19 +1050,21 @@ notes = "A hint that an address is about to be used, which is one instruction on
 name = "__builtin_return_address"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "void *(unsigned int)"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-driver::the_return_address_is_one_word_above_the_frame_the_walk_ended_at"]
+notes = "The address control goes back to from a frame, which is the one above it read one word further along. Everything the row beside this one says applies here too, including the forced frame pointer: gcc reads the return address of the frame a function is in off the stack pointer when it kept no frame pointer, and this keeps one and reads 8(%rbp) instead, which costs a push and a pop in a function that asked."
 
 [[feature]]
 name = "__builtin_frame_address"
 kind = "builtin"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 signature = "void *(unsigned int)"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-driver::the_frame_address_is_the_frame_pointer_after_walking_that_many_links"]
+notes = "Where a frame is, which on x86-64 is what the frame pointer holds, so a function that asks for one is given a frame pointer whether or not anything else asked. A depth above zero walks that many saved frame pointers first, one load each, which is what gcc 16.2.0 writes for the same program. The depth has to be a constant, since the walk is that many instructions long, and check/builtin/frame.rs is where that is enforced along with the limit of 255 that gcc does not have. What the answer is worth is the program's own business: the chain only reaches as far as the callers that kept a frame pointer, which is why gcc documents a nonzero depth as unsafe and warns about one under -Wall."
 
 [[feature]]
 name = "__builtin_thread_pointer"

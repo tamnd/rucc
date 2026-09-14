@@ -659,6 +659,12 @@ impl Checker<'_> {
         if let Some(value) = self.assume_aligned_value(function, &args, span) {
             return value;
         }
+        // The two that ask about the frames the program is running in, which are a walk up the
+        // saved frame pointers and not a call to anything. In `check/builtin/frame.rs`, with why
+        // the depth has to be a constant and why one above the limit is refused.
+        if let Some(value) = self.frame_address_builtin(function, &args, signature.ret, span) {
+            return value;
+        }
         // Where the running thread's own storage starts, which is a register read and not a call
         // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
         if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {

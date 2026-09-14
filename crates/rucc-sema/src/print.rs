@@ -51,7 +51,7 @@ use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
 use crate::decl::{DeclId, DeclKind, Definition, Linkage, Priority, StorageDuration, Visibility};
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
 
@@ -480,6 +480,13 @@ impl<'a> Printer<'a> {
             ExprKind::Prefetch { write, locality, .. } => {
                 format!("prefetch {} {locality}", if write { "write" } else { "read" })
             }
+            ExprKind::FrameAddress { ask, depth } => {
+                let what = match ask {
+                    FrameAsk::Frame => "frame-address",
+                    FrameAsk::Return => "return-address",
+                };
+                format!("{what} {depth}")
+            }
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
@@ -496,6 +503,7 @@ impl<'a> Printer<'a> {
             | ExprKind::LabelAddr(_)
             | ExprKind::Unreachable
             | ExprKind::Trap
+            | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer => {}
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.

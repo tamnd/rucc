@@ -612,6 +612,11 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", {hint}");
             }
+            // No operands at all, so the depth follows the opcode with a space and no comma, the
+            // way an ordering follows `fence`.
+            Extra::Depth(depth) => {
+                let _ = write!(self.out, " depth {depth}");
+            }
             Extra::Targets(targets) => {
                 // A conditional branch names its condition first and then both arms. A jump
                 // has no operands at all and is its target.

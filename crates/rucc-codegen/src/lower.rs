@@ -425,6 +425,14 @@ pub struct Stack {
     /// prologue had to force the stack pointer's alignment, so which register the load reads
     /// through is not settled here either.
     pub arguments: Vec<(mir::Inst, u32)>,
+    /// Whether the function asked where its own frame is, which is what `__builtin_frame_address`
+    /// and `__builtin_return_address` both start from.
+    ///
+    /// A function like that keeps a frame pointer whatever the flags say, because the register is
+    /// the answer to the first of them and the start of the walk for every depth above zero. There
+    /// is no other way to reach it: the distance from the stack pointer to the frame is a number
+    /// the layout works out, and what a walk up the chain needs is the link the prologue saved.
+    pub walks_frames: bool,
 }
 
 impl Stack {
@@ -796,6 +804,17 @@ impl<'a> Lowering<'a> {
                 // library rather than any arithmetic.
                 Opcode::ThreadPointer => {
                     self.thread_pointer(inst)?;
+                    continue;
+                }
+                // Where a frame is and what it returns to, built here for the same reason and one
+                // more. The reason is the same: what the walk starts from is the frame pointer,
+                // which is not a register a rule pattern can bind, and there is nothing in reading
+                // the link the prologue saved that a proof over bitvectors could discharge. The
+                // extra one is that how long the walk is comes out of a number beside the
+                // instruction, so one of these is not one instruction but however many the depth
+                // says, and a rule replaces a term with a term.
+                Opcode::FrameAddress | Opcode::ReturnAddress => {
+                    self.frames(inst)?;
                     continue;
                 }
                 // Built from the frame for the reason an `alloca` is, and from the convention for
@@ -2009,6 +2028,69 @@ impl<'a> Lowering<'a> {
         let name = x86_64::BRANCH.indirect;
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
         self.out.build(block, opcode).at(span).operand(mir::Operand::read(reg, self.gpr)).finish();
+        Ok(())
+    }
+
+    /// `__builtin_frame_address` and `__builtin_return_address`, which are a walk up the chain of
+    /// saved frame pointers and then one thing read at the end of it.
+    ///
+    /// Every frame that kept a frame pointer holds the caller's at the address the register points
+    /// at, and the address that frame returns to one word above that, which is where the call
+    /// instruction put it and where the prologue's push left it. So the walk is a load through the
+    /// register for each link, the frame address is wherever the walk stopped, and the return
+    /// address is one more load from a word above it. gcc 16.2.0 writes exactly this, measured on
+    /// x86-64 at `-O2` for depths zero to three of both builtins.
+    ///
+    /// The function is given a frame pointer because of this, which is what [`Stack::walks_frames`]
+    /// carries out to the layout. A depth of zero needs it as the answer and every depth above zero
+    /// needs it as the start, so there is no case here where it is not wanted.
+    ///
+    /// How far the chain actually reaches is the program's business and not this one's. A caller
+    /// compiled without a frame pointer has no link in it for the walk to follow, so a depth above
+    /// zero is a promise about how the whole program was built. That is why gcc documents a nonzero
+    /// depth as unsafe rather than as an answer, and why the depth is refused above a limit in
+    /// `check/builtin/frame.rs` rather than walked as far as it says.
+    fn frames(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Depth(depth) = data.extra else { return Err(self.unsupported(inst)) };
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let returning = data.opcode == Opcode::ReturnAddress;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let moves = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move");
+        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", moves.load)));
+        self.stack.walks_frames = true;
+
+        // Where the walk is up to. The frame pointer to begin with, and the register the last load
+        // wrote after that.
+        let reg = self.new_reg(result);
+        let mut base = mir::Reg::physical(self.conv.frame_pointer);
+        for link in 0..depth {
+            // The last load of a walk that is looking for a frame writes the answer itself, which
+            // is what keeps a walk of so many links that many instructions and not one more.
+            let ends_here = link + 1 == depth && !returning;
+            let next = if ends_here { reg } else { self.out.new_vreg(self.gpr) };
+            let at = mir::Mem::at(mir::Operand::read(base, self.gpr));
+            self.out.build(block, load).at(span).def(next, self.gpr).mem(at).finish();
+            base = next;
+        }
+
+        if returning {
+            let up = i32::try_from(self.conv.return_address).expect("a word above the frame");
+            let at = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
+            self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
+        } else if depth == 0 {
+            // The one case with no load in it at all: the frame this function is running in is the
+            // register itself, and a physical register is not one the allocator hands out, so the
+            // answer is a copy of it.
+            let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", moves.mov)));
+            self.out
+                .build(block, mov)
+                .at(span)
+                .operand(mir::Operand::write(reg, self.gpr))
+                .operand(mir::Operand::read(base, self.gpr))
+                .finish();
+        }
         Ok(())
     }
 

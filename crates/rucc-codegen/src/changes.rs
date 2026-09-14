@@ -53,7 +53,7 @@
 //! anywhere reads the register, so a removal the framework takes is a removal nothing was reading;
 //! what it will not take is the many where the register is read further down about a different
 //! write. So a pass that runs after allocation and removes instructions has to have its own reason,
-//! which is why [`crate::reload`] has one and says what it is, and a pass that rewrites rather than
+//! which is why [`crate::copies`] has one and says what it is, and a pass that rewrites rather than
 //! removes has the whole of the framework as usual.
 //!
 //! # Reading a register somewhere else

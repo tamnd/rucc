@@ -485,6 +485,8 @@ pub enum Extra {
     Order(MemOrder),
     /// What a `prefetch` is a hint about, which is a read or a write and how much locality.
     Prefetch(PrefetchHint),
+    /// How many frames up to walk, for `frame_address` and `return_address`.
+    Depth(u32),
     /// The targets of a branch, with the default first for a `switch`.
     Targets(BlockCallList),
     /// A call.
@@ -522,6 +524,7 @@ impl Extra {
             Self::Rmw(..) => ExtraKind::Rmw,
             Self::Order(_) => ExtraKind::Order,
             Self::Prefetch(_) => ExtraKind::Prefetch,
+            Self::Depth(_) => ExtraKind::Depth,
             Self::Targets(_) => ExtraKind::Targets,
             Self::Call(_) => ExtraKind::Call,
             Self::Switch(_) => ExtraKind::Switch,

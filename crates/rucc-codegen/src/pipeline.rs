@@ -412,8 +412,10 @@ pub fn compile_recording(
     let base = stack.layout(Layout::new(machine.conv, machine.file));
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
-        // function that calls it is given one whether or not anything else asked.
-        frame_pointer: flags.frame_pointer || profile == Profile::Late,
+        // function that calls it is given one whether or not anything else asked. A function that
+        // asked where its own frame is has the same claim on one, and for a plainer reason: the
+        // register is the answer.
+        frame_pointer: flags.frame_pointer || profile == Profile::Late || stack.walks_frames,
         red_zone: flags.red_zone,
         protect: guard.is_some(),
         // A protected function calls the one that does not come back, on the arm where the check
