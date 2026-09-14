@@ -1979,6 +1979,15 @@ static void *counting(void *ignored) {
                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
                 break;
             }
+            /* Read the object again rather than using what the failed exchange wrote back over
+             * the expected buffer, which is what a program would do and what libatomic's own
+             * documentation suggests. Not because the write back is in doubt, since the groups
+             * above check it at every width, but because a run of this file against a routine
+             * that got it wrong would otherwise spin here forever: the count only goes up, so an
+             * expected value that is never refreshed is a value the object never comes back to.
+             * A check that hangs is worse than a check that fails.
+             */
+            wide_load(sizeof counter, counter, expected, __ATOMIC_SEQ_CST);
         }
     }
     return NULL;
