@@ -1928,7 +1928,10 @@ impl<'u> Body<'_, 'u> {
 
     /// `if (cond) then else otherwise`.
     fn if_stmt(&mut self, cond: ExprId, then: StmtId, otherwise: Option<StmtId>, span: Span) {
-        if let Some(taken) = self.folded_condition(cond) {
+        if let Some((effects, taken)) = self.decided_condition(cond) {
+            for effect in effects {
+                self.discard(effect);
+            }
             self.constant_if(taken, then, otherwise, span);
             return;
         }
@@ -1953,6 +1956,56 @@ impl<'u> Body<'_, 'u> {
         self.at = join;
         if let Some(join) = join {
             self.ssa.seal(self.func, join);
+        }
+    }
+
+    /// Which way the condition of an `if` goes when nothing it reads can change the answer, and
+    /// the parts of it that still have to run.
+    ///
+    /// A whole condition being a constant is the easy half and not the half real code writes.
+    /// What it writes is `if ((err != OK) && MP_HAS(S_READ_ARC4RANDOM)) err = s_read_arc4random(p, n);`,
+    /// which is libtommath asking whether a platform routine was compiled in at all, and the macro
+    /// is nought on a platform that has not got it. The `&&` is not a constant expression, because
+    /// the left of it reads a variable, and the answer is nought whatever that variable holds. So
+    /// the left is walked for what it does and the arm goes away with the call in it.
+    ///
+    /// Which side ends a chain is the whole of the rule. `&&` ends on false and `||` ends on true,
+    /// so a side that decides that way decides the condition and the other side does not run, and
+    /// a side that decides the other way leaves the answer to the side it did not decide. A side
+    /// nothing decides is a side that still has to run, and it goes in the list, in the order the
+    /// program wrote it.
+    fn decided_condition(&self, cond: ExprId) -> Option<(Vec<ExprId>, bool)> {
+        if let Some(answer) = self.folded_condition(cond) {
+            return Some((Vec::new(), answer));
+        }
+        let tast = self.tast();
+        match tast[cond].kind {
+            ExprKind::Convert { kind: Conversion::Bool, operand } => {
+                self.decided_condition(operand)
+            }
+            ExprKind::Unary { op: UnaryOp::Not, operand } => {
+                let (effects, answer) = self.decided_condition(operand)?;
+                Some((effects, !answer))
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
+                let ends = op == BinaryOp::LogOr;
+                if let Some((mut effects, answer)) = self.decided_condition(lhs) {
+                    if answer == ends {
+                        return Some((effects, ends));
+                    }
+                    let (rest, answer) = self.decided_condition(rhs)?;
+                    effects.extend(rest);
+                    return Some((effects, answer));
+                }
+                let (rest, answer) = self.decided_condition(rhs)?;
+                if answer != ends {
+                    return None;
+                }
+                let mut effects = vec![lhs];
+                effects.extend(rest);
+                Some((effects, ends))
+            }
+            _ => None,
         }
     }
 

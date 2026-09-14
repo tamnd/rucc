@@ -57,3 +57,34 @@ int present(void) {
   }
   return 0;
 }
+
+// The shape real code writes is not a constant at all. libtommath asks whether a platform routine
+// was compiled in with a macro that is nought where it was not, and the variable on the other side
+// of the `&&` cannot change that answer, so the left still runs and the arm goes away with the
+// call in it.
+int has_it(int err) {
+  if (err && 0) {
+    only_on_32_bit();
+  }
+  if (err || 1) {
+    return 1;
+  }
+  only_on_32_bit();
+  return 0;
+}
+
+// The side that decides can be the left one, and then the other side does not run at all.
+int skipped(int (*f)(void)) {
+  if (0 && f()) {
+    only_on_32_bit();
+  }
+  return 0;
+}
+
+int negated(int err) {
+  if (!(err && 0)) {
+    return 1;
+  }
+  only_on_32_bit();
+  return 0;
+}
