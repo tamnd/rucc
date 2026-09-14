@@ -591,11 +591,10 @@ tests = []
 name = "cleanup"
 kind = "attribute"
 gcc_version = "3.4"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["systemd", "linux", "glibc"]
-tests = []
-notes = "Runs the destructor on every scope exit including a goto out of the scope."
+tests = ["tests/golden/cleanup-attribute.c", "tests/accept/a-cleanup-on-an-object-that-outlives-its-block.c"]
+notes = "Runs the handler on every way out of the block the object was declared in, which is the closing brace and every return, break, continue and goto that leaves it, in the reverse of the order the objects were declared. Not longjmp, which gcc does not promise either. A computed goto or an asm goto out of a block that owes one is turned down rather than built without the calls."
 
 [[feature]]
 name = "constructor"

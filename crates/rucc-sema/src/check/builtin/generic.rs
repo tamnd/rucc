@@ -423,6 +423,7 @@ impl Checker<'_> {
                 visibility: None,
                 startup: Startup::default(),
                 init: None,
+                cleanup: None,
                 params: DeclList::EMPTY,
                 body: None,
             },

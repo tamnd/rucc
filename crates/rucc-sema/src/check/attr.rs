@@ -48,9 +48,10 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
-use crate::decl::{DeclKind, Priority, Startup, Visibility};
+use crate::decl::{DeclId, DeclKind, Priority, Startup, StorageDuration, Visibility};
 use crate::eval;
 use crate::expr::ExprKind;
+use crate::scope::Binding;
 use crate::tast::StrId;
 
 /// What the layout engine takes from an attribute list.
@@ -361,6 +362,102 @@ impl Checker<'_> {
             return None;
         }
         Some(id)
+    }
+
+    /// The function a `cleanup` attribute asks to have called when the object goes out of scope.
+    ///
+    /// This is what glib writes as `g_autoptr`, systemd as `_cleanup_free_` and jansson as
+    /// `json_auto_t`, and a compiler that reads past it leaks whatever the handler would have
+    /// given back. The armour and the namespace are read the way [`Self::packing`] reads them,
+    /// and two of them on one declaration is the first one, which is what a list is read as
+    /// everywhere else here.
+    ///
+    /// The argument is an identifier rather than a string, unlike `alias` above, and it names a
+    /// function that is looked up here in the scope the declaration is in. What it resolves to is
+    /// kept on the declaration rather than on the name, because only an object inside a block can
+    /// carry the attribute and such an object is declared once.
+    pub(in crate::check) fn cleanup(
+        &mut self,
+        attrs: AttrList,
+        kind: DeclKind,
+        duration: StorageDuration,
+    ) -> Option<DeclId> {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) == "cleanup" {
+                return self.cleanup_argument(attr, kind, duration);
+            }
+        }
+        None
+    }
+
+    /// The handler one `cleanup` named, and nothing when there is no point in calling it or when
+    /// what was named is not something that can be called.
+    fn cleanup_argument(
+        &mut self,
+        attr: rucc_ast::Attribute,
+        kind: DeclKind,
+        duration: StorageDuration,
+    ) -> Option<DeclId> {
+        let args = self.ast[attr.args].to_vec();
+        let what = "'cleanup' requires the name of a function to call";
+        // `cleanup(free)` is a lone identifier, which the parser keeps as one because
+        // `format(printf, 1, 2)` does, so an expression here is something else entirely.
+        let Some(&AttrArg::Ident(name)) = args.first() else {
+            self.report(Diagnostic::error(what, attr.span).with_code("E0706"));
+            return None;
+        };
+        // Only an object that lives in a block has a scope to leave, and there is nowhere to put
+        // the call for anything else, so the attribute is dropped with the warning gcc drops it
+        // with. Saying nothing is what makes this shape of wrongness hard to find.
+        if kind != DeclKind::Object || duration != StorageDuration::Automatic {
+            let only = "'cleanup' is only for an object with automatic storage duration";
+            self.report(Diagnostic::warning(only, attr.span).with_code("E0707"));
+            return None;
+        }
+        let Some(Binding::Decl(handler)) = self.scopes.lookup(name) else {
+            let undeclared = format!("'{}' in 'cleanup' does not name anything", self.text(name));
+            self.report(Diagnostic::error(undeclared, attr.span).with_code("E0706"));
+            return None;
+        };
+        if self.tast[handler].kind != DeclKind::Function {
+            let not = format!("'{}' in 'cleanup' is not a function", self.text(name));
+            self.report(Diagnostic::error(not, attr.span).with_code("E0706"));
+            return None;
+        }
+        // The handler is called with the address of the object and with nothing else, so one
+        // parameter that is a pointer is the only shape there is anything to call. A declaration
+        // with no prototype says nothing about what it takes and so says nothing about how the
+        // address travels either, which leaves the call with nothing to be built from.
+        //
+        // Whether that pointer is to the object's own type is not asked. gcc warns where the two
+        // disagree and calls it anyway, and a handler written for `void *` is the ordinary case,
+        // so what the declaration wrote is what the address is passed as.
+        let declared = self.types.canonical(self.tast[handler].ty);
+        let ok = match self.types.kind(declared) {
+            TypeKind::Function(id) => {
+                let signature = self.types.signature(id);
+                let first = signature.params.first().copied();
+                signature.prototyped
+                    && signature.params.len() == 1
+                    && first.is_some_and(|param| {
+                        matches!(self.types.kind(self.types.canonical(param)), TypeKind::Pointer(_))
+                    })
+            }
+            _ => false,
+        };
+        if !ok {
+            let one = format!(
+                "'{}' in 'cleanup' takes one argument, which is the address of the object",
+                self.text(name)
+            );
+            self.report(Diagnostic::error(one, attr.span).with_code("E0706"));
+            return None;
+        }
+        Some(handler)
     }
 
     /// How far outside a shared library an attribute list says the name reaches.

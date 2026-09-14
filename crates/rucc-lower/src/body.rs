@@ -87,11 +87,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         vlas: HashMap::new(),
         shared: None,
         marks: Vec::new(),
+        cleanups: Vec::new(),
         next_scope: 0,
         pinned: HashSet::new(),
         landings: HashMap::new(),
         jumps: Vec::new(),
         grows: false,
+        cleans: false,
         aligned: HashMap::new(),
         restrict: Scopes::default(),
     };
@@ -125,6 +127,11 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // Whether anything in the function grows the stack, which decides what a `goto` can do.
     let declared: Vec<TypeId> = params.iter().chain(locals.iter()).map(|&d| tast[d].ty).collect();
     body.grows = grows || declared.iter().any(|&ty| repr::is_variable_length(body.types(), ty));
+    // Whether anything the function declares has a handler to run when it goes out of scope, which
+    // decides whether a jump has to be remembered so that the handlers between it and its label
+    // can be run in front of it. Asked here for the reason the question above it is: a `goto` can
+    // be written above every declaration it jumps past.
+    body.cleans = locals.iter().any(|&local| tast[local].cleanup.is_some());
     // Before the walk, because it is a question about what the function declares rather than about
     // what it does, and the scan above is where that is already known. What the attribute then
     // costs the function is a slot in its frame and a comparison before each of its returns.
@@ -528,6 +535,15 @@ struct Body<'a, 'u> {
     shared: Option<(ExprId, Value)>,
     /// One entry per open scope, outermost first.
     marks: Vec<Mark>,
+    /// The objects each open scope has to run a handler on when control leaves it, in the order
+    /// they were declared, one entry per open scope and in step with the marks above.
+    ///
+    /// Each pair is the object and the function `__attribute__((cleanup(f)))` named. The list is
+    /// built as the walk reaches the declarations rather than when the scope opens, so a `goto`
+    /// that jumps over a declaration and then leaves the block does not run a handler on an object
+    /// that was never made. The calls go in the reverse of this order, which is what gcc does and
+    /// what a program that acquires two things in a row depends on.
+    cleanups: Vec<Vec<Cleanup>>,
     /// How many scopes have been opened, which is what gives the next one a name of its own.
     next_scope: u32,
     /// The scopes an `__builtin_alloca` has taken out of the business of giving the stack back.
@@ -553,6 +569,9 @@ struct Body<'a, 'u> {
     /// Whether anything the function declares is an array whose length is not a constant, which
     /// is what makes the stack move under it.
     grows: bool,
+    /// Whether anything the function declares has a handler to run when it goes out of scope,
+    /// which is what makes a jump out of a block something to come back to.
+    cleans: bool,
     /// What an address is known to be aligned to, for the addresses something worked it out for.
     ///
     /// An access ordinarily assumes the alignment of the type it goes through, because that is
@@ -588,6 +607,15 @@ struct Mark {
     saved: Option<Value>,
 }
 
+/// One object a scope has to run a handler on when control leaves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cleanup {
+    /// The object, whose address the handler is called with.
+    object: DeclId,
+    /// The function the attribute named.
+    handler: DeclId,
+}
+
 /// Where an exact overflow check is sending its answer.
 ///
 /// The two halves of the destination type that the arithmetic in [`Body::overflow_exactly`] asks
@@ -614,6 +642,10 @@ struct Jump {
     inst: Inst,
     /// The scopes the jump was made in.
     from: Vec<Mark>,
+    /// What each of those scopes had to run a handler on where the jump was written, in step with
+    /// the marks above. Taken here because the scopes are closed and forgotten long before the
+    /// walk knows where the label is.
+    holding: Vec<Vec<Cleanup>>,
     /// The labelled statements control can arrive at, which is one for a `goto` and every label
     /// whose address the function takes for a computed one.
     targets: Vec<StmtId>,
@@ -952,13 +984,89 @@ impl<'u> Body<'_, 'u> {
         let scope = self.next_scope;
         self.next_scope += 1;
         self.marks.push(Mark { scope, saved: None });
+        self.cleanups.push(Vec::new());
     }
 
-    /// Closes the innermost scope, giving back what it grew the stack by.
+    /// Closes the innermost scope, running the handlers it owes and giving back what it grew the
+    /// stack by.
+    ///
+    /// The handlers first and the stack afterwards, because a handler is called with the address
+    /// of an object in this scope and giving the stack back is what takes that object away.
     fn close(&mut self, span: Span) {
         let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
+        let owed = self.cleanups.pop().expect("a scope is closed by whoever opened it");
+        self.run_cleanups(&owed, span);
         let saved = self.released(&mark);
         self.restore(saved, span);
+    }
+
+    /// Notes that an object has a handler to run when the scope it was declared in is left.
+    ///
+    /// Written where the declaration is rather than where the scope opens, so that a jump over the
+    /// declaration leaves nothing to run. An object declared twice in one scope is the same object
+    /// arrived at twice, which a backward `goto` over the declaration does, and it is owed one
+    /// call and not two.
+    fn owes_cleanup(&mut self, object: DeclId, handler: DeclId) {
+        let Some(owed) = self.cleanups.last_mut() else { return };
+        if owed.iter().any(|entry| entry.object == object) {
+            return;
+        }
+        owed.push(Cleanup { object, handler });
+    }
+
+    /// The handlers one scope owes, called in the reverse of the order the objects were declared.
+    fn run_cleanups(&mut self, owed: &[Cleanup], span: Span) {
+        if self.at.is_none() {
+            return;
+        }
+        for entry in owed.iter().rev() {
+            if let Some(inst) = self.cleanup_call(*entry, span) {
+                let block = self.block();
+                self.func.append_inst(block, inst);
+            }
+        }
+    }
+
+    /// One call to a handler, built but not put anywhere.
+    ///
+    /// It is built rather than appended because a jump out of a block needs the same call in front
+    /// of a branch that already exists, which is [`Body::settle`]'s work, and the two ways of
+    /// placing it are the only difference between them.
+    ///
+    /// The argument is the object's address, which is the slot itself: an object with a handler on
+    /// it is one whose address is taken, so [`Scan`] has already given it one. The signature is
+    /// the handler's own, which the checking made sure takes one pointer, so nothing here has to
+    /// decide how the argument travels.
+    fn cleanup_call(&mut self, entry: Cleanup, span: Span) -> Option<Inst> {
+        let Some(Local::Slot(slot)) = self.vars.get(&entry.object).copied() else { return None };
+        let ty = self.tast()[entry.handler].ty;
+        let plan = self.unit.plan(ty, &[], span)?;
+        let signature = self.func.add_signature(plan.signature);
+        let callee = self.unit.symbol_of(entry.handler);
+        let varargs = self.func.push_abis(&plan.varargs);
+        let info = self.func.add_call(CallInfo { callee: Some(callee), signature, varargs });
+        let returns: Vec<Type> = self.func[signature].return_types().collect();
+        let args = self.func.push_values(&[slot]);
+        let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
+        Some(self.func.create_inst(data, &returns, span))
+    }
+
+    /// Whether any scope that is open owes a handler, which is what makes a jump the walk cannot
+    /// place the calls for something to turn down rather than build.
+    fn owes_anything(&self) -> bool {
+        self.cleanups.iter().any(|owed| !owed.is_empty())
+    }
+
+    /// The handlers every scope from `depth` outwards owes, innermost scope first.
+    ///
+    /// This is what a `break`, a `continue` or a `return` leaving several blocks at once has to
+    /// run, and the order is the order the blocks are left in.
+    fn unwind_cleanups(&mut self, depth: usize, span: Span) {
+        let leaving: Vec<Vec<Cleanup>> =
+            self.cleanups.get(depth..).unwrap_or_default().to_vec();
+        for owed in leaving.iter().rev() {
+            self.run_cleanups(owed, span);
+        }
     }
 
     /// The stack pointer a scope gives back at the end of itself, which is nothing at all for one
@@ -981,6 +1089,7 @@ impl<'u> Body<'_, 'u> {
     /// The outermost of the marks being left is the one to restore, since it is the oldest
     /// stack pointer of them and restoring it takes back everything the inner ones did too.
     fn unwind(&mut self, depth: usize, span: Span) {
+        self.unwind_cleanups(depth, span);
         let open = self.marks.get(depth..).unwrap_or_default().to_vec();
         let saved = open.iter().find_map(|mark| self.released(mark));
         self.restore(saved, span);
@@ -1371,6 +1480,11 @@ impl<'u> Body<'_, 'u> {
                     // name for the type.
                     self.variable_length(decl);
                     self.init(decl);
+                    // After the initializer, because the handler runs on the object the
+                    // declaration made and a declaration that was never reached made none.
+                    if let Some(handler) = tast[decl].cleanup {
+                        self.owes_cleanup(decl, handler);
+                    }
                 }
             }
             Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise, span),
@@ -1545,10 +1659,11 @@ impl<'u> Body<'_, 'u> {
     /// `switch` or a `goto` was built with and the block the walk arrives at are the same one.
     fn labelled(&mut self, body: StmtId, span: Span) {
         let block = self.label_block(body);
-        if self.grows {
+        if self.grows || self.cleans {
             // The scopes control lands in, which is what a jump to this label has to put the
-            // stack back to. Taken before the labelled statement is walked, since a scope that
-            // statement opens is one the label is outside of.
+            // stack back to and which blocks it has to run the handlers of on the way. Taken
+            // before the labelled statement is walked, since a scope that statement opens is one
+            // the label is outside of.
             self.landings.insert(body, self.marks.clone());
         }
         if self.at.is_some() {
@@ -1582,11 +1697,19 @@ impl<'u> Body<'_, 'u> {
 
     /// Remembers a jump whose stack is settled once the walk knows where its labels are.
     ///
-    /// Nothing is remembered for a function whose stack does not move, which is nearly all of
-    /// them: there is no restore to build anywhere in one, so there is nothing to come back for.
+    /// Nothing is remembered for a function whose stack does not move and which owes no handler,
+    /// which is nearly all of them: there is nothing to build in front of a branch in one, so
+    /// there is nothing to come back for.
     fn pending(&mut self, inst: Inst, targets: Vec<StmtId>, what: &'static str, span: Span) {
-        if self.grows {
-            self.jumps.push(Jump { inst, from: self.marks.clone(), targets, what, span });
+        if self.grows || self.cleans {
+            self.jumps.push(Jump {
+                inst,
+                from: self.marks.clone(),
+                holding: self.cleanups.clone(),
+                targets,
+                what,
+                span,
+            });
         }
     }
 
@@ -1599,6 +1722,7 @@ impl<'u> Body<'_, 'u> {
     fn settle(&mut self) {
         let jumps = std::mem::take(&mut self.jumps);
         for jump in jumps {
+            self.settle_cleanups(&jump);
             let mut wanted = None;
             for target in &jump.targets {
                 let arriving = self.landings.get(target).map_or([].as_slice(), Vec::as_slice);
@@ -1617,6 +1741,41 @@ impl<'u> Body<'_, 'u> {
                 }
                 Some(Landing::Enters) => self.unsupported(jump.what, jump.span),
                 Some(Landing::Same) | None => {}
+            }
+        }
+    }
+
+    /// Runs the handlers a jump owes in front of its branch.
+    ///
+    /// The blocks being left are the ones the jump is inside and its label is not, which is every
+    /// scope past the point where the two chains stop agreeing. The calls go in front of the
+    /// branch, innermost block first and in the reverse of the order each block declared its
+    /// objects, which is where they would have been built if the label had already been reached.
+    ///
+    /// They are built before the stack restore in [`Body::settle`] and so end up in front of it,
+    /// which is the same order [`Body::close`] puts them in and is there for the same reason: a
+    /// handler is given the address of an object the restore takes away.
+    ///
+    /// A computed `goto` is turned down before it gets here when anything is owed, since which
+    /// label it arrives at is not known, so what is left is one target.
+    fn settle_cleanups(&mut self, jump: &Jump) {
+        if jump.holding.iter().all(Vec::is_empty) {
+            return;
+        }
+        let [target] = jump.targets[..] else { return };
+        let arriving = self.landings.get(&target).map_or([].as_slice(), Vec::as_slice);
+        let shared = jump
+            .from
+            .iter()
+            .zip(arriving)
+            .take_while(|(from, to)| from.scope == to.scope)
+            .count();
+        let leaving: Vec<Vec<Cleanup>> = jump.holding.get(shared..).unwrap_or_default().to_vec();
+        for owed in leaving.iter().rev() {
+            for entry in owed.iter().rev() {
+                if let Some(inst) = self.cleanup_call(*entry, jump.span) {
+                    self.func.insert_before(inst, jump.inst);
+                }
             }
         }
     }
@@ -1643,6 +1802,12 @@ impl<'u> Body<'_, 'u> {
     /// are listed. That is the conservative answer and the only one available: the address can
     /// have been through a table, a parameter or a global on the way here.
     fn indirect_goto(&mut self, target: ExprId, span: Span) {
+        if self.owes_anything() {
+            // Which label it arrives at is the address's business, so which blocks it leaves is
+            // not known here and neither is which handlers to run. Turned down rather than left
+            // to run none of them, which is the shape of wrongness this attribute exists to stop.
+            self.unsupported("a computed goto out of a block with a cleanup handler", span);
+        }
         let address = self.value(target);
         let taken = self.taken.clone();
         let blocks: Vec<Block> = taken.iter().map(|&body| self.label_block(body)).collect();
@@ -1682,6 +1847,12 @@ impl<'u> Body<'_, 'u> {
             // The same reason a `goto` is turned down: where the stack should be on arrival
             // depends on the scope the label is in, which the walk does not collect.
             self.unsupported("an asm goto in a function with a variable length array", span);
+            return;
+        }
+        if goto && self.owes_anything() {
+            // And the same again for the handlers the blocks between here and the label owe,
+            // which are not built for a jump the walk does not remember.
+            self.unsupported("an asm goto out of a block with a cleanup handler", span);
             return;
         }
 
@@ -2295,6 +2466,7 @@ impl<'u> Body<'_, 'u> {
             let returns: Vec<Type> =
                 self.func.signature().returns.iter().map(|slot| slot.ty).collect();
             let values: Vec<Value> = returns.into_iter().map(|ty| self.blank(ty, span)).collect();
+            self.unwind_cleanups(0, span);
             self.build(span).ret(&values);
             self.at = None;
             return;
@@ -2322,6 +2494,9 @@ impl<'u> Body<'_, 'u> {
                 Vec::new()
             }
         };
+        // Every block the function is inside is left at once, after the value has been taken out
+        // of it: `return obj->field;` reads the object a handler is about to be given.
+        self.unwind_cleanups(0, span);
         self.build(span).ret(&values);
         self.at = None;
     }
@@ -6897,6 +7072,13 @@ impl Scan<'_> {
             self.locals.push(id);
         } else {
             self.statics.push(id);
+        }
+        // An object with a handler on it is one whose address is taken, since that is what the
+        // handler is called with, and nothing in the body says so: the attribute is the only
+        // mention of it. So it is put in memory here, where everything else that needs a slot is
+        // decided, rather than being left in a register the call has no way to point at.
+        if self.tast[id].cleanup.is_some() {
+            self.escaped.insert(id);
         }
         if let Some(init) = self.tast[id].init {
             for index in 0..self.tast[init].len() {
