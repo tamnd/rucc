@@ -17,6 +17,7 @@
  * again and a sweep be run later without changing this file.
  */
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +167,24 @@ _Float128 __extendsftf2(float value);
 float __trunctfsf2(_Float128 value);
 _Float128 __extenddftf2(double value);
 double __trunctfdf2(_Float128 value);
+
+/* And the four atomics with no width in their name, which are what an access to an object too wide
+ * for one instruction becomes. Not floating point at all, and here for the reason everything above
+ * is here: the archive defines them and nothing else on the link line does.
+ *
+ * Reached through names of this file's own with an assembler label on them, rather than by writing
+ * the real names. __atomic_load and the other three are type generic builtins in the system
+ * compiler, so a call to one with four arguments is a call it reads as the builtin with the wrong
+ * number of arguments, and a prototype for one is a prototype that disagrees with the builtin.
+ * libatomic has the same problem and solves it the same way, by defining libat_load and putting the
+ * exported name on the symbol.
+ */
+void wide_load(size_t size, void *object, void *into, int order) __asm__("__atomic_load");
+void wide_store(size_t size, void *object, void *value, int order) __asm__("__atomic_store");
+void wide_exchange(size_t size, void *object, void *value, void *into,
+                   int order) __asm__("__atomic_exchange");
+_Bool wide_compare_exchange(size_t size, void *object, void *expected, void *desired, int success,
+                            int failure) __asm__("__atomic_compare_exchange");
 
 /* Every offset in a word and one past it, so the head, the word and the tail of an implementation
  * that works a word at a time each get to be the only part that runs and each get to run beside
@@ -1823,6 +1842,182 @@ static void quad_between_corners(void) {
     say("quadbetweencorner", 0, digest);
 }
 
+/* The atomics, which are a different kind of routine from everything above and need buffers of
+ * their own. Four ranges are live at once, every one of them is both read and written, and what is
+ * most likely to be wrong in a routine whose whole body is a copy of a size it was handed is a byte
+ * written past the end. So each range sits in the middle of its own buffer with a canary either
+ * side, and every case digests all four buffers whole.
+ */
+#define ATOMIC_WIDEST 128
+#define ATOMIC_ROOM (ATOMIC_WIDEST + PHASES + 2 * PAD)
+
+static unsigned char at_object[ATOMIC_ROOM];
+static unsigned char at_value[ATOMIC_ROOM];
+static unsigned char at_into[ATOMIC_ROOM];
+static unsigned char at_expected[ATOMIC_ROOM];
+
+static unsigned long long mix_atomic(unsigned long long digest) {
+    digest = mix(digest, at_object, sizeof at_object);
+    digest = mix(digest, at_value, sizeof at_value);
+    digest = mix(digest, at_into, sizeof at_into);
+    return mix(digest, at_expected, sizeof at_expected);
+}
+
+/* The widths an atomic object comes in: every one from nothing up to a word past the widest the
+ * machine reaches on its own, and then the sizes a structure lands on. Nothing is in there because
+ * a loop that runs no times is where an off by one shows up, and because two objects with no bytes
+ * in them compare equal, which is the one width where the exchange's answer is not obvious.
+ */
+static const int ATOMIC_SIZES[] = {
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12,  13,  14,
+    15, 16, 17, 20, 24, 31, 32, 33, 48, 64, 65, 96, 127, 128,
+};
+
+#define ATOMIC_SIZES_COUNT ((int)(sizeof ATOMIC_SIZES / sizeof ATOMIC_SIZES[0]))
+
+/* The four routines at one width, at every offset in a word.
+ *
+ * The two compare and exchanges are a chain rather than two independent cases. The first is handed
+ * an expected value that is not what is there, so it fails and writes what was there back over the
+ * expected buffer, which leaves that buffer holding exactly what the object holds. The second is
+ * then the succeeding case with nothing set up for it, and it only succeeds if the first one wrote
+ * the right bytes back.
+ */
+static void atomics(int size) {
+    unsigned long long digest = 14695981039346656037ull;
+    size_t n = (size_t)size;
+    for (int phase = 0; phase < PHASES; phase++) {
+        unsigned char *object = at_object + PAD + phase;
+        unsigned char *value = at_value + PAD + phase;
+        unsigned char *into = at_into + PAD + phase;
+        unsigned char *expected = at_expected + PAD + phase;
+
+        fill_canary(at_object, sizeof at_object);
+        fill_canary(at_value, sizeof at_value);
+        fill_canary(at_into, sizeof at_into);
+        fill_canary(at_expected, sizeof at_expected);
+        fill_random(object, n);
+        fill_random(value, n);
+
+        wide_load(n, object, into, __ATOMIC_SEQ_CST);
+        digest = mix_atomic(digest);
+        cases++;
+
+        wide_store(n, object, value, __ATOMIC_SEQ_CST);
+        digest = mix_atomic(digest);
+        cases++;
+
+        fill_random(value, n);
+        wide_exchange(n, object, value, into, __ATOMIC_SEQ_CST);
+        digest = mix_atomic(digest);
+        cases++;
+
+        fill_random(expected, n);
+        fill_random(value, n);
+        digest = mix_number(digest, wide_compare_exchange(n, object, expected, value,
+                                                          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        digest = mix_atomic(digest);
+        cases++;
+
+        fill_random(value, n);
+        digest = mix_number(digest, wide_compare_exchange(n, object, expected, value,
+                                                          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        digest = mix_atomic(digest);
+        cases++;
+    }
+    say("atomic", size, digest);
+}
+
+/* And the lock under those four, held against itself, which is the only thing in this file that
+ * runs on more than one thread.
+ *
+ * Nothing above this would notice a lock that does not lock, because one thread taking a lock
+ * nobody else wants is the same program whether the lock works or not. So four threads each add one
+ * to a counter three words wide through the compare and exchange, and the answer is the number of
+ * additions, which it would not be if two of them were ever inside at once.
+ *
+ * The count is small on purpose. What this catches is a lock that does not lock at all, and that
+ * shows up in the first few thousand rounds or not at all: running it longer would spend the time
+ * in the spin rather than on the question.
+ */
+#define ATOMIC_THREADS 4
+#define ATOMIC_ROUNDS 2000
+#define ATOMIC_COUNTER 24
+
+static unsigned char counter[ATOMIC_COUNTER];
+
+/* The first word holds the count, the second stays zero the whole way through and the third holds a
+ * number nothing writes, so a copy that stopped at the counter and a copy that ran past the object
+ * are both visible in what comes out.
+ */
+static void counter_start(void) {
+    for (int i = 0; i < ATOMIC_COUNTER; i++) {
+        counter[i] = 0;
+    }
+    counter[16] = 7;
+}
+
+static void *counting(void *ignored) {
+    (void)ignored;
+    for (int round = 0; round < ATOMIC_ROUNDS; round++) {
+        unsigned char expected[ATOMIC_COUNTER];
+        unsigned char desired[ATOMIC_COUNTER];
+        wide_load(sizeof counter, counter, expected, __ATOMIC_SEQ_CST);
+        for (;;) {
+            unsigned long long count = 0;
+            for (int i = 0; i < ATOMIC_COUNTER; i++) {
+                desired[i] = expected[i];
+            }
+            for (int i = 0; i < 8; i++) {
+                count |= (unsigned long long)desired[i] << (8 * i);
+            }
+            count += 1;
+            for (int i = 0; i < 8; i++) {
+                desired[i] = (unsigned char)(count >> (8 * i));
+            }
+            if (wide_compare_exchange(sizeof counter, counter, expected, desired,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                break;
+            }
+            /* Read the object again rather than using what the failed exchange wrote back over
+             * the expected buffer, which is what a program would do and what libatomic's own
+             * documentation suggests. Not because the write back is in doubt, since the groups
+             * above check it at every width, but because a run of this file against a routine
+             * that got it wrong would otherwise spin here forever: the count only goes up, so an
+             * expected value that is never refreshed is a value the object never comes back to.
+             * A check that hangs is worse than a check that fails.
+             */
+            wide_load(sizeof counter, counter, expected, __ATOMIC_SEQ_CST);
+        }
+    }
+    return NULL;
+}
+
+/* A thread that will not start is counted on this one instead, so that the answer is the same
+ * number whatever the machine running this was willing to give out. A run with no threads at all
+ * still checks the arithmetic and simply says nothing about the lock.
+ */
+static void counting_threads(void) {
+    unsigned long long digest = 14695981039346656037ull;
+    pthread_t running[ATOMIC_THREADS];
+    int started = 0;
+    counter_start();
+    for (int i = 0; i < ATOMIC_THREADS; i++) {
+        if (pthread_create(&running[started], NULL, counting, NULL) == 0) {
+            started++;
+        }
+    }
+    for (int i = started; i < ATOMIC_THREADS; i++) {
+        counting(NULL);
+    }
+    for (int i = 0; i < started; i++) {
+        pthread_join(running[i], NULL);
+    }
+    digest = mix(digest, counter, sizeof counter);
+    cases += ATOMIC_THREADS * ATOMIC_ROUNDS;
+    say("atomiccounter", ATOMIC_COUNTER, digest);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         unsigned long long seed = strtoull(argv[1], NULL, 0);
@@ -1893,6 +2088,10 @@ int main(int argc, char **argv) {
         quad_integers(i);
         quad_between(i);
     }
+    for (int i = 0; i < ATOMIC_SIZES_COUNT; i++) {
+        atomics(ATOMIC_SIZES[i]);
+    }
+    counting_threads();
     printf("cases %ld\n", cases);
     return 0;
 }
