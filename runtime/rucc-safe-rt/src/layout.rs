@@ -387,6 +387,70 @@ impl Cap {
             None => false,
         }
     }
+
+    /// The capability over `len` bytes starting `off` bytes into what this one covers.
+    ///
+    /// Document 06 section 6.2.2's `cap_narrow`, which is the whole of `-fsafety-subobject`'s
+    /// mechanism and is arithmetic and nothing else. No plane is read and no allocator is asked,
+    /// because a member of an object is in the same instance the object is, so the version and the
+    /// metadata word come through unchanged. That is also why narrowing does not break
+    /// `container_of` the way a design that gave each derivation its own provenance would: what
+    /// changes is the range, and document 04 section 4.4 keeps provenance per instance.
+    ///
+    /// Bottom for a range that is not inside this one, and for arithmetic that would wrap. A narrow
+    /// that escapes the object it was taken from is the compiler having got the member's placement
+    /// wrong rather than the program having done anything, so this refuses at the first access
+    /// through the result instead of reporting anything here: a derivation is not an access, and
+    /// blaming the program for a range it never computed would be the wrong report.
+    ///
+    /// Bottom in gives bottom out without being a case of its own. Every narrowing of it but the
+    /// empty one fails the range test, because it covers nothing, and the empty one comes back
+    /// carrying the dead version it was handed.
+    #[must_use]
+    pub const fn narrowed(self, off: u64, len: u64) -> Self {
+        let (end, over) = off.overflowing_add(len);
+        if over || end > self.ext {
+            return Self::BOTTOM;
+        }
+        match self.lo.checked_add(off) {
+            Some(lo) => Self::new(lo, len, self.ver, self.meta),
+            None => Self::BOTTOM,
+        }
+    }
+}
+
+/// The names generated code is compiled against.
+///
+/// One so far, and it is the odd one of the runtime's entry points: everything else exported from
+/// this crate reads a plane or asks the allocator something, and this reads nothing at all. It is
+/// here rather than inlined into the generated code because the layout of [`Cap`] is the runtime's
+/// to know. A compiler that wrote the four words itself would be a second place that has to agree
+/// about which word is which, and the whole reason [`Cap::BYTES`] is written down twice and tested
+/// twice is that even the size is more agreement than anybody wants.
+pub mod exports {
+    use super::Cap;
+
+    /// Document 06 section 6.2.2's `cap_narrow`.
+    ///
+    /// Beside the instruction rather than in place of it, in the same shape as the rest of the
+    /// capability producers: the result went into the slot the first argument names.
+    ///
+    /// # Safety
+    ///
+    /// `out` is a writable, aligned [`Cap`] sized slot and `base` is a readable one. The two may be
+    /// the same slot, since the capability is read out of it before anything is written back.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_narrow(
+        out: *mut Cap,
+        base: *const Cap,
+        off: u64,
+        len: u64,
+    ) {
+        // SAFETY: the caller's slot, which the contract above says is readable and aligned.
+        let base = unsafe { base.read() };
+        // SAFETY: the caller's other slot, which the contract says is writable and aligned.
+        unsafe { out.write(base.narrowed(off, len)) }
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +471,43 @@ mod tests {
         assert!(!cap.covers(1024, 65));
         // A length no object could hold, which is the overflow a signed compare would let past.
         assert!(!cap.covers(1024, u64::MAX));
+    }
+
+    #[test]
+    fn narrowing_keeps_the_instance_and_moves_only_the_range() {
+        let meta = Meta::new(Class::Allocated, perm::READ | perm::WRITE, 7);
+        let cap = Cap::new(1024, 64, 2, meta);
+
+        let member = cap.narrowed(16, 8);
+        assert_eq!(member.lo, 1040);
+        assert_eq!(member.ext, 8);
+        assert!(member.covers(1040, 8));
+        assert!(!member.covers(1048, 1));
+        // The part that keeps `container_of` working. A member is in the instance its object is in,
+        // so the version and the whole metadata word come through untouched and a walk back up to
+        // the object is a question about the same instance.
+        assert_eq!(member.ver, cap.ver);
+        assert_eq!(member.meta, meta);
+
+        // The whole object and the empty range at either end, all of which are inside it.
+        assert_eq!(cap.narrowed(0, 64), cap);
+        assert_eq!(cap.narrowed(64, 0).lo, 1088);
+        assert!(!cap.narrowed(64, 0).is_bottom());
+    }
+
+    #[test]
+    fn narrowing_to_a_range_that_is_not_inside_permits_nothing() {
+        let cap = Cap::new(1024, 64, 2, Meta::new(Class::Allocated, perm::READ, 1));
+        assert!(cap.narrowed(0, 65).is_bottom());
+        assert!(cap.narrowed(64, 1).is_bottom());
+        assert!(cap.narrowed(65, 0).is_bottom());
+        // The wrap a pair of unsigned additions would otherwise let past, which is the one way a
+        // range with both ends inside the object can still be a lie.
+        assert!(cap.narrowed(8, u64::MAX).is_bottom());
+        assert!(Cap::new(u64::MAX - 8, 64, 2, Meta(0)).narrowed(16, 8).is_bottom());
+        // Bottom narrows to bottom, including the empty narrowing that passes the range test.
+        assert!(Cap::BOTTOM.narrowed(0, 1).is_bottom());
+        assert!(Cap::BOTTOM.narrowed(0, 0).is_bottom());
     }
 
     #[test]

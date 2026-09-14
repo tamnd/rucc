@@ -54,6 +54,16 @@
 //! of it. `rucc_safe_rt::cap`'s `load` is the read. It is also the only thing this pass places that
 //! reads a capability as well as making one, which is what shapes [`frames`] into two walks.
 //!
+//! And `cap_narrow`, which is `-fsafety-subobject`'s whole mechanism and the fourth box. A pointer
+//! derived from a member of a structure gets the member's bounds rather than the object's, so an
+//! overflow from one member into the next is caught where the default model would let it through.
+//! What that costs is written down in document 04 section 4.4 and document 09 section 9.4, and it is
+//! why the flag exists rather than the behaviour being on. The lowering is another call, over the
+//! same two ends `cap_load` has, and the arithmetic behind it is `rucc_safe_rt::layout::Cap`'s
+//! `narrowed`: the version and the metadata word come through untouched, because a member is in the
+//! instance its object is in, and a range that is not inside the one it was taken from comes back
+//! permitting nothing.
+//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -127,6 +137,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
             (Opcode::CapNull, Some(address)) => nulled(func, word, inst, address),
             (Opcode::CapOf, Some(address)) => allocated(func, names, inst, address),
             (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
+            (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
             (Opcode::CapStore, _) => stored(func, names, inst),
             _ => {}
         }
@@ -176,13 +187,12 @@ fn prune(func: &mut Func) {
 fn placeable(func: &Func) -> bool {
     for inst in walk(func) {
         let opcode = func[inst].opcode;
-        let known =
-            matches!(opcode, Opcode::CapNull | Opcode::CapLoad) || fresh(func, inst).is_some();
-        if opcode.makes_capability() && !known {
+        let placed = matches!(opcode, Opcode::CapNull | Opcode::CapLoad | Opcode::CapNarrow);
+        if opcode.makes_capability() && !placed && fresh(func, inst).is_none() {
             return false;
         }
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
-        if reads && !matches!(opcode, Opcode::CapStore | Opcode::CapLoad) {
+        if reads && !matches!(opcode, Opcode::CapStore | Opcode::CapLoad | Opcode::CapNarrow) {
             return false;
         }
         // A capability passed along an edge is one whose reader is a block parameter, and a block
@@ -315,6 +325,31 @@ fn read(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
     let mut args = vec![address];
     args.extend_from_slice(&func[func[inst].args]);
     let data = crate::lower::calling(func, names, "__rucc_cap_load", &[Type::PTR; 4], &[], &args);
+    let made = func.create_inst(data, &[], func.span(inst));
+    func.insert_before(made, inst);
+    func.remove_inst(inst);
+}
+
+/// `cap_narrow` becomes `__rucc_cap_narrow(slot, base, off, len)`.
+///
+/// The only one of these whose operands are not already the right types. The offset and the length
+/// are integers in whatever width the arithmetic that produced them was in, and the runtime declares
+/// both as `size_t`, so [`crate::lower::fitted`] puts them in the target's width first. The verifier
+/// makes the two agree with each other, so either one being narrow means both are.
+///
+/// The arithmetic is a call rather than four instructions here, which is the one place this pass
+/// could have written the words itself and does not. `rucc_safe_rt::layout::Cap::narrowed` is three
+/// comparisons and a copy, so nothing is being hidden from the optimizer that it could have used,
+/// and writing it here would put the field order of a capability in a second place. [`nulled`] is
+/// the exception that shows the rule: four zero words is the whole of the bottom capability whatever
+/// the field order turns out to be.
+fn narrowed(func: &mut Func, names: &mut Interner, word: Type, inst: Inst, address: Value) {
+    let [base, off, len] = func[func[inst].args] else { return };
+    let off = crate::lower::fitted(func, inst, off, word);
+    let len = crate::lower::fitted(func, inst, len, word);
+    let params = &[Type::PTR, Type::PTR, word, word];
+    let args = &[address, base, off, len];
+    let data = crate::lower::calling(func, names, "__rucc_cap_narrow", params, &[], args);
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     func.remove_inst(inst);
@@ -535,6 +570,12 @@ mod tests {
         believed(&module(&mut names), &func, &names);
     }
 
+    /// An integer constant of that width, in the block being built.
+    fn number(b: &mut Builder<'_>, value: i128, ty: Type) -> Value {
+        let imm = b.func().add_imm(Imm::int(value, ty));
+        b.value(InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
+    }
+
     /// Whether the value is the address an `alloca` gave back, which is what a slot looks like.
     fn slot(func: &Func, value: Value) -> bool {
         matches!(func[value].def, Def::Result { inst, .. } if func[inst].opcode == Opcode::Alloca)
@@ -611,6 +652,44 @@ mod tests {
         assert_eq!(count(&func, Opcode::CapNull), 0);
         assert_eq!(count(&func, Opcode::Alloca), 0);
         believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_narrowed_capability_is_one_call_with_the_two_numbers_in_the_targets_width() {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let narrow = Type::int(32);
+        let mut func = built(&mut names, |b, cap, at| {
+            let off = number(b, 16, narrow);
+            let len = number(b, 8, narrow);
+            let args = b.func().push_values(&[cap, off, len]);
+            let member = b.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
+            let args = b.func().push_values(&[member, at, at, member]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        });
+        frames(&mut func, &mut names, word);
+        assert_eq!(count(&func, Opcode::Alloca), 2);
+        assert_eq!(count(&func, Opcode::CapNarrow), 0);
+        // Both numbers were written in a width that is not the target's, so both are extended. The
+        // verifier makes the pair agree with each other, so it is never one of the two.
+        assert_eq!(count(&func, Opcode::ZExt), 2);
+        assert!(!any_capability(&func));
+
+        let call = walk(&func)
+            .into_iter()
+            .find(|&inst| func[inst].opcode == Opcode::Call)
+            .expect("the narrowing became a call");
+        let args: Vec<Value> = func[func[call].args].to_vec();
+        assert_eq!(args.len(), 4);
+        assert!(slot(&func, args[0]));
+        assert!(slot(&func, args[1]));
+        assert_eq!(func[args[2]].ty, word);
+        assert_eq!(func[args[3]].ty, word);
+
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_narrow"), "{text}");
+        believed(&unit, &func, &names);
     }
 
     #[test]
