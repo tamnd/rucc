@@ -143,7 +143,9 @@ pub enum Arg<'a> {
 /// A slot says what the object's bytes are read as rather than what the program wrote into them.
 /// An eightbyte holding two `float`s is a [`Slot::Float`] of [`Format::Double`], because eight
 /// bytes of floating point data arrive in one vector register whichever way the program divided
-/// them up and the bits are the same either way.
+/// them up and the bits are the same either way. A slot is also allowed to be wider than one
+/// eightbyte: a `_Float128` is sixteen bytes in one vector register, which is one slot of
+/// [`Format::Quad`] and not two of [`Format::Double`].
 ///
 /// The offset is carried rather than derived because it cannot be worked out from the run of
 /// slots. Two eightbytes are at zero and eight, four `float`s of a homogeneous aggregate are
