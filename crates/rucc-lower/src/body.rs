@@ -3850,6 +3850,14 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
                 None
             }
+            // A stop, which is one instruction and nothing under it. The block goes on here for
+            // the reason it goes on above, and with less at stake: what follows a stop is written
+            // and never reached, since the program is gone by the time control would have got
+            // there.
+            ExprKind::Trap => {
+                self.build(span).inst(InstData::new(Opcode::Trap), &[]);
+                None
+            }
             // A fact about the machine rather than about the program, so there is nothing under it
             // to lower first and the whole of it is the one instruction the back end writes.
             ExprKind::ThreadPointer => {
@@ -6202,6 +6210,7 @@ impl Scan<'_> {
             | ExprKind::Str(_)
             | ExprKind::Decl(_)
             | ExprKind::Unreachable
+            | ExprKind::Trap
             | ExprKind::ThreadPointer => {}
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {

@@ -854,6 +854,14 @@ impl<'a> Lowering<'a> {
                     self.hint(inst)?;
                     continue;
                 }
+                // Stopping, written by name for the first half of the barrier's reason: it
+                // computes nothing, so there is no term for a rule to replace, and what makes it
+                // right is what the operating system does with the fault rather than anything a
+                // proof over bitvectors could discharge.
+                Opcode::Trap => {
+                    self.trap(inst);
+                    continue;
+                }
                 // A compare and exchange, which is written by name because it produces two values
                 // and a rule produces one. The replacement of a rule is one term, a term names the
                 // value an instruction computes, and there is no way in that language to say that
@@ -2082,6 +2090,24 @@ impl<'a> Lowering<'a> {
         let fence = mir::Opcode::new(self.names.intern("x64.mfence"));
         self.out.build(block, fence).at(span).finish();
         Ok(())
+    }
+
+    /// The instruction a program stops on, which is one byte pair and no operands.
+    ///
+    /// `ud2` is an opcode the manual promises will never be given a meaning, so a processor that
+    /// reaches it raises the fault for an instruction it does not know, and on Linux that arrives
+    /// at the program as `SIGILL`. That is what `__builtin_trap` is for: a stop that cannot be
+    /// caught by anything the program installed for an ordinary error, cannot be returned from,
+    /// and leaves the address of the fault in the core file.
+    ///
+    /// Why not a call to `abort`. It is two bytes against a call and a relocation, it needs no
+    /// library, and it works in the places this one is written most, which are a kernel and a
+    /// freestanding program that has no `abort` to call. gcc 16.2.0 writes `ud2` here too.
+    fn trap(&mut self, inst: Inst) {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let stop = mir::Opcode::new(self.names.intern("x64.ud2"));
+        self.out.build(block, stop).at(span).finish();
     }
 
     /// One hint that an address is about to be used, which is one instruction and no promise.

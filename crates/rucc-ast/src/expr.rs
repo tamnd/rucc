@@ -168,6 +168,14 @@ pub enum Expr {
         /// The other branch.
         otherwise: ExprId,
     },
+    /// `__builtin_classify_type(operand)`, where the operand is an expression.
+    ///
+    /// The expression is never evaluated. What the builtin answers is a number naming the kind
+    /// of type its operand has, so the operand is there for its type alone, the same way the
+    /// controlling expression of a `_Generic` is.
+    ClassifyExpr(ExprId),
+    /// `__builtin_classify_type(ty)`, where the operand is a type name.
+    ClassifyType(TypeNameId),
     /// `__builtin_types_compatible_p(a, b)`.
     TypesCompatible {
         /// The first type.

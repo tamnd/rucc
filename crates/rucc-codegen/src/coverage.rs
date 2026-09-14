@@ -93,6 +93,9 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // the four instructions it is comes out of a number in the builtin's arguments, and a pattern
     // matches on an opcode and a type and could not see it.
     (Opcode::Prefetch, "`crate::lower`, as one of the four `prefetch` instructions"),
+    // Stopping, which is built here because it computes nothing for a rule to have a pattern for
+    // and because what makes it right is the operating system rather than any bitvector.
+    (Opcode::Trap, "`crate::lower`, as the `ud2` the program stops on"),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),

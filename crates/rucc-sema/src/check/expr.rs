@@ -125,6 +125,8 @@ impl Checker<'_> {
             ast::Expr::ChooseExpr { cond, then, otherwise } => {
                 self.choose_expr(cond, then, otherwise, span)
             }
+            ast::Expr::ClassifyExpr(operand) => self.classify_expr(operand, span),
+            ast::Expr::ClassifyType(ty) => self.classify_type(ty, span),
             ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
             ast::Expr::VaStart { list, last } => self.va_start(list, last, span),
@@ -642,10 +644,20 @@ impl Checker<'_> {
         if let Some(node) = self.unreachable_builtin(function, span) {
             return node;
         }
+        // The stop, which has no value and nothing under it either. In `check/builtin/trap.rs`,
+        // with why it is one instruction rather than a call to `abort`.
+        if let Some(node) = self.trap_builtin(function, span) {
+            return node;
+        }
         // The hint about an address, which is one instruction and promises nothing. In
         // `check/builtin/prefetch.rs`, with why its two optional arguments have to be constants.
         if let Some(node) = self.prefetch_builtin(function, &args, span) {
             return node;
+        }
+        // The promise about the low bits of an address, whose value is the address. In
+        // `check/builtin/aligned.rs`, with why the promise is dropped and the arguments kept.
+        if let Some(value) = self.assume_aligned_value(function, &args, span) {
+            return value;
         }
         // Where the running thread's own storage starts, which is a register read and not a call
         // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
@@ -1912,7 +1924,7 @@ impl Checker<'_> {
     /// What an argument gets where the prototype does not say what it should be: the integer
     /// promotions, and `float` widened to `double`. Both exist because of how varargs are read,
     /// and a compiler that forgets the second one passes four bytes where `va_arg` reads eight.
-    fn default_promote(&mut self, arg: ExprId) -> ExprId {
+    pub(in crate::check) fn default_promote(&mut self, arg: ExprId) -> ExprId {
         let arg = self.conv().promote(arg);
         let ty = self.tast[arg].ty;
         if self.types.kind(self.types.canonical(ty)) == TypeKind::Float(FloatKind::Float) {

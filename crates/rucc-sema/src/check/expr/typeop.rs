@@ -47,6 +47,38 @@ use crate::decl::InitEntry;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
+/// `void_type_class`, and the eleven below it are the rest of gcc's `enum type_class`.
+///
+/// The numbers matter and the gaps in them matter, because a program that asks this question
+/// compares the answer against a number it wrote out, so these are an interface and not a
+/// private numbering. The gaps are the classes that belong to gcc's other front ends, and they
+/// are named in [`Checker::type_class`] rather than given constants nothing reads.
+const VOID_CLASS: i32 = 0;
+/// `integer_type_class`, which C's `char` is in as well, since gcc holds it in an integer type.
+const INTEGER_CLASS: i32 = 1;
+/// `enumeral_type_class`, which an enumeration reaches only through the type name form.
+const ENUMERAL_CLASS: i32 = 3;
+/// `boolean_type_class`, likewise, since a `bool` argument is promoted to an `int`.
+const BOOLEAN_CLASS: i32 = 4;
+/// `pointer_type_class`.
+const POINTER_CLASS: i32 = 5;
+/// `real_type_class`, which every real floating type is in whatever its width.
+const REAL_CLASS: i32 = 8;
+/// `complex_type_class`, which `_Complex int` is in as well as the floating spellings.
+const COMPLEX_CLASS: i32 = 9;
+/// `function_type_class`, which a function reaches only through the type name form.
+const FUNCTION_CLASS: i32 = 10;
+/// `record_type_class`, which is a `struct`.
+const RECORD_CLASS: i32 = 12;
+/// `union_type_class`.
+const UNION_CLASS: i32 = 13;
+/// `array_type_class`, which an array reaches only through the type name form.
+const ARRAY_CLASS: i32 = 14;
+/// `bitint_type_class`.
+const BITINT_CLASS: i32 = 18;
+/// `vector_type_class`.
+const VECTOR_CLASS: i32 = 19;
+
 /// Which of the two measurements is being asked for.
 ///
 /// One type rather than two functions because the rules are the same rule with one word changed
@@ -663,6 +695,90 @@ impl Checker<'_> {
             }
         }
         Some((ty, offset))
+    }
+
+    /// `__builtin_classify_type(expr)`, whose operand is there for its type alone.
+    ///
+    /// The expression is checked, because a program that writes a mistake inside one should hear
+    /// about the mistake, and then it is thrown away: nothing runs. gcc does the same, which was
+    /// measured rather than assumed, with a call in the operand and a counter in the callee that
+    /// stays at zero at every optimization level.
+    ///
+    /// What the operand takes on the way is the default argument promotions, which is the whole
+    /// difference between this and the type name form. gcc declares the builtin variadic and
+    /// passes the operand to it, so an array is a pointer by the time the question is asked, a
+    /// function is a pointer, an enumeration is an `int` and a `bool` is an `int`. Four of the
+    /// twenty answers are unreachable through this form for that reason, and they are reachable
+    /// through the other one.
+    pub(super) fn classify_expr(&mut self, operand: ast::ExprId, span: Span) -> ExprId {
+        let operand = self.expr(operand);
+        if self.is_poisoned(operand) {
+            return self.poison(span);
+        }
+        let operand = self.default_promote(operand);
+        let ty = self.tast[operand].ty;
+        self.type_class(ty, span)
+    }
+
+    /// `__builtin_classify_type(type-name)`, which asks about the type as written.
+    ///
+    /// gcc grew this form in version 14 and it is the one that can name every answer, since
+    /// nothing is promoted on the way in. It is here beside `__builtin_types_compatible_p`
+    /// rather than in `check/builtin/` because what it has in common with its neighbours is the
+    /// shape: a type name in parentheses that the parser has to read, and a constant out.
+    pub(super) fn classify_type(&mut self, ty: ast::TypeNameId, span: Span) -> ExprId {
+        let ty = self.type_name(ty);
+        self.type_class(ty, span)
+    }
+
+    /// The number naming what kind of type this is, which is gcc's `enum type_class`.
+    ///
+    /// The numbers are gcc's and a program compares against them by writing them out, since the
+    /// enumeration is not in any header a program includes, so they are part of the interface and
+    /// not an implementation detail. `execute/20040709-1.c` in the torture suite is one that does,
+    /// with `== 8` for a real floating member.
+    ///
+    /// Four classes have nothing here that can produce them. `char_type_class` is not one of
+    /// them: gcc reaches it from C++ and from Fortran and holds C's `char` in an `INTEGER_TYPE`,
+    /// so `__builtin_classify_type(char)` is the integer answer there too. The four are the
+    /// reference and the method, which are C++, `string_type_class`, which is Fortran, and
+    /// `no_type_class`, which needs a type this compiler has no name for: `nullptr` here is a
+    /// `void *` and answers the pointer class, where gcc gives it its own type and answers minus
+    /// one.
+    fn type_class(&mut self, ty: TypeId, span: Span) -> ExprId {
+        let class = self.class_of(ty);
+        let int = self.int();
+        self.constant(Const::Int(i128::from(class)), int, span)
+    }
+
+    /// Which class one type is in, with the sugar and the qualifiers already gone.
+    fn class_of(&mut self, ty: TypeId) -> i32 {
+        // `_Atomic int` is the integer class, so the atomic wrapper comes off the same way a
+        // typedef and a qualifier do. It is a type here rather than a qualifier, which is why it
+        // needs a case of its own rather than falling out of the canonical form.
+        let mut canonical = self.types.canonical(ty);
+        while let TypeKind::Atomic(inner) = self.types.kind(canonical) {
+            canonical = self.types.canonical(inner);
+        }
+        match self.types.kind(canonical) {
+            TypeKind::Void => VOID_CLASS,
+            TypeKind::Int(_) => INTEGER_CLASS,
+            TypeKind::Enum(_) => ENUMERAL_CLASS,
+            TypeKind::Bool => BOOLEAN_CLASS,
+            TypeKind::Pointer(_) => POINTER_CLASS,
+            TypeKind::Float(_) => REAL_CLASS,
+            TypeKind::Complex(_) => COMPLEX_CLASS,
+            TypeKind::Function(_) => FUNCTION_CLASS,
+            TypeKind::Record(record) => {
+                let union = self.types.record_info(record).kind == rucc_types::RecordKind::Union;
+                if union { UNION_CLASS } else { RECORD_CLASS }
+            }
+            TypeKind::Array { .. } => ARRAY_CLASS,
+            TypeKind::BitInt { .. } => BITINT_CLASS,
+            TypeKind::Vector { .. } => VECTOR_CLASS,
+            // Both of these have been taken off above and neither can arrive here.
+            TypeKind::Atomic(_) | TypeKind::Typedef { .. } => INTEGER_CLASS,
+        }
     }
 
     /// `__builtin_types_compatible_p(a, b)`, which is a constant the preprocessor cannot ask.
@@ -1788,6 +1904,88 @@ mod tests {
                 "request for member 'b' in something not a structure or union",
             ]
         );
+    }
+
+    /// Every number here was read off gcc 16.2.0 on x86-64 Linux rather than off a header, since
+    /// the enumeration is not in one a program can include and the numbers are what a program
+    /// writes out.
+    #[test]
+    fn classify_type_answers_gcc_s_number_for_every_kind_of_type() {
+        let mut f = Fixture::new();
+        let tag = f.name("S");
+        let un = f.name("U");
+        let enum_tag = f.name("E");
+        let width = f.name("width_t");
+        let mut c = f.checker();
+
+        let int = c.types.int(IntKind::Int);
+        let void = c.types.void();
+        let character = c.types.int(IntKind::Char);
+        let boolean = c.types.boolean();
+        let pointer = c.types.pointer(int);
+        let double = c.types.float(FloatKind::Double);
+        let complex = c.types.complex_float(FloatKind::Double);
+        let bits = c.types.bit_int(true, 7);
+        let vector = c.types.vector(int, 4);
+        let array = c.types.array(int, ArrayLen::Fixed(4));
+        let atomic = c.types.atomic(int);
+        let sugar = c.types.typedef(width, int);
+        let signature =
+            FunctionType { ret: int, params: Vec::new(), variadic: false, prototyped: true };
+        let function = c.types.function(signature);
+        let record = tagged(&mut c, tag, &[]);
+        let union = union_of(&mut c, un, &[]);
+        let enumeration = {
+            let id = c.types.declare_enum(Some(enum_tag));
+            c.types.complete_enum(id, int, false);
+            c.types.enumeration(id)
+        };
+
+        assert_eq!(c.class_of(void), 0);
+        assert_eq!(c.class_of(int), 1);
+        // C's `char` is an integer type in gcc as well, so the char class is one of the four
+        // this compiler can never answer with rather than the answer for this.
+        assert_eq!(c.class_of(character), 1);
+        assert_eq!(c.class_of(enumeration), 3);
+        assert_eq!(c.class_of(boolean), 4);
+        assert_eq!(c.class_of(pointer), 5);
+        assert_eq!(c.class_of(double), 8);
+        assert_eq!(c.class_of(complex), 9);
+        assert_eq!(c.class_of(function), 10);
+        assert_eq!(c.class_of(record), 12);
+        assert_eq!(c.class_of(union), 13);
+        assert_eq!(c.class_of(array), 14);
+        assert_eq!(c.class_of(bits), 18);
+        assert_eq!(c.class_of(vector), 19);
+        // The two wrappers that are not a kind of type in their own right.
+        assert_eq!(c.class_of(atomic), 1);
+        assert_eq!(c.class_of(sugar), 1);
+    }
+
+    /// The two forms of the operator, and the promotions that make them answer differently.
+    #[test]
+    fn the_expression_form_of_classify_type_promotes_and_the_type_form_does_not() {
+        let mut f = Fixture::new();
+        let n = f.name("n");
+        let object = f.expr(ast::Expr::Name(n));
+        let bound = fixed(&mut f, 4);
+        let as_written = named(&mut f, &[BuiltinSet::INT], &[bound]);
+        let of_expr = f.expr(ast::Expr::ClassifyExpr(object));
+        let of_type = f.expr(ast::Expr::ClassifyType(as_written));
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let array = c.types.array(int, ArrayLen::Fixed(4));
+        c.declare_object(n, array, Span::DUMMY);
+        let promoted = c.check_expr(of_expr);
+        let written = c.check_expr(of_type);
+
+        // The array decays on the way into a variadic parameter, so the expression form cannot
+        // answer the array class and the type name form is the only one that can.
+        assert_eq!(folded(&c, promoted), 5);
+        assert_eq!(folded(&c, written), 14);
+        assert_eq!(typed(&c, promoted), "int");
+        assert!(messages(&c).is_empty());
     }
 
     #[test]

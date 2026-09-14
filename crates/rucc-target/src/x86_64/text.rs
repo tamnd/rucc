@@ -631,6 +631,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("prefetch_t2", &[spell("prefetcht2", &[Mem])]),
     ("prefetch_t1", &[spell("prefetcht1", &[Mem])]),
     ("prefetch_t0", &[spell("prefetcht0", &[Mem])]),
+    // The instruction a program stops on. No operands and one spelling, and the name is the whole
+    // of it.
+    ("ud2", &[spell("ud2", &[])]),
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),
