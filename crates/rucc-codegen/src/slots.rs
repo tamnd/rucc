@@ -43,6 +43,23 @@
 //! answered and the types are gone by here, but one whose bytes something can reach at a moment
 //! liveness does not know about.
 //!
+//! # Where a local is wanted is not where its address is live
+//!
+//! Knowing which instructions reach a local is only half of it. The address that reaches it is a
+//! value and the object is not, so an address register that dies right after the store through it
+//! says nothing about how long those bytes have to go on holding what was stored. A local written
+//! at one point and read at another has to hold its contents through everything in between, however
+//! little of what is in between mentions the local at all.
+//!
+//! So the area of a local is worked out as its own question over the control flow graph: its bytes
+//! matter at every point that has a touch behind it and a touch in front of it. A point with
+//! nothing in front is one where the object is finished with, and a point with nothing behind is
+//! one where it holds nothing anybody may read, since the contents of a local nothing has written
+//! yet are not contents. [`areas`] is that, and the two halves of it are reachability over the
+//! graph rather than over the line the function was laid out in. Over the line would be wrong for a
+//! loop: a local written at the bottom of a body and read at the top of the next turn is one whose
+//! bytes matter across the header too, and the header is laid out before either of the two touches.
+//!
 //! # The moves count too
 //!
 //! Where a spilled value is live is not quite everywhere its slot is touched. The store that fills
@@ -128,15 +145,24 @@ impl Slots {
     ///
     /// `reach` is what [`reach`] said about this function before the allocator ran, `widths` is how
     /// many bytes a slot of each of the allocation's spill slots takes, and `locals` is the
-    /// function's own objects in the order the lowering recorded them.
+    /// function's own objects in the order the lowering recorded them. `func` is the function the
+    /// allocator has finished with, which is asked for the shape of its control flow and nothing
+    /// else: the rewrite took the values away but it left every block and every edge where it was.
     #[must_use]
-    pub fn share(reach: &Reach, allocation: &Allocation, locals: &[Local], widths: &[u32]) -> Self {
+    pub fn share(
+        func: &Func,
+        reach: &Reach,
+        allocation: &Allocation,
+        locals: &[Local],
+        widths: &[u32],
+    ) -> Self {
         if locals.len() + widths.len() > CROWDED {
             return Self::apart(locals, widths);
         }
         let mut wants = Vec::with_capacity(locals.len() + widths.len());
+        let mut reached = areas(func, reach, &allocation.live, &allocation.order);
         for (local, &Local { size, align }) in locals.iter().enumerate() {
-            let area = reach.area(local, &allocation.live, &allocation.order);
+            let area = reached.get_mut(local).and_then(Option::take);
             wants.push(Want { what: What::Local(local), size, align, area });
         }
         let held = spilled(allocation, widths.len());
@@ -275,17 +301,18 @@ pub struct Reach {
 }
 
 impl Reach {
-    /// Everywhere a local's bytes may be reached, or `None` for one that shares with nothing.
-    fn area(&self, local: usize, live: &Live, order: &Order) -> Option<Vec<Range>> {
+    /// Every point one local is touched at, which is where its address is live and where an
+    /// instruction that swallowed the address stands.
+    fn touches(&self, local: usize, live: &Live, order: &Order) -> Option<Vec<Range>> {
         let held = self.through.get(local)?.as_ref()?;
-        let mut pieces: Vec<Range> = Vec::new();
+        let mut spots: Vec<Range> = Vec::new();
         for &reg in &held.regs {
-            pieces.extend(live.area(reg).into_iter().flat_map(Area::pieces));
+            spots.extend(live.area(reg).into_iter().flat_map(Area::pieces));
         }
         for &inst in &held.at {
-            pieces.push(Range { start: order.early(inst), end: order.late(inst) });
+            spots.push(Range { start: order.early(inst), end: order.late(inst) });
         }
-        Some(merged(pieces))
+        Some(spots)
     }
 
     /// Whether a local may share its bytes with anything, which is what the tests ask.
@@ -293,6 +320,144 @@ impl Reach {
     pub fn shares(&self, local: usize) -> bool {
         self.through.get(local).is_some_and(Option::is_some)
     }
+}
+
+/// Everywhere the bytes of each local have to go on holding what was put in them.
+///
+/// A point counts if a touch of that local can have happened before it and another can still
+/// happen after it. Before is reachability forward through the graph from the blocks that touch
+/// the local, after is the same walk backwards, and the bytes matter where the two meet. See the
+/// note in the module documentation on why this is asked over the graph and not over the line the
+/// function was laid out in.
+///
+/// A local this pass could not follow the address of comes back `None`, which is the answer that
+/// shares with nothing.
+fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<Vec<Range>>> {
+    let blocks = order.blocks();
+    let count = reach.through.len();
+    let words = count.div_ceil(64);
+
+    // Where each block starts, which is ascending, so the block a point is in is a search.
+    let starts: Vec<u32> = blocks.iter().map(|&block| order.start(block)).collect();
+    let holding = |point: u32| starts.partition_point(|&start| start <= point).saturating_sub(1);
+
+    // Which locals each block touches, as bits for the walk and as a range for the answer.
+    let mut touched = vec![vec![0u64; words]; blocks.len()];
+    let mut inside: Vec<Vec<(usize, Range)>> = vec![Vec::new(); blocks.len()];
+    for local in 0..count {
+        let Some(spots) = reach.touches(local, live, order) else { continue };
+        for spot in spots {
+            for at in holding(spot.start)..=holding(spot.end) {
+                let block = blocks[at];
+                let start = spot.start.max(order.start(block));
+                let end = spot.end.min(order.end(block));
+                touched[at][local / 64] |= 1 << (local % 64);
+                inside[at].push((local, Range { start, end }));
+            }
+        }
+    }
+
+    // One range per block per local, from the first touch in the block to the last. A block runs
+    // top to bottom, so whatever sits between two touches of the same local is between them in the
+    // run as well, and the bytes have to have held what they hold all the way through it.
+    for spots in inside.iter_mut() {
+        spots.sort_unstable_by_key(|&(local, Range { start, .. })| (local, start));
+        let mut kept = 0;
+        for at in 1..spots.len() {
+            if spots[at].0 == spots[kept].0 {
+                spots[kept].1.end = spots[kept].1.end.max(spots[at].1.end);
+            } else {
+                kept += 1;
+                spots[kept] = spots[at];
+            }
+        }
+        spots.truncate(spots.len().min(kept + 1));
+    }
+
+    // The graph, by position in the line rather than by block, because everything else here is.
+    let mut place = vec![0usize; func.block_count()];
+    for (at, &block) in blocks.iter().enumerate() {
+        place[block.index()] = at;
+    }
+    let mut ahead: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+    let mut behind: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+    for (at, &block) in blocks.iter().enumerate() {
+        for call in &func[block].succs {
+            let to = place[call.block.index()];
+            ahead[at].push(to);
+            behind[to].push(at);
+        }
+    }
+
+    let written = spread(&behind, &touched, words, true);
+    let read = spread(&ahead, &touched, words, false);
+
+    let mut out = vec![None; count];
+    for (local, pieces) in out.iter_mut().enumerate() {
+        if reach.shares(local) {
+            *pieces = Some(Vec::new());
+        }
+    }
+    for (at, &block) in blocks.iter().enumerate() {
+        let whole = Range { start: order.start(block), end: order.end(block) };
+        for word in 0..words {
+            let mut bits = written[at][word] & read[at][word];
+            while bits != 0 {
+                let local = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(pieces) = out[local].as_mut() {
+                    pieces.push(whole);
+                }
+            }
+        }
+        // A block that touches the local is covered from the touch, or from the top of the block
+        // if something above already wrote it, and to the touch, or to the bottom if something
+        // below still reads it.
+        for &(local, spot) in &inside[at] {
+            let held = |bits: &[Vec<u64>]| bits[at][local / 64] & (1 << (local % 64)) != 0;
+            let start = if held(&written) { whole.start } else { spot.start };
+            let end = if held(&read) { whole.end } else { spot.end };
+            if let Some(pieces) = out[local].as_mut() {
+                pieces.push(Range { start, end });
+            }
+        }
+    }
+    for pieces in out.iter_mut().flatten() {
+        *pieces = merged(std::mem::take(pieces));
+    }
+    out
+}
+
+/// Which locals a touch of can reach the start of each block, following the given edges.
+///
+/// One walk stands for both directions. Handed the edges into each block it says which locals were
+/// touched somewhere above, and handed the edges out of each block it says which are touched
+/// somewhere below. The sweep goes the way the edges point so that a straight line settles in one
+/// pass and only a loop costs a second.
+fn spread(
+    edges: &[Vec<usize>],
+    touched: &[Vec<u64>],
+    words: usize,
+    forward: bool,
+) -> Vec<Vec<u64>> {
+    let mut out = vec![vec![0u64; words]; edges.len()];
+    let mut going = true;
+    while going {
+        going = false;
+        for at in 0..edges.len() {
+            let at = if forward { at } else { edges.len() - 1 - at };
+            let mut row = std::mem::take(&mut out[at]);
+            for &from in &edges[at] {
+                for word in 0..words {
+                    let had = row[word];
+                    row[word] |= out[from][word] | touched[from][word];
+                    going |= row[word] != had;
+                }
+            }
+            out[at] = row;
+        }
+    }
+    out
 }
 
 /// Everywhere one local is reached from.
@@ -605,7 +770,7 @@ mod tests {
         building.through(block, second);
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 1, "one run of bytes for the two of them");
         assert_eq!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 1);
@@ -622,7 +787,7 @@ mod tests {
         building.through(block, second);
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
         assert_ne!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 0);
@@ -642,7 +807,7 @@ mod tests {
         let (reach, allocation) = building.allocate(1, 2);
 
         assert_eq!(allocation.assignment.spilled(), 1, "one value went to the stack");
-        let plan = Slots::share(&reach, &allocation, &[WORD], &[8]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD], &[8]);
         assert_eq!(plan.cells().len(), 1);
         assert_eq!(plan.local(0), plan.slot(0));
     }
@@ -660,7 +825,7 @@ mod tests {
 
         assert!(!reach.shares(0), "an address that got away");
         assert!(reach.shares(1));
-        let plan = Slots::share(&reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
         assert_ne!(plan.local(0), plan.local(1));
     }
@@ -680,6 +845,54 @@ mod tests {
     }
 
     #[test]
+    fn a_local_touched_again_later_keeps_its_bytes_over_everything_in_between() {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.through(block, first);
+        // Another local in the stretch between the two touches of the first one. Nothing mentions
+        // the first local in here, which is exactly the case: it is not being read, but what it
+        // holds is still wanted below, so these cannot be the same bytes.
+        let second = building.local(block, 1);
+        building.through(block, second);
+        // The first local again, reached through an address worked out a second time.
+        let again = building.local(block, 0);
+        building.through(block, again);
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+        assert_eq!(plan.saved(), 0);
+    }
+
+    #[test]
+    fn a_local_touched_in_a_loop_keeps_its_bytes_over_the_rest_of_the_loop() {
+        let (mut building, block) = Building::new();
+        let header = building.func.create_block();
+        let body = building.func.create_block();
+        building.func.build(block, building.nop).finish();
+        building.func.succs_mut(block).push(BlockCall::to(header));
+
+        // The header is laid out before the body and touches a local of its own.
+        let held = building.local(header, 1);
+        building.through(header, held);
+        building.func.build(header, building.nop).finish();
+        building.func.succs_mut(header).push(BlockCall::to(body));
+
+        // The body touches the other one, every turn of the loop, and the header runs between one
+        // turn and the next. So the body's local is wanted over the header as well, which is a
+        // thing only the edges say: in the line the function is laid out in, the header is above
+        // the only touch there is.
+        let addr = building.local(body, 0);
+        building.through(body, addr);
+        building.func.build(body, building.nop).finish();
+        building.func.succs_mut(body).push(BlockCall::to(header));
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    #[test]
     fn an_address_a_second_address_computation_reads_is_the_same_local_followed_on() {
         let (mut building, block) = Building::new();
         let first = building.local(block, 0);
@@ -694,7 +907,7 @@ mod tests {
         let (reach, allocation) = building.allocate(2, 4);
 
         assert!(reach.shares(0), "a derived address is still an address into this frame");
-        let plan = Slots::share(&reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2, "the two locals are wanted at once after all");
     }
 
@@ -709,7 +922,7 @@ mod tests {
 
         let narrow = Local { size: 4, align: 4 };
         let wide = Local { size: 16, align: 16 };
-        let plan = Slots::share(&reach, &allocation, &[narrow, wide], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[narrow, wide], &[]);
         assert_eq!(plan.cells(), [Cell { size: 16, align: 16 }]);
         assert_eq!(plan.local(0), plan.local(1));
     }
@@ -724,7 +937,7 @@ mod tests {
         // A list with nothing on it for a local is this pass having no account of it rather than
         // a local nothing touches, so it keeps bytes of its own.
         assert!(!reach.shares(1));
-        let plan = Slots::share(&reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
     }
 
@@ -754,7 +967,7 @@ mod tests {
         let locals = [Local { size: 64, align: 8 }; 2];
         let base = Layout { leaf: false, locals: &locals, ..Layout::new(&SYSV, REGS) };
         let apart = Frame::of(&building.func, &allocation, &base);
-        let plan = Slots::share(&reach, &allocation, &locals, &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &locals, &[]);
         let layout = Layout { share: Some(&plan), ..base };
         let together = Frame::of(&building.func, &allocation, &layout);
 
@@ -797,7 +1010,7 @@ mod tests {
         let (reach, allocation) = building.allocate(1, 4);
 
         let locals = vec![WORD; CROWDED + 1];
-        let plan = Slots::share(&reach, &allocation, &locals, &[]);
+        let plan = Slots::share(&building.func, &reach, &allocation, &locals, &[]);
         assert_eq!(plan.cells().len(), locals.len());
         assert_eq!(plan.saved(), 0);
     }

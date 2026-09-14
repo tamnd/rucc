@@ -467,7 +467,7 @@ pub fn compile_recording(
     // and because a spill slot cannot be shared with a local until it is known there is one.
     let share = reach.map(|reach| {
         let widths = frame::widths(&layout, &allocation);
-        Slots::share(&reach, &allocation, &stack.locals, &widths)
+        Slots::share(&func, &reach, &allocation, &stack.locals, &widths)
     });
     let layout = Layout { share: share.as_ref(), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
