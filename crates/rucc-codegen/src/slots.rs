@@ -55,10 +55,10 @@
 //! matter at every point that has a touch behind it and a touch in front of it. A point with
 //! nothing in front is one where the object is finished with, and a point with nothing behind is
 //! one where it holds nothing anybody may read, since the contents of a local nothing has written
-//! yet are not contents. [`areas`] is that, and the two halves of it are reachability over the
-//! graph rather than over the line the function was laid out in. Over the line would be wrong for a
-//! loop: a local written at the bottom of a body and read at the top of the next turn is one whose
-//! bytes matter across the header too, and the header is laid out before either of the two touches.
+//! yet are not contents. The two halves of that question are reachability over the graph rather
+//! than over the line the function was laid out in. Over the line would be wrong for a loop: a
+//! local written at the bottom of a body and read at the top of the next turn is one whose bytes
+//! matter across the header too, and the header is laid out before either of the two touches.
 //!
 //! # The moves count too
 //!
