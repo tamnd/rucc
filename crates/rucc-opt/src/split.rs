@@ -755,11 +755,16 @@ fn leaving(func: &Func, plan: &Plan) -> bool {
 /// be written again there is arithmetic to copy as well, and the values that arithmetic rests on are
 /// the operands of the instructions being copied, since [`remade`] rewrites the header's parameters
 /// and leaves everything else naming what it named inside the loop.
+///
+/// The gap a sweep leaves in front of its first access counts too. [`spare`] subtracts it off the
+/// room it has, and it is worked out from a value of its own, so a guard names it just as surely as
+/// it names the address the sweep starts from.
 fn mentions(func: &Func, plan: &Plan) -> Vec<Value> {
     let mut found = Vec::new();
     for sweep in &plan.sweeps {
         found.extend(sweep.base.value());
         found.extend(sweep.apart.value);
+        found.extend(sweep.ahead.and_then(|ahead| ahead.value));
         if let Walk::Again { at, .. } = sweep.walk {
             found.push(at);
         }
@@ -2714,6 +2719,68 @@ mod tests {
         (names, func, vec![entry, head, more, over, next, again, done])
     }
 
+    /// The same two loops, with the second one carrying a derivation check rather than a bounds
+    /// check.
+    ///
+    /// The check names the array, which stands still, so the window goes on the array and the guard
+    /// subtracts how far along the walk begins. That gap is where the first loop stopped, which is
+    /// the first loop's own counter, and it is the one way a plan names a value without the value
+    /// being either the address the sweep starts from or the displacement it carries. `trailing` is
+    /// where that happens and `bench/safety/a-strided-column-sum.c` is the shape it was written for.
+    fn one_after_another_with_a_gap() -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let params = [Type::PTR, Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let more = func.create_block();
+        let over = func.create_block();
+        let next = func.create_block();
+        let again = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let limit = func.append_param(entry, Type::int(64));
+        let first = func.append_param(head, Type::int(64));
+        let second = func.append_param(next, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let args = build.func().push_values(&[array, first]);
+        let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        checking(&mut build, at, byte());
+        let read = build.load(Type::int(8), at, byte(), Flags::NONE);
+        let nothing = build.iconst(Type::int(8), 0);
+        let stop = build.icmp(IntPred::Eq, read, nothing);
+        build.br_if(stop, over, &[], more, &[]);
+
+        let mut build = Builder::new(&mut func, more);
+        let one = build.iconst(Type::int(64), 1);
+        let step = build.binary(Opcode::Add, first, one, Flags::NSW);
+        build.jump(head, &[step]);
+
+        Builder::new(&mut func, over).jump(next, &[first]);
+
+        let mut build = Builder::new(&mut func, next);
+        let args = build.func().push_values(&[array, second]);
+        let here = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let seen = build.load(Type::int(8), here, byte(), Flags::NONE);
+        let blank = build.iconst(Type::int(8), 32);
+        let over_too = build.icmp(IntPred::Eq, seen, blank);
+        build.br_if(over_too, done, &[], again, &[]);
+        deriving(&mut func, next, array, here);
+
+        let mut build = Builder::new(&mut func, again);
+        let one = build.iconst(Type::int(64), 1);
+        let onward = build.binary(Opcode::Add, second, one, Flags::NSW);
+        let go = build.icmp(IntPred::Slt, onward, limit);
+        build.br_if(go, next, &[onward], done, &[]);
+
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, more, over, next, again, done])
+    }
+
     /// Builds a loop with a loop inside it, each of them reading the array it was handed.
     ///
     /// The outer loop reads one element per outer iteration, which is a check in its own blocks. The
@@ -3019,6 +3086,23 @@ mod tests {
         // not written down yet. Without the refusal the verifier reports the guard's address as a
         // value that arrives at a block and does not reach the use, which is what SQLite hit.
         let (mut names, mut func, _) = one_after_another();
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+
+        let stats = Split.run(&mut func, &mut an, &mut Fuel::unlimited());
+        sound(&func, &mut names);
+        assert_eq!(stats.count(Kind::Missed, super::WANTED_ELSEWHERE), 1);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+    }
+
+    #[test]
+    fn a_loop_whose_value_the_next_loops_guard_subtracts_is_left_alone_as_well() {
+        // The same refusal reached through the gap rather than through the address. The second
+        // loop's window goes on the array and its guard takes off how far along the walk begins,
+        // which is the first loop's counter, and nothing else in the plan names that value. Missing
+        // it was tamnd/rucc#1248: the first loop was split, its counter came out as one value per
+        // half, and the guard that had not been written yet named the one that does not reach it.
+        let (mut names, mut func, _) = one_after_another_with_a_gap();
         let mut an = crate::machine::fixtures::analyses();
         Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
 
