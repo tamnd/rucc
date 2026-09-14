@@ -72,13 +72,15 @@
 //! returns from. After it every register is physical and every offset into the frame is a
 //! constant, which is the point at which a function is one an encoder could read.
 //!
-//! [`copies`] is the one thing that runs between those two and it takes instructions out rather
-//! than putting them in. The allocator decides one value at a time, so it writes moves that put a
-//! value where the machine has it already: a word written out and read straight back into the
-//! register it came out of, a slot read twice into the same register with nothing writing either
-//! in between, a copy of a register into one that already holds what it holds. Only the
-//! allocator's own moves are touched, which is why [`finish`] hands back which instruction each of
-//! them became.
+//! [`copies`] is the one thing that runs between those two and it makes the function shorter and
+//! cheaper rather than longer. The allocator decides one value at a time, so it writes moves that
+//! put a value where the machine has it already: a word written out and read straight back into
+//! the register it came out of, a slot read twice into the same register with nothing writing
+//! either in between, a copy of a register into one that already holds what it holds. Those go.
+//! The near miss of the same thing, a slot read into one register while another already holds that
+//! word, stays an instruction and becomes a copy between the two registers, which is cheaper than
+//! going to the frame for a word that never left. Only the allocator's own moves are touched,
+//! which is why [`finish`] hands back which instruction each of them became.
 //!
 //! [`layout`] runs last and is what makes a function something a machine could run rather than
 //! something a printer could print. It puts the blocks in the order they are laid out in and then

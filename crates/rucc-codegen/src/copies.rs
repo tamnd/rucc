@@ -25,6 +25,11 @@
 //! seen from different sides, which is why they are one pass rather than four: a move is dead when
 //! what it writes to and what it reads from hold the same value already.
 //!
+//! The near miss of the same thing is a load of a slot into a register while a different register
+//! holds that word. Nothing can be removed there, since the word does have to arrive in the
+//! register the load names, but it can come out of the register that has it rather than out of the
+//! frame. That is the second thing this does and the rest of the same knowledge answers it.
+//!
 //! # Why it is not a rule over the instructions
 //!
 //! A store followed by a load of the same address is not on its own a dead load. The same pair of
@@ -83,6 +88,31 @@
 //! in the middle of anything, and so does the instruction that takes room for an array whose size
 //! is not known until it runs.
 //!
+//! # When a load becomes a copy
+//!
+//! A slot read into a register while no register holds that word is a load and has to stay one. A
+//! slot read into one register while another register holds the same word is a load a copy would
+//! do instead, and a copy is the cheaper of the two on every machine here: it is fewer bytes, it
+//! does not go near the memory unit, and on a machine that renames its registers it often costs
+//! nothing to run at all.
+//!
+//! Which instruction that copy is is the target's answer and not this pass's, and it is the same
+//! answer [`crate::finish`] read to write the load. A class of registers is moved between two
+//! registers by one named instruction and between a register and the frame by two others, and the
+//! three are named together for that class, so asking for the one is asking the description that
+//! produced the other.
+//!
+//! Being named together is also what makes the widths agree. Every entry in the map was put there
+//! by one of the allocator's own moves and every one of those moves a whole register of its class,
+//! so two places holding one value hold it in all of their bytes rather than in a low part that a
+//! wider copy would read past.
+//!
+//! Where several registers hold the word, the lowest numbered of them is the one written. Any of
+//! them would be correct, and the map is a hash map, so writing whichever came out of it first
+//! would make the assembly depend on where the addresses happened to land. A compiler whose output
+//! moves between two runs of one input is one nobody can compare anything against, which is a
+//! worse thing to be than one that picks the second best register.
+//!
 //! # Why it does not go through the change framework
 //!
 //! Because the one question [`crate::changes`] would answer about a removal is one that cannot be
@@ -99,50 +129,81 @@
 //! way to be told, and section 37.2's framework is about the machine's description of itself
 //! rather than about the allocator's, so this keeps its own.
 //!
+//! The framework's own question, whether the target has an instruction of the shape a pass
+//! proposes, is one the rewrite does not have to ask either. The copy it writes is the instruction
+//! the description names for moving a register of that class, so it is an instruction the target
+//! has by where the name came from rather than by a lookup afterwards.
+//!
 //! # What it does not do
 //!
-//! A move that could be a cheaper move is left as it is. A slot read into a register while another
-//! register holds the same word is a load that a copy would do instead, and a copy is the cheaper
-//! of the two on every machine here. Writing one means naming the instruction that copies a
-//! register of that class at that width, which is a question for the description rather than for
-//! the map, and it is the next piece of section 37.4's pass rather than part of this one.
-//!
 //! Nothing is propagated. A read of a register that another register is known to equal stays a
-//! read of the register it names, so this takes moves out and never rewrites what is left.
+//! read of the register it names. The two things this does are both to one of the allocator's own
+//! moves and to nothing else, for the reason the rest of this is built on: what makes an edit here
+//! safe is that the allocator wrote the instruction and owns the slot, and an instruction a
+//! lowering rule wrote is neither.
+//!
+//! Nothing crosses a block, on either half.
 
 use std::collections::HashMap;
 
 use rucc_base::Interner;
-use rucc_mir::{Block, Func, Inst};
+use rucc_mir::{Block, Func, Inst, Opcode, Reg};
 use rucc_regalloc::assign::Place;
-use rucc_target::{CallRegs, MachineInsts, PhysReg, RegClass};
+use rucc_regalloc::rewrite::Edit;
+use rucc_target::{CallRegs, FrameInsts, MachineInsts, PhysReg, RegClass};
 
 use crate::finish::Moves;
 
-/// Takes out every move of the allocator's that puts a value where it is already, and says how
-/// many.
-pub fn dead(
+/// What one function came to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Cleaned {
+    /// Moves taken out, because the place each wrote held what it was moving already.
+    pub gone: usize,
+    /// Loads out of the frame written as copies instead, because a register held the word.
+    pub copied: usize,
+}
+
+/// Takes out every move of the allocator's that puts a value where it is already, and reads the
+/// rest out of a register wherever one has the word the frame does.
+///
+/// # Panics
+///
+/// Panics on a move of a class the target did not say how to move, which is the same frame
+/// description [`crate::finish`] wrote the move out of and so is the caller handing this a
+/// function and a target that were not worked out from each other.
+pub fn clean(
     func: &mut Func,
     moves: &Moves,
     machine: &MachineInsts,
+    frame: &FrameInsts,
     conv: &CallRegs,
-    names: &Interner,
-) -> usize {
+    names: &mut Interner,
+) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
-    let mut taken = 0;
+    let mut cleaned = Cleaned::default();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         let mut holds = Holds::default();
         let mut gone: Vec<Inst> = Vec::new();
         for inst in insts {
-            // One of the allocator's own moves, which is the only kind of instruction this takes
-            // out and the only kind it learns anything from.
+            // One of the allocator's own moves, which is the only kind of instruction this edits
+            // and the only kind it learns anything from.
             if let Some(edit) = moves.at(inst) {
                 if holds.same(edit.class, edit.mov.to, edit.mov.from) {
                     gone.push(inst);
-                } else {
-                    holds.moved(edit.class, edit.mov.to, edit.mov.from);
+                    cleaned.gone += 1;
+                    continue;
                 }
+                // A load of a word a register has. The copy goes where the load was and the load
+                // goes, and what arrives in the register is the same either way, so the map is
+                // told about the move below whichever of the two instructions is left.
+                if let Some((to, from)) = instead(&holds, &edit) {
+                    let copy = copy(func, names, frame, edit.class, to, from);
+                    func.insert_before(inst, copy);
+                    gone.push(inst);
+                    cleaned.copied += 1;
+                }
+                holds.moved(edit.class, edit.mov.to, edit.mov.from);
                 continue;
             }
             let name = names.resolve(func[inst].opcode.name());
@@ -165,15 +226,39 @@ pub fn dead(
         }
         for inst in gone {
             func.remove_inst(inst);
-            taken += 1;
         }
     }
-    taken
+    cleaned
 }
 
 /// Whether that register is one the frame is addressed through, so writing it moves every slot.
 fn addresses(conv: &CallRegs, class: RegClass, reg: PhysReg) -> bool {
     class == conv.int_class && (reg == conv.stack_pointer || reg == conv.frame_pointer)
+}
+
+/// The two registers a copy would be written between, where this edit is a load out of the frame
+/// of a word some register holds.
+///
+/// `None` for every other edit. A store has nowhere else to go, since the word has to reach the
+/// frame and no machine here writes the frame from anywhere but a register, and a copy between two
+/// registers is already the instruction this would be turning something into.
+fn instead(holds: &Holds, edit: &Edit) -> Option<(PhysReg, PhysReg)> {
+    let (Place::Reg(to), Place::Slot(_)) = (edit.mov.to, edit.mov.from) else { return None };
+    Some((to, holds.register(edit.class, edit.mov.from)?))
+}
+
+/// The instruction that copies a register of that class into another on this target.
+fn copy(
+    func: &mut Func,
+    names: &mut Interner,
+    frame: &FrameInsts,
+    class: RegClass,
+    to: PhysReg,
+    from: PhysReg,
+) -> Inst {
+    let moves = frame.moves(class).expect("a class the target says how to move");
+    let mov = Opcode::new(names.intern(&format!("{}{}", frame.prefix, moves.mov)));
+    func.build_loose(mov).def(Reg::physical(to), class).uses(Reg::physical(from), class).finish()
 }
 
 /// Which places are known to hold the same value as each other, over one block.
@@ -197,6 +282,24 @@ impl Holds {
     fn same(&self, class: RegClass, to: Place, from: Place) -> bool {
         let read = self.what.get(&(class.number(), from));
         read.is_some() && read == self.what.get(&(class.number(), to))
+    }
+
+    /// A register known to hold what that place holds, and the lowest numbered of them where more
+    /// than one does.
+    ///
+    /// Lowest numbered rather than whichever the map hands back first, because the map is a hash
+    /// map and which entry comes out of one first is a fact about addresses. Reading it would make
+    /// the assembly of one input differ between two runs of the compiler.
+    fn register(&self, class: RegClass, place: Place) -> Option<PhysReg> {
+        let value = *self.what.get(&(class.number(), place))?;
+        self.what
+            .iter()
+            .filter(|&(&(number, _), &held)| number == class.number() && held == value)
+            .filter_map(|(&(_, place), _)| match place {
+                Place::Reg(reg) => Some(reg),
+                Place::Slot(_) => None,
+            })
+            .min_by_key(|reg| reg.number())
     }
 
     /// Records a move that ran, so what it wrote holds what it read.
@@ -240,6 +343,10 @@ mod tests {
     /// A spill register to write with, which is the one x86-64 holds back for exactly this.
     const R10: PhysReg = PhysReg::new(10);
 
+    /// The second of them, which is what an instruction with both operands on the stack reads the
+    /// other one into.
+    const R11: PhysReg = PhysReg::new(11);
+
     /// A function with one block in it, and the names it was built with.
     fn empty() -> (Interner, Func, Block) {
         let mut names = Interner::new();
@@ -249,8 +356,13 @@ mod tests {
     }
 
     /// The pass, with the one target these tests are written against.
-    fn dead(func: &mut Func, moves: &Moves, names: &Interner) -> usize {
-        super::dead(func, moves, &MACHINE, &SYSV, names)
+    fn clean(func: &mut Func, moves: &Moves, names: &mut Interner) -> Cleaned {
+        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, names)
+    }
+
+    /// How many moves went, for a test about the half that removes.
+    fn gone(func: &mut Func, moves: &Moves, names: &mut Interner) -> usize {
+        clean(func, moves, names).gone
     }
 
     /// The opcode of that name on this target.
@@ -334,6 +446,22 @@ mod tests {
         func.insts(block).count()
     }
 
+    /// What the block says now, one opcode per instruction, which is how a test about a rewrite
+    /// says which instruction came out of it.
+    fn written(func: &Func, block: Block, names: &Interner) -> Vec<String> {
+        func.insts(block).map(|inst| names.resolve(func[inst].opcode.name()).to_owned()).collect()
+    }
+
+    /// The registers the instruction at that position in the block reads.
+    fn reads(func: &Func, block: Block, at: usize) -> Vec<PhysReg> {
+        let inst = func.insts(block).nth(at).expect("an instruction at that position");
+        func[func[inst].operands]
+            .iter()
+            .filter(|operand| !operand.role.is_def())
+            .filter_map(|operand| operand.reg.phys())
+            .collect()
+    }
+
     /// The pair the pass started as: a word written out and read straight back into the register it
     /// was written out of.
     #[test]
@@ -345,7 +473,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 1);
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 1, "the spill went too, or the reload stayed");
         assert_eq!(func.insts(block).next(), Some(spill));
     }
@@ -363,7 +491,7 @@ mod tests {
         moves.record(first, back(block, 0, R10));
         moves.record(second, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 2);
+        assert_eq!(gone(&mut func, &moves, &mut names), 2);
         assert_eq!(left(&func, block), 1);
     }
 
@@ -382,7 +510,7 @@ mod tests {
         moves.record(first, back(block, 0, R10));
         moves.record(second, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 2);
+        assert_eq!(gone(&mut func, &moves, &mut names), 2);
         assert_eq!(left(&func, block), 2, "the spill and the instruction between are the two");
     }
 
@@ -399,7 +527,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 3);
     }
 
@@ -414,7 +542,7 @@ mod tests {
         moves.record(reload, back(block, 0, R10));
         moves.record(spill, out(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 1);
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 1);
         assert_eq!(func.insts(block).next(), Some(reload));
     }
@@ -429,7 +557,7 @@ mod tests {
         moves.record(first, across(block, RAX, R10));
         moves.record(second, across(block, RAX, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 1);
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 1);
     }
 
@@ -444,23 +572,89 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 1, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 2);
     }
 
-    /// A reload into another register puts the word somewhere it is not, so the load does
-    /// something even though the word it reads is the one just written.
+    /// A reload into another register puts the word somewhere it is not, so the instruction has
+    /// work to do. Where it takes the word from is the question, and the register that was spilled
+    /// still holds it, so the frame is not read.
     #[test]
-    fn a_reload_into_a_different_register_stays() {
+    fn a_reload_into_a_different_register_becomes_a_copy() {
         let (mut names, mut func, block) = empty();
         let spill = store(&mut func, &mut names, block, R10, 16);
-        let reload = load(&mut func, &mut names, block, PhysReg::new(11), 16);
+        let reload = load(&mut func, &mut names, block, R11, 16);
         let mut moves = Moves::default();
         moves.record(spill, out(block, 0, R10));
-        moves.record(reload, back(block, 0, PhysReg::new(11)));
+        moves.record(reload, back(block, 0, R11));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
-        assert_eq!(left(&func, block), 2);
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned { gone: 0, copied: 1 });
+        assert_eq!(written(&func, block, &names), ["x64.mov_mr_64", "x64.mov_rr_64"]);
+        assert_eq!(reads(&func, block, 1), vec![R10]);
+    }
+
+    /// The same reload with nothing having put the word in a register. There is nowhere to read it
+    /// from but the frame, so the load is the instruction it was.
+    #[test]
+    fn a_reload_no_register_holds_the_word_of_stays_a_load() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R11, 16);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R11));
+
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned::default());
+        assert_eq!(written(&func, block, &names), ["x64.mov_rm_64"]);
+    }
+
+    /// Three registers holding one word is three right answers, and the pass takes the lowest
+    /// numbered of them every time rather than whichever the map hands back first.
+    #[test]
+    fn the_copy_is_written_out_of_the_lowest_numbered_register_that_has_the_word() {
+        let (mut names, mut func, block) = empty();
+        let spill = store(&mut func, &mut names, block, R10, 16);
+        let first = copy(&mut func, &mut names, block, R11, R10);
+        let second = copy(&mut func, &mut names, block, RAX, R10);
+        let reload = load(&mut func, &mut names, block, PhysReg::new(12), 16);
+        let mut moves = Moves::default();
+        moves.record(spill, out(block, 0, R10));
+        moves.record(first, across(block, R11, R10));
+        moves.record(second, across(block, RAX, R10));
+        moves.record(reload, back(block, 0, PhysReg::new(12)));
+
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned { gone: 0, copied: 1 });
+        assert_eq!(reads(&func, block, 3), vec![RAX], "rax is register zero");
+    }
+
+    /// A call takes the registers with it, so the word is in the frame and nowhere else and the
+    /// reload behind one is a load rather than a copy of a register that no longer has it.
+    #[test]
+    fn a_reload_behind_a_call_is_not_written_as_a_copy() {
+        let (mut names, mut func, block) = empty();
+        let spill = store(&mut func, &mut names, block, R10, 16);
+        let call = op(&mut names, "call");
+        func.build(block, call).uses(Reg::physical(RAX), GPR).finish();
+        let reload = load(&mut func, &mut names, block, R11, 16);
+        let mut moves = Moves::default();
+        moves.record(spill, out(block, 0, R10));
+        moves.record(reload, back(block, 0, R11));
+
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned::default());
+        assert_eq!(written(&func, block, &names), ["x64.mov_mr_64", "x64.call", "x64.mov_rm_64"]);
+    }
+
+    /// A word written out to the frame has to go to the frame, so a store is left alone however
+    /// many registers hold what it is storing.
+    #[test]
+    fn a_spill_of_a_word_another_register_holds_stays_a_store() {
+        let (mut names, mut func, block) = empty();
+        let copied = copy(&mut func, &mut names, block, R11, R10);
+        let spill = store(&mut func, &mut names, block, R11, 16);
+        let mut moves = Moves::default();
+        moves.record(copied, across(block, R11, R10));
+        moves.record(spill, out(block, 0, R11));
+
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned::default());
+        assert_eq!(written(&func, block, &names), ["x64.mov_rr_64", "x64.mov_mr_64"]);
     }
 
     /// A slot number is a slot number in the class that owns it, so a pair that agrees on
@@ -474,7 +668,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, Edit { class: XMM, ..back(block, 0, R10) });
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 2);
     }
 
@@ -486,7 +680,7 @@ mod tests {
         store(&mut func, &mut names, block, R10, 16);
         load(&mut func, &mut names, block, R10, 16);
 
-        assert_eq!(dead(&mut func, &Moves::default(), &names), 0);
+        assert_eq!(gone(&mut func, &Moves::default(), &mut names), 0);
         assert_eq!(left(&func, block), 2);
     }
 
@@ -503,7 +697,7 @@ mod tests {
         moves.record(spill, out(first, 0, R10));
         moves.record(reload, back(first, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, second), 1);
     }
 
@@ -520,7 +714,7 @@ mod tests {
         moves.record(copied, across(block, RAX, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 1);
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 2);
     }
 
@@ -539,7 +733,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 3);
     }
 
@@ -560,7 +754,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 3);
     }
 
@@ -577,7 +771,7 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R10));
 
-        assert_eq!(dead(&mut func, &moves, &names), 0);
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 3);
     }
 }

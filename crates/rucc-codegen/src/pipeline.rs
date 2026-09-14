@@ -521,7 +521,7 @@ pub fn compile_recording(
     // decisions of the allocator and what stands between the two is settled by the function they
     // both went into. Before the layout, because the layout is where the instruction sequence
     // stops being something a pass may edit.
-    copies::dead(&mut func, &moves, machine.shapes, machine.conv, names);
+    copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, names);
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.

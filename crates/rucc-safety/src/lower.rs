@@ -164,6 +164,7 @@ fn calls(
             Opcode::MetaFenceAcquire => taken_everywhere(func, names, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
+            Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => declared(func, inst),
             _ => {}
         }
     }
@@ -441,6 +442,22 @@ fn opened(func: &mut Func, names: &mut Interner, inst: Inst) {
 fn closed(func: &mut Func, names: &mut Interner, inst: Inst) {
     let [scope] = func[func[inst].args] else { return };
     call(func, names, inst, "__rucc_restrict_leave", &[Type::PTR], &[], &[scope]);
+}
+
+/// `safe_region_begin` and `safe_region_end` become nothing at all.
+///
+/// The only pair here that lowers to no call, and the reason is that a declared region is a fact
+/// about the build rather than a thing the program does. Everything between the two markers is code
+/// the monitor was told not to judge, so there is no check to emit, no plane to write and no state
+/// for the runtime to keep: the region has already had its effect by the time this runs, which was
+/// to keep the checks from being written in the first place.
+///
+/// What a region does cost is the row `spec/safe-memory/10-boundaries.md` section 10.2 asks for,
+/// and [`crate::summary`] has already taken it. That pass runs on the front end's IR, before the
+/// back end and so before this, which is the order that makes the count possible at all: after this
+/// the object file has no trace that a region was ever declared.
+fn declared(func: &mut Func, inst: Inst) {
+    func.remove_inst(inst);
 }
 
 /// `meta_type` becomes `__rucc_meta_type(pointer, size, type)`.
@@ -1639,6 +1656,56 @@ mod tests {
             !opcodes.contains(&Opcode::CapExtent),
             "with nothing left of the query: {opcodes:?}"
         );
+    }
+
+    /// A module holding one function that declares a region and does nothing else.
+    fn exempt(names: &mut Interner) -> Module {
+        let reason = names.intern("hand written assembly, checked by review");
+        let mut func = Func::new(names.intern("driver"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        b.inst(
+            InstData { extra: Extra::Reason(reason), ..InstData::new(Opcode::SafeRegionBegin) },
+            &[],
+        );
+        b.inst(InstData::new(Opcode::SafeRegionEnd), &[]);
+        b.ret(&[]);
+        let mut module = Module::new(names.intern("driver.c"), &target());
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn the_markers_around_a_declared_region_lower_into_nothing_at_all() {
+        // The only pair here that becomes no call. A region is the reason some code carries no
+        // checks rather than something the code does, so once `crate::summary` has counted it
+        // there is nothing left for the back end to be handed.
+        let mut names = Interner::new();
+        let mut module = exempt(&mut names);
+        assert_eq!(lower(&mut module, &mut names), 0);
+
+        let id = module.funcs().next().expect("the module has one function");
+        assert_eq!(
+            print_func(&module, &module[id], &names),
+            "func @driver(), linkage(external) {\n\
+             block0:\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_region_costs_the_object_file_no_descriptor_either() {
+        // A descriptor describes a failure and a marker cannot fail, so a build made of nothing but
+        // declared regions has an empty section and gets none.
+        let mut names = Interner::new();
+        let mut module = exempt(&mut names);
+        lower(&mut module, &mut names);
+        assert_eq!(module.globals().count(), 0);
     }
 
     #[test]

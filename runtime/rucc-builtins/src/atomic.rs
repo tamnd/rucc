@@ -3,10 +3,17 @@
 //! Design: `spec/12-abi-and-runtime.md` section 12.8, and tamnd/rucc#1064. The reference for
 //! `runtime/builtins/atomic.c`, which is the one that ships, for the reason [`crate`] gives.
 //!
-//! Four routines, which are the ones libatomic exports without a width in their name. They take
-//! the size as their first argument and everything else through a pointer, so one routine serves
-//! every width: an access to a seventeen byte structure and an access to a `__int128` are the same
-//! call with a different number in it.
+//! Two sets, which are libatomic's two. Four routines have no width in their name and take the size
+//! as their first argument with everything else through a pointer, so one routine serves every
+//! width: an access to a seventeen byte structure and an access to a `__int128` are the same call
+//! with a different number in it. Sixteen have a width in their name and take the value itself,
+//! which is only possible where the machine has a pair of registers to carry one, and the width is
+//! sixteen bytes because that is the one above the lock free width where it does.
+//!
+//! Both sets share the table, which is not a saving. A sixteen byte object can arrive at either one
+//! of them, since a compiler is free to emit the generic call for it and gcc emits the sized call,
+//! so two tables would be the hazard below with the two libraries being the two halves of this
+//! module.
 //!
 //! # The lock, and what it does not give
 //!
@@ -23,7 +30,7 @@
 //!
 //! # The ordering argument
 //!
-//! Every one of the four takes one and none of them reads it. The lock is an acquire and the
+//! Every one of the twenty takes one and none of them reads it. The lock is an acquire and the
 //! unlock is a release, so two accesses to the same object are ordered against each other whatever
 //! either asked for. A caller that asked for less has been given more, which it is allowed to be,
 //! and libatomic ignores the argument here for the same reason.
@@ -268,6 +275,330 @@ pub unsafe fn compare_exchange(
     matched
 }
 
+/// The one step every routine with a width in its name is: take the lock, read what is there,
+/// write what the operation makes of it, and answer what was there.
+///
+/// A load is that with the operation left out and a store is that with the value thrown away, so
+/// they go through it too rather than taking the lock a second way.
+///
+/// # Safety
+///
+/// `object` usable as a `u128`, which means sixteen bytes and aligned to sixteen, and reached only
+/// through these routines for as long as anybody else may be reaching it.
+unsafe fn update(object: *mut u128, apply: impl FnOnce(u128) -> u128) -> u128 {
+    let guard = guard_for(object.cast());
+    take(guard);
+    // SAFETY: the caller promises a usable object, and the lock is held across both accesses.
+    let was = unsafe {
+        let was = object.read();
+        object.write(apply(was));
+        was
+    };
+    drop_guard(guard);
+    was
+}
+
+/// `unsigned __int128 __atomic_load_16(const volatile void *object, int order)`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_load_16(object: *const c_void, order: i32) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast_mut().cast(), |was| was) }
+}
+
+/// `void __atomic_store_16(volatile void *object, unsigned __int128 value, int order)`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_store_16(object: *mut c_void, value: u128, order: i32) {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |_| value) };
+}
+
+/// `unsigned __int128 __atomic_exchange_16(volatile void *object, unsigned __int128 value, int
+/// order)`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_exchange_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |_| value) }
+}
+
+/// `_Bool __atomic_compare_exchange_16(volatile void *object, void *expected, unsigned __int128
+/// desired, _Bool weak, int success, int failure)`.
+///
+/// The comparison is over the value rather than over the representation, which is where this set
+/// and the generic one differ and is not a choice either of them made: sixteen bytes of integer has
+/// no padding in it for the two questions to come apart over.
+///
+/// A weak exchange may fail with the value it was asked for sitting in the object and this one
+/// never does, which is what libatomic answers as well. The caller is in a loop either way.
+///
+/// # Safety
+///
+/// As [`update`], with `expected` usable as a `u128` as well.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_compare_exchange_16(
+    object: *mut c_void,
+    expected: *mut c_void,
+    desired: u128,
+    weak: bool,
+    success: i32,
+    failure: i32,
+) -> bool {
+    let _ = (weak, success, failure);
+    // SAFETY: the caller promises the C contract.
+    unsafe { compare_exchange_16(object.cast(), expected.cast(), desired) }
+}
+
+/// The compare and exchange at that width, without the arguments nothing reads.
+///
+/// # Safety
+///
+/// As [`__atomic_compare_exchange_16`].
+pub unsafe fn compare_exchange_16(object: *mut u128, expected: *mut u128, desired: u128) -> bool {
+    // SAFETY: the caller promises a usable expected value, which nothing else is reaching.
+    let want = unsafe { expected.read() };
+    let mut matched = false;
+    // SAFETY: the caller promises a usable object.
+    let was = unsafe {
+        update(object, |was| {
+            matched = was == want;
+            if matched { desired } else { was }
+        })
+    };
+    if !matched {
+        // SAFETY: as above, and the write back on failure is what the pointer is for.
+        unsafe { expected.write(was) };
+    }
+    matched
+}
+
+/// `unsigned __int128 __atomic_fetch_add_16(volatile void *object, unsigned __int128 value, int
+/// order)`, and the five beside it.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_add_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| was.wrapping_add(value)) }
+}
+
+/// `__atomic_fetch_sub_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_sub_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| was.wrapping_sub(value)) }
+}
+
+/// `__atomic_fetch_and_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_and_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| was & value) }
+}
+
+/// `__atomic_fetch_or_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_or_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| was | value) }
+}
+
+/// `__atomic_fetch_xor_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_xor_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| was ^ value) }
+}
+
+/// `__atomic_fetch_nand_16`, which is the odd one of the six: an and and then a complement, which
+/// is not an operator in C and is not an instruction on most machines. It is in the family because
+/// the kernel clears a bit with it and wants what was there.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_fetch_nand_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    let _ = order;
+    // SAFETY: the caller promises the C contract.
+    unsafe { update(object.cast(), |was| !(was & value)) }
+}
+
+/// `__atomic_add_fetch_16`, and the five beside it, which answer the value afterwards.
+///
+/// Each of them is the routine above it and then the same operation again over the answer, which
+/// is what gcc does when it lowers one of these names onto the other and is right for the same
+/// reason: both operands are in registers by then, so it is an instruction rather than a second
+/// trip through the lock.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_add_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    unsafe { __atomic_fetch_add_16(object, value, order) }.wrapping_add(value)
+}
+
+/// `__atomic_sub_fetch_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_sub_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    unsafe { __atomic_fetch_sub_16(object, value, order) }.wrapping_sub(value)
+}
+
+/// `__atomic_and_fetch_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_and_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    unsafe { __atomic_fetch_and_16(object, value, order) & value }
+}
+
+/// `__atomic_or_fetch_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_or_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    unsafe { __atomic_fetch_or_16(object, value, order) | value }
+}
+
+/// `__atomic_xor_fetch_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_xor_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    unsafe { __atomic_fetch_xor_16(object, value, order) ^ value }
+}
+
+/// `__atomic_nand_fetch_16`.
+///
+/// # Safety
+///
+/// As [`update`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __atomic_nand_fetch_16(
+    object: *mut c_void,
+    value: u128,
+    order: i32,
+) -> u128 {
+    // SAFETY: the caller promises the C contract.
+    !(unsafe { __atomic_fetch_nand_16(object, value, order) } & value)
+}
+
 #[cfg(test)]
 mod tests {
     use core::cell::UnsafeCell;
@@ -382,6 +713,80 @@ mod tests {
         assert!(matched);
         assert_eq!(object, [0], "nothing was copied either");
         assert_eq!(expected, [1]);
+    }
+
+    /// The step every routine with a width in its name is made of, which answers what was there
+    /// and leaves what the operation made of it. The six operations are the caller's, so what is
+    /// checked here is the step and one of each kind of operation over it.
+    #[test]
+    fn the_widest_step_answers_the_old_value_and_leaves_the_new_one() {
+        let mut object = 0x1234_5678_9ABC_DEF0_0F0F_0F0F_0F0F_0F0F_u128;
+        let value = 0x1111_2222_3333_4444_5555_6666_7777_8888_u128;
+        let was = object;
+        // SAFETY: the object is a `u128` and nothing else is reaching it.
+        let answer = unsafe { update(&raw mut object, |found| found.wrapping_add(value)) };
+        assert_eq!(answer, was, "the value before");
+        assert_eq!(object, was.wrapping_add(value), "the value after");
+
+        // SAFETY: as above.
+        let answer = unsafe { update(&raw mut object, |found| !(found & value)) };
+        assert_eq!(object, !(answer & value), "and the one with no operator of its own");
+    }
+
+    /// The widest addition wraps rather than stopping at the top, which is what C says an unsigned
+    /// object does and is the case a counter running through this eventually reaches.
+    #[test]
+    fn the_widest_addition_goes_round_the_top() {
+        let mut object = u128::MAX;
+        // SAFETY: the object is a `u128` and nothing else is reaching it.
+        let was = unsafe { update(&raw mut object, |found| found.wrapping_add(3)) };
+        assert_eq!(was, u128::MAX);
+        assert_eq!(object, 2);
+    }
+
+    /// The compare and exchange at that width, both ways round. The failing case is the one with
+    /// something to say: the object keeps what it had and the expected value is written over with
+    /// what was actually there.
+    #[test]
+    fn the_widest_compare_exchange_answers_whether_it_happened() {
+        let mut object = 7_u128;
+        let mut expected = 7_u128;
+        // SAFETY: both are `u128` objects and nothing else is reaching either.
+        let matched = unsafe { compare_exchange_16(&raw mut object, &raw mut expected, 9) };
+        assert!(matched);
+        assert_eq!(object, 9);
+        assert_eq!(expected, 7, "a match leaves it alone");
+
+        let mut expected = 7_u128;
+        // SAFETY: as above.
+        let matched = unsafe { compare_exchange_16(&raw mut object, &raw mut expected, 11) };
+        assert!(!matched);
+        assert_eq!(object, 9, "nothing was written");
+        assert_eq!(expected, 9, "and what was there came back");
+    }
+
+    /// The two sets over one object, which is the case that makes them share a table. The bytes
+    /// the generic store put there are the value the sized load answers, and the value the sized
+    /// store put there is the bytes the generic load answers.
+    #[test]
+    fn the_two_sets_are_about_the_same_bytes() {
+        let mut object = 0_u128;
+        let value = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10_u128;
+        let bytes = value.to_ne_bytes();
+        // SAFETY: the object is sixteen bytes and so is the buffer, and nothing else is reaching
+        // either of them.
+        unsafe { store(16, (&raw mut object).cast(), bytes.as_ptr()) };
+        // SAFETY: as above.
+        let seen = unsafe { update(&raw mut object, |was| was) };
+        assert_eq!(seen, value, "what the generic store wrote");
+
+        let mut into = [0u8; 16];
+        // SAFETY: as above.
+        unsafe {
+            update(&raw mut object, |_| value.wrapping_add(1));
+            load(16, (&raw mut object).cast(), into.as_mut_ptr());
+        }
+        assert_eq!(into, value.wrapping_add(1).to_ne_bytes(), "and what the sized one wrote");
     }
 
     /// Every entry in the table is reachable, which is what the multiply is there for. Addresses

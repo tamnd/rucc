@@ -34,6 +34,10 @@ The categories:
 
 `--emit=safety-summary` (document 07 section 7.8) reports every row. A build whose counts are all zero except the first two has the strongest guarantee this design can produce; a build with ten thousand recoveries has a guarantee that is mostly aspiration, and the point is that the difference is visible without reading code.
 
+The declared region row is the one where the count on its own says the least, which is why it is reported by reason rather than as a total. Three regions all declared for the same reason are one thing to argue about and three regions with three different reasons are three, so the reasons are what the summary counts and the total falls out of them. Zero is written out rather than left off, because a build that declared no regions at all is making a claim and the reader should be able to see it made.
+
+The count is taken on the front end's IR, before the back end runs, and the two markers are then removed rather than lowered. That order is on purpose and it is the whole of what a declared region costs: everything between the markers is code the monitor was told not to judge, so there is no check to emit and no state for the runtime to keep, and by the time an object file exists there is no trace that a region was ever declared. The summary is the only place the fact survives, which is the argument for counting it there rather than leaving it to be read back out of a binary.
+
 This is a modest idea and it is absent from every tool in document 01. ASan does not tell you how much of your program it did not instrument.
 
 ## 10.3 libc and the interposed surface

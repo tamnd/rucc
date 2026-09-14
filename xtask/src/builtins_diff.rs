@@ -50,9 +50,18 @@
 //! defining both and a harness reaching the wrong one, so the same list the divisions are in names
 //! these too and the check is that the archive really did come out with them.
 //!
+//! The sixteen with a width in their name are on the list for a sharper version of the same reason.
+//! Those are builtins too, so a call written as `__atomic_load_16` is a call the compiler is free to
+//! answer on the spot, and the harness reaches them through local names with labels on them for that
+//! reason. What the list is guarding there is the other end: a name the archive came out without is
+//! a link that fails, which is loud, but a name misspelled on both sides is two archives quietly
+//! defining a routine nothing calls.
+//!
 //! The harness is linked with `-pthread`, which nothing above the atomics needed. One thread taking
-//! a lock nobody else wants is the same program whether the lock works or not, so the last group is
-//! four threads counting through the compare and exchange and the digest is what they counted to.
+//! a lock nobody else wants is the same program whether the lock works or not, so two of the last
+//! groups run on four threads: one counts through the compare and exchange, and one has two threads
+//! counting through the sized addition while two count through the generic compare and exchange,
+//! which is the group that fails if the two sets do not share a table.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -200,7 +209,12 @@ for side in ours reference; do
         __fixtfsi __fixunstfsi __fixtfdi __fixunstfdi \\
         __floattitf __floatuntitf __fixtfti __fixunstfti \\
         __extendsftf2 __trunctfsf2 __extenddftf2 __trunctfdf2 \\
-        __atomic_load __atomic_store __atomic_exchange __atomic_compare_exchange; do
+        __atomic_load __atomic_store __atomic_exchange __atomic_compare_exchange \\
+        __atomic_load_16 __atomic_store_16 __atomic_exchange_16 __atomic_compare_exchange_16 \\
+        __atomic_fetch_add_16 __atomic_fetch_sub_16 __atomic_fetch_and_16 \\
+        __atomic_fetch_or_16 __atomic_fetch_xor_16 __atomic_fetch_nand_16 \\
+        __atomic_add_fetch_16 __atomic_sub_fetch_16 __atomic_and_fetch_16 \\
+        __atomic_or_fetch_16 __atomic_xor_fetch_16 __atomic_nand_fetch_16; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
     done
 done

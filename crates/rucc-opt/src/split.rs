@@ -294,8 +294,33 @@ const NOT_A_SWEEP: &str = "check kept in both halves, its address does not walk 
                            constant";
 
 /// What is reported for a check whose address the analysis has nothing to say about.
+///
+/// The last of the four below rather than the only one, and what is left once [`stopped`] has had a
+/// look at the address. Anything that reaches here is an address built some way none of the three
+/// named shapes covers, so the row is the remainder of the census rather than the whole of it.
 const NOT_FOLLOWED: &str = "check kept in both halves, what its address does round the loop is not \
                             something the analysis follows";
+
+/// What is reported for a check on a pointer the loop carries and reads back out of memory.
+const WALKS_A_STRUCTURE: &str = "check kept in both halves, the pointer it is about comes back \
+                                 round the loop out of memory, which is a walk over a linked \
+                                 structure";
+
+/// What is reported for a check whose address was itself read out of memory inside the loop.
+const ADDRESS_FROM_MEMORY: &str =
+    "check kept in both halves, the pointer it is about was read out of memory inside the loop";
+
+/// What is reported for a check whose address came back from a call inside the loop.
+const ADDRESS_FROM_A_CALL: &str =
+    "check kept in both halves, the pointer it is about came back from a call inside the loop";
+
+/// What is reported for a check whose address is one of two the loop chose between.
+const ADDRESS_FROM_A_CHOICE: &str =
+    "check kept in both halves, the pointer it is about is one of two the loop chose between";
+
+/// What is reported for a check on a pointer the pass cannot fault, moved by a displacement it can.
+const STEP_NOT_FOLLOWED: &str = "check kept in both halves, its address is a displacement off a \
+                                 pointer and the displacement is not something the analysis follows";
 
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str =
@@ -846,6 +871,10 @@ fn walked(
         // rather than collapsing every one of them into this fallback missing.
         Err(why) => match measured(func, cfg, loops, id, latch, pointer) {
             Some(found) => found,
+            // The one reason on that list that names no shape. Every other one says what the
+            // address was and why that is not enough, and this one says the analysis had nothing to
+            // say at all, so what it stopped on is worked out here rather than left as one row.
+            None if why == NOT_FOLLOWED => return Err(stopped(func, loops, id, latch, pointer)),
             None => return Err(why),
         },
     };
@@ -1313,6 +1342,82 @@ fn peeled(func: &Func, pointer: Value) -> (Value, i128) {
         at = of;
     }
     (at, offset)
+}
+
+/// A pointer with every `ptr_add` on the front of it taken off, and whether any of them moved it by
+/// an amount that is not a number.
+///
+/// [`peeled`] stops at a step that is not a number, because what it is working out is a fixed
+/// distance and a step nobody wrote down is not one. This does not stop, because what it is working
+/// out is where the address came from, and a step nobody wrote down is still a step off something.
+/// That the step was there at all is the second thing it hands back, since a displacement the
+/// program computed is one of the ways an address stops being something the analysis follows.
+fn beneath(func: &Func, pointer: Value) -> (Value, bool) {
+    let mut at = pointer;
+    let mut worked = false;
+    while let Some(of) = operand_of(func, at, Opcode::PtrAdd, 0) {
+        let by = operand_of(func, at, Opcode::PtrAdd, 1);
+        worked = worked || by.is_some_and(|by| constant(func, by).is_none());
+        at = of;
+    }
+    (at, worked)
+}
+
+/// What the analysis stopped on, for an address it had nothing to say about.
+///
+/// [`NOT_FOLLOWED`] used to be one row and it is the largest in the census, which made it the least
+/// useful thing in there: a number that big is a list of different problems, and the row said which
+/// pass gave up rather than what it gave up on. So the address is taken apart once more here, at the
+/// point the reason is finally reported, and what is underneath it is what gets named.
+///
+/// The header parameter is looked at first and looked through, because a pointer the loop carries is
+/// the interesting case and what it is depends on what comes back round the latch rather than on the
+/// parameter. A load there is `p = p->next`, which is the walk over a linked structure the census
+/// wants counted on its own: nothing in this pass will ever split one, since the guard tests a
+/// distance and the next node of a list is its own object.
+fn stopped(func: &Func, loops: &Loops, id: LoopId, latch: Block, pointer: Value) -> &'static str {
+    let (base, worked) = beneath(func, pointer);
+    // Only the load is named over the back edge. What else can come back is an address the loop
+    // worked out some other way, and where that was worked out is the question the rest of this
+    // answers, so naming it here as well would be the same answer written in two places.
+    if let Some(next) = round(func, loops, id, latch, base) {
+        if shape(func, beneath(func, next).0) == ADDRESS_FROM_MEMORY {
+            return WALKS_A_STRUCTURE;
+        }
+    }
+    let named = shape(func, base);
+    if named != NOT_FOLLOWED {
+        return named;
+    }
+    // Nothing to say about the pointer the address is built on, so what is left to say is how far
+    // along it the address is. That is worth its own row because it is a different thing to fix:
+    // the pointer is fine and the subscript is what nothing here can count.
+    if worked { STEP_NOT_FOLLOWED } else { NOT_FOLLOWED }
+}
+
+/// The value a header parameter is handed on the way back round, if the pointer is one.
+///
+/// [`carried`] does this walk to decide whether to refuse and this one does it to decide what to
+/// say, which is why neither calls the other: that one wants to know if what comes back is the
+/// parameter moved, and this one wants the value itself.
+fn round(func: &Func, loops: &Loops, id: LoopId, latch: Block, pointer: Value) -> Option<Value> {
+    let Def::Param { block, index } = func[pointer].def else { return None };
+    if block != loops.header(id) {
+        return None;
+    }
+    let term = func.terminator(latch)?;
+    copy::edge_args(func, term, block).get(index as usize).copied()
+}
+
+/// Where a pointer with nothing on the front of it came from, said as one of the census rows.
+fn shape(func: &Func, base: Value) -> &'static str {
+    let Def::Result { inst, .. } = func[base].def else { return NOT_FOLLOWED };
+    match func[inst].opcode {
+        Opcode::Load => ADDRESS_FROM_MEMORY,
+        Opcode::Call | Opcode::CallIndirect => ADDRESS_FROM_A_CALL,
+        Opcode::Select => ADDRESS_FROM_A_CHOICE,
+        _ => NOT_FOLLOWED,
+    }
 }
 
 /// Whether a value is a header parameter moved by some number of bytes.
@@ -3331,7 +3436,7 @@ mod tests {
         let (mut names, mut func, _) = from_what_it_carries(true);
         let stats = split_up(&mut func);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
-        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::STEP_NOT_FOLLOWED), 1, "and says which half");
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "and the check stays where it was");
         assert!(all(&func, Opcode::CapExtent).is_empty(), "with nothing asked in front of it");
         sound(&func, &mut names);
@@ -3348,9 +3453,135 @@ mod tests {
         let (mut names, mut func, _) = down_a_list();
         let stats = split_up(&mut func);
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
-        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::WALKS_A_STRUCTURE), 1, "and says it is a list");
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "and the check stays where it was");
         assert!(all(&func, Opcode::CapExtent).is_empty(), "with nothing asked in front of it");
+        sound(&func, &mut names);
+    }
+
+    /// Where the address the loop checks came from, for [`made_in_the_loop`].
+    enum Made {
+        /// Read out of memory.
+        Read,
+        /// Handed back by a call that cannot free.
+        Returned,
+        /// One of two, chosen every iteration.
+        Chosen,
+        /// Worked out from the counter as a number and then used as an address.
+        Cast,
+    }
+
+    /// A loop whose checked address is made in the body, in one of the ways the census names.
+    ///
+    /// ```text
+    /// entry(a, n): jump head(0)
+    /// head(i):     p = <made here>; check_bounds cap_of(p), p
+    ///              j = i + 1; br j < n -> head(j), done
+    /// done:        ret
+    /// ```
+    ///
+    /// The same loop every time, because what these rows differ in is where the pointer came from
+    /// and that is the only thing varied here. None of the four is an address scalar evolution can
+    /// evolve and none is one the guard could write again, so all of them reach the same refusal.
+    /// What each one is for is that the refusal now says which of them it was.
+    fn made_in_the_loop(how: Made) -> (Interner, Func, Vec<Block>) {
+        let word = Type::int(64);
+        let mut names = Interner::new();
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR, word]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let text = func.append_param(entry, Type::PTR);
+        let count = func.append_param(entry, word);
+        let index = func.append_param(head, word);
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(word, 0);
+        build.jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let args = build.func().push_values(&[text, index]);
+        let along = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let pointer = match how {
+            Made::Read => build.load(Type::PTR, along, mem(), Flags::NONE),
+            Made::Returned => {
+                let callee = names.intern("somewhere");
+                let returns = Signature::new().with_returns(&[Type::PTR]);
+                let signature = build.func().add_signature(returns);
+                let call = build.call(callee, signature, &[]);
+                // Without this the loop is refused for the call before any check is looked at, and
+                // the row would be one no build ever reports. A callee that cannot free is the only
+                // way a call gets to be in a loop this pass is still willing to split.
+                build.func()[call].flags |= Flags::NOFREE;
+                build.func()[call].results().next().expect("the callee hands back a pointer")
+            }
+            // One arm reads memory, which is what keeps the guard from writing the choice out
+            // again. Two arms it could write are a choice it takes rather than refuses.
+            Made::Chosen => {
+                let other = build.load(Type::PTR, along, mem(), Flags::NONE);
+                let odd = build.iconst(word, 1);
+                let which = build.binary(Opcode::And, index, odd, Flags::NONE);
+                let none = build.iconst(word, 0);
+                let taken = build.icmp(IntPred::Eq, which, none);
+                build.select(taken, text, other)
+            }
+            Made::Cast => build.unary(Opcode::IntToPtr, index, Type::PTR),
+        };
+        checking(&mut build, pointer, byte());
+        let one = build.iconst(word, 1);
+        let next = build.binary(Opcode::Add, index, one, Flags::NSW);
+        let again = build.icmp(IntPred::Slt, next, count);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
+
+    /// What the census says about a loop built by [`made_in_the_loop`].
+    fn refusal(how: Made) -> (Interner, Func, Stats) {
+        let (names, mut func, _) = made_in_the_loop(how);
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 0, "the loop is left alone");
+        (names, func, stats)
+    }
+
+    #[test]
+    fn an_address_read_out_of_memory_says_so() {
+        // A second copy of the load is a second read at another moment, so neither the guard nor
+        // the preheader can work the address out, and the check stays in both halves. What this is
+        // about is the row it lands in: the pointer came out of memory, which is a different thing
+        // to do something about than a subscript nothing can count.
+        let (mut names, func, stats) = refusal(Made::Read);
+        assert_eq!(stats.count(Kind::Missed, super::ADDRESS_FROM_MEMORY), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_address_handed_back_by_a_call_says_so() {
+        // The loop is still one this pass would split, since the callee cannot free, so the check
+        // is looked at and refused on its own account rather than the loop being dropped first.
+        let (mut names, func, stats) = refusal(Made::Returned);
+        assert_eq!(stats.count(Kind::Missed, super::ADDRESS_FROM_A_CALL), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_address_the_loop_chose_between_says_so() {
+        // Named by what the address is rather than by what is under the arm that reads memory. The
+        // choice is the outer thing and it is the thing anybody reading the census would go and
+        // look at, since which arm was taken is what the guard would have to know.
+        let (mut names, func, stats) = refusal(Made::Chosen);
+        assert_eq!(stats.count(Kind::Missed, super::ADDRESS_FROM_A_CHOICE), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_address_none_of_the_rows_fits_is_still_counted() {
+        // The remainder, which is what the old single row has become. Keeping it is the point: a
+        // census that named three shapes and dropped everything else would be a census of what
+        // somebody thought to look for rather than of what the build does.
+        let (mut names, func, stats) = refusal(Made::Cast);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FOLLOWED), 1);
         sound(&func, &mut names);
     }
 

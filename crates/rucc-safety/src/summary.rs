@@ -161,6 +161,14 @@ pub struct Summary {
     pub synthesized: usize,
     /// Inline assembly sites, each of which is trusted to do what its constraints say.
     pub asm: usize,
+    /// Declared exemptions, by the reason each one was declared with.
+    ///
+    /// Section 10.2's own row, and the one category of the trust set where the count on its own
+    /// says the least. A build with three regions all declared for the same reason is one thing to
+    /// argue about and a build with three different reasons is three, so the reasons are what is
+    /// counted and the total falls out of them. Sorted by reason, because a summary two builds
+    /// apart should differ where the build differs rather than where a hash table did.
+    pub regions: Vec<(String, usize)>,
     /// Places a pointer crosses between this build and code it did not instrument, which is what
     /// the run time recovery counts will be counting.
     pub crossings: Sites,
@@ -199,6 +207,7 @@ impl Summary {
         out.push_str(&format!("    \"exposed\": {},\n", self.exposed));
         out.push_str(&format!("    \"synthesized\": {},\n", self.synthesized));
         out.push_str(&format!("    \"asm\": {},\n", self.asm));
+        out.push_str(&format!("    \"regions\": {},\n", regions(&self.regions)));
         out.push_str(&format!(
             "    \"crossings\": {{ \"entered\": {}, \"returned\": {} }}\n",
             self.crossings.entered, self.crossings.returned
@@ -268,6 +277,10 @@ pub fn summarize(
     // The wrappers are ours and are not the boundary this build failed to model, so they do not
     // belong on the unwrapped list even though every one of them is an undefined symbol here.
     let mut external: Vec<Symbol> = Vec::new();
+    // Counted here rather than anywhere later, because `crate::lower` takes the markers out once
+    // this has run and a region is then a thing the object file has no trace of. That order is on
+    // purpose: the count is the whole of what a declared region costs the back end.
+    let mut declared: HashMap<String, usize> = HashMap::new();
 
     for id in module.funcs() {
         if module[id].is_declaration() {
@@ -290,6 +303,14 @@ pub fn summarize(
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
+                // The begin rather than the end, so that a region counts once. The reason is on
+                // the begin for the same arithmetic, since it is the declaration and the end is
+                // only where it stops.
+                Opcode::SafeRegionBegin => {
+                    if let Extra::Reason(reason) = func[inst].extra {
+                        *declared.entry(names.resolve(reason).to_string()).or_default() += 1;
+                    }
+                }
                 Opcode::Call | Opcode::TailCall | Opcode::CallIndirect => {
                     let indirect = func[inst].opcode == Opcode::CallIndirect;
                     if indirect {
@@ -347,6 +368,10 @@ pub fn summarize(
     // Sorted, so that two builds of the same file produce the same bytes. The walk order is the
     // function order in the module, which is a thing the front end is allowed to change.
     summary.external.sort_unstable();
+    summary.regions = declared.into_iter().collect();
+    // Sorted for the reason the list above is, and by the reason rather than by the count, because
+    // a reason is what a reader looks one up by.
+    summary.regions.sort_unstable();
     summary
 }
 
@@ -394,6 +419,28 @@ fn class(class: Class) -> String {
         class.remaining,
         class.discharged()
     )
+}
+
+/// The declared regions as a JSON object, with the total beside the reasons.
+///
+/// The total is written out rather than left to be summed, for the reason the frame block's
+/// `wanted` is: adding up two units should be adding up numbers rather than working out which ones
+/// belong on the bottom of a fraction. A build with no regions gets the total and an empty object,
+/// not nothing, because zero declared regions is a fact about the build and worth reading.
+fn regions(regions: &[(String, usize)]) -> String {
+    let total: usize = regions.iter().map(|&(_, count)| count).sum();
+    let mut out = format!("{{ \"total\": {total}, \"by_reason\": {{");
+    if regions.is_empty() {
+        out.push_str("} }");
+        return out;
+    }
+    out.push('\n');
+    for (at, (reason, count)) in regions.iter().enumerate() {
+        let comma = if at + 1 == regions.len() { "" } else { "," };
+        out.push_str(&format!("      {}: {count}{comma}\n", quoted(reason)));
+    }
+    out.push_str("    } }");
+    out
 }
 
 /// A list of names as a JSON array, on one line when it is empty.
@@ -554,6 +601,7 @@ mod tests {
             exposed: 0,
             synthesized: 0,
             asm: 1,
+            regions: vec![("hand written spinlock".to_string(), 1), ("mmio window".to_string(), 2)],
             crossings: Sites { entered: 2, returned: 1 },
             frames: Frames { elided: 4, checked: 2, outside: 3, unknown: 1, pointerless: 5 },
         }
@@ -667,6 +715,66 @@ mod tests {
         let text = filled().render();
         assert!(text.contains("\"elided\": 4"), "{text}");
         assert!(text.contains("\"wanted\": 10"), "{text}");
+    }
+
+    /// A module whose only function declares regions, with `reasons` on the begin of each.
+    fn exempt(names: &mut Interner, reasons: &[&str]) -> Module {
+        let declared: Vec<Symbol> = reasons.iter().map(|reason| names.intern(reason)).collect();
+        let mut func = Func::new(names.intern("driver"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        for reason in declared {
+            let extra = Extra::Reason(reason);
+            b.inst(InstData { extra, ..InstData::new(Opcode::SafeRegionBegin) }, &[]);
+            b.inst(InstData::new(Opcode::SafeRegionEnd), &[]);
+        }
+        b.ret(&[]);
+        let mut module = Module::new(names.intern("driver.c"), &target());
+        module.add_func(func);
+        module
+    }
+
+    fn regions_of(module: &Module, names: &Interner) -> Vec<(String, usize)> {
+        summarize(module, names, "driver.c", "detect", Counts::default(), 0, Sites::default())
+            .regions
+    }
+
+    #[test]
+    fn a_declared_region_is_counted_under_the_reason_it_was_declared_with() {
+        let mut names = Interner::new();
+        let module = exempt(&mut names, &["mmio window", "mmio window", "hand written spinlock"]);
+        let regions = regions_of(&module, &names);
+        assert_eq!(
+            regions,
+            vec![("hand written spinlock".to_string(), 1), ("mmio window".to_string(), 2)],
+            "{regions:?}"
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_region_is_not_a_second_region() {
+        // Both markers are in the module and only the begin carries a reason, so a count that
+        // walked either one would be double what the build actually declared.
+        let mut names = Interner::new();
+        let module = exempt(&mut names, &["mmio window"]);
+        let regions = regions_of(&module, &names);
+        assert_eq!(regions, vec![("mmio window".to_string(), 1)], "{regions:?}");
+    }
+
+    #[test]
+    fn the_regions_are_reported_with_the_total_beside_the_reasons() {
+        let text = filled().render();
+        assert!(text.contains("\"total\": 3"), "{text}");
+        assert!(text.contains("\"hand written spinlock\": 1"), "{text}");
+        assert!(text.contains("\"mmio window\": 2"), "{text}");
+    }
+
+    #[test]
+    fn a_build_that_declared_no_regions_says_zero_rather_than_nothing() {
+        // Zero declared regions is a fact about the build and the row a reviewer wants to read
+        // first, so it is written out rather than left off the way a run time count is.
+        let text = Summary { regions: Vec::new(), ..filled() }.render();
+        assert!(text.contains("\"regions\": { \"total\": 0, \"by_reason\": {} },"), "{text}");
     }
 
     #[test]
