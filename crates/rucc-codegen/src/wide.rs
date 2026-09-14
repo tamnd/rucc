@@ -341,7 +341,7 @@ fn fits(signature: &Signature, conv: &CallRegs) -> bool {
                 return false;
             }
         } else if param.ty.is_float() {
-            places.float();
+            places.float(crate::abi::float_bytes(param.ty));
         } else {
             places.integer();
         }

@@ -448,13 +448,24 @@ impl<'a> Places<'a> {
     }
 
     /// Where the next value is, when it travels in a vector register.
-    pub fn float(&mut self) -> Where {
+    ///
+    /// `bytes` is how wide the value is, and it is asked for because of what happens once the
+    /// vector registers have run out. A register holds whatever is put in it, so up to that point
+    /// the width changes nothing, and the argument area is a run of words, so a `float` or a
+    /// `double` that got no register takes one word wherever it starts. A `_Float128` is neither:
+    /// it is sixteen bytes aligned to sixteen, so its slot is two words and begins on an even one.
+    /// A slot of one word would leave the argument behind it sitting on the top half of the value,
+    /// and the load that reads it back is a `movaps`, which faults on an address that is not a
+    /// multiple of sixteen rather than being slow.
+    pub fn float(&mut self, bytes: u32) -> Where {
         match self.regs.sse_args.get(self.position(true)) {
             Some(&reg) => {
                 self.sse += 1;
                 Where::Reg(reg)
             }
-            None => self.on_stack(self.regs.word, self.regs.word),
+            // The alignment is the width, which [`Places::on_stack`] raises to a word for anything
+            // narrower, so this is the natural alignment of the value and not a rule of its own.
+            None => self.on_stack(bytes, bytes),
         }
     }
 
@@ -637,7 +648,7 @@ mod tests {
         assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
         // Two integers went past, and a convention that counts separately has not spent a vector
         // register on either of them.
-        assert_eq!(places.float(), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.float(8), Where::Reg(PhysReg::new(10)));
         assert_eq!(places.size(), 0);
     }
 
@@ -648,7 +659,7 @@ mod tests {
         assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
         // The second position, so the second vector register, and the second integer register is
         // spent whether anything is in it or not.
-        assert_eq!(places.float(), Where::Reg(PhysReg::new(11)));
+        assert_eq!(places.float(8), Where::Reg(PhysReg::new(11)));
         assert_eq!(places.integer(), Where::Stack(0));
     }
 
@@ -659,7 +670,7 @@ mod tests {
         assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
         assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
         assert_eq!(places.integer(), Where::Stack(0));
-        assert_eq!(places.float(), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.float(8), Where::Reg(PhysReg::new(10)));
         assert_eq!(places.size(), 8);
     }
 
