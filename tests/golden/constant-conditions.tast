@@ -117,3 +117,91 @@ decl #7 present : int(void) function external defined
               const 1 : int
       return
         const 0 : int
+decl #9 has_it : int(int) function external defined
+  params
+    decl #8 err : int object automatic defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            binary && : int
+              convert bool : _Bool
+                convert lvalue : int
+                  decl #8 err : int lvalue
+              convert bool : _Bool
+                const 0 : int
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+      if
+        cond
+          convert bool : _Bool
+            binary || : int
+              convert bool : _Bool
+                convert lvalue : int
+                  decl #8 err : int lvalue
+              convert bool : _Bool
+                const 1 : int
+        then
+          block
+            return
+              const 1 : int
+      expr
+        call : void
+          convert function-decay : void (*)(void)
+            decl #0 only_on_32_bit : void(void) function
+      return
+        const 0 : int
+decl #11 skipped : int(int (*)(void)) function external defined
+  params
+    decl #10 f : int (*)(void) object automatic defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            binary && : int
+              convert bool : _Bool
+                const 0 : int
+              convert bool : _Bool
+                call : int
+                  convert lvalue : int (*)(void)
+                    decl #10 f : int (*)(void) lvalue
+        then
+          block
+            expr
+              call : void
+                convert function-decay : void (*)(void)
+                  decl #0 only_on_32_bit : void(void) function
+      return
+        const 0 : int
+decl #13 negated : int(int) function external defined
+  params
+    decl #12 err : int object automatic defined
+  body
+    block
+      if
+        cond
+          convert bool : _Bool
+            unary ! : int
+              convert bool : _Bool
+                binary && : int
+                  convert bool : _Bool
+                    convert lvalue : int
+                      decl #12 err : int lvalue
+                  convert bool : _Bool
+                    const 0 : int
+        then
+          block
+            return
+              const 1 : int
+      expr
+        call : void
+          convert function-decay : void (*)(void)
+            decl #0 only_on_32_bit : void(void) function
+      return
+        const 0 : int
