@@ -436,6 +436,21 @@ mod tests {
         "sar_rcl_16",
     ];
 
+    /// The arithmetic that reads its second source out of memory, which [`crate::combine`] writes.
+    ///
+    /// A function rather than a list, for the reason the compare pass's exemption is taken from the
+    /// flag description rather than typed out: the pass already writes down which instructions it
+    /// can produce, and a second copy of that here would be a second opinion about one pass.
+    ///
+    /// No rule selects one of these because a rule matches a term and one of these is two terms, a
+    /// load and an arithmetic operation, put together. Whether they may be put together depends on
+    /// what is written between them and on whether anything else wants what the load read, and
+    /// neither is a fact about either term. That is the whole reason the pass exists and the module
+    /// documentation there says it at length.
+    fn combine() -> Vec<&'static str> {
+        crate::combine::FOLDS.iter().map(|fold| fold.into).collect()
+    }
+
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_a_frame_really_writes() {
         // The same claim as the one about the convention, so that this list cannot grow an opcode
@@ -534,7 +549,11 @@ mod tests {
     #[test]
     fn every_described_instruction_is_reachable_from_a_rule() {
         let written = heads();
+        let combine = combine();
         for &(opcode, _) in x86_64::INSTS {
+            if combine.contains(&opcode) {
+                continue;
+            }
             if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }

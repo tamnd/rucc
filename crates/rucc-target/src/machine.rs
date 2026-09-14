@@ -48,6 +48,17 @@ pub struct MachineInsts {
     pub takes_imm: fn(&str) -> bool,
     /// Whether an instruction of that name carries an addressing mode.
     pub takes_mem: fn(&str) -> bool,
+    /// Whether an instruction of that name writes to the memory it names.
+    ///
+    /// Asked by a pass moving a read of memory from where it is to somewhere later, which is safe
+    /// while nothing it passes could have written what it is about to read. The answer is about
+    /// the instruction rather than about the address, because whether two addresses are the same
+    /// place is a question nothing below selection has an analysis for.
+    ///
+    /// A call answers `false` here and is not safe to move a read past. What a call does to memory
+    /// is not in the instruction at all, which is why [`Self::calls`] is a separate question and
+    /// why a pass asking this one has to ask that one as well.
+    pub writes_mem: fn(&str) -> bool,
     /// Whether an instruction of that name is a call.
     ///
     /// Asked by a pass that has to know which registers an instruction leaves alone, because a
@@ -84,6 +95,12 @@ impl MachineInsts {
     #[must_use]
     pub fn calls(&self, name: &str) -> bool {
         (self.calls)(self.bare(name))
+    }
+
+    /// Whether an instruction of that name writes to memory on this target.
+    #[must_use]
+    pub fn writes_mem(&self, name: &str) -> bool {
+        (self.writes_mem)(self.bare(name))
     }
 
     /// Whether this target multiplies an index by that.

@@ -2301,9 +2301,12 @@ decl #0 x : int object external static defined
 
         // Nothing is pushed and no frame is taken, so the only thing between the stack pointer and
         // the caller's arguments is the return address the call pushed. Which is where gcc 16.2.0
-        // reads them from too, at `-O0`, in the same two instructions.
+        // reads them from too, at `-O0`, though it reads them in three instructions where this
+        // reads them in two: the second read is the addition's own memory operand, which is
+        // `rucc_codegen::combine`, and the offset in it is the one the frame layout wrote into the
+        // load before the two were put together.
         assert!(text.contains("\tmovq\t8(%rsp), "), "{text}");
-        assert!(text.contains("\tmovq\t16(%rsp), "), "{text}");
+        assert!(text.contains("\taddq\t16(%rsp), "), "{text}");
 
         // A narrower one is read at its own width, because the bits above it are bits the
         // convention says nothing about, and one in the other register file with the other file's

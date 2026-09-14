@@ -243,6 +243,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     operands: machine_operands,
     takes_imm: machine_takes_imm,
     takes_mem: machine_takes_mem,
+    writes_mem: machine_writes_mem,
     calls: machine_calls,
     scales: &[1, 2, 4, 8],
 };
@@ -263,6 +264,12 @@ fn machine_takes_imm(name: &str) -> bool {
 #[must_use]
 fn machine_takes_mem(name: &str) -> bool {
     form(name).is_some_and(Form::takes_mem)
+}
+
+/// Whether an instruction of that name writes to the memory it names.
+#[must_use]
+fn machine_writes_mem(name: &str) -> bool {
+    form(name).is_some_and(Form::writes_mem)
 }
 
 /// Whether an instruction of that name is a call.

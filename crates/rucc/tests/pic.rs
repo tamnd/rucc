@@ -64,12 +64,17 @@ int read_all(void) { return away + here + quiet; }
 /// answers a reference to a variable some library defines by making room for it in the executable
 /// and copying it there, so the name really does end up at a distance this file could have
 /// measured. That is a copy relocation and it is why `-fPIE` is cheaper than `-fPIC`.
+///
+/// Which instruction names the address is left out of what is asked here, because that is not what
+/// this is about and it does change: `rucc_codegen::combine` puts the load of a name into the
+/// arithmetic that reads it, so two of the three below are named by an `addl` rather than a `movl`.
+/// What the question is about is the `(%rip)` and the absence of a table.
 #[test]
 fn an_executable_works_every_address_out_for_itself() {
     for flags in [&[][..], &["-fPIE"], &["-fpie"]] {
         let text = asm("exe", flags, THREE);
-        assert!(text.contains("\tmovl\taway(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("\tmovl\there(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("away(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("here(%rip)"), "{flags:?}: {text}");
         assert!(!text.contains("GOTPCREL"), "{flags:?}: {text}");
     }
 }
@@ -85,7 +90,8 @@ fn a_library_reads_the_exported_ones_out_of_the_table() {
         let text = asm("lib", flags, THREE);
         assert!(text.contains("\tmovq\taway@GOTPCREL(%rip)"), "{flags:?}: {text}");
         assert!(text.contains("\tmovq\there@GOTPCREL(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("\tmovl\tquiet(%rip)"), "a static is nobody else's: {text}");
+        assert!(text.contains("quiet(%rip)"), "a static is nobody else's: {text}");
+        assert!(!text.contains("quiet@GOTPCREL"), "a static is nobody else's: {text}");
     }
 }
 

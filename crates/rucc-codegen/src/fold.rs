@@ -137,7 +137,7 @@ impl Pending<'_> {
     /// An address on any of the lists reads the stack pointer and nothing else, so it never reads a
     /// register another one of them wrote, which is what makes it impossible for a reader to end up
     /// on a list twice and be given two offsets.
-    fn moved(&mut self, from: mir::Inst, into: &[mir::Inst]) {
+    pub(crate) fn moved(&mut self, from: mir::Inst, into: &[mir::Inst]) {
         move_entries(self.addresses, from, into);
         move_entries(self.arguments, from, into);
         if let Some(at) = self.dynamic.iter().position(|&inst| inst == from) {
