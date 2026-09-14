@@ -96,6 +96,7 @@
 pub mod boundary;
 pub mod frame;
 pub mod lower;
+pub mod origin;
 pub mod plane;
 pub mod promise;
 pub mod slot;
@@ -268,10 +269,14 @@ pub fn run(module: &mut Module, subobject: Subobject, promise: Promise, races: R
 /// Puts checks in front of every access and every derivation in a function.
 ///
 /// Section 6.3: every `load` and `store` gets `check_bounds` and `check_live`, with the
-/// capability coming from `cap_of` on the pointer operand, and every `ptr_add` gets
-/// `check_deriv` on the pointer it was computed from. The size and the alignment are the
-/// access's own, since a check that asked about a different number of bytes from the access it
-/// guards would be checking something the program does not do.
+/// capability coming from the pointer operand, and every `ptr_add` gets `check_deriv` on the
+/// pointer it was computed from. The size and the alignment are the access's own, since a check
+/// that asked about a different number of bytes from the access it guards would be checking
+/// something the program does not do.
+///
+/// A capability belongs to a pointer rather than to an access, so two checks through the same
+/// pointer read one `cap_of` and a walk reads the one belonging to what it walked off.
+/// [`mod@origin`] is where it is made and where that is argued.
 ///
 /// The two access checks are separate instructions rather than one fused check, which section
 /// 6.2.2 asks for and which matters more than it looks: the common case document 07 is built
@@ -292,13 +297,17 @@ pub fn insert(
     races: Races,
 ) -> Counts {
     let mut counts = Counts::default();
+    // One table for the whole function, because a capability belongs to a pointer and not to an
+    // access: two checks through the same pointer read the same one. [`mod@origin`] is where that
+    // is argued and where the placement that makes it sound is.
+    let mut origins = origin::Origins::new();
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in insts {
         match func[inst].opcode {
             Opcode::Load | Opcode::Store => match pointer_of(func, inst) {
                 Some(pointer) => {
-                    let capability = check(func, inst, pointer, width);
+                    let capability = check(func, &mut origins, inst, pointer, width);
                     counts.checked += 1;
                     counts.live += 1;
                     if func[inst].opcode == Opcode::Store {
@@ -362,7 +371,7 @@ pub fn insert(
                 }
             }
             Opcode::PtrAdd => {
-                if derivation(func, inst) {
+                if derivation(func, &mut origins, inst) {
                     counts.derived += 1;
                 } else {
                     counts.skipped += 1;
@@ -412,12 +421,23 @@ fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
     func[value].ty.is_ptr().then_some(value)
 }
 
-/// Puts `cap_of`, `check_bounds` and `check_live` immediately before one access.
+/// Puts `check_bounds` and `check_live` immediately before one access, over the pointer's
+/// capability.
 ///
 /// Gives back the capability the two checks read, so that a third check on the same access can read
 /// the same one rather than taking it again. An access with no payload gets nothing and answers
 /// nothing, which is the shape a caller has to handle anyway.
-fn check(func: &mut Func, access: Inst, pointer: Value, width: u64) -> Option<Value> {
+///
+/// The capability comes out of `origins` rather than being taken here, so an access through a
+/// pointer some earlier access already asked about reads what that one read. Where it is made and
+/// why that is sound is [`mod@origin`].
+fn check(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    access: Inst,
+    pointer: Value,
+    width: u64,
+) -> Option<Value> {
     let span = func.span(access);
     let Extra::Mem(info) = func[access].extra else { return None };
     let mut info = func[info];
@@ -426,7 +446,7 @@ fn check(func: &mut Func, access: Inst, pointer: Value, width: u64) -> Option<Va
     // padding is about what a store records rather than about what it reads or writes.
     info.owns = 0;
 
-    let capability = cap_of(func, pointer, access);
+    let capability = origins.of(func, pointer, access);
 
     // The check reads the same bytes the access does, so it carries the access's own payload
     // rather than a copy of it that could later disagree.
@@ -981,7 +1001,7 @@ fn keyed(func: &Func, atomic: Inst) -> Option<Value> {
     func[value].ty.is_ptr().then_some(value)
 }
 
-/// Puts `cap_of` and `check_deriv` immediately before one `ptr_add`.
+/// Puts `check_deriv` immediately after one `ptr_add`, over the capability of what it walked off.
 ///
 /// Judgement J2, which is the one that catches a pointer walking off its object *before* anything
 /// is read through it. C says computing such a pointer is already undefined, and catching it here
@@ -997,7 +1017,7 @@ fn keyed(func: &Func, atomic: Inst) -> Option<Value> {
 /// over is. Document 03 section 3.1 widened S5's window to `[lo - stride, hi]`, so the runtime
 /// cannot decide the low end without it, and it is a value rather than a constant because a walk
 /// over a variable length array steps by a width the program computes.
-fn derivation(func: &mut Func, add: Inst) -> bool {
+fn derivation(func: &mut Func, origins: &mut origin::Origins, add: Inst) -> bool {
     let Some(&base) = func[func[add].args].first() else { return false };
     if !func[base].ty.is_ptr() {
         return false;
@@ -1006,7 +1026,7 @@ fn derivation(func: &mut Func, add: Inst) -> bool {
 
     let span = func.span(add);
     let width = stride(func, add);
-    let capability = cap_of(func, base, add);
+    let capability = origins.of(func, base, add);
     let args = func.push_values(&[capability, base, derived, width]);
     let check = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[], span);
     func.insert_after(check, add);
@@ -1070,16 +1090,6 @@ fn one(func: &mut Func, at: Inst, ty: Type) -> Value {
     let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[ty], span);
     func.insert_before(made, at);
     func[made].results().next().expect("a constant created with one result has one")
-}
-
-/// Puts a `cap_of` for `pointer` immediately before `at`, and gives back what it produced.
-fn cap_of(func: &mut Func, pointer: Value, at: Inst) -> Value {
-    let span = func.span(at);
-    let args = func.push_values(&[pointer]);
-    let cap =
-        func.create_inst(InstData { args, ..InstData::new(Opcode::CapOf) }, &[Type::CAP], span);
-    func.insert_before(cap, at);
-    func[cap].results().next().expect("cap_of produces one value")
 }
 
 #[cfg(test)]
@@ -1196,6 +1206,9 @@ mod tests {
             // The plane writes are after the store and not in front of it. The bytes were stored
             // through that type, and were stored at all, once the store has happened, and the
             // check in front of it may yet refuse the store both of them are about.
+            //
+            // One `cap_of` for two accesses, because both go through the same pointer and a
+            // capability is about the pointer. `origin` is where that is argued.
             "func @both(ptr) -> i32, linkage(external) {\n\
              block0(%0: ptr):\n    \
              %1 = cap_of %0\n    \
@@ -1203,14 +1216,13 @@ mod tests {
              check_live %1, %0\n    \
              check_init %1, %0, size 4, align 4\n    \
              %2 = load.i32 %0, size 4, align 4\n    \
-             %3 = cap_of %0\n    \
-             check_bounds %3, %0, size 4, align 4\n    \
-             check_live %3, %0\n    \
+             check_bounds %1, %0, size 4, align 4\n    \
+             check_live %1, %0\n    \
              store %2 -> %0, size 4, align 4\n    \
+             %3 = iconst.i64 4\n    \
+             meta_type %0, %3, tbaa !1\n    \
              %4 = iconst.i64 4\n    \
-             meta_type %0, %4, tbaa !1\n    \
-             %5 = iconst.i64 4\n    \
-             meta_init %0, %5\n    \
+             meta_init %0, %4\n    \
              return %2\n\
              }\n"
         );
@@ -2139,11 +2151,11 @@ mod tests {
             print_func(&module, &func, &names),
             "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
              block0(%0: ptr, %1: i64):\n    \
-             %2 = iconst.i64 24\n    \
-             %3 = mul.nsw %1, %2\n    \
-             %4 = cap_of %0\n    \
-             %5 = ptr_add %0, %3\n    \
-             check_deriv %4, %0, %5, %2\n    \
+             %2 = cap_of %0\n    \
+             %3 = iconst.i64 24\n    \
+             %4 = mul.nsw %1, %3\n    \
+             %5 = ptr_add %0, %4\n    \
+             check_deriv %2, %0, %5, %3\n    \
              return %5\n\
              }\n"
         );
@@ -2177,7 +2189,7 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
 
         let printed = print_func(&module, &func, &names);
-        assert!(printed.contains("check_deriv %6, %0, %7, %2\n"), "{printed}");
+        assert!(printed.contains("check_deriv %2, %0, %7, %3\n"), "{printed}");
     }
 
     #[test]
@@ -2213,10 +2225,10 @@ mod tests {
             // recognise gets, and it is the strict reading of C.
             "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
              block0(%0: ptr, %1: i64):\n    \
-             %2 = iconst.i64 1\n    \
-             %3 = cap_of %0\n    \
+             %2 = cap_of %0\n    \
+             %3 = iconst.i64 1\n    \
              %4 = ptr_add %0, %1\n    \
-             check_deriv %3, %0, %4, %2\n    \
+             check_deriv %2, %0, %4, %3\n    \
              return %4\n\
              }\n"
         );
@@ -2224,6 +2236,89 @@ mod tests {
         if let Err(errors) = verify_func(&module, &func, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
+    }
+
+    #[test]
+    fn a_walk_and_the_access_through_it_read_the_capability_of_what_it_walked_off() {
+        // One capability for the whole walk, and it is the base's rather than the derived
+        // pointer's. That is the cheap answer and it is also the right one: asking about an
+        // interior pointer means recovering whichever object the plane says that address is in,
+        // and for a pointer that has already run off the end of its own object that is somebody
+        // else's, which is a bounds check that passes where it should refuse.
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("through"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p, n]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let args = b.func().push_values(&[moved]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[read]);
+
+        let (module, plane) = planed(&mut names, "through.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
+        assert!(printed.contains("check_deriv %2, %0, %4, %3\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %4, size 4, align 4\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_pointer_read_out_of_memory_takes_its_capability_at_the_read() {
+        // Which is where the answer is going to come from once the rest of tamnd/rucc#1241 lands,
+        // since a pointer that lives in memory has its capability in the aux slot beside it and
+        // reading the two is one event. Putting the fallback in the same place means the placement
+        // stops changing when the producer does.
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("indirect"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let held = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        let args = b.func().push_values(&[held]);
+        let info = MemInfo { size: 4, align: 4, ..info };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[read]);
+
+        let (module, plane) = planed(&mut names, "indirect.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("%2 = load %0, align 8\n    %3 = cap_of %2\n"), "{printed}");
+        assert!(printed.contains("check_bounds %3, %2, size 4, align 4\n"), "{printed}");
     }
 
     #[test]
