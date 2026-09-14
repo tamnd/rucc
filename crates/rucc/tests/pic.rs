@@ -104,7 +104,10 @@ fn a_library_reads_the_exported_ones_out_of_the_table() {
 #[test]
 fn a_library_pays_nothing_for_a_name_nothing_outside_it_can_see() {
     let text = asm("hidden", &["-fPIC", "-fvisibility=hidden"], THREE);
-    assert!(!text.contains("GOTPCREL"), "{text}");
+    assert!(text.contains("here(%rip)"), "a name this file defines is here: {text}");
+    assert!(text.contains("quiet(%rip)"), "a static is nobody else's: {text}");
+    assert!(!text.contains("here@GOTPCREL"), "{text}");
+    assert!(!text.contains("quiet@GOTPCREL"), "{text}");
 
     let marked = asm(
         "marked",
@@ -115,6 +118,29 @@ int read_kept(void) { return kept; }
 ",
     );
     assert!(marked.contains("\tmovl\tkept(%rip)"), "{marked}");
+}
+
+/// And it still pays for a name it only mentions, which is the whole of tamnd/rucc#1234.
+///
+/// `-fvisibility=hidden` is a claim about the names this file puts into the library. A name it
+/// declares and does not define is one it knows nothing about, and calling that hidden tells the
+/// linker to resolve it inside this object, which it cannot do: libexpat reads `stderr`, `stderr`
+/// is in libc, and the link stopped with `R_X86_64_PC32 against symbol stderr@@GLIBC_2.2.5 can not
+/// be used when making a shared object`, advising a `-fPIC` that was already on the line.
+///
+/// Measured against gcc 16.2.0, which writes the same two: the plain declaration goes through the
+/// table and the marked one is reached from the instruction pointer.
+#[test]
+fn a_library_still_pays_for_a_name_it_only_declares() {
+    let source = "\
+extern int plain;
+__attribute__((visibility(\"hidden\"))) extern int marked;
+int read_both(void) { return plain + marked; }
+";
+    let text = asm("declared", &["-fPIC", "-fvisibility=hidden"], source);
+    assert!(text.contains("\tmovq\tplain@GOTPCREL(%rip)"), "{text}");
+    assert!(text.contains("marked(%rip)"), "{text}");
+    assert!(!text.contains("marked@GOTPCREL"), "an attribute on a declaration counts: {text}");
 }
 
 /// The last one written is the one that counts, which is how every other flag with two directions
