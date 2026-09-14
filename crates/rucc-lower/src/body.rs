@@ -1062,8 +1062,7 @@ impl<'u> Body<'_, 'u> {
     /// This is what a `break`, a `continue` or a `return` leaving several blocks at once has to
     /// run, and the order is the order the blocks are left in.
     fn unwind_cleanups(&mut self, depth: usize, span: Span) {
-        let leaving: Vec<Vec<Cleanup>> =
-            self.cleanups.get(depth..).unwrap_or_default().to_vec();
+        let leaving: Vec<Vec<Cleanup>> = self.cleanups.get(depth..).unwrap_or_default().to_vec();
         for owed in leaving.iter().rev() {
             self.run_cleanups(owed, span);
         }
@@ -1764,12 +1763,8 @@ impl<'u> Body<'_, 'u> {
         }
         let [target] = jump.targets[..] else { return };
         let arriving = self.landings.get(&target).map_or([].as_slice(), Vec::as_slice);
-        let shared = jump
-            .from
-            .iter()
-            .zip(arriving)
-            .take_while(|(from, to)| from.scope == to.scope)
-            .count();
+        let shared =
+            jump.from.iter().zip(arriving).take_while(|(from, to)| from.scope == to.scope).count();
         let leaving: Vec<Vec<Cleanup>> = jump.holding.get(shared..).unwrap_or_default().to_vec();
         for owed in leaving.iter().rev() {
             for entry in owed.iter().rev() {

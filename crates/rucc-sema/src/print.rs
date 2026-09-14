@@ -150,10 +150,9 @@ impl<'a> Printer<'a> {
         // The handler is a declaration rather than a name, so what is written is the name it was
         // resolved to, which is what makes a dump show which function the call will go to.
         if let Some(handler) = node.cleanup {
-            let spelled = self.tast[handler].name.map_or_else(
-                || "?".to_string(),
-                |name| self.names.resolve(name).to_string(),
-            );
+            let spelled = self.tast[handler]
+                .name
+                .map_or_else(|| "?".to_string(), |name| self.names.resolve(name).to_string());
             head.push_str(&format!(" cleanup {spelled}"));
         }
         // Each on its own, because a function may be in both orders, and a bare one carries no
