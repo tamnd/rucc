@@ -6112,11 +6112,10 @@ impl<'u> Body<'_, 'u> {
             self.library_read(addr, into, ty, order, span);
             return;
         };
-        let align = repr::align_of(self.types(), self.target(), ty);
-        let mut info = self.piece_info(align, 0);
+        let mut info = self.piece_info(self.object_align(ty), 0);
         info.order = order;
         let held = self.build(span).atomic_load(raw, addr, info, Flags::NONE);
-        let plain = self.piece_info(align, 0);
+        let plain = self.piece_info(self.buffer_align(ty), 0);
         self.build(span).store(held, into, plain, Flags::NONE);
     }
 
@@ -6126,12 +6125,30 @@ impl<'u> Body<'_, 'u> {
             self.library_write(addr, from, ty, order, span);
             return;
         };
-        let align = repr::align_of(self.types(), self.target(), ty);
-        let plain = self.piece_info(align, 0);
+        let plain = self.piece_info(self.buffer_align(ty), 0);
         let held = self.build(span).load(raw, from, plain, Flags::NONE);
-        let mut info = plain;
+        let mut info = self.piece_info(self.object_align(ty), 0);
         info.order = order;
         self.build(span).atomic_store(held, addr, info, Flags::NONE);
+    }
+
+    /// What the atomic object itself is aligned to, which is what the qualifier raised it to.
+    fn object_align(&mut self, ty: TypeId) -> u32 {
+        repr::align_of(self.types(), self.target(), ty)
+    }
+
+    /// What the buffer on the other end of the copy is aligned to, which is the type's own
+    /// alignment without the qualifier's rise.
+    ///
+    /// The two are not the same number and the difference is not cosmetic. A parameter of type
+    /// `struct P { int a, b; }` gets a slot aligned to four, because that is what the type asks
+    /// for, and `_Atomic struct P` raises the object in memory to eight so that one instruction
+    /// reaches it. Telling the load out of that slot it is eight is telling it something that is
+    /// not so, and a target whose wide load faults on a misaligned address is where that gets
+    /// found rather than here.
+    fn buffer_align(&mut self, ty: TypeId) -> u32 {
+        let inner = self.underlying(ty);
+        repr::align_of(self.types(), self.target(), inner)
     }
 
     /// The integer an object of that type is moved as, and [`None`] for one an instruction does

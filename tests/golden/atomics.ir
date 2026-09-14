@@ -11,6 +11,8 @@ global @room : bytes 32 = { zero 32 }, align 4, linkage(external)
 global @table : bytes 16 = { zero 16 }, align 4, linkage(external)
 global @both : bytes 4 = { zero 4 }, align 4, linkage(external)
 global @wide : bytes 16 = { zero 16 }, align 16, linkage(external)
+global @pair : bytes 8 = { zero 8 }, align 8, linkage(external)
+global @three : bytes 12 = { zero 12 }, align 4, linkage(external)
 
 func @put(i32), linkage(external) {
 block0(%0: i32):
@@ -299,6 +301,54 @@ block0(%0: ptr, %1: i128):
     %5 = iconst.i32 5
     %6 = call @__atomic_compare_exchange(%4, %3, %0, %2, %5, %5) : (i64, ptr, ptr, ptr, i32, i32) -> i1
     return %6
+}
+
+func @paired() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = global_addr @pair
+    %2 = atomic_load.i64 %1, align 8, seq_cst
+    store %2 -> %0, align 8
+    %3 = load.i64 %0, align 4
+    return %3
+}
+
+func @pairing(i64), linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    store %0 -> %1, align 4
+    %2 = global_addr @pair
+    %3 = load.i64 %1, align 8
+    atomic_store %3 -> %2, align 8, seq_cst
+    return
+}
+
+func @threefold() -> (i64, i32), linkage(external) {
+block0:
+    %0 = alloca, size 12, align 4
+    %1 = global_addr @three
+    %2 = iconst.i64 12
+    %3 = iconst.i32 5
+    call @__atomic_load(%2, %1, %0, %3) : (i64, ptr, ptr, i32)
+    %4 = load.i64 %0, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %0, %5
+    %7 = load.i32 %6, align 4
+    return %4, %7
+}
+
+func @threading(i64, i32), linkage(external) {
+block0(%0: i64, %1: i32):
+    %2 = alloca, size 12, align 4
+    store %0 -> %2, align 4
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 4
+    %5 = global_addr @three
+    %6 = iconst.i64 12
+    %7 = iconst.i32 5
+    call @__atomic_store(%6, %5, %2, %7) : (i64, ptr, ptr, i32)
+    return
 }
 
 !0 = tbaa "char", offset 0

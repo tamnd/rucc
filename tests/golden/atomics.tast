@@ -275,3 +275,37 @@ decl #45 swing : _Bool(__int128 *, __int128) function external defined
             decl #43 want : __int128 * lvalue
           convert lvalue : __int128
             decl #44 v : __int128 lvalue
+decl #46 pair : _Atomic(struct Pair) object external static tentative
+decl #47 paired : struct Pair(void) function external defined
+  body
+    block
+      return
+        convert lvalue : struct Pair
+          decl #46 pair : _Atomic(struct Pair) lvalue
+decl #49 pairing : void(struct Pair) function external defined
+  params
+    decl #48 v : struct Pair object automatic defined
+  body
+    block
+      expr
+        assign = : struct Pair
+          decl #46 pair : _Atomic(struct Pair) lvalue
+          convert lvalue : struct Pair
+            decl #48 v : struct Pair lvalue
+decl #50 three : _Atomic(struct Three) object external static tentative
+decl #51 threefold : struct Three(void) function external defined
+  body
+    block
+      return
+        convert lvalue : struct Three
+          decl #50 three : _Atomic(struct Three) lvalue
+decl #53 threading : void(struct Three) function external defined
+  params
+    decl #52 v : struct Three object automatic defined
+  body
+    block
+      expr
+        assign = : struct Three
+          decl #50 three : _Atomic(struct Three) lvalue
+          convert lvalue : struct Three
+            decl #52 v : struct Three lvalue
