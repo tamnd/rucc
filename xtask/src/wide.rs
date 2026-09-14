@@ -58,9 +58,9 @@ const ROUTINES: [&str; 12] = [
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when the compiler or the archive will not build or the script will not run, and
-/// [`Error::Failed`] when a build of the fixture does not call the runtime routines, when a program
-/// did not reach the end, or when any group of cases came out differently from the system
+/// [`crate::Error::Io`] when the compiler or the archive will not build or the script will not run,
+/// and [`crate::Error::Failed`] when a build of the fixture does not call the runtime routines, when
+/// a program did not reach the end, or when any group of cases came out differently from the system
 /// compiler's.
 pub(crate) fn wide() -> Result<()> {
     let fixture = root().join("tests").join("wide").join("arithmetic.c");
