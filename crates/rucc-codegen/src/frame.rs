@@ -273,8 +273,16 @@ impl Frame {
         let mut cells = Vec::with_capacity(plan.cells().len());
         let mut order: Vec<usize> = (0..plan.cells().len()).collect();
         // Widest alignment first, so that placing each one straight after the last never leaves a
-        // hole bigger than the alignment the next one asked for.
-        order.sort_by_key(|&cell| std::cmp::Reverse(plan.cells()[cell].align));
+        // hole bigger than the alignment the next one asked for. Within one alignment, the cells
+        // that are a whole number of it go before the ones that are not, because a cell that ends
+        // part way through leaves a hole in front of the next cell that asked for the same
+        // alignment and none at all in front of a narrower one. A cell shared by a wide thing and
+        // a strict one is exactly how a size that is not a multiple of its own alignment arises,
+        // so without this a frame could come out larger for sharing than it was for not.
+        order.sort_by_key(|&cell| {
+            let Cell { size, align } = plan.cells()[cell];
+            (std::cmp::Reverse(align), size % align != 0)
+        });
         cells.resize(plan.cells().len(), 0);
         for cell in order {
             let Cell { size, align: want } = plan.cells()[cell];

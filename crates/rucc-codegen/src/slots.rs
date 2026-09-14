@@ -766,6 +766,30 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_bytes_that_ends_part_way_through_its_alignment_costs_the_frame_nothing() {
+        let (mut building, block) = Building::new();
+        let addr = building.local(block, 0);
+        building.through(block, addr);
+        let (_, allocation) = building.allocate(1, 4);
+
+        // Twenty four bytes asking for sixteen is what a cell shared by a wide thing and a strict
+        // one looks like, and it ends eight bytes into an alignment. Which way round the two are
+        // given is not allowed to matter, because the order they are placed in is this pass's
+        // business and the order they were declared in is not.
+        let ragged = Local { size: 24, align: 16 };
+        let whole = Local { size: 32, align: 16 };
+        let size = |locals: &[Local]| {
+            let layout = Layout { leaf: false, locals, ..Layout::new(&SYSV, REGS) };
+            Frame::of(&building.func, &allocation, &layout).size()
+        };
+
+        assert_eq!(size(&[ragged, whole]), size(&[whole, ragged]));
+        // The two of them end to end with no hole between, which with the return address on top
+        // of it is already where a call wants the stack pointer, so nothing is added for that.
+        assert_eq!(size(&[ragged, whole]), 56);
+    }
+
+    #[test]
     fn a_function_with_more_slots_than_anything_real_is_laid_out_the_old_way() {
         let (mut building, block) = Building::new();
         let addr = building.local(block, 0);
