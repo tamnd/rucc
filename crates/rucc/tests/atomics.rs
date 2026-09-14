@@ -202,19 +202,62 @@ _Atomic struct S big;
     assert!(said.contains("E0519"), "{said}");
 }
 
-/// The builtins that name an ordering are the other half of this and are not written yet, so one
-/// of them at a width with no instruction is refused rather than reaching the back end as an
-/// access no rule covers.
+/// The builtins go to the same table at that width, which is what makes the operators and the
+/// names in the header agree about an object too wide for an instruction.
 #[test]
-fn a_builtin_at_that_width_is_refused_for_now() {
-    let said = refusal(
+fn a_builtin_at_that_width_is_a_call_as_well() {
+    let text = asm(
         "wide-builtin",
         "\
 _Atomic __int128 w;
-__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_SEQ_CST); }
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+void put(__int128 v) { __atomic_store_n(&w, v, __ATOMIC_RELEASE); }
+__int128 swap(__int128 v) { return __atomic_exchange_n(&w, v, __ATOMIC_ACQ_REL); }
+__int128 bump(__int128 v) { return __atomic_add_fetch(&w, v, __ATOMIC_SEQ_CST); }
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&w, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
 ",
     );
-    assert!(said.contains("an atomic builtin on an object this wide"), "{said}");
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_exchange"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// The ordering a builtin was written with travels to the call, unlike the operators, which are
+/// sequentially consistent because the language says so. None of the four routines reads the
+/// argument today and all four take one, so the truth goes in rather than a five.
+#[test]
+fn the_ordering_a_builtin_named_reaches_the_call() {
+    let text = asm(
+        "wide-order",
+        "\
+_Atomic __int128 w;
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+",
+    );
+    assert!(text.contains("$2,"), "{text}");
+    assert!(!text.contains("$5,"), "{text}");
+}
+
+/// The older family is the same routine with the value expected put into a slot first, and
+/// `__sync_val_compare_and_swap` reads that slot afterwards to find what was there. The routine
+/// writes the object's own bytes over the slot when it fails and leaves them alone when it does
+/// not, and what it leaves alone is the value that was expected, which is what the object held.
+#[test]
+fn the_older_exchange_reads_what_it_expected_back_out() {
+    let text = asm(
+        "wide-sync",
+        "\
+_Atomic __int128 w;
+__int128 was(__int128 old, __int128 new) { return __sync_val_compare_and_swap(&w, old, new); }
+_Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+",
+    );
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
 }
 
 /// A bit-field cannot carry the qualifier, because 6.7.2.1p5 says what a bit-field's type may be
