@@ -763,18 +763,21 @@ impl Checker<'_> {
         // the lock: the whole object is what an access to one takes the lock around, so a read of
         // four bytes out of the middle of it is not under that lock and is not atomic. gcc refuses
         // this as well, rather than reading the member and leaving the program to find out.
-        if let TypeKind::Atomic(held) = self.types.kind(self.types.canonical(ty))
-            && matches!(self.types.kind(self.types.canonical(held)), TypeKind::Record(_))
-        {
-            let name = self.text(name).to_owned();
-            self.report(
-                Diagnostic::error(
-                    format!("accessing a member '{name}' of an atomic structure or union"),
-                    span,
-                )
-                .with_code("E0502"),
-            );
-            return self.poison(span);
+        //
+        // Nested rather than one `&&` chain, because a `let` in the middle of a condition is
+        // Rust 1.88 and the workspace's floor is 1.85.
+        if let TypeKind::Atomic(held) = self.types.kind(self.types.canonical(ty)) {
+            if matches!(self.types.kind(self.types.canonical(held)), TypeKind::Record(_)) {
+                let name = self.text(name).to_owned();
+                self.report(
+                    Diagnostic::error(
+                        format!("accessing a member '{name}' of an atomic structure or union"),
+                        span,
+                    )
+                    .with_code("E0502"),
+                );
+                return self.poison(span);
+            }
         }
         let TypeKind::Record(record) = self.types.kind(self.types.canonical(ty)) else {
             let name = self.text(name).to_owned();

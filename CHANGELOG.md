@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The workspace builds on its stated minimum toolchain again. A member access check written for atomic structures put a `let` in the middle of a condition, which is Rust 1.88, and `Cargo.toml` says the floor is 1.85, so `cargo +1.85.0 check` stopped with `'let' expressions in this position are unstable` and nobody on an older toolchain could build the compiler at all. The fix is the one `crates/rucc-sema/src/convert.rs` already writes down for the same reason, which is two nested ifs rather than one chain. The reason this reached main is worth saying: the `msrv` job is a check like any other and a merge that goes around the checks goes around that one too, so the rule of thumb is that anything landed with the gates bypassed wants the minimum toolchain run by hand before it goes in.
+
 ## 0.10.42
 
 ### Added
