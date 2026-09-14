@@ -10,6 +10,7 @@ global @p : bytes 8 = { zero 8 }, align 8, linkage(external)
 global @room : bytes 32 = { zero 32 }, align 4, linkage(external)
 global @table : bytes 16 = { zero 16 }, align 4, linkage(external)
 global @both : bytes 4 = { zero 4 }, align 4, linkage(external)
+global @wide : bytes 16 = { zero 16 }, align 16, linkage(external)
 
 func @put(i32), linkage(external) {
 block0(%0: i32):
@@ -201,7 +202,51 @@ block0(%0: i32):
     return %5
 }
 
+func @widen(i128), linkage(external) {
+block0(%0: i128):
+    %1 = alloca, size 16, align 16
+    %2 = global_addr @wide
+    store %0 -> %1, align 16
+    %3 = iconst.i64 16
+    %4 = iconst.i32 5
+    call @__atomic_store(%3, %2, %1, %4) : (i64, ptr, ptr, i32)
+    return
+}
+
+func @taken() -> i128, linkage(external) {
+block0:
+    %0 = alloca, size 16, align 16
+    %1 = global_addr @wide
+    %2 = iconst.i64 16
+    %3 = iconst.i32 5
+    call @__atomic_load(%2, %1, %0, %3) : (i64, ptr, ptr, i32)
+    %4 = load.i128 %0, align 16
+    return %4
+}
+
+func @raise(i128), linkage(external) {
+block0(%0: i128):
+    %1 = alloca, size 16, align 16
+    %2 = alloca, size 16, align 16
+    %3 = global_addr @wide
+    %4 = iconst.i64 16
+    %5 = iconst.i32 5
+    call @__atomic_load(%4, %3, %2, %5) : (i64, ptr, ptr, i32)
+    jump block1
+
+block1:
+    %6 = load.i128 %2, align 16
+    %7 = add.nsw %6, %0
+    store %7 -> %1, align 16
+    %8 = call @__atomic_compare_exchange(%4, %3, %2, %1, %5, %5) : (i64, ptr, ptr, ptr, i32, i32) -> i1
+    br_if %8, block2, block1
+
+block2:
+    return
+}
+
 !0 = tbaa "char", offset 0
 !1 = tbaa "int", parent !0, offset 0
 !2 = tbaa "double", parent !0, offset 0
 !3 = tbaa "pointer", parent !0, offset 0
+!4 = tbaa "__int128", parent !0, offset 0

@@ -98,10 +98,12 @@ typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
  * the IR can hold a barrier that binds one thread only. */
 #define atomic_signal_fence(order) __atomic_thread_fence(order)
 
-/* Every atomic type this compiler accepts is one the machine reaches in a single instruction,
- * because the ones it does not are refused where they are written. So the answer is yes, and the
- * object is still named so that a program written with a side effect in there behaves. */
-#define atomic_is_lock_free(object) ((void)(object), 1)
+/* The width decides it, so the builtin is asked rather than the answer being written down here.
+ * An object the machine reaches in a single instruction is lock free and one wider than that is a
+ * lock out of the runtime's table, and both are types this compiler accepts. The object is passed
+ * along as well as measured, because a program may have written a side effect in there and
+ * because the alignment is part of the question the builtin answers. */
+#define atomic_is_lock_free(object) __atomic_is_lock_free(sizeof(*(object)), (object))
 
 #define ATOMIC_BOOL_LOCK_FREE __GCC_ATOMIC_BOOL_LOCK_FREE
 #define ATOMIC_CHAR_LOCK_FREE __GCC_ATOMIC_CHAR_LOCK_FREE
@@ -173,8 +175,9 @@ typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
 
 /* One byte, whatever the type says, which is what the two builtins below reach. gcc wraps that
  * byte in a structure so that nothing but the four names here can touch it. A structure with the
- * qualifier on it is an object this compiler has no instruction for, so the byte is named
- * directly, and the standard already says a program may do nothing else with one of these.
+ * qualifier on it is an object this compiler refuses, since an access to one is a copy and not a
+ * value, so the byte is named directly and the standard already says a program may do nothing else
+ * with one of these.
  *
  * An unsigned char rather than a `_Bool` because the two builtins work on a byte and neither of
  * them ever puts anything but a zero or a one in it, so nothing can tell the difference, and

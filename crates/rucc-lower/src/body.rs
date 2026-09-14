@@ -196,6 +196,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
 /// which has been eight since the flag was written.
 const BUFFER: u64 = 8;
 
+/// The number `<stdatomic.h>` gives the strongest ordering, which is the last argument of every
+/// routine in the runtime's table of locks.
+const SEQ_CST: i128 = 5;
+
 /// Whether this function gets a stack protector, which is a question about the locals it declares.
 ///
 /// A canary catches a write that runs off the end of something and keeps going, so what decides is
@@ -409,6 +413,24 @@ enum Step {
     /// An address a number of elements further on, which is what pointer arithmetic is and what
     /// `++` on a pointer is.
     Walk { steps: Value, signed: bool, size: Stride, back: bool },
+}
+
+/// What an access to a place has to be for it to be ordered.
+///
+/// The three are not three degrees of the same thing. An access that is one instruction is that
+/// instruction with an ordering on it, and an access that is a call is the runtime taking a lock
+/// around a copy, which is a different shape of code and not a slower version of the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ordered {
+    /// Not ordered at all, which is every object without the qualifier and is also what a refused
+    /// one answers once the refusal has been reported.
+    No,
+    /// One instruction reaches the whole object, so the access is that instruction in its ordered
+    /// form.
+    Instruction,
+    /// Nothing reaches the whole object at once, so the access is a call into the runtime's table
+    /// of locks.
+    Call,
 }
 
 /// One loop or `switch`, and where its `break` and its `continue` go.
@@ -1182,31 +1204,51 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// Whether an access to that type has to be an ordered one, reporting where it has to be one
-    /// this compiler cannot make.
+    /// What an access to that type has to be, reporting where it has to be one this compiler
+    /// cannot make.
     ///
     /// C11 6.5.16p3 and 5.1.2.4 make a plain read or a plain write of an atomic object a
     /// sequentially consistent one, which is the strongest ordering there is and the only one the
     /// language spells without a call. A program that wants a weaker one asks for it by name
     /// through `<stdatomic.h>`.
     ///
-    /// What this compiler cannot make is an access to an object that is not one value the machine
-    /// reaches in one instruction: a structure, or something wider than a machine word. gcc calls
-    /// into libatomic for those, which takes a lock out of a table keyed by the address, and a
-    /// program half of whose accesses take that lock and half of which do not is not atomic at
-    /// all. So the ones there is no instruction for are refused rather than done without a lock.
-    fn atomic_access(&mut self, ty: TypeId, span: Span) -> bool {
+    /// The machine reaches a byte, a halfword, a word and a doubleword in one instruction, and an
+    /// access to one of those is that instruction. Anything wider is a call into the runtime's
+    /// table of locks, which is `runtime/builtins/atomic.c` and is libatomic's table under
+    /// libatomic's names, so the two compilers' objects in one program take the same lock.
+    ///
+    /// What is left over is an object with no value at all: a structure, a union or a vector. The
+    /// runtime would take the lock for one of those quite happily, since its four generic routines
+    /// work through pointers and a size, but the walk has nowhere to put what comes back, and an
+    /// aggregate access is a copy rather than a read. Those are still refused here.
+    fn atomic_access(&mut self, ty: TypeId, span: Span) -> Ordered {
         if !self.is_atomic(ty) {
-            return false;
+            return Ordered::No;
         }
         let inner = self.underlying(ty);
         let size = repr::size_of(self.types(), self.target(), ty);
         let single = repr::value_type(self.types(), self.target(), ty).is_some()
             && !rucc_types::is_vector(self.types(), inner);
-        if single && matches!(size, 1 | 2 | 4 | 8) {
+        if !single {
+            self.unsupported("an atomic object this compiler has no value for", span);
+            return Ordered::No;
+        }
+        if matches!(size, 1 | 2 | 4 | 8) { Ordered::Instruction } else { Ordered::Call }
+    }
+
+    /// Whether an access one of the named builtins asks for is one the machine has an instruction
+    /// for, reporting where it is not.
+    ///
+    /// The operators have somewhere to go at a width the machine cannot reach, which is the call
+    /// [`Self::atomic_access`] answers with, and the builtins do not yet. Until they do, one of
+    /// them at such a width is refused here, where the name the program wrote is in hand. Letting
+    /// it through would reach the back end as an ordered access no rule covers, which is an error
+    /// as well and is one that names an instruction rather than anything the program said.
+    fn narrow_enough(&mut self, ty: TypeId, span: Span) -> bool {
+        if matches!(repr::size_of(self.types(), self.target(), ty), 1 | 2 | 4 | 8) {
             return true;
         }
-        self.unsupported("an atomic object this compiler cannot reach in one instruction", span);
+        self.unsupported("an atomic builtin on an object this wide", span);
         false
     }
 
@@ -3498,11 +3540,14 @@ impl<'u> Body<'_, 'u> {
                 // number on an instruction that would never look at it.
                 let mut info = MemInfo { owns: 0, ..self.info_of(place) };
                 let flags = self.flags(place.ty);
-                if !ordered {
-                    return Some(self.build(span).load(ty, addr, info, flags));
+                match ordered {
+                    Ordered::No => Some(self.build(span).load(ty, addr, info, flags)),
+                    Ordered::Instruction => {
+                        info.order = MemOrder::SeqCst;
+                        Some(self.build(span).atomic_load(ty, addr, info, flags))
+                    }
+                    Ordered::Call => Some(self.library_load(addr, place.ty, ty, span)),
                 }
-                info.order = MemOrder::SeqCst;
-                Some(self.build(span).atomic_load(ty, addr, info, flags))
             }
             Where::Bits(addr, run) => Some(self.read_bits(addr, run, place.ty, ty, span)),
         }
@@ -3523,11 +3568,15 @@ impl<'u> Body<'_, 'u> {
             Where::Addr(addr) => {
                 let mut info = self.info_of(place);
                 let flags = self.flags(place.ty);
-                if ordered {
-                    info.order = MemOrder::SeqCst;
-                    self.build(span).atomic_store(value, addr, info, flags);
-                } else {
-                    self.build(span).store(value, addr, info, flags);
+                match ordered {
+                    Ordered::No => {
+                        self.build(span).store(value, addr, info, flags);
+                    }
+                    Ordered::Instruction => {
+                        info.order = MemOrder::SeqCst;
+                        self.build(span).atomic_store(value, addr, info, flags);
+                    }
+                    Ordered::Call => self.library_store(addr, value, place.ty, span),
                 }
                 None
             }
@@ -4268,7 +4317,8 @@ impl<'u> Body<'_, 'u> {
         ty: TypeId,
         span: Span,
     ) -> Option<Value> {
-        if !self.atomic_access(ty, span) {
+        let ordered = self.atomic_access(ty, span);
+        if ordered == Ordered::No {
             return None;
         }
         let place = self.place(operand);
@@ -4280,7 +4330,7 @@ impl<'u> Body<'_, 'u> {
         };
         let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
         let step = self.one(ty, up, span);
-        let (before, after) = self.atomic_update(addr, ty, step, span);
+        let (before, after) = self.atomic_update(addr, ty, step, ordered, span);
         Some(if op.is_postfix() { before } else { after })
     }
 
@@ -5163,6 +5213,9 @@ impl<'u> Body<'_, 'u> {
                 let mut info = self.access(ty);
                 info.order = order;
                 let flags = self.flags(ty);
+                if !self.narrow_enough(ty, span) {
+                    return None;
+                }
                 Some(self.build(span).atomic_load(into, addr, info, flags))
             }
             AtomicOp::Store => {
@@ -5172,6 +5225,9 @@ impl<'u> Body<'_, 'u> {
                 let mut info = self.access(stored);
                 info.order = order;
                 let flags = self.flags(stored);
+                if !self.narrow_enough(stored, span) {
+                    return None;
+                }
                 self.build(span).atomic_store(value, addr, info, flags);
                 None
             }
@@ -5186,6 +5242,9 @@ impl<'u> Body<'_, 'u> {
                 let mut info = plain;
                 info.order = order;
                 let flags = self.flags(object);
+                if !self.narrow_enough(object, span) {
+                    return None;
+                }
                 let held = self.build(span).atomic_load(into, addr, info, flags);
                 let out = self.value(place);
                 self.build(span).store(held, out, plain, flags);
@@ -5258,6 +5317,9 @@ impl<'u> Body<'_, 'u> {
         let mut info = self.access(object);
         info.order = order;
         let flags = self.flags(object);
+        if !self.narrow_enough(object, span) {
+            return None;
+        }
 
         let address = self.address;
         let pointer = self.value_type(object, span).is_ptr();
@@ -5356,6 +5418,9 @@ impl<'u> Body<'_, 'u> {
         let mut info = plain;
         info.order = order;
         let flags = self.flags(stored);
+        if !self.narrow_enough(stored, span) {
+            return None;
+        }
 
         let place = self.value(wanted);
         let expected = if op == AtomicOp::CompareExchange {
@@ -5652,7 +5717,8 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<Value> {
         let ty = place.ty;
-        if !self.atomic_access(ty, span) {
+        let ordered = self.atomic_access(ty, span);
+        if ordered == Ordered::No {
             return None;
         }
         let right = self.value(rhs);
@@ -5672,7 +5738,7 @@ impl<'u> Body<'_, 'u> {
         };
         // What one of these is worth is the value in the object afterwards, and the value before
         // is what a `++` after its operand wants and this does not.
-        let (_, after) = self.atomic_update(addr, ty, step, span);
+        let (_, after) = self.atomic_update(addr, ty, step, ordered, span);
         Some(after)
     }
 
@@ -5688,7 +5754,17 @@ impl<'u> Body<'_, 'u> {
     ///
     /// It answers the value that was in the object before and the value in it afterwards, since a
     /// caller wants one of the two and which one is the whole difference between `x++` and `++x`.
-    fn atomic_update(&mut self, addr: Value, ty: TypeId, step: Step, span: Span) -> (Value, Value) {
+    fn atomic_update(
+        &mut self,
+        addr: Value,
+        ty: TypeId,
+        step: Step,
+        ordered: Ordered,
+        span: Span,
+    ) -> (Value, Value) {
+        if ordered == Ordered::Call {
+            return self.library_update(addr, ty, step, span);
+        }
         let into = self.value_type(ty, span);
         let mut info = self.access(ty);
         info.order = MemOrder::SeqCst;
@@ -5740,6 +5816,137 @@ impl<'u> Body<'_, 'u> {
         let old = self.ssa.read(self.func, before, done, into);
         let new = self.ssa.read(self.func, after, done, into);
         (old, new)
+    }
+
+    /// A read of an object no instruction reaches all of, which is the runtime copying it out from
+    /// under the lock into a slot of our own and this reading the slot.
+    ///
+    /// The copy is what makes the read of the slot an ordinary load. Nothing else can see that slot
+    /// while the call is running, since its address never leaves this function, so what is in it
+    /// once the call returns is one value the object held rather than a mixture of two.
+    ///
+    /// A `volatile` object loses the flag on the way through, which costs it nothing: the flag is
+    /// there to stop the optimizer moving an access or folding two into one, and a call to a name
+    /// it knows nothing about is already something it will not move an access past.
+    fn library_load(&mut self, addr: Value, ty: TypeId, into: Type, span: Span) -> Value {
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let slot = self.scratch(size, align, span);
+        let bytes = self.byte_count(size, span);
+        let order = self.strongest(span);
+        self.atomic_call("__atomic_load", &[bytes, addr, slot, order], &[], span);
+        let info = self.piece_info(align, 0);
+        self.build(span).load(into, slot, info, Flags::NONE)
+    }
+
+    /// The other way round: the value goes into a slot of our own and the runtime copies the slot
+    /// into the object from under the lock.
+    ///
+    /// What the routine copies is the object rather than the value, so on a type with padding in it
+    /// the bytes the store did not write travel too, which for an `_Atomic long double` is six of
+    /// the sixteen. That is what gcc does with one and it cannot make the loop in
+    /// [`Self::library_update`] spin, because what that loop compares against is a copy of the
+    /// object's own bytes, padding and all, rather than anything built beside it.
+    fn library_store(&mut self, addr: Value, value: Value, ty: TypeId, span: Span) {
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let slot = self.scratch(size, align, span);
+        let info = self.piece_info(align, 0);
+        self.build(span).store(value, slot, info, Flags::NONE);
+        let bytes = self.byte_count(size, span);
+        let order = self.strongest(span);
+        self.atomic_call("__atomic_store", &[bytes, addr, slot, order], &[], span);
+    }
+
+    /// [`Self::atomic_update`] at a width no instruction reaches, which is the same loop around a
+    /// compare and exchange with both of those being calls.
+    ///
+    /// The value under discussion lives in a stack slot rather than in a register, because that is
+    /// how the runtime's routines take it, and the loop reads that slot to do the arithmetic and
+    /// writes the answer into a second one. There is no single instruction case here, because a
+    /// width with no instruction is what put us on this path.
+    ///
+    /// What the next attempt compares against does not have to be read again. The runtime's compare
+    /// and exchange writes what was actually in the object back into the expected slot when it
+    /// fails, which is the whole reason that argument is a pointer, so the slot is already right
+    /// for the next time round.
+    fn library_update(
+        &mut self,
+        addr: Value,
+        ty: TypeId,
+        step: Step,
+        span: Span,
+    ) -> (Value, Value) {
+        let into = self.value_type(ty, span);
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let info = self.piece_info(align, 0);
+        let expected = self.scratch(size, align, span);
+        let desired = self.scratch(size, align, span);
+        let before = self.temp();
+        let after = self.temp();
+
+        // Both of these are made once, in front of the loop, and read every time round it.
+        let bytes = self.byte_count(size, span);
+        let order = self.strongest(span);
+        self.atomic_call("__atomic_load", &[bytes, addr, expected, order], &[], span);
+
+        let again = self.new_block();
+        self.jump(again, span);
+        self.at = Some(again);
+
+        let old = self.build(span).load(into, expected, info, Flags::NONE);
+        let new = self.apply(&step, old, ty, span);
+        self.build(span).store(new, desired, info, Flags::NONE);
+        self.ssa.write(before, again, old);
+        self.ssa.write(after, again, new);
+        let args = [bytes, addr, expected, desired, order, order];
+        let inst = self.atomic_call("__atomic_compare_exchange", &args, &[Type::I1], span);
+        let exchanged =
+            self.func[inst].results().next().expect("a compare and exchange says whether it did");
+
+        let done = self.new_block();
+        self.br_if(exchanged, done, again, span);
+        // Both of the block's predecessors exist now, the one before the loop and the loop's own
+        // back edge, so the value the head reads is settled and the block can be closed.
+        self.ssa.seal(self.func, again);
+        self.ssa.seal(self.func, done);
+        self.at = Some(done);
+        let old = self.ssa.read(self.func, before, done, into);
+        let new = self.ssa.read(self.func, after, done, into);
+        (old, new)
+    }
+
+    /// A call to one of the four runtime routines that take a size and work through pointers.
+    ///
+    /// The signature is written out here rather than asked of [`abi::plan`], the way the libgcc
+    /// calls in [`Self::trapping`] are, and for the same reason: every argument is a pointer or an
+    /// integer that fits in a register, which every ABI in the target matrix passes in a register
+    /// in the order it is written, and the one return is a `_Bool`, which travels the way a `_Bool`
+    /// a program returns does. The parameter types come from the values themselves so that a size
+    /// is a word on a target whose word is 32 bits as readily as on one whose word is 64.
+    fn atomic_call(&mut self, routine: &str, args: &[Value], returns: &[Type], span: Span) -> Inst {
+        let params: Vec<Type> = args.iter().map(|&value| self.func[value].ty).collect();
+        let symbol = self.unit.names.intern(routine);
+        let sig =
+            self.func.add_signature(Signature::new().with_params(&params).with_returns(returns));
+        self.build(span).call_varargs(symbol, sig, args, &[])
+    }
+
+    /// How many bytes the object is, as the `size_t` the routines take it as.
+    fn byte_count(&mut self, size: u64, span: Span) -> Value {
+        let address = self.address;
+        self.build(span).iconst(address, i128::from(size))
+    }
+
+    /// The ordering the routines take, which is always the strongest.
+    ///
+    /// A plain read or a plain write of an atomic object is sequentially consistent by C11
+    /// 5.1.2.4, and a plain access is the only thing that reaches here: the builtins that name a
+    /// weaker one are their own path. The number is gcc's, which is the one `<stdatomic.h>` spells
+    /// and the one libatomic's callers pass.
+    fn strongest(&mut self, span: Span) -> Value {
+        self.build(span).iconst(Type::int(32), SEQ_CST)
     }
 
     /// The one instruction that does the whole of an atomic read modify write, where the machine
@@ -5838,8 +6045,11 @@ impl<'u> Body<'_, 'u> {
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         // One with the qualifier on it, which is a copy that would have to happen all at once and
         // cannot. [`Self::atomic_access`] is what reports it, and the copy is made anyway because
-        // a reported error is not a reason to build something else on top of it.
-        self.atomic_access(ty, span);
+        // a reported error is not a reason to build something else on top of it. Nothing reaches
+        // this today, since the front end turns the declaration of such an object down before
+        // there is anything to copy, and it stays here because that is the refusal this one is
+        // waiting on rather than a rule of its own.
+        let _ = self.atomic_access(ty, span);
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let destination = self.address_of(place, span);
