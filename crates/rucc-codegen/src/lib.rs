@@ -120,6 +120,14 @@
 //! analysis. `spec/optimizer/37-machine-level-optimization.md` section 37.4 is the entry it comes
 //! from and says what is still left of it.
 //!
+//! [`combine`] is the entry in that section the section names first, and it is the other half of
+//! what the fold above does. The fold takes an address the rules built on its own and puts it back
+//! inside the instruction that reads through it; this takes a load the rules built on its own and
+//! puts it inside the arithmetic that reads what it loaded. Both exist because a rule matches one
+//! term and both of these are two terms, and both are the same question about whether the value
+//! could have changed in between, answered here by the load having exactly one reader and by
+//! nothing between the two writing memory or calling anything.
+//!
 //! [`bits`] is the other entry in that section, and it is the same question asked about a register
 //! rather than about an address: how much of one anything reads. C promotes every narrow operand
 //! to `int` before doing anything with it, so a program full of `char` arithmetic is a program
@@ -148,6 +156,7 @@
 pub mod abi;
 pub mod bits;
 pub mod changes;
+pub mod combine;
 pub mod compare;
 pub mod copies;
 pub mod coverage;

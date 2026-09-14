@@ -39,12 +39,12 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi, CmpSet,
-    CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load,
-    LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal,
-    RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Test,
-    TestCmov, Trap, UnaryR, UnaryX87,
+    AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi,
+    CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
+    ConvertFromVec, ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing,
+    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87,
+    Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec,
+    Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -61,6 +61,15 @@ pub enum Form {
     AluRr,
     /// Two-address arithmetic on a register and an immediate.
     AluRi,
+    /// The same instruction as [`Form::AluRr`] reading its second source out of memory.
+    ///
+    /// One operand vector shorter than [`Form::AluRr`] and one addressing mode longer, which is
+    /// the whole difference: the destination is still the first source, the machine still writes
+    /// the answer into a register, and what the second source is has moved from a register number
+    /// to a mode. No lowering rule produces one, because a rule matches a term and what this is
+    /// is a load and an arithmetic term put together, which is [`crate::MachineInsts`]'s customer
+    /// `rucc_codegen::combine`.
+    AluRm,
     /// Two-address arithmetic on one register, which is negation and complement.
     UnaryR,
     /// A two-address shift by a constant.
@@ -715,7 +724,7 @@ impl Form {
         match self {
             LoadImm => &LOAD_IMM,
             AluRr => &TWO_ADDRESS_RR,
-            AluRi | UnaryR | ShiftRi => &TWO_ADDRESS_RI,
+            AluRi | AluRm | UnaryR | ShiftRi => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi => &ONE_TO_ONE,
@@ -774,6 +783,7 @@ impl Form {
         matches!(
             self,
             Lea | Load
+                | AluRm
                 | Store
                 | LoadVec
                 | StoreVec
@@ -784,6 +794,48 @@ impl Form {
                 | Rmw
                 | Probe
                 | Prefetch
+        )
+    }
+
+    /// Whether an instruction of this form reads or writes memory.
+    ///
+    /// Asked by a pass that wants to move a memory access from where it is to somewhere later,
+    /// which is safe while nothing it passes touches memory at all. Reading and writing are one
+    /// question here rather than two, because moving a read past a read is still a reordering of
+    /// two accesses, and the machine IR does not say which accesses the program insisted on: a
+    /// `volatile` read and an ordinary one are the same instruction with the same operands by the
+    /// time anything here can see them.
+    ///
+    /// [`Lea`] is not on the list and is the reason the question is not simply whether the form has
+    /// an addressing mode. It names an address and computes it and reads nothing there, which is
+    /// the whole of what it is for.
+    ///
+    /// [`Push`], [`Pop`], [`Ret`] and [`Call`] are on it and have no addressing mode at all, which
+    /// is the reason from the other side. What they touch is the stack and the instruction does not
+    /// spell it out.
+    ///
+    /// A call answers `true` here and is still not enough on its own. What a call does to memory is
+    /// not something the instruction says, which is why [`crate::MachineInsts::calls`] exists as a
+    /// separate question, and a pass that has to know what survived a call has to ask that one too.
+    #[must_use]
+    pub fn touches_mem(self) -> bool {
+        matches!(
+            self,
+            Load | AluRm
+                | Store
+                | LoadVec
+                | StoreVec
+                | PushX87
+                | PopX87
+                | CtrlX87
+                | CmpXchg
+                | Rmw
+                | Probe
+                | Prefetch
+                | Push
+                | Pop
+                | Ret
+                | Call
         )
     }
 }
@@ -824,6 +876,33 @@ pub static INSTS: &[(&str, Form)] = &[
     ("imul_rr_16", AluRr),
     ("imul_rr_32", AluRr),
     ("imul_rr_64", AluRr),
+    // The same arithmetic with the second source in memory, which is every one of the above
+    // except the eight bit multiply. That one is written as a thirty two bit `imul` because the
+    // machine has no narrower two-operand multiply, and reading thirty two bits out of memory
+    // where the program asked for eight is a read of three bytes nobody said were there.
+    ("add_rm_8", AluRm),
+    ("add_rm_16", AluRm),
+    ("add_rm_32", AluRm),
+    ("add_rm_64", AluRm),
+    ("sub_rm_8", AluRm),
+    ("sub_rm_16", AluRm),
+    ("sub_rm_32", AluRm),
+    ("sub_rm_64", AluRm),
+    ("and_rm_8", AluRm),
+    ("and_rm_16", AluRm),
+    ("and_rm_32", AluRm),
+    ("and_rm_64", AluRm),
+    ("or_rm_8", AluRm),
+    ("or_rm_16", AluRm),
+    ("or_rm_32", AluRm),
+    ("or_rm_64", AluRm),
+    ("xor_rm_8", AluRm),
+    ("xor_rm_16", AluRm),
+    ("xor_rm_32", AluRm),
+    ("xor_rm_64", AluRm),
+    ("imul_rm_16", AluRm),
+    ("imul_rm_32", AluRm),
+    ("imul_rm_64", AluRm),
     // Arithmetic, register with immediate.
     ("add_ri_8", AluRi),
     ("add_ri_16", AluRi),
@@ -1408,7 +1487,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 378);
+        assert_eq!(described, 401);
     }
 
     #[test]

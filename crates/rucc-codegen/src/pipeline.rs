@@ -34,6 +34,7 @@ use rucc_target::{
 use rucc_tuple::Arch;
 
 use crate::bits;
+use crate::combine;
 use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
@@ -394,6 +395,13 @@ pub fn compile_recording(
         dynamic: &mut stack.dynamic,
     };
     fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending);
+
+    // After that fold rather than before it, because what this puts inside an arithmetic
+    // instruction is a load's addressing mode and a load whose address is still a `lea` in front of
+    // it has nothing in its own mode worth carrying. Before allocation for the reason the fold is:
+    // a virtual register is written once, which is the whole of why the value the load produced
+    // cannot have changed between the two instructions this joins.
+    combine::loads(&mut func, machine.shapes, names, &mut pending);
 
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by

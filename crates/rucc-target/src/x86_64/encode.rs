@@ -398,6 +398,35 @@ static ENCODINGS: &[Encoding] = &[
     bytes("imulw", &RR, Word, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imull", &RR, Long, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imulq", &RR, Quad, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
+    // The same arithmetic with the source in memory, which for the eight that share a column is
+    // the opcode two above the register form: the column holds the direction, so `01` writes the
+    // register into what the addressing byte names and `03` reads it out. The addressing byte
+    // therefore names the memory and the register beside it is the destination, which is the
+    // multiply's arrangement rather than the addition's and is why every row here reads the same
+    // way round.
+    bytes("addb", &MR, Byte, &[0x02], pair(0, 1), NO_IMM),
+    bytes("addw", &MR, Word, &[0x03], pair(0, 1), NO_IMM),
+    bytes("addl", &MR, Long, &[0x03], pair(0, 1), NO_IMM),
+    bytes("addq", &MR, Quad, &[0x03], pair(0, 1), NO_IMM),
+    bytes("subb", &MR, Byte, &[0x2A], pair(0, 1), NO_IMM),
+    bytes("subw", &MR, Word, &[0x2B], pair(0, 1), NO_IMM),
+    bytes("subl", &MR, Long, &[0x2B], pair(0, 1), NO_IMM),
+    bytes("subq", &MR, Quad, &[0x2B], pair(0, 1), NO_IMM),
+    bytes("andb", &MR, Byte, &[0x22], pair(0, 1), NO_IMM),
+    bytes("andw", &MR, Word, &[0x23], pair(0, 1), NO_IMM),
+    bytes("andl", &MR, Long, &[0x23], pair(0, 1), NO_IMM),
+    bytes("andq", &MR, Quad, &[0x23], pair(0, 1), NO_IMM),
+    bytes("orb", &MR, Byte, &[0x0A], pair(0, 1), NO_IMM),
+    bytes("orw", &MR, Word, &[0x0B], pair(0, 1), NO_IMM),
+    bytes("orl", &MR, Long, &[0x0B], pair(0, 1), NO_IMM),
+    bytes("orq", &MR, Quad, &[0x0B], pair(0, 1), NO_IMM),
+    bytes("xorb", &MR, Byte, &[0x32], pair(0, 1), NO_IMM),
+    bytes("xorw", &MR, Word, &[0x33], pair(0, 1), NO_IMM),
+    bytes("xorl", &MR, Long, &[0x33], pair(0, 1), NO_IMM),
+    bytes("xorq", &MR, Quad, &[0x33], pair(0, 1), NO_IMM),
+    bytes("imulw", &MR, Word, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
+    bytes("imull", &MR, Long, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
+    bytes("imulq", &MR, Quad, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     // Arithmetic, register with immediate. The eight of these share three opcodes and are told
     // apart by the three bits beside the register, which is the column the manual calls `/digit`.
     // Nothing narrower than a word can sign extend a byte, since a byte is already one.
