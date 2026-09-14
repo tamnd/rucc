@@ -232,3 +232,46 @@ decl #37 raise : void(__int128) function external defined
           decl #32 wide : _Atomic(__int128) lvalue
           convert lvalue : __int128
             decl #36 v : __int128 lvalue
+decl #38 fetch : __int128(void) function external defined
+  body
+    block
+      return
+        atomic load acquire : __int128
+          unary & : _Atomic(__int128) *
+            decl #32 wide : _Atomic(__int128) lvalue
+decl #40 swap : __int128(__int128) function external defined
+  params
+    decl #39 v : __int128 object automatic defined
+  body
+    block
+      return
+        atomic exchange acq_rel : __int128
+          unary & : _Atomic(__int128) *
+            decl #32 wide : _Atomic(__int128) lvalue
+          convert lvalue : __int128
+            decl #39 v : __int128 lvalue
+decl #42 bump : __int128(__int128) function external defined
+  params
+    decl #41 v : __int128 object automatic defined
+  body
+    block
+      return
+        atomic add_fetch seq_cst : __int128
+          unary & : _Atomic(__int128) *
+            decl #32 wide : _Atomic(__int128) lvalue
+          convert lvalue : __int128
+            decl #41 v : __int128 lvalue
+decl #45 swing : _Bool(__int128 *, __int128) function external defined
+  params
+    decl #43 want : __int128 * object automatic defined
+    decl #44 v : __int128 object automatic defined
+  body
+    block
+      return
+        atomic compare_exchange seq_cst : _Bool
+          unary & : _Atomic(__int128) *
+            decl #32 wide : _Atomic(__int128) lvalue
+          convert lvalue : __int128 *
+            decl #43 want : __int128 * lvalue
+          convert lvalue : __int128
+            decl #44 v : __int128 lvalue

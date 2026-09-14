@@ -6030,6 +6030,11 @@ impl<'u> Body<'_, 'u> {
     ///
     /// A weak exchange gets the strong one, since the routine never fails with the expected value
     /// sitting in the object. Weak is permission to do less and not an instruction to.
+    ///
+    /// The routine takes two orderings and gets the same one twice, because the walk carries one:
+    /// the IR's compare and exchange has a single ordering on it and the failing case is the
+    /// stronger of the two by the time a program has written something the front end accepts. The
+    /// routine reads neither of them.
     fn library_exchanged(
         &mut self,
         op: AtomicOp,
