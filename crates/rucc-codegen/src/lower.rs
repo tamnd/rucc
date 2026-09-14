@@ -2627,9 +2627,9 @@ impl<'a> Lowering<'a> {
     /// has no blocks to branch between. So they are all written every time, which is correct and is
     /// what `-O0` costs. Issue #323 is the branch.
     ///
-    /// A vector register is written eight bytes at a time and not sixteen, for the reason
-    /// [`crate::varargs`] gives: the upper half of a slot is not something any reader of a list
-    /// looks at.
+    /// A vector register is written all sixteen bytes at a time, because a `_Float128` fills one and
+    /// a `va_arg` of a quad reads the slot back whole. gcc writes the same sixteen with the same
+    /// instruction, which is what [`crate::varargs`] says a list has to be built out of.
     ///
     /// The address is computed once into a register rather than written as a displacement off the
     /// stack pointer, because a displacement into a frame is not known until after allocation and
@@ -2648,7 +2648,7 @@ impl<'a> Lowering<'a> {
 
         let base = self.frame_address(out, save);
         for &(reg, class, at) in &arrived.spare {
-            let name = if class == self.gpr { "x64.mov_mr_64" } else { "x64.movsd_mr" };
+            let name = if class == self.gpr { "x64.mov_mr_64" } else { "x64.movaps_mr" };
             let store = mir::Opcode::new(self.names.intern(name));
             let up = i32::try_from(at).expect("a register save area under two gigabytes");
             let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);

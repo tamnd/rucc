@@ -44,7 +44,9 @@
 //! corpus. The quad is worth the exception because of what it does to an argument counter: it is
 //! the one type here that takes two eightbytes and one register, so an ABI that counts eightbytes
 //! and an ABI that counts registers place the argument behind it in different places, and nothing
-//! else in the corpus asks that question.
+//! else in the corpus asks that question. The same thing past the dots is the other half of it,
+//! since a `va_arg` of a quad is a walk over a save area whose slot for this one type is a whole
+//! vector register rather than the low half of one.
 //!
 //! The guard names two things and needs both. `__FLT128_MANT_DIG__` is the macro gcc defines
 //! wherever the type exists, so it is the question "is there a `_Float128` here" asked the way
@@ -923,6 +925,50 @@ fn signatures() -> Vec<Signature> {
          argument.",
         Some(Ty::Aggregate(14)),
         vec![Ty::Aggregate(14), Ty::Scalar(Scalar::Float128)],
+    );
+
+    let mut quad_variadic =
+        |name: &str, why: &'static str, ret: Option<Ty>, params: Vec<Ty>, varargs: Vec<Ty>| {
+            let signature =
+                build_variadic(&mut values, name.to_string(), why, ret, params, varargs);
+            out.push(Signature { guard: Some(QUAD), ..signature });
+        };
+
+    quad_variadic(
+        "qv_quads_past_the_registers",
+        "Ten quads past the dots, which is the va_arg walk over the one type whose slot in the \
+         register save area is the whole of a vector register rather than the low half of one. \
+         Eight of them are in the area and the last two are where the caller left them, so this \
+         asks about both ends of the walk and about the sixteen byte alignment the argument area \
+         owes the type.",
+        Some(Ty::Scalar(Scalar::Float128)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Scalar(Scalar::Float128); 10],
+    );
+    quad_variadic(
+        "qv_quad_between_doubles",
+        "A quad with a double either side of it past the dots, which is where the offset into the \
+         vector half has to move by sixteen for one of them and by eight for the others. A walk \
+         that stepped the counter by the same amount for all three reads the second double out of \
+         the top of the quad.",
+        Some(Ty::Scalar(Scalar::Double)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Float128),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Float128),
+            Ty::Scalar(Scalar::Double),
+        ],
+    );
+    quad_variadic(
+        "qv_struct_holding_a_quad",
+        "The struct holding one read off the list, which is the other half of the walk: an \
+         aggregate that arrived in registers is copied out of the save area into a buffer, and \
+         this is the only object in the corpus whose one slot is sixteen bytes wide.",
+        Some(Ty::Aggregate(12)),
+        vec![Ty::Scalar(Scalar::Int)],
+        vec![Ty::Aggregate(12), Ty::Scalar(Scalar::Int)],
     );
 
     out

@@ -2464,3 +2464,134 @@ union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1)
 }
 #endif
 
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 qv_quads_past_the_registers(int a0, ...)
+{
+	ABI_VA_LIST ap;
+
+	if (a0 != 6295606)
+		abi_fail("qv_quads_past_the_registers", "a0");
+
+	ABI_VA_START(ap, a0);
+	{
+		_Float128 v0 = ABI_VA_ARG(ap, _Float128);
+		if (v0 != 797.25f128)
+			abi_fail("qv_quads_past_the_registers", "v0");
+	}
+	{
+		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
+		if (v1 != 798.25f128)
+			abi_fail("qv_quads_past_the_registers", "v1");
+	}
+	{
+		_Float128 v2 = ABI_VA_ARG(ap, _Float128);
+		if (v2 != 799.25f128)
+			abi_fail("qv_quads_past_the_registers", "v2");
+	}
+	{
+		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
+		if (v3 != 800.25f128)
+			abi_fail("qv_quads_past_the_registers", "v3");
+	}
+	{
+		_Float128 v4 = ABI_VA_ARG(ap, _Float128);
+		if (v4 != 801.25f128)
+			abi_fail("qv_quads_past_the_registers", "v4");
+	}
+	{
+		_Float128 v5 = ABI_VA_ARG(ap, _Float128);
+		if (v5 != 802.25f128)
+			abi_fail("qv_quads_past_the_registers", "v5");
+	}
+	{
+		_Float128 v6 = ABI_VA_ARG(ap, _Float128);
+		if (v6 != 803.25f128)
+			abi_fail("qv_quads_past_the_registers", "v6");
+	}
+	{
+		_Float128 v7 = ABI_VA_ARG(ap, _Float128);
+		if (v7 != 804.25f128)
+			abi_fail("qv_quads_past_the_registers", "v7");
+	}
+	{
+		_Float128 v8 = ABI_VA_ARG(ap, _Float128);
+		if (v8 != 805.25f128)
+			abi_fail("qv_quads_past_the_registers", "v8");
+	}
+	{
+		_Float128 v9 = ABI_VA_ARG(ap, _Float128);
+		if (v9 != 806.25f128)
+			abi_fail("qv_quads_past_the_registers", "v9");
+	}
+	ABI_VA_END(ap);
+
+	return 807.25f128;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+double qv_quad_between_doubles(int a0, ...)
+{
+	ABI_VA_LIST ap;
+
+	if (a0 != 6390634)
+		abi_fail("qv_quad_between_doubles", "a0");
+
+	ABI_VA_START(ap, a0);
+	{
+		double v0 = ABI_VA_ARG(ap, double);
+		if (v0 != 809.25)
+			abi_fail("qv_quad_between_doubles", "v0");
+	}
+	{
+		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
+		if (v1 != 810.25f128)
+			abi_fail("qv_quad_between_doubles", "v1");
+	}
+	{
+		double v2 = ABI_VA_ARG(ap, double);
+		if (v2 != 811.25)
+			abi_fail("qv_quad_between_doubles", "v2");
+	}
+	{
+		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
+		if (v3 != 812.25f128)
+			abi_fail("qv_quad_between_doubles", "v3");
+	}
+	{
+		double v4 = ABI_VA_ARG(ap, double);
+		if (v4 != 813.25)
+			abi_fail("qv_quad_between_doubles", "v4");
+	}
+	ABI_VA_END(ap);
+
+	return 814.25;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_one qv_struct_holding_a_quad(int a0, ...)
+{
+	ABI_VA_LIST ap;
+
+	if (a0 != 6446067)
+		abi_fail("qv_struct_holding_a_quad", "a0");
+
+	ABI_VA_START(ap, a0);
+	{
+		struct quad_one v0 = ABI_VA_ARG(ap, struct quad_one);
+		if (v0.x != 816.25f128)
+			abi_fail("qv_struct_holding_a_quad", "v0.x");
+	}
+	{
+		int v1 = ABI_VA_ARG(ap, int);
+		if (v1 != 6461905)
+			abi_fail("qv_struct_holding_a_quad", "v1");
+	}
+	ABI_VA_END(ap);
+
+	struct quad_one r = { 818.25f128 };
+	return r;
+}
+#endif
+
