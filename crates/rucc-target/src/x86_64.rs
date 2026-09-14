@@ -243,6 +243,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     operands: machine_operands,
     takes_imm: machine_takes_imm,
     takes_mem: machine_takes_mem,
+    calls: machine_calls,
     scales: &[1, 2, 4, 8],
 };
 
@@ -262,6 +263,16 @@ fn machine_takes_imm(name: &str) -> bool {
 #[must_use]
 fn machine_takes_mem(name: &str) -> bool {
     form(name).is_some_and(Form::takes_mem)
+}
+
+/// Whether an instruction of that name is a call.
+///
+/// [`Form::Call`] and nothing else. An indirect call is the same form, which is right here: what
+/// a pass asks this for is which registers are gone across the instruction, and a call through an
+/// address destroys the same ones a call to a name does.
+#[must_use]
+fn machine_calls(name: &str) -> bool {
+    form(name) == Some(Form::Call)
 }
 
 /// Whether the instruction of that name is one that copies the low bits of its source.

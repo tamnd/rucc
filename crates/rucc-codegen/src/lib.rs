@@ -72,11 +72,13 @@
 //! returns from. After it every register is physical and every offset into the frame is a
 //! constant, which is the point at which a function is one an encoder could read.
 //!
-//! [`reload`] is the one thing that runs between those two and it takes instructions out rather
-//! than putting them in. The allocator decides one value at a time, so a value it writes out and
-//! wants back on the next line comes out as a store and the load of the same slot behind it, and
-//! the load reads a word the register it reads into already holds. Only the allocator's own moves
-//! are touched, which is why [`finish`] hands back which instruction each of them became.
+//! [`copies`] is the one thing that runs between those two and it takes instructions out rather
+//! than putting them in. The allocator decides one value at a time, so it writes moves that put a
+//! value where the machine has it already: a word written out and read straight back into the
+//! register it came out of, a slot read twice into the same register with nothing writing either
+//! in between, a copy of a register into one that already holds what it holds. Only the
+//! allocator's own moves are touched, which is why [`finish`] hands back which instruction each of
+//! them became.
 //!
 //! [`layout`] runs last and is what makes a function something a machine could run rather than
 //! something a printer could print. It puts the blocks in the order they are laid out in and then
@@ -145,6 +147,7 @@ pub mod abi;
 pub mod bits;
 pub mod changes;
 pub mod compare;
+pub mod copies;
 pub mod coverage;
 pub mod elsewhere;
 pub mod expand;
@@ -156,7 +159,6 @@ pub mod lower;
 pub mod pipeline;
 pub mod pressure;
 pub mod quad;
-pub mod reload;
 pub mod retry;
 pub mod select;
 pub mod slots;
