@@ -302,7 +302,8 @@ unsafe fn update(object: *mut u128, apply: impl FnOnce(u128) -> u128) -> u128 {
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// `object` usable as a `u128`, which means sixteen bytes and aligned to sixteen, and reached only
+/// through these routines for as long as anybody else may be reaching it.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_load_16(object: *const c_void, order: i32) -> u128 {
@@ -315,7 +316,7 @@ pub unsafe extern "C" fn __atomic_load_16(object: *const c_void, order: i32) -> 
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_store_16(object: *mut c_void, value: u128, order: i32) {
@@ -329,7 +330,7 @@ pub unsafe extern "C" fn __atomic_store_16(object: *mut c_void, value: u128, ord
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_exchange_16(
@@ -354,7 +355,7 @@ pub unsafe extern "C" fn __atomic_exchange_16(
 ///
 /// # Safety
 ///
-/// As [`update`], with `expected` usable as a `u128` as well.
+/// As [`__atomic_load_16`], with `expected` usable as a `u128` as well.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_compare_exchange_16(
@@ -398,7 +399,7 @@ pub unsafe fn compare_exchange_16(object: *mut u128, expected: *mut u128, desire
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_add_16(
@@ -415,7 +416,7 @@ pub unsafe extern "C" fn __atomic_fetch_add_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_sub_16(
@@ -432,7 +433,7 @@ pub unsafe extern "C" fn __atomic_fetch_sub_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_and_16(
@@ -449,7 +450,7 @@ pub unsafe extern "C" fn __atomic_fetch_and_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_or_16(
@@ -466,7 +467,7 @@ pub unsafe extern "C" fn __atomic_fetch_or_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_xor_16(
@@ -485,7 +486,7 @@ pub unsafe extern "C" fn __atomic_fetch_xor_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_fetch_nand_16(
@@ -507,7 +508,7 @@ pub unsafe extern "C" fn __atomic_fetch_nand_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_add_fetch_16(
@@ -523,7 +524,7 @@ pub unsafe extern "C" fn __atomic_add_fetch_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_sub_fetch_16(
@@ -539,7 +540,7 @@ pub unsafe extern "C" fn __atomic_sub_fetch_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_and_fetch_16(
@@ -555,7 +556,7 @@ pub unsafe extern "C" fn __atomic_and_fetch_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_or_fetch_16(
@@ -571,7 +572,7 @@ pub unsafe extern "C" fn __atomic_or_fetch_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_xor_fetch_16(
@@ -587,7 +588,7 @@ pub unsafe extern "C" fn __atomic_xor_fetch_16(
 ///
 /// # Safety
 ///
-/// As [`update`].
+/// As [`__atomic_load_16`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __atomic_nand_fetch_16(
