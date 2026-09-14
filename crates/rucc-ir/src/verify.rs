@@ -1593,6 +1593,22 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+            // And the same pair again for the one value that crosses a call the other way. The
+            // writing end takes the capability and the reading end takes the pointer, which is the
+            // fallback rather than the subject, so neither of them mentions the other's operand.
+            Opcode::CapYield => {
+                if self.takes(opcode, arity, 1) {
+                    self.capability(opcode, arg(0), 0);
+                }
+            }
+            Opcode::CapResult => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
             Opcode::CapNarrow => {
                 if self.takes(opcode, arity, 3) {
                     self.capability(opcode, arg(0), 0);

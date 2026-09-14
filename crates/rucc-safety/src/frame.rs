@@ -23,6 +23,26 @@
 //! [`Opcode::CapPublish`] and [`Opcode::CapClear`] on the writing side and [`Opcode::CapArg`] on the
 //! reading one.
 //!
+//! # The pointer that goes the other way
+//!
+//! A returned pointer is the one value that crosses a call backwards, and it gets the same pair of
+//! ends with the sides swapped. The callee says what it is returning with [`Opcode::CapYield`], in
+//! front of the return it is about, and the caller reads it with [`Opcode::CapResult`], behind the
+//! call it is about.
+//!
+//! That write is the only one in the design that goes into a frame somebody else made, and it is
+//! allowed to for a reason worth saying rather than assuming. The frame is the caller's stack, the
+//! caller is sitting in the call waiting for this function to come back, and this function's own
+//! stack is about to stop existing, so the caller's frame is the only storage that is alive at both
+//! ends. The alternative would be a second frame pointing the other way, which is a second
+//! publish and a second take on every call that returns a pointer.
+//!
+//! The caller writes the bottom capability into that slot before it publishes, and that is what
+//! makes a callee which wrote nothing tell the truth. The frame is one allocation per function
+//! reused by every call site in it, so without the write the slot still holds the last call's
+//! answer, and a capability belonging to some other pointer is worse than no capability at all, for
+//! exactly the reason the empty frame is an instruction rather than an absence.
+//!
 //! # The reading end
 //!
 //! A callee takes the frame once, at the top of the function, and then asks it one question per
@@ -114,11 +134,16 @@ const FLAGS: u64 = 6;
 /// How wide each of those two is.
 const HALF: u64 = 2;
 
+/// Where the callee leaves the capability of the pointer it returns.
+///
+/// After the arguments, because it is one more capability and there was nowhere cheaper to put it.
+/// The caller writes the bottom capability here before it publishes, so that a callee which wrote
+/// nothing is telling the truth rather than leaving the previous call's answer behind.
+const RET: u64 = HEAD + slot::BYTES * ARGS as u64;
+
 /// Where the frame this one was published over is kept.
 ///
-/// After the capabilities and after the one the callee writes its returned pointer's into, which is
-/// why the count below is one more than [`ARGS`]. Nothing reads that last one yet. The arguments are
-/// both halves now, and the returned pointer is neither of them, so it is the next box.
+/// After the capabilities and after [`RET`], which is why the count below is one more than [`ARGS`].
 const OUTER: u64 = HEAD + slot::BYTES * (ARGS as u64 + 1);
 
 /// The call a `cap_publish` or a `cap_clear` is about, which is the instruction after it.
@@ -143,6 +168,37 @@ pub(crate) fn describes(func: &Func, inst: Inst) -> Option<Inst> {
 /// says it cannot lower.
 pub(crate) fn placeable(func: &Func, inst: Inst) -> bool {
     func[func[inst].args].len() <= ARGS && describes(func, inst).is_some()
+}
+
+/// Whether a `cap_result` is behind a call that was published to.
+///
+/// Two instructions back rather than one, because what has to be true is not only that there is a
+/// call in front of this but that the call had a frame. A `cap_clear` in that position is a call
+/// with no frame for anybody to have written into, so there would be nothing here to read and the
+/// answer would be the previous call site's.
+pub(crate) fn given(func: &Func, inst: Inst) -> bool {
+    let Some(block) = func.block_of(inst) else { return false };
+    let insts: Vec<Inst> = func.insts(block).collect();
+    let Some(at) = insts.iter().position(|&each| each == inst) else { return false };
+    let Some(call) = at.checked_sub(1).and_then(|back| insts.get(back)) else { return false };
+    if !matches!(func[*call].opcode, Opcode::Call | Opcode::CallIndirect) {
+        return false;
+    }
+    at.checked_sub(2)
+        .and_then(|back| insts.get(back))
+        .is_some_and(|&publish| func[publish].opcode == Opcode::CapPublish)
+}
+
+/// Whether a `cap_yield` is in front of the return it is about.
+///
+/// The same kind of tie a publish has with its call, and needed for the same kind of reason. What
+/// the instruction says is about the value leaving by one particular return, and one sitting
+/// anywhere else would be writing the frame for a path that does not take it.
+pub(crate) fn leaving(func: &Func, inst: Inst) -> bool {
+    let Some(block) = func.block_of(inst) else { return false };
+    let mut after = func.insts(block).skip_while(|&at| at != inst);
+    after.next();
+    after.next().is_some_and(|next| func[next].opcode == Opcode::Return)
 }
 
 /// `cap_publish` becomes the frame written out and `__rucc_frame_publish(frame)` in front of the
@@ -174,6 +230,14 @@ pub(crate) fn hand_over(
     // field that means something later would mean whatever the previous call put there.
     let zero = slot::konst(func, inst, Imm::int(0, half), half);
     record(func, inst, word, zero, frame, FLAGS, HALF);
+    // And the bottom capability where the callee leaves its returned pointer's, which is four zero
+    // words for the reason `cap_null` is four zero words. This is what makes a callee that wrote
+    // nothing tell the truth: without it the slot holds whatever the previous call site put there,
+    // and the caller would read a capability belonging to some other pointer entirely.
+    let empty = slot::konst(func, inst, Imm::int(0, word), word);
+    for step in 0..slot::BYTES / WORD {
+        record(func, inst, word, empty, frame, RET + step * WORD, WORD);
+    }
     for (at, &cap) in caps.iter().enumerate() {
         let to = slot::offset(func, inst, frame, HEAD + slot::BYTES * at as u64, word);
         let info = MemInfo {
@@ -329,6 +393,44 @@ pub(crate) fn argument(
     let params = &[Type::PTR, Type::PTR, word, Type::PTR];
     let args = &[address, frame, position, at];
     let data = crate::lower::calling(func, names, "__rucc_frame_arg", params, &[], args);
+    let made = func.create_inst(data, &[], func.span(inst));
+    func.insert_before(made, inst);
+    func.remove_inst(inst);
+}
+
+/// `cap_yield` becomes `__rucc_frame_yield(frame, slot)`.
+///
+/// The frame is the one this function was handed, so the write goes into storage the caller owns
+/// and is still sitting in, which is the only place a returned pointer's capability can live: this
+/// function's own stack is gone by the time the caller looks at anything. A null frame is a caller
+/// that said nothing, and the runtime drops the write rather than the compiler testing for it here.
+///
+/// In place of the instruction, which gives nothing back, so there is nothing to rewrite around.
+pub(crate) fn yielded(func: &mut Func, names: &mut Interner, inst: Inst, frame: Value) {
+    let [cap] = func[func[inst].args] else { return };
+    let params = &[Type::PTR, Type::PTR];
+    crate::lower::call(func, names, inst, "__rucc_frame_yield", params, &[], &[frame, cap]);
+}
+
+/// `cap_result` becomes `__rucc_frame_returned(slot, frame, pointer)`.
+///
+/// The frame is the one the publish in front of the call filled in, and it is read after the call
+/// rather than before because what is being read is what the callee wrote. The pointer is the
+/// fallback, for a callee that wrote nothing and left the bottom capability the publish put there,
+/// and it is the runtime that tells those apart for the reason [`argument`] gives.
+///
+/// Beside the instruction rather than in place of it, because the call gives nothing back.
+pub(crate) fn result(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    address: Value,
+    frame: Value,
+) {
+    let [at] = func[func[inst].args] else { return };
+    let params = &[Type::PTR, Type::PTR, Type::PTR];
+    let args = &[address, frame, at];
+    let data = crate::lower::calling(func, names, "__rucc_frame_returned", params, &[], args);
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     func.remove_inst(inst);

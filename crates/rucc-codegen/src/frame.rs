@@ -574,9 +574,9 @@ fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
 
 /// How many bytes each of an allocation's spill slots takes on the stack.
 ///
-/// The same question as [`width`] asked of a whole allocation at once, and public because
-/// [`crate::slots`] needs it to say how big a cell holding a spilled value has to be, which it has
-/// to know before there is a frame to ask.
+/// The same question the width of one register class is, asked of a whole allocation at once, and
+/// public because [`crate::slots`] needs it to say how big a cell holding a spilled value has to
+/// be, which it has to know before there is a frame to ask.
 #[must_use]
 pub fn widths(layout: &Layout<'_>, allocation: &Allocation) -> Vec<u32> {
     allocation.assignment.slots().iter().map(|&class| width(layout, class)).collect()

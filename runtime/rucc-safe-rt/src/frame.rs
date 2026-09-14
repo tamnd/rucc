@@ -277,6 +277,60 @@ pub mod exports {
         unsafe { out.write(crate::recover::argument(carried, addr)) }
     }
 
+    /// Leaves the capability of the pointer this function is returning where its caller will look.
+    ///
+    /// The one write in this module that is into somebody else's frame. It is allowed to be because
+    /// the frame is the caller's stack and the caller is waiting for this function to return, and it
+    /// is needed because a returned pointer is the one value that crosses a call in the other
+    /// direction. Whether the frame was taken makes no difference: taking clears the magic word so
+    /// that nothing believes the frame twice, and the storage stays where it is either way.
+    ///
+    /// A null frame is nothing to do, which is a return to a caller that published nothing. The
+    /// caller of that call recovers instead, and it would have had to whatever this did.
+    ///
+    /// # Safety
+    ///
+    /// `frame` is null or the frame this call was given. `cap` is a readable, aligned [`Cap`] sized
+    /// slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_frame_yield(frame: *mut Frame, cap: *const Cap) {
+        if frame.is_null() {
+            return;
+        }
+        // SAFETY: the caller says the frame is the one this call was given, which is storage that
+        // outlives this function, and that `cap` is a readable slot.
+        unsafe { (*frame).ret = cap.read() }
+    }
+
+    /// The capability of the pointer a call gave back, out of `frame` or worked out from `addr`.
+    ///
+    /// The reading end of [`__rucc_frame_yield`], and the same shape as [`__rucc_frame_arg`] for the
+    /// same reason. A caller writes the bottom capability into the slot before it publishes, so a
+    /// callee that wrote nothing leaves the bottom one there, and the bottom one is what says to
+    /// work the answer out of the planes instead.
+    ///
+    /// # Safety
+    ///
+    /// `out` is a writable, aligned [`Cap`] sized slot. `frame` is null or a frame this function
+    /// published and has not yet given up. `addr` is only ever compared, never read through, so it
+    /// may be any value at all including null.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_frame_returned(
+        out: *mut Cap,
+        frame: *mut Frame,
+        addr: *const c_void,
+    ) {
+        let carried = if frame.is_null() {
+            Cap::BOTTOM
+        } else {
+            // SAFETY: the caller says the frame is one it published itself, so it is this thread's
+            // own stack and is still live.
+            unsafe { (*frame).ret }
+        };
+        // SAFETY: the caller's slot, which the contract above says is writable and aligned.
+        unsafe { out.write(crate::recover::argument(carried, addr)) }
+    }
+
     /// # Safety
     ///
     /// As [`super::restore_to`].
@@ -433,6 +487,35 @@ mod tests {
         // SAFETY: null says there is no frame, which the contract allows.
         unsafe {
             exports::__rucc_frame_arg(&raw mut out, core::ptr::null_mut(), 0, core::ptr::null());
+        }
+        assert_eq!(out, found);
+    }
+
+    #[test]
+    fn a_returned_pointer_comes_back_through_the_slot_the_arguments_do_not_use() {
+        // The one value that crosses a call the other way. The callee writes into the frame its
+        // caller made, because that frame is the caller's stack and the caller is waiting for it.
+        let returned = cap(8192, 4);
+        let mut frame = Frame::EMPTY;
+        let mut out = Cap::BOTTOM;
+
+        // SAFETY: both are locals of this function.
+        unsafe {
+            exports::__rucc_frame_yield(&raw mut frame, &raw const returned);
+            exports::__rucc_frame_returned(&raw mut out, &raw mut frame, core::ptr::null());
+        }
+        assert_eq!(out, returned);
+
+        // A callee that wrote nothing leaves the bottom capability the caller put there, which is
+        // the signal to work the answer out of the planes, and so is having no frame at all.
+        let found = crate::recover::recover(core::ptr::null());
+        frame.ret = Cap::BOTTOM;
+        // SAFETY: as above, and a null frame is nothing to write to and nothing to read from.
+        unsafe {
+            exports::__rucc_frame_yield(core::ptr::null_mut(), &raw const returned);
+            exports::__rucc_frame_returned(&raw mut out, &raw mut frame, core::ptr::null());
+            assert_eq!(out, found);
+            exports::__rucc_frame_returned(&raw mut out, core::ptr::null_mut(), core::ptr::null());
         }
         assert_eq!(out, found);
     }

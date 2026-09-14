@@ -275,6 +275,29 @@ pub enum Opcode {
     /// reach is not an error either, since it is the recovery again, so nothing here has to know how
     /// many capabilities a frame holds.
     CapArg,
+    /// The capability of the pointer this function is returning, left where its caller reads.
+    ///
+    /// One operand, the capability, and it goes immediately in front of the `ret` it is about, which
+    /// is the tie [`Opcode::CapPublish`] has with its call. A function that returns from several
+    /// places has one of these in front of each of them, because what is being said is about the
+    /// value leaving by that particular one.
+    ///
+    /// This is the only thing in the design that writes into a frame somebody else made. It is
+    /// allowed to because the frame is the caller's stack and the caller is waiting for this
+    /// function to return, and it is needed because a returned pointer is the one value that crosses
+    /// a call in the other direction.
+    CapYield,
+    /// The capability of the pointer a call gave back, out of the frame the call was published with.
+    ///
+    /// The reading end of [`Opcode::CapYield`], in the caller. One operand, the pointer that came
+    /// back, and one capability out. The operand is there for the reason [`Opcode::CapArg`]'s is: a
+    /// callee that wrote nothing leaves the bottom capability where the caller put it, and the
+    /// bottom one is the signal to work the answer out from the pointer instead.
+    ///
+    /// It goes immediately after the call it is about, and that call has to be one a `cap_publish`
+    /// goes in front of. A call that says there is no frame has no frame for a callee to have
+    /// written into, so there would be nothing for this to read.
+    CapResult,
     /// An access is within its capability's bounds, aligned, and permitted.
     ///
     /// The size and the alignment are the access's, and they are in the memory payload rather
@@ -609,6 +632,8 @@ impl Opcode {
             Self::CapPublish => "cap_publish",
             Self::CapClear => "cap_clear",
             Self::CapArg => "cap_arg",
+            Self::CapYield => "cap_yield",
+            Self::CapResult => "cap_result",
             Self::CheckBounds => "check_bounds",
             Self::CheckLive => "check_live",
             Self::CheckType => "check_type",
@@ -868,6 +893,7 @@ impl Opcode {
                     | Self::CapLoad
                     | Self::CapRecover
                     | Self::CapArg
+                    | Self::CapResult
                     | Self::CapExtent
                     | Self::CapExtentBack
                     | Self::CheckBounds
@@ -914,6 +940,7 @@ impl Opcode {
             | Self::CapStore
             | Self::CapPublish
             | Self::CapClear
+            | Self::CapYield
             | Self::CheckBounds
             | Self::CheckLive
             | Self::CheckType
@@ -945,11 +972,12 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// Six of the eleven `cap` instructions. The other five consume one instead, or none at all:
+    /// Seven of the thirteen `cap` instructions. The other six consume one instead, or none at all:
     /// `cap_store` writes one beside a pointer, `cap_extent` and `cap_extent_back` ask one a
     /// question about itself and answer with a number, `cap_publish` hands a call's worth of them
-    /// to a callee, and `cap_clear` takes no operands because saying there is no frame is not a
-    /// statement about any capability. The reason this is a question about the opcode rather than
+    /// to a callee, `cap_yield` leaves one where the caller of this function will look for it, and
+    /// `cap_clear` takes no operands because saying there is no frame is not a statement about any
+    /// capability. The reason this is a question about the opcode rather than
     /// about the result type is that the verifier asks it the other way round: it walks the results
     /// looking for a `cap` and needs to know whether the instruction under it was entitled to make
     /// one.
@@ -963,6 +991,7 @@ impl Opcode {
                 | Self::CapNarrow
                 | Self::CapRecover
                 | Self::CapArg
+                | Self::CapResult
         )
     }
 
@@ -1169,6 +1198,8 @@ static ALL: &[Opcode] = &[
     Opcode::CapPublish,
     Opcode::CapClear,
     Opcode::CapArg,
+    Opcode::CapYield,
+    Opcode::CapResult,
     Opcode::CheckBounds,
     Opcode::CheckLive,
     Opcode::CheckType,
@@ -1592,7 +1623,8 @@ mod tests {
                 Opcode::CapNull,
                 Opcode::CapNarrow,
                 Opcode::CapRecover,
-                Opcode::CapArg
+                Opcode::CapArg,
+                Opcode::CapResult
             ]
         );
         // The other three read a capability rather than making one. `cap_store` writes it out and

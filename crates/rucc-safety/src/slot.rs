@@ -87,6 +87,12 @@
 //! from is taken once at the top of the function, which is the one thing about this producer that is
 //! not a property of the instruction on its own.
 //!
+//! And `cap_yield` and `cap_result`, which are the same pair once more for the pointer a call gives
+//! back, so the callee is the writer this time and the caller is the reader. The writing end is the
+//! only thing in this pass that stores into a frame it did not make, which it may because that frame
+//! is the caller's stack and the caller is waiting in the call. [`mod@crate::frame`] is where that is
+//! argued, along with why the caller empties the slot before it publishes.
+//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -194,6 +200,27 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
                 };
                 crate::frame::argument(func, names, word, inst, address, at);
             }
+            // The writing end of the returned pointer, which goes into the caller's frame and so
+            // wants the same taken pointer the arguments do. A function that only yields still pays
+            // for the take, which is one call at the top of a function that returns a pointer.
+            (Opcode::CapYield, _) => {
+                let at = match given {
+                    Some(at) => at,
+                    None => {
+                        let Some(at) = crate::frame::taken(func, names, inst) else { continue };
+                        given = Some(at);
+                        at
+                    }
+                };
+                crate::frame::yielded(func, names, inst, at);
+            }
+            // And its reading end, which is back in the caller and so wants the frame the publish
+            // in front of the call filled in rather than the one this function was handed. There is
+            // always one by now, because the publish sits two instructions in front of this.
+            (Opcode::CapResult, Some(address)) => {
+                let Some(at) = frame else { continue };
+                crate::frame::result(func, names, inst, address, at);
+            }
             _ => {}
         }
     }
@@ -249,6 +276,7 @@ fn placeable(func: &Func) -> bool {
                 | Opcode::CapNarrow
                 | Opcode::CapRecover
                 | Opcode::CapArg
+                | Opcode::CapResult
         );
         if opcode.makes_capability() && !placed && fresh(func, inst).is_none() {
             return false;
@@ -256,7 +284,11 @@ fn placeable(func: &Func) -> bool {
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
         let consumes = matches!(
             opcode,
-            Opcode::CapStore | Opcode::CapLoad | Opcode::CapNarrow | Opcode::CapPublish
+            Opcode::CapStore
+                | Opcode::CapLoad
+                | Opcode::CapNarrow
+                | Opcode::CapPublish
+                | Opcode::CapYield
         );
         if reads && !consumes {
             return false;
@@ -265,6 +297,16 @@ fn placeable(func: &Func) -> bool {
         // both of which [`crate::frame::placeable`] is where they are argued: it has to be in front
         // of a call, and it cannot describe more arguments than the frame holds.
         if opcode == Opcode::CapPublish && !crate::frame::placeable(func, inst) {
+            return false;
+        }
+        // The returned pointer's two ends have a tie of the same kind and are checked here for the
+        // same reason, which is that the check has to happen before anything has been rewritten. A
+        // yield away from its return would write the frame on a path that does not take it, and a
+        // result behind a call with no frame would read the previous call site's answer.
+        if opcode == Opcode::CapYield && !crate::frame::leaving(func, inst) {
+            return false;
+        }
+        if opcode == Opcode::CapResult && !crate::frame::given(func, inst) {
             return false;
         }
         // A capability passed along an edge is one whose reader is a block parameter, and a block
@@ -904,9 +946,12 @@ mod tests {
         // function's rather than the call's, so a second call would not add a third.
         assert_eq!(count(&func, Opcode::Alloca), 2);
         // Four zero words for the null capability, then the count and the spare half word beside
-        // it. The capability itself goes over as a copy rather than as four more stores, because
-        // what is being moved is a slot the pass does not otherwise look inside.
-        assert_eq!(count(&func, Opcode::Store), 6);
+        // it, then four more emptying the slot the callee writes its returned pointer's capability
+        // into. The capability itself goes over as a copy rather than as four more stores, because
+        // what is being moved is a slot the pass does not otherwise look inside. The last four are
+        // what makes a callee that writes nothing believed: the frame is one reservation the
+        // function reuses at every call site, so without them the slot holds the last call's answer.
+        assert_eq!(count(&func, Opcode::Store), 10);
         assert_eq!(count(&func, Opcode::Memcpy), 1);
         assert!(!any_capability(&func));
 
@@ -1062,6 +1107,118 @@ mod tests {
         // The runtime takes the position as a `size_t` and the front end is under no obligation to
         // have produced one, which is the same thing `cap_narrow`'s offset and length need.
         assert_eq!(count(&func, Opcode::ZExt), 1);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn the_capability_of_a_returned_pointer_is_left_in_the_frame_the_caller_waits_in() {
+        let mut names = Interner::new();
+        let mut func = built(&mut names, |b, cap, _| {
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapYield) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapYield), 0);
+        // One reservation, which is the capability being handed back. The frame is not one of
+        // these, for the reason the argument end's is not: it belongs to whoever called this.
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert!(!any_capability(&func));
+
+        // Taken before it is written into, which is the same order the arguments need and for the
+        // same reason, since the take is what says where the frame is.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        let take = text.find("__rucc_frame_take").expect("the frame is taken");
+        let left = text.find("__rucc_frame_yield").expect("the capability is left behind");
+        assert!(take < left, "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_yield_that_is_not_in_front_of_a_return_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let mut func = built(&mut names, |b, cap, at| {
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapYield) }, &[]);
+            let args = b.func().push_values(&[cap, at, at, cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        });
+        frames(&mut func, &mut names, Type::int(64));
+        // What it says is about the value leaving by one particular return, so one that is not in
+        // front of a return is describing nothing, and the refusal is the publish's refusal.
+        assert_eq!(count(&func, Opcode::CapYield), 1);
+        assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    /// A function that calls `g(at)` for a pointer and asks what the pointer it got back is.
+    ///
+    /// The shape the reading end is defined over, which is a call with something in front of it and
+    /// the `cap_result` behind it. The flag picks which of the two things can be in front, and the
+    /// version that clears is a call with no frame for the callee to have written into.
+    fn returning(names: &mut Interner, vouched: bool) -> Func {
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let sig = Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::PTR]);
+        let sig = func.add_signature(sig);
+        let callee = names.intern("g");
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        if vouched {
+            let cap = b.value(InstData::new(Opcode::CapNull), Type::CAP);
+            let args = b.func().push_values(&[cap]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+        } else {
+            b.inst(InstData::new(Opcode::CapClear), &[]);
+        }
+        let args = b.func().push_values(&[at]);
+        let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
+        let base = b.value(data, Type::PTR);
+        let args = b.func().push_values(&[base]);
+        let mine = b.value(InstData { args, ..InstData::new(Opcode::CapResult) }, Type::CAP);
+        let args = b.func().push_values(&[mine, base, base, mine]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn the_pointer_a_call_gave_back_is_read_out_of_the_frame_it_was_published_with() {
+        let mut names = Interner::new();
+        let mut func = returning(&mut names, true);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapResult), 0);
+        assert_eq!(count(&func, Opcode::CapPublish), 0);
+        // Three reservations: the capability that went over, the frame it went over in, and the
+        // slot the answer comes back into.
+        assert_eq!(count(&func, Opcode::Alloca), 3);
+        assert!(!any_capability(&func));
+
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        let publish = text.find("__rucc_frame_publish").expect("the frame is published");
+        let call = text.find("call @g(").expect("the call is still there");
+        let back = text.find("__rucc_frame_returned").expect("the answer is read back");
+        assert!(publish < call, "{text}");
+        // After the call, because what is being read is what the callee wrote, and nothing here
+        // takes a frame, because this end is the caller and the frame is its own.
+        assert!(call < back, "{text}");
+        assert!(!text.contains("__rucc_frame_take"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_result_behind_a_call_with_no_frame_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let mut func = returning(&mut names, false);
+        frames(&mut func, &mut names, Type::int(64));
+        // A call that says there is no frame has none for the callee to have written into, so
+        // there is nothing here to read and the answer would be whatever the last call site left.
+        assert_eq!(count(&func, Opcode::CapResult), 1);
+        assert_eq!(count(&func, Opcode::CapClear), 1);
+        assert_eq!(count(&func, Opcode::Alloca), 0);
         believed(&module(&mut names), &func, &names);
     }
 

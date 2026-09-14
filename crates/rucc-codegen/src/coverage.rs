@@ -246,6 +246,15 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // capability. It is in the callee rather than in the caller and it answers whether or not there
     // was a frame, because a pointer nobody described is one to be recovered from the planes.
     (Opcode::CapArg, "`rucc_safety::frame`, into the read of the frame the caller published"),
+    // And the same pair for the pointer a call gives back, which is the one value crossing a call in
+    // the other direction. The writing end is in the callee and is the only thing here that writes
+    // into a frame it did not make, which it may because the frame is the caller's stack and the
+    // caller is waiting for it.
+    (
+        Opcode::CapYield,
+        "`rucc_safety::frame`, into the write of the frame the caller is waiting on",
+    ),
+    (Opcode::CapResult, "`rucc_safety::frame`, into the read of what the callee left behind"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.
