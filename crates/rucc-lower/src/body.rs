@@ -35,8 +35,8 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, FrameAsk,
-    InitEntry, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, Eval, ExprId, ExprKind, ExprList,
+    FrameAsk, InitEntry, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
@@ -1928,6 +1928,10 @@ impl<'u> Body<'_, 'u> {
 
     /// `if (cond) then else otherwise`.
     fn if_stmt(&mut self, cond: ExprId, then: StmtId, otherwise: Option<StmtId>, span: Span) {
+        if let Some(taken) = self.folded_condition(cond) {
+            self.constant_if(taken, then, otherwise, span);
+            return;
+        }
         let cond = self.condition(cond);
         let then_block = self.new_block();
         let else_block = self.new_block();
@@ -1946,6 +1950,69 @@ impl<'u> Body<'_, 'u> {
         }
         self.leave_arm(&mut join, span);
 
+        self.at = join;
+        if let Some(join) = join {
+            self.ssa.seal(self.func, join);
+        }
+    }
+
+    /// Which way the condition of an `if` goes when it is a constant, and nothing when it is not.
+    ///
+    /// A program that asks a question about the compiler rather than about its own data writes the
+    /// answer as a constant and puts the call that only the other answer supports inside the arm
+    /// that is never taken. `if (sizeof (void *) == 4) use_the_32_bit_helper();` in a build for a
+    /// 64 bit target is that, and so is every `if (0)` a configure script leaves behind. Emitting
+    /// the branch leaves the call referenced, the linker goes looking for a function nobody
+    /// defined, and the program does not link. gcc folds the branch away in the front end, so it
+    /// links at every level including `-O0`, and this is where rucc does the same. The optimizer
+    /// already removed these at `-O1` and above, which is why the failure was only ever seen in a
+    /// build that did not ask for optimization.
+    ///
+    /// Only a number answers. An address does not, because the address of a weak symbol is null
+    /// when nothing defined it, and `if (&maybe_there)` is a question the linker answers rather
+    /// than one the compiler can. A condition the folder had something to say about does not
+    /// answer either, since the ordinary path is the one that reports, and taking the answer here
+    /// would drop what it reported on the floor.
+    fn folded_condition(&self, cond: ExprId) -> Option<bool> {
+        let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
+        let folded = eval.constant(cond);
+        if !eval.finish().is_empty() {
+            return None;
+        }
+        match folded {
+            Ok(Const::Int(value)) => Some(value != 0),
+            Ok(Const::Float(value)) => Some(!value.is_zero()),
+            _ => None,
+        }
+    }
+
+    /// `if (cond) ...` where the condition folded, which builds the arm that runs and no branch.
+    ///
+    /// The arm that runs is built straight into the block the `if` was reached in, so the ordinary
+    /// case of a constant condition costs no block and no jump at all. The arm that does not run
+    /// is walked with nothing to append to, which is the same state the walk is in after a
+    /// `return`, so [`Body::unreachable_stmt`] drops it. What that keeps is a label inside it that
+    /// a `goto` from outside reaches, and that is the one thing in dead code that has to survive:
+    /// control really does arrive there, so the walk starts a block and goes on. Only then is
+    /// there anything to join, and only then is a join block made.
+    fn constant_if(&mut self, taken: bool, then: StmtId, otherwise: Option<StmtId>, span: Span) {
+        let (live, dead) = if taken { (Some(then), otherwise) } else { (otherwise, Some(then)) };
+        if let Some(live) = live {
+            self.stmt(live);
+        }
+        let after = self.at.take();
+        if let Some(dead) = dead {
+            self.stmt(dead);
+        }
+        if self.at.is_none() {
+            self.at = after;
+            return;
+        }
+
+        let mut join = None;
+        self.leave_arm(&mut join, span);
+        self.at = after;
+        self.leave_arm(&mut join, span);
         self.at = join;
         if let Some(join) = join {
             self.ssa.seal(self.func, join);

@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A branch on a constant is folded away while the body is being lowered, so the arm that cannot run leaves nothing for the linker to go looking for at `-O0`. A program that asks a question about the compiler rather than about its own data writes the answer as a constant and puts the call only the other answer supports inside the arm that is never taken, which is what every configure script leaves behind as an `if (0)` and what libtommath writes as a feature test. The optimizer already removed these, so the failure only ever showed up in a build that did not ask for optimization, and there it showed up as a link error naming a function nobody defined rather than as anything the compiler said. gcc folds the branch in its front end and links at every level, and `crates/rucc-lower/src/body.rs` now does the same: the arm that runs is built into the block the `if` was reached in, so the ordinary case costs no extra block and no extra jump, and the arm that does not run is walked with nothing to append to, which is the state the walk is already in after a `return`. What that keeps is the one thing in dead code that has to survive, a label inside the arm that a `goto` from outside reaches, and a join block is made only when the walk really did start again there. Only a number decides the branch. An address does not, because the address of a weak symbol is null when nothing defined it and `if (&maybe_there)` is a question the linker answers rather than one the folder can, and a condition the folder had something to report about does not decide it either, since taking the answer there would drop what it reported. This was the last thing between libtommath and a pass on rung two of the real corpus, where all 133 of its files compile and the archive builds and the demo failed to link. Part of tamnd/rucc#1243.
+
 ## 0.10.43
 
 ### Changed
