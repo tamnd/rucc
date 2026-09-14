@@ -635,6 +635,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("prefetcht0", &M, Long, &[0x0F, 0x18], ext(0, 1), NO_IMM),
     bytes("prefetcht1", &M, Long, &[0x0F, 0x18], ext(0, 2), NO_IMM),
     bytes("prefetcht2", &M, Long, &[0x0F, 0x18], ext(0, 3), NO_IMM),
+    // The instruction a program stops on. Two bytes and no operands, and what makes it work is
+    // that the manual promises this opcode will never be given a meaning, so every processor there
+    // is raises the fault for an instruction it does not know rather than doing something.
+    bytes("ud2", &NO_ARGS, Long, &[0x0F, 0x0B], NO_MODRM, NO_IMM),
     // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
     // the addressing byte at the end of it is part of the opcode. A machine that does not check
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run
@@ -1536,6 +1540,7 @@ mod tests {
     #[test]
     fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
         assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
+        assert_eq!(hex("ud2", &[]), "0f 0b");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the

@@ -44,7 +44,7 @@ use Form::{
     ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load,
     LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87, Ret, RetVal,
     RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Test,
-    TestCmov, UnaryR, UnaryX87,
+    TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -275,6 +275,20 @@ pub enum Form {
     /// reason: there is nothing about either that a proof over bitvectors could discharge, since
     /// what makes them right is the frame in one case and the memory model in the other.
     Barrier,
+    /// The instruction a program stops on, which reads nothing, writes nothing and never comes
+    /// back.
+    ///
+    /// What `__builtin_trap` asks for. `ud2` is an opcode the manual promises will never be given
+    /// a meaning, so the processor raises the fault for an instruction it does not know, and on
+    /// Linux that arrives at the program as `SIGILL`. It needs no library, which is why it is the
+    /// stop a kernel and a freestanding program can both write, and why it is two bytes rather
+    /// than a call and a relocation.
+    ///
+    /// The same empty operand list as [`Form::Barrier`] and a form of its own for the same reason:
+    /// a form is read as what an instruction is as well as what its operands are, and ordering
+    /// memory and stopping the program have nothing to do with each other. No rule selects one,
+    /// because there is nothing about stopping that a proof over bitvectors could discharge.
+    Trap,
     /// A landing pad, which reads nothing, writes nothing and says that the address it is at is
     /// one an indirect call or jump is allowed to arrive at.
     ///
@@ -726,7 +740,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe | Landing | Nop | Spin => &LEAVE,
+            Ret | Barrier | Probe | Landing | Nop | Spin | Trap => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -1139,6 +1153,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("prefetch_t2", Prefetch),
     ("prefetch_t1", Prefetch),
     ("prefetch_t0", Prefetch),
+    // The instruction a program stops on, which `__builtin_trap` asks for. Nothing selects one:
+    // `rucc_codegen::lower` writes it by name where the builtin stood.
+    ("ud2", Trap),
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),
@@ -1391,7 +1408,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 377);
+        assert_eq!(described, 378);
     }
 
     #[test]
@@ -1449,6 +1466,7 @@ mod tests {
                             | Nop
                             | Spin
                             | Prefetch
+                            | Trap
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1601,7 +1619,16 @@ mod tests {
                 shape.operands().is_empty()
                     == matches!(
                         shape,
-                        Call | Jcc | Jmp | Ret | Barrier | Probe | Landing | Nop | Spin | Prefetch
+                        Call | Jcc
+                            | Jmp
+                            | Ret
+                            | Barrier
+                            | Probe
+                            | Landing
+                            | Nop
+                            | Spin
+                            | Prefetch
+                            | Trap
                     )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"

@@ -1299,7 +1299,7 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
-            Opcode::Fence | Opcode::Unreachable | Opcode::UnreachableHint => {
+            Opcode::Fence | Opcode::Unreachable | Opcode::UnreachableHint | Opcode::Trap => {
                 self.takes(opcode, arity, 0);
             }
             Opcode::Prefetch | Opcode::StackRestore | Opcode::VaStart | Opcode::VaEnd => {

@@ -246,6 +246,14 @@ mod tests {
     /// one that costs anything here.
     const BARRIER: &[&str] = &["mfence"];
 
+    /// The instruction a program stops on, which `crate::lower` writes rather than a rule.
+    ///
+    /// The first half of the barrier's reason and not the second. It computes nothing, so there is
+    /// no equality for the solver and no pattern for a rule. What makes it right is not a claim
+    /// about the order anything becomes visible in either: it is what the operating system does
+    /// with the fault, which is a fact about neither the values nor the program around it.
+    const STOP: &[&str] = &["ud2"];
+
     /// The instructions that are a hint rather than a computation.
     ///
     /// The same shape of exemption the barrier gets and for a reason one step further out. A
@@ -539,7 +547,7 @@ mod tests {
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
-            if LABELS.contains(&opcode) {
+            if LABELS.contains(&opcode) || STOP.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");
@@ -559,6 +567,18 @@ mod tests {
         for &opcode in BARRIER {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+        }
+    }
+
+    /// The same claim about the instruction a program stops on, which is the barrier's shape
+    /// exactly: no operands, because an instruction with one is an instruction a rule could have
+    /// been written for, and no addressing mode either, because it is given nothing at all.
+    #[test]
+    fn the_instruction_exempt_from_a_rule_because_it_stops_the_program_is_bare() {
+        for &opcode in STOP {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+            assert!(!form.takes_mem(), "{opcode} is given an address and stopping needs none");
         }
     }
 

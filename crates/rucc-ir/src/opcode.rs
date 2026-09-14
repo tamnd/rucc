@@ -469,6 +469,13 @@ pub enum Opcode {
     Expect,
     /// `__builtin_unreachable` as a hint on a path, distinct from the terminator.
     UnreachableHint,
+    /// `__builtin_trap`, which stops the program where it stands.
+    ///
+    /// Not a terminator, for the reason `unreachable_hint` is not one: what ends a block here is
+    /// control going somewhere, and this goes nowhere at all. The block it is in goes on being
+    /// lowered and whatever follows it is written and never run, which costs a few bytes nothing
+    /// reaches and keeps every pass that walks a block from needing a second shape for it.
+    Trap,
     /// `__builtin_prefetch`.
     Prefetch,
     /// `__builtin_frame_address`.
@@ -630,6 +637,7 @@ impl Opcode {
             Self::UMulOverflow => "umul_overflow",
             Self::Expect => "expect",
             Self::UnreachableHint => "unreachable_hint",
+            Self::Trap => "trap",
             Self::Prefetch => "prefetch",
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
@@ -881,6 +889,7 @@ impl Opcode {
             | Self::VaCopy
             | Self::StackRestore
             | Self::UnreachableHint
+            | Self::Trap
             | Self::SetjmpMarker
             | Self::LongjmpMarker
             | Self::CapStore
@@ -1181,6 +1190,7 @@ static ALL: &[Opcode] = &[
     Opcode::UMulOverflow,
     Opcode::Expect,
     Opcode::UnreachableHint,
+    Opcode::Trap,
     Opcode::Prefetch,
     Opcode::FrameAddress,
     Opcode::ReturnAddress,

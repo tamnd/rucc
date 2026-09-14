@@ -481,6 +481,7 @@ impl<'a> Printer<'a> {
                 format!("prefetch {} {locality}", if write { "write" } else { "read" })
             }
             ExprKind::Unreachable => "unreachable".to_owned(),
+            ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
         }
     }
@@ -494,6 +495,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Decl(_)
             | ExprKind::LabelAddr(_)
             | ExprKind::Unreachable
+            | ExprKind::Trap
             | ExprKind::ThreadPointer => {}
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.

@@ -1264,6 +1264,18 @@ impl<'a> Printer<'a> {
                 self.expr_at(otherwise, ASSIGN);
                 self.token(")");
             }
+            Expr::ClassifyExpr(operand) => {
+                self.token("__builtin_classify_type");
+                self.token("(");
+                self.expr_at(operand, ASSIGN);
+                self.token(")");
+            }
+            Expr::ClassifyType(ty) => {
+                self.token("__builtin_classify_type");
+                self.token("(");
+                self.type_name(ty);
+                self.token(")");
+            }
             Expr::TypesCompatible { a, b } => {
                 self.token("__builtin_types_compatible_p");
                 self.token("(");

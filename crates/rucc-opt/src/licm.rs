@@ -476,6 +476,9 @@ fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool 
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => false,
         // A promise that control does not get here, so nothing after it runs either.
         Opcode::UnreachableHint => false,
+        // Stopping, which is the same answer for a plainer reason: nothing after it runs because
+        // there is no after.
+        Opcode::Trap => false,
         Opcode::SDiv | Opcode::SRem | Opcode::UDiv | Opcode::URem | Opcode::Load => {
             movement(speculate::why_not(func, inst, ranges, at)) != Move::IfItWasGoingToRun
         }

@@ -210,6 +210,8 @@ pub enum Keyword {
     BuiltinChooseExpr,
     /// `__builtin_types_compatible_p`.
     BuiltinTypesCompatibleP,
+    /// `__builtin_classify_type`, which takes either a type name or an expression.
+    BuiltinClassifyType,
     /// `__builtin_va_arg`.
     BuiltinVaArg,
     /// `__builtin_va_list`, the target's type for a variable argument list.
@@ -475,6 +477,9 @@ static KEYWORDS: &[Entry] = &[
     e("__builtin_offsetof", Keyword::BuiltinOffsetof, ALWAYS),
     e("__builtin_choose_expr", Keyword::BuiltinChooseExpr, ALWAYS),
     e("__builtin_types_compatible_p", Keyword::BuiltinTypesCompatibleP, ALWAYS),
+    // Either a type name or an expression, decided by the token after the parenthesis, and the
+    // expression is not evaluated, so both halves of the reason are here.
+    e("__builtin_classify_type", Keyword::BuiltinClassifyType, ALWAYS),
     e("__builtin_va_arg", Keyword::BuiltinVaArg, ALWAYS),
     // The rest of the variable argument family. `__builtin_va_list` names a type, and the other
     // three are handed the list object rather than its value, since what they do is write it.

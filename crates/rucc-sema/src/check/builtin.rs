@@ -55,6 +55,7 @@ use crate::expr::{ExprId, ExprKind};
 use crate::scope::Binding;
 
 mod abs;
+mod aligned;
 mod atomic;
 mod bswap;
 mod classify;
@@ -68,6 +69,7 @@ mod overflow;
 mod prefetch;
 mod sign;
 mod thread;
+mod trap;
 mod unreachable;
 
 /// The name in the object file for a function declared under this spelling, when the two are

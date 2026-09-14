@@ -441,6 +441,7 @@ impl Parser<'_> {
             Keyword::BuiltinOffsetof => self.builtin_offsetof(),
             Keyword::BuiltinChooseExpr => self.builtin_choose_expr(),
             Keyword::BuiltinTypesCompatibleP => self.builtin_types_compatible(),
+            Keyword::BuiltinClassifyType => self.builtin_classify_type(),
             Keyword::BuiltinVaArg => self.builtin_va_arg(),
             Keyword::BuiltinVaStart => self.builtin_va_start(),
             Keyword::BuiltinVaEnd => self.builtin_va_end(),
@@ -572,6 +573,29 @@ impl Parser<'_> {
         self.expect_punct(Punct::RParen);
         let span = self.span_from(start);
         self.add_expr(Expr::TypesCompatible { a, b }, span)
+    }
+
+    /// `__builtin_classify_type(type)` or `__builtin_classify_type(expr)`.
+    ///
+    /// The two forms answer different numbers for the same type, so which one was written has to
+    /// survive parsing. An expression is passed to a variadic function in gcc and takes the
+    /// default argument promotions on the way, so `__builtin_classify_type(c)` for a `char` is
+    /// the number for an `int` and `__builtin_classify_type(char)` is not. One token of lookahead
+    /// past the parenthesis decides it, the same as everywhere else a type name can start.
+    fn builtin_classify_type(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let node = if self.starts_type_name(self.cursor.current()) {
+            Expr::ClassifyType(self.type_name())
+        } else {
+            Expr::ClassifyExpr(self.assign_expr())
+        };
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        self.add_expr(node, span)
     }
 
     /// `__builtin_va_arg(list, type)`.

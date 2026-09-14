@@ -2696,6 +2696,51 @@ decl #0 x : int object external static defined
         assert!(!text.contains("prefetchw"), "{text}");
     }
 
+    /// The stop, which is the one instruction the machine is promised never to have a meaning for.
+    ///
+    /// What is checked is the instruction and not any effect, because the effect is a fault and a
+    /// unit test has nowhere to take one. gcc 16.2.0 writes the same instruction for the same
+    /// program, and it is not a call, which is the half that matters in a kernel and in a
+    /// freestanding program: neither has an `abort` for a call to reach.
+    ///
+    /// The second half is the block going on after it. A statement written under a stop is
+    /// compiled the way it would have been without one, so the addition is still there, and that
+    /// is the front end declining to treat a stop as the end of a path.
+    #[test]
+    fn a_trap_is_the_instruction_the_machine_has_no_meaning_for() {
+        let text = asm("void stop(void) { __builtin_trap(); }\n");
+        assert!(text.contains("\tud2\n"), "{text}");
+        assert!(!text.contains("\tcall"), "a stop is not a call to anything: {text}");
+
+        let text = asm("int stop(int a) { __builtin_trap(); return a + 1; }\n");
+        assert!(text.contains("\tud2\n"), "{text}");
+        assert!(text.contains("\taddl\t"), "the block goes on after a stop: {text}");
+    }
+
+    /// The promise about the low bits of an address, whose value is the address.
+    ///
+    /// Nothing here reads an alignment fact about a value yet, so what the call leaves behind is
+    /// its first argument and no instruction at all. The claim worth checking end to end is that
+    /// the name is gone: a builtin nothing lowers reaches the assembler as a call to a name no
+    /// object file defines, which is how this one used to fail to link out of glibc's string
+    /// headers.
+    ///
+    /// The arguments behind the address are still evaluated, because gcc 16.2.0 evaluates them at
+    /// every optimization level even though it has folded the call away. A constant has nothing to
+    /// run and is dropped, and a call does, so the second half asks for the callee by name.
+    #[test]
+    fn assume_aligned_is_its_first_argument_and_keeps_the_rest() {
+        let text = asm("void *aligned(char *p) { return __builtin_assume_aligned(p, 16); }\n");
+        assert!(!text.contains("assume_aligned"), "{text}");
+        assert!(!text.contains("\tcall"), "nothing is called for an alignment fact: {text}");
+
+        let source = "unsigned long width(void);\n\
+                      void *aligned(char *p) { return __builtin_assume_aligned(p, width()); }\n";
+        let text = asm(source);
+        assert!(!text.contains("assume_aligned"), "{text}");
+        assert!(text.contains("width"), "the argument that is not the answer still runs: {text}");
+    }
+
     /// Not a rewording of the check above: what the two paths agree about is the point.
     #[test]
     fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {

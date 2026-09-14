@@ -394,6 +394,14 @@ pub enum ExprKind {
     /// carries is the promise itself, which the optimizer is where it will pay, and until then
     /// what it costs to honour is nothing at all. See `check/builtin/unreachable.rs`.
     Unreachable,
+    /// `__builtin_trap()`, which stops the program where it stands.
+    ///
+    /// It has no operands and no value, and it is a node rather than a call for the reason the one
+    /// above it is: there is no function of the name for a call to reach. What it becomes is one
+    /// instruction the machine has no meaning for, so the program takes the fault for an
+    /// instruction that does not exist and the operating system ends it. See
+    /// `check/builtin/trap.rs`.
+    Trap,
     /// `__builtin_thread_pointer()`, the address of the storage the running thread has.
     ///
     /// It has no operands, and it is a node rather than a call for the reason the one above it is:
