@@ -294,8 +294,62 @@ pub(crate) struct Leak {
 /// wrong after it. The cost is a walk per repair, and section 26.9 says the way to make that cheap
 /// is GCC's `changed_bbs` set, which is worth building the second time it is needed rather than the
 /// first.
+/// One walk of the function rather than one per loop, which is what asking [`leaked`] of every loop
+/// in turn would be. A value named by a block leaves exactly those loops that hold its definition
+/// and not the block, and since loops that meet at all are nested, those are the innermost stretch
+/// of the chain of loops around the definition, up to the first one that holds the block as well.
+/// So one walk can sort every use into the loops it leaks out of. On a function with sixteen hundred
+/// loops and no leak to repair, asking per loop walked a hundred and ninety thousand instructions
+/// sixteen hundred times to answer nothing. tamnd/rucc#1086.
+///
+/// The order the candidates are looked at in is the order asking per loop produced, outer loop
+/// first and within a loop the blocks and the instructions in theirs, so the repair this picks is
+/// the repair that was picked before.
 fn leak(func: &Func, dom: &Dominators, fronts: &Frontiers, loops: &Loops) -> Option<Leak> {
-    loops.all().find_map(|id| leaked(func, dom, fronts, loops, id))
+    if loops.count() == 0 {
+        return None;
+    }
+    let mut found: Vec<Vec<(Block, Value)>> = vec![Vec::new(); loops.count()];
+    for block in func.blocks() {
+        let around = chain(loops, loops.innermost(block));
+        for inst in func.insts(block) {
+            for value in named(func, inst) {
+                let Some(from) = defining(func, value) else { continue };
+                let mut walk = loops.innermost(from);
+                while let Some(id) = walk {
+                    if around.contains(&id) {
+                        break;
+                    }
+                    found[id.index()].push((block, value));
+                    walk = loops.parent(id);
+                }
+            }
+        }
+    }
+    for id in loops.all() {
+        for &(block, value) in &found[id.index()] {
+            let at = caught(func, dom, fronts, loops, id, value);
+            // A use no placement covers is one this repair does not reach, and reporting it would
+            // have the caller do the work and find the use still there, which for a caller that asks
+            // again until the answer is nothing is a loop that does not end.
+            if !covered(dom, &at, block) {
+                continue;
+            }
+            return Some(Leak { value, at, id });
+        }
+    }
+    None
+}
+
+/// The loops around a block, innermost first.
+fn chain(loops: &Loops, innermost: Option<LoopId>) -> Vec<LoopId> {
+    let mut walk = innermost;
+    let mut around = Vec::new();
+    while let Some(id) = walk {
+        around.push(id);
+        walk = loops.parent(id);
+    }
+    around
 }
 
 /// The same question asked about one loop, for a caller that wants that loop in closed form.
@@ -765,6 +819,56 @@ mod tests {
             func[exit].params.contains(&returned),
             "what is returned is the exit's parameter rather than the value the loop defined"
         );
+    }
+
+    #[test]
+    fn a_value_the_inner_loop_computes_and_the_code_after_both_reads_is_routed_out_of_each() {
+        // A value defined inside a nested loop and read after the outer one leaves two loops, not
+        // one, and the walk that finds it has to say so about both. Asking loop by loop got this
+        // right by asking twice; one walk gets it right by following the value's own loops outward
+        // until it reaches one the use is in as well. tamnd/rucc#1086.
+        //
+        // ```text
+        // entry(n): jump outer(0)
+        // outer(i): jump inner(0)
+        // inner(j): u = j < n; br u -> under, latch
+        // under:    j2 = j + 1; jump inner(j2)
+        // latch:    i2 = i + 1; t = i2 < n; br t -> outer(i2), done
+        // done:     ret j
+        // ```
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let inner = func.create_block();
+        let under = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let n = func.append_param(entry, Type::int(32));
+        let i = func.append_param(outer, Type::int(32));
+        let j = func.append_param(inner, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+        let start = Builder::new(&mut func, outer).iconst(Type::int(32), 0);
+        Builder::new(&mut func, outer).jump(inner, &[start]);
+        let u = Builder::new(&mut func, inner).icmp(IntPred::Slt, j, n);
+        Builder::new(&mut func, inner).br_if(u, under, &[], latch, &[]);
+        let stride = Builder::new(&mut func, under).iconst(Type::int(32), 1);
+        let after = Builder::new(&mut func, under).binary(Opcode::Add, j, stride, Flags::NONE);
+        Builder::new(&mut func, under).jump(inner, &[after]);
+        let step = Builder::new(&mut func, latch).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, latch).binary(Opcode::Add, i, step, Flags::NONE);
+        let t = Builder::new(&mut func, latch).icmp(IntPred::Slt, next, n);
+        Builder::new(&mut func, latch).br_if(t, outer, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[j]);
+
+        canon(&mut func);
+        let term = func.terminator(done).expect("the tail returns");
+        let returned = func[func[term].args][0];
+        assert_ne!(returned, j, "the tail no longer names the inner loop's own definition");
+        assert!(func[done].params.contains(&returned), "it reads what the exit handed it");
     }
 
     /// Two counted loops one after the other, each entered from two places.

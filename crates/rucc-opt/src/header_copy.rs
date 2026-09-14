@@ -77,7 +77,7 @@ use rucc_ir::{
 
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
-use crate::loops::Loops;
+use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::{Analyses, Fuel, Pass, Preserved, Stats, prune, simplify_cfg};
 
@@ -136,19 +136,31 @@ impl Pass for HeaderCopy {
         }
         let mut done = HashSet::new();
         let mut say = true;
-        while let Some(job) = self.plan(func, an, &done, &mut stats, say) {
+        let mut dry = false;
+        loop {
+            let jobs = self.plan(func, an, &done, &mut stats, say);
             say = false;
-            if !fuel.take() {
-                stats.missed(NO_FUEL);
+            if jobs.is_empty() {
                 break;
             }
-            done.insert(job.header);
-            done.insert(job.body);
-            let copy = apply(func, &job);
-            stats.optimized(COPIED);
+            let mut copies = Vec::with_capacity(jobs.len());
+            for job in &jobs {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    dry = true;
+                    break;
+                }
+                done.insert(job.header);
+                done.insert(job.body);
+                copies.push(apply(func, job));
+                stats.optimized(COPIED);
+            }
             an.clear();
-            if settle(func, an, copy, &mut stats) {
+            if settle(func, an, &copies, &mut stats) {
                 an.clear();
+            }
+            if dry {
+                break;
             }
         }
         if stats.changed() {
@@ -164,6 +176,8 @@ impl Pass for HeaderCopy {
 /// One loop to copy the header of, worked out against the function as it stands.
 #[derive(Debug)]
 struct Job {
+    /// The loop, which is what [`independent`] asks about to decide whether two jobs meet.
+    id: LoopId,
     /// The block holding the exit test.
     header: Block,
     /// The one block outside the loop the header is reached from.
@@ -179,13 +193,35 @@ struct Job {
     carried: Vec<Value>,
 }
 
+/// One loop the cheap checks accepted, waiting on the walk that says what it carries.
+#[derive(Debug)]
+struct Candidate {
+    /// The loop.
+    id: LoopId,
+    /// The block holding the exit test.
+    header: Block,
+    /// The one block outside the loop the header is reached from.
+    entry: Block,
+    /// The header's successor inside the loop.
+    body: Block,
+    /// Everything the header defines, which [`carried`] sorts into what the loop reads and what
+    /// nothing does.
+    defined: Vec<Value>,
+}
+
 impl HeaderCopy {
-    /// The first loop worth copying the header of, and what it would take.
+    /// Every loop worth copying the header of that can be copied without looking again.
     ///
-    /// One at a time, because the copy adds a block to the loop it is made for and the forest the
-    /// next answer would be read out of is the one this call just invalidated. `say` is false on
-    /// every call after the first so that a loop this declines is declined once rather than once
-    /// per round.
+    /// A round rather than one at a time. A copy changes the shape of the loop it is made for, so
+    /// the forest this was read out of is wrong about that loop afterwards, and the answer used to
+    /// be to rebuild the graph, the dominator tree and the forest and ask again. On a function with
+    /// sixteen hundred loops that is two thousand rebuilds, which was most of what an optimized
+    /// build of tamnd/rucc#1086's test spent its time on. What the rebuild protects is one loop's
+    /// shape, so this takes the loops whose shapes do not touch and copies all of their headers
+    /// from the one look. [`independent`] is the argument for why that is the same edit.
+    ///
+    /// `say` is false on every call after the first so that a loop this declines is declined once
+    /// rather than once per round.
     fn plan(
         &self,
         func: &Func,
@@ -193,41 +229,38 @@ impl HeaderCopy {
         done: &HashSet<Block>,
         stats: &mut Stats,
         say: bool,
-    ) -> Option<Job> {
+    ) -> Vec<Job> {
         let (cfg, dom, loops) = (an.cfg(func), an.dominators(func), an.loops(func));
-        let mut found = None;
+        let mut wanted = Vec::new();
         for id in loops.all() {
             let header = loops.header(id);
             if done.contains(&header) {
                 continue;
             }
-            match self.consider(func, cfg, dom, loops, id, header) {
-                Ok(job) => {
-                    if found.is_none() {
-                        found = Some(job);
-                    }
-                    if !say {
-                        break;
-                    }
-                }
+            match self.consider(func, cfg, loops, id, header) {
+                Ok(candidate) => wanted.push(candidate),
                 Err(why) if say && why == ALREADY => stats.note(ALREADY),
                 Err(why) if say => stats.missed(why),
                 Err(_) => (),
             }
         }
-        found
+        let jobs = carried(func, dom, loops, wanted, stats, say);
+        independent(loops, jobs)
     }
 
     /// Whether this loop can have its header copied, and why not when it cannot.
+    ///
+    /// Everything here is answered out of the loop itself. What the header defines and who reads it
+    /// is the one question that is about the whole function, and [`carried`] asks it for all the
+    /// candidates at once.
     fn consider(
         &self,
         func: &Func,
         cfg: &Cfg,
-        dom: &Dominators,
         loops: &Loops,
-        id: crate::loops::LoopId,
+        id: LoopId,
         header: Block,
-    ) -> Result<Job, &'static str> {
+    ) -> Result<Candidate, &'static str> {
         let leaves = cfg.successors(header).iter().any(|&to| !loops.contains(id, to));
         if !leaves {
             // The exit test is somewhere below, which is the shape this pass is trying to reach.
@@ -259,8 +292,11 @@ impl HeaderCopy {
                 return Err(EFFECTS);
             }
         }
-        let carried = carried(func, dom, loops, id, header, body, &insts)?;
-        Ok(Job { header, entry, body, carried })
+        let mut defined: Vec<Value> = func[header].params.clone();
+        for &inst in &insts {
+            defined.extend(func[inst].results());
+        }
+        Ok(Candidate { id, header, entry, body, defined })
     }
 }
 
@@ -288,65 +324,162 @@ fn repeatable(func: &Func, inst: Inst) -> bool {
     )
 }
 
-/// The values the header defines that the rest of the loop reads.
+/// Turns the candidates into jobs by working out, for each, which of the values its header defines
+/// the rest of its loop reads.
 ///
-/// These are what the copy owes a merge at the body. A value read outside the loop is an error
-/// rather than an entry, because merging it would need a second parameter at the exit and after
-/// [`crate::canon`] there is no such value to merge: loop-closed form has already routed it.
+/// Those are what the copy owes a merge at the body. A value read outside the loop takes the
+/// candidate out rather than joining the list, because merging it would need a second parameter at
+/// the exit and after [`crate::canon`] there is no such value to merge: loop-closed form has already
+/// routed it.
+///
+/// One walk of the function for every candidate at once. tamnd/rucc#1015 made this one walk per
+/// candidate instead of one per value, and tamnd/rucc#1086 is the same move one level up: a header
+/// defines a handful of values, the function it is in can be very large, and a function with sixteen
+/// hundred loops in it was paying for sixteen hundred walks per round. A value belongs to exactly
+/// one candidate, because two candidates are two loops and two loops have two headers, so one map
+/// from value to candidate is enough to share the walk.
 fn carried(
     func: &Func,
     dom: &Dominators,
     loops: &Loops,
-    id: crate::loops::LoopId,
-    header: Block,
-    body: Block,
-    insts: &[Inst],
-) -> Result<Vec<Value>, &'static str> {
-    let mut defined: Vec<Value> = func[header].params.clone();
-    for &inst in insts {
-        defined.extend(func[inst].results());
+    wanted: Vec<Candidate>,
+    stats: &mut Stats,
+    say: bool,
+) -> Vec<Job> {
+    let mut watched: HashMap<Value, usize> = HashMap::new();
+    for (which, candidate) in wanted.iter().enumerate() {
+        for &value in &candidate.defined {
+            watched.insert(value, which);
+        }
     }
-    // One walk of the function for all of them at once rather than one walk each. A header defines
-    // a handful of values and the function it is in can be very large, and this used to be most of
-    // the time an optimized build of a large function spent. See tamnd/rucc#1015.
-    let watched: HashSet<Value> = defined.iter().copied().collect();
-    let mut read: HashSet<Value> = HashSet::new();
+    let mut read: Vec<HashSet<Value>> = vec![HashSet::new(); wanted.len()];
+    let mut escapes = vec![false; wanted.len()];
+    let mut names: Vec<usize> = Vec::new();
     for block in func.blocks() {
-        if block == header {
-            continue;
-        }
-        let mut names = false;
+        names.clear();
         for inst in func.insts(block) {
-            names |= reads(func, inst, &watched, &mut read);
+            reads(func, inst, block, &wanted, &watched, &mut read, &mut names);
         }
-        if names && (!loops.contains(id, block) || !dom.dominates(body, block)) {
-            return Err(ESCAPES);
-        }
-    }
-    Ok(defined.into_iter().filter(|value| read.contains(value)).collect())
-}
-
-/// Records every watched value this instruction names, as an operand or on an edge out of it.
-///
-/// Answers whether it named any of them, which is the block's business rather than the value's: a
-/// block that reads one of these from the wrong place is an error whichever one it read.
-fn reads(func: &Func, inst: Inst, watched: &HashSet<Value>, read: &mut HashSet<Value>) -> bool {
-    let mut named = false;
-    for &value in &func[func[inst].args] {
-        if watched.contains(&value) {
-            read.insert(value);
-            named = true;
-        }
-    }
-    for call in func.successors(inst) {
-        for &value in &func[call.args] {
-            if watched.contains(&value) {
-                read.insert(value);
-                named = true;
+        for &which in &names {
+            let candidate = &wanted[which];
+            if !loops.contains(candidate.id, block) || !dom.dominates(candidate.body, block) {
+                escapes[which] = true;
             }
         }
     }
-    named
+    let mut jobs = Vec::new();
+    for (which, candidate) in wanted.into_iter().enumerate() {
+        if escapes[which] {
+            if say {
+                stats.missed(ESCAPES);
+            }
+            continue;
+        }
+        let taken = &read[which];
+        let carried = candidate.defined.into_iter().filter(|value| taken.contains(value)).collect();
+        jobs.push(Job {
+            id: candidate.id,
+            header: candidate.header,
+            entry: candidate.entry,
+            body: candidate.body,
+            carried,
+        });
+    }
+    jobs
+}
+
+/// Records every watched value this instruction names, as an operand or on an edge out of it, and
+/// notes which candidates the block named something of.
+///
+/// Which candidates rather than which values, because a block that reads one of these from the wrong
+/// place is an error for that candidate whichever of its values it read. A candidate's own header is
+/// left out on both counts: the header is where these values are defined and reading one there is
+/// neither a carry nor an escape.
+fn reads(
+    func: &Func,
+    inst: Inst,
+    block: Block,
+    wanted: &[Candidate],
+    watched: &HashMap<Value, usize>,
+    read: &mut [HashSet<Value>],
+    names: &mut Vec<usize>,
+) {
+    let mut note = |value: Value| {
+        let Some(&which) = watched.get(&value) else { return };
+        if block == wanted[which].header {
+            return;
+        }
+        read[which].insert(value);
+        if !names.contains(&which) {
+            names.push(which);
+        }
+    };
+    for &value in &func[func[inst].args] {
+        note(value);
+    }
+    for call in func.successors(inst) {
+        for &value in &func[call.args] {
+            note(value);
+        }
+    }
+}
+
+/// The jobs out of a round that may all be applied before the function is looked at again.
+///
+/// Two jobs are safe together when the loops they are about share no block and neither loop holds
+/// the other's preheader. The argument is that a job writes only inside its own loop and to its own
+/// preheader. The copy is a new block put on the edge into the header, and the only block outside
+/// the loop it edits is the preheader, whose one successor is the header by the definition
+/// [`Loops::preheader`] uses. The merge gives the body a parameter and hands a value over on every
+/// edge into the body, and every one of those edges comes from inside the loop, because a natural
+/// loop is entered at its header alone and the body is not the header. The rewrite that follows
+/// reaches only the blocks that read the carried values, and [`carried`] has already taken the job
+/// out if any of those is outside the loop. So two jobs whose loops and preheaders do not meet edit
+/// two disjoint sets of blocks, and applying both from one look at the function is the same function
+/// as applying one, looking again, and applying the other.
+///
+/// Loops that share a block at all are nested, so the loops a taken one rules out are the ones it is
+/// nested in and the ones nested in it.
+fn independent(loops: &Loops, jobs: Vec<Job>) -> Vec<Job> {
+    let mut blocked = vec![false; loops.count()];
+    let mut taken = vec![false; loops.count()];
+    let mut kept: Vec<Job> = Vec::new();
+    for job in jobs {
+        if blocked[job.id.index()] || inside(loops, &taken, job.entry) {
+            continue;
+        }
+        let mut up = Some(job.id);
+        while let Some(id) = up {
+            blocked[id.index()] = true;
+            up = loops.parent(id);
+        }
+        let mut down = vec![job.id];
+        while let Some(id) = down.pop() {
+            blocked[id.index()] = true;
+            down.extend(loops.children(id));
+        }
+        // And no later job may be about a loop this one's preheader sits in.
+        let mut around = loops.innermost(job.entry);
+        while let Some(id) = around {
+            blocked[id.index()] = true;
+            around = loops.parent(id);
+        }
+        taken[job.id.index()] = true;
+        kept.push(job);
+    }
+    kept
+}
+
+/// Whether any loop holding this block has been taken already.
+fn inside(loops: &Loops, taken: &[bool], block: Block) -> bool {
+    let mut walk = loops.innermost(block);
+    while let Some(id) = walk {
+        if taken[id.index()] {
+            return true;
+        }
+        walk = loops.parent(id);
+    }
+    false
 }
 
 /// Makes the copy, puts it on the edge into the loop, and returns it.
@@ -462,35 +595,47 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
     }
 }
 
-/// Asks the ranges whether the copied test is settled, and takes it out where it is.
+/// Asks the ranges whether the copied tests are settled, and takes out the ones that are.
 ///
 /// This is section 26.6's point about the entry condition. A test that always holds leaves a loop
 /// known to run at least once, which is what document 07.5's trip count wanted. One that never
 /// holds leaves the loop unreachable, and taking it out is [`crate::simplify_cfg::sweep`]'s job
 /// rather than this one's.
 ///
-/// Answers whether it moved an edge, which the caller needs because the analyses it just built to
-/// ask the ranges are the ones the next round wants and they are only stale if this took a branch
-/// out. The ranges settle the test on a minority of the loops here and the graph is the size of
-/// the function, so the rounds where nothing happens used to pay for a rebuild that changed
-/// nothing. tamnd/rucc#1045.
-fn settle(func: &mut Func, an: &mut Analyses, copy: Block, stats: &mut Stats) -> bool {
-    let Some(term) = func.terminator(copy) else { return false };
-    let cond = func[func[term].args][0];
-    let answer = {
+/// Every copy the round made is asked from the one set of ranges, and the answers are acted on
+/// afterwards. That is sound because every question is about a different block's terminator and
+/// every answer is a fact about the values arriving there, which taking a branch out somewhere else
+/// cannot make untrue. Asking one at a time would mean a graph and a dominator tree per copy, which
+/// is the cost tamnd/rucc#1086 is about.
+///
+/// Answers whether it moved an edge, which the caller needs because the analyses this built are the
+/// ones the next round wants and they are only stale if a branch came out. The ranges settle the
+/// test on a minority of the loops here and the graph is the size of the function, so the rounds
+/// where nothing happens used to pay for a rebuild that changed nothing. tamnd/rucc#1045.
+fn settle(func: &mut Func, an: &mut Analyses, copies: &[Block], stats: &mut Stats) -> bool {
+    let mut out: Vec<(Inst, BlockCall, bool)> = Vec::new();
+    {
         let cfg = an.cfg(func);
         let dom = an.dominators(func);
         let mut ranges = Ranges::new(func, cfg, dom);
-        prune::settled(func, &mut ranges, copy, cond)
-    };
-    let Some(taken) = answer else {
-        stats.missed(UNDECIDED);
+        for &copy in copies {
+            let Some(term) = func.terminator(copy) else { continue };
+            let cond = func[func[term].args][0];
+            let Some(taken) = prune::settled(func, &mut ranges, copy, cond) else {
+                stats.missed(UNDECIDED);
+                continue;
+            };
+            let calls: Vec<BlockCall> = func.successors(term).collect();
+            out.push((term, if taken { calls[0] } else { calls[1] }, taken));
+        }
+    }
+    if out.is_empty() {
         return false;
-    };
-    let calls: Vec<BlockCall> = func.successors(term).collect();
-    let call = if taken { calls[0] } else { calls[1] };
-    simplify_cfg::jump_to(func, term, call);
-    stats.optimized(if taken { ENTERED } else { SKIPPED });
+    }
+    for (term, call, taken) in out {
+        simplify_cfg::jump_to(func, term, call);
+        stats.optimized(if taken { ENTERED } else { SKIPPED });
+    }
     true
 }
 
@@ -787,6 +932,156 @@ mod tests {
         // And with one, which is what the pipeline hands it, the same loop is copied.
         let stats = copied(&mut func, &SPEED);
         assert_eq!(stats.count(Kind::Optimized, super::COPIED), 1);
+        sound(&func, &mut names);
+    }
+
+    /// Two counted loops one after the other, which share no block and no preheader.
+    ///
+    /// ```text
+    /// entry(n): jump one(0)
+    /// one(i):  t = i < n; br t -> up, mid
+    /// up:      i2 = i + 1; jump one(i2)
+    /// mid:     jump two(0)
+    /// two(j):  u = j < n; br u -> down, done
+    /// down:    j2 = j + 1; jump two(j2)
+    /// done:    ret
+    /// ```
+    fn side_by_side() -> (Func, Interner, Vec<Block>) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let one = func.create_block();
+        let up = func.create_block();
+        let mid = func.create_block();
+        let two = func.create_block();
+        let down = func.create_block();
+        let done = func.create_block();
+        let n = func.append_param(entry, Type::int(32));
+        let i = func.append_param(one, Type::int(32));
+        let j = func.append_param(two, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(one, &[zero]);
+        let t = Builder::new(&mut func, one).icmp(IntPred::Slt, i, n);
+        Builder::new(&mut func, one).br_if(t, up, &[], mid, &[]);
+        let step = Builder::new(&mut func, up).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, up).binary(Opcode::Add, i, step, Flags::NONE);
+        Builder::new(&mut func, up).jump(one, &[next]);
+        let start = Builder::new(&mut func, mid).iconst(Type::int(32), 0);
+        Builder::new(&mut func, mid).jump(two, &[start]);
+        let u = Builder::new(&mut func, two).icmp(IntPred::Slt, j, n);
+        Builder::new(&mut func, two).br_if(u, down, &[], done, &[]);
+        let stride = Builder::new(&mut func, down).iconst(Type::int(32), 1);
+        let after = Builder::new(&mut func, down).binary(Opcode::Add, j, stride, Flags::NONE);
+        Builder::new(&mut func, down).jump(two, &[after]);
+        Builder::new(&mut func, done).ret(&[]);
+        (func, names, vec![up, down])
+    }
+
+    #[test]
+    fn two_loops_that_do_not_meet_are_both_copied() {
+        let (mut func, mut names, bodies) = side_by_side();
+
+        let stats = copied(&mut func, &SPEED);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 2);
+        sound(&func, &mut names);
+
+        let (_cfg, _dom, loops) = forest(&func);
+        assert_eq!(loops.count(), 2, "both loops are still loops");
+        for id in loops.all() {
+            let header = loops.header(id);
+            assert!(
+                !Cfg::new(&func).successors(header).iter().any(|&to| !loops.contains(id, to)),
+                "and neither of them tests at the top any more"
+            );
+        }
+        for body in bodies {
+            assert_eq!(func[body].params.len(), 1, "each body carries its own counter");
+        }
+    }
+
+    /// A counted loop with a counted loop inside it, where the inner preheader is an outer block.
+    ///
+    /// ```text
+    /// entry(n): jump outer(0)
+    /// outer(i): t = i < n; br t -> ahead, done
+    /// ahead:    jump inner(0)
+    /// inner(j): u = j < n; br u -> under, latch
+    /// under:    j2 = j + 1; jump inner(j2)
+    /// latch:    i2 = i + 1; jump outer(i2)
+    /// done:     ret
+    /// ```
+    fn nested() -> (Func, Interner) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let ahead = func.create_block();
+        let inner = func.create_block();
+        let under = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let n = func.append_param(entry, Type::int(32));
+        let i = func.append_param(outer, Type::int(32));
+        let j = func.append_param(inner, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+        let t = Builder::new(&mut func, outer).icmp(IntPred::Slt, i, n);
+        Builder::new(&mut func, outer).br_if(t, ahead, &[], done, &[]);
+        let start = Builder::new(&mut func, ahead).iconst(Type::int(32), 0);
+        Builder::new(&mut func, ahead).jump(inner, &[start]);
+        let u = Builder::new(&mut func, inner).icmp(IntPred::Slt, j, n);
+        Builder::new(&mut func, inner).br_if(u, under, &[], latch, &[]);
+        let stride = Builder::new(&mut func, under).iconst(Type::int(32), 1);
+        let after = Builder::new(&mut func, under).binary(Opcode::Add, j, stride, Flags::NONE);
+        Builder::new(&mut func, under).jump(inner, &[after]);
+        let step = Builder::new(&mut func, latch).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, latch).binary(Opcode::Add, i, step, Flags::NONE);
+        Builder::new(&mut func, latch).jump(outer, &[next]);
+        Builder::new(&mut func, done).ret(&[]);
+        (func, names)
+    }
+
+    #[test]
+    fn a_loop_and_the_loop_inside_it_are_copied_one_round_apart() {
+        // The two share every block the inner one has, and the inner one's preheader is a block of
+        // the outer one, so a round may hold at most one of them. Both are still copied, and the
+        // point of the test is that the second is planned against a function the first has already
+        // changed rather than against the plan the first was made from.
+        let (mut func, mut names) = nested();
+
+        let stats = copied(&mut func, &SPEED);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 2);
+        sound(&func, &mut names);
+
+        let (cfg, _dom, loops) = forest(&func);
+        assert_eq!(loops.count(), 2, "both loops survived the copy");
+        for id in loops.all() {
+            let header = loops.header(id);
+            assert!(
+                !cfg.successors(header).iter().any(|&to| !loops.contains(id, to)),
+                "and both test at the bottom now"
+            );
+        }
+    }
+
+    #[test]
+    fn a_round_stops_where_the_fuel_does() {
+        // Two loops a round may hold together, and one unit of fuel. The first is copied and the
+        // second is left for a run with more, which is what taking fuel per job rather than per
+        // round means.
+        let (mut func, mut names) = {
+            let (mut func, names, _) = side_by_side();
+            let mut an = crate::machine::fixtures::analyses();
+            Canon.run(&mut func, &mut an, &mut Fuel::unlimited());
+            (func, names)
+        };
+
+        let stats =
+            SPEED.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         sound(&func, &mut names);
     }
 }
