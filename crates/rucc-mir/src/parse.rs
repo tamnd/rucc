@@ -99,6 +99,7 @@ struct PendingMem {
     scale: u8,
     disp: i32,
     symbol: Option<Symbol>,
+    block: Option<u32>,
     reach: Reach,
     segment: Option<Segment>,
 }
@@ -375,6 +376,11 @@ impl<'a> Parser<'a, '_> {
                     return self.fail("an address names one symbol");
                 }
                 mem.symbol = Some(self.symbol()?);
+            } else if self.at("block") {
+                if mem.block.is_some() {
+                    return self.fail("an address names one block");
+                }
+                mem.block = Some(self.label()?);
             } else if self.at("%") || self.at("$") {
                 let operand = PendingOperand {
                     reg: self.written(false)?,
@@ -502,21 +508,35 @@ impl<'a> Parser<'a, '_> {
                     operands.push(self.resolve(&func, operand)?);
                 }
                 let mem = match inst.mem {
-                    Some(mem) => Some(Mem {
-                        base: match mem.base {
-                            Some(operand) => Some(self.resolve(&func, &operand)?),
+                    Some(mem) => {
+                        let named = match mem.block {
+                            Some(number) => match blocks.get(number as usize) {
+                                Some(&block) => Some(block),
+                                None => {
+                                    return self.fail(format!(
+                                        "block{number} is addressed and never begins"
+                                    ));
+                                }
+                            },
                             None => None,
-                        },
-                        index: match mem.index {
-                            Some(operand) => Some(self.resolve(&func, &operand)?),
-                            None => None,
-                        },
-                        scale: mem.scale,
-                        disp: mem.disp,
-                        symbol: mem.symbol,
-                        reach: mem.reach,
-                        segment: mem.segment,
-                    }),
+                        };
+                        Some(Mem {
+                            base: match mem.base {
+                                Some(operand) => Some(self.resolve(&func, &operand)?),
+                                None => None,
+                            },
+                            index: match mem.index {
+                                Some(operand) => Some(self.resolve(&func, &operand)?),
+                                None => None,
+                            },
+                            scale: mem.scale,
+                            disp: mem.disp,
+                            symbol: mem.symbol,
+                            block: named,
+                            reach: mem.reach,
+                            segment: mem.segment,
+                        })
+                    }
                     None => None,
                 };
                 let mut builder = func.build(*block, Opcode::new(inst.opcode));
@@ -848,6 +868,25 @@ block0:
 mfunc @guard {
 block0:
     %0:gpr = x64.mov_rm [fs:40]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_label_round_trips() {
+        // What `&&label` is selected as, and the one address whose whole content is a place in this
+        // function rather than a name somebody else resolves. The block it names is written the way
+        // an arm of a terminator is, so the reader has to tell the two apart by where they are.
+        round_trip(
+            "\
+mfunc @jump {
+block0:
+    %0:gpr = x64.lea_64 [block1]
+    x64.jmp_reg %0, block1
+
+block1:
     x64.ret
 }
 ",
