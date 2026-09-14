@@ -22,6 +22,7 @@ mod differential;
 mod disasm;
 mod dso;
 mod fuzz;
+mod gate;
 mod implib;
 mod pressure;
 mod quad;
@@ -80,7 +81,8 @@ tasks:
   corpus            run the pinned C corpus against the compiler this tree builds
   bless             rewrite the expectations in tests/golden from what the compiler produces now
   interpose         check the interposition table and the compiler's copy of it agree
-  ci                run everything the per-commit CI job runs, in the same order
+  ci                run every check the per-commit CI job runs, as much of it at once as
+                    the build directory's lock allows
   help              print this message
 ";
 
@@ -122,7 +124,7 @@ fn main() -> ExitCode {
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
-        Some("ci") => ci(),
+        Some("ci") => gate::ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -137,10 +139,29 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("xtask: {e}");
-            ExitCode::FAILURE
+            ExitCode::from(exit_of(&e))
         }
     }
 }
+
+/// What a task that did not finish leaves behind for whoever started it.
+///
+/// One for a task that ran and found problems, which is the ordinary failure, and two for one that
+/// could not run at all. The two have always been different things and the type has always said
+/// which, and until the gate started every check as a process of its own the difference never had
+/// to leave this one. Now it does: a check that could not run is reported by name along with why,
+/// the way a container-less machine's checks always were, and a check that ran and said no stops
+/// the gate.
+const fn exit_of(error: &Error) -> u8 {
+    match error {
+        Error::Failed { .. } => 1,
+        Error::Io(_) => 2,
+    }
+}
+
+/// The code a task that could not run exits with, which is what the gate reads to tell a check it
+/// must report from a check it must fail on.
+pub(crate) const COULD_NOT_RUN: i32 = 2;
 
 /// Anything that stops a task finishing.
 #[derive(Debug)]
@@ -827,6 +848,18 @@ fn paths() -> Result<()> {
         .output()
         .map_err(|e| Error::Io(format!("could not run git: {e}")))?;
     if !out.status.success() {
+        // A tree that is not a checkout is a tree this check has nothing to say about, which is
+        // not the same thing as a tree it disapproves of. A release tarball and a copy taken with
+        // rsync are both of those, and both should hear that the check did not run rather than
+        // that their paths are wrong.
+        let said = String::from_utf8_lossy(&out.stderr);
+        if said.contains("not a git repository") {
+            return Err(Error::Io(
+                "paths: not a git checkout, so there is no list of \
+                                  tracked files to check"
+                    .to_owned(),
+            ));
+        }
         return Err(Error::Failed {
             task: "paths",
             problems: vec!["git ls-files failed, so there is no list of tracked files".to_owned()],
@@ -1180,6 +1213,12 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
     if let Some(dir) = archive.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
     }
+    // Written beside it and moved on top of it, because two tasks want this archive and the gate
+    // runs them at the same time. The compiler writing straight to the shared path would have one
+    // of them reading half an archive the other was still writing, which is a failure about the
+    // clock rather than about the tree. A rename within one directory is one step or none, so
+    // whoever is reading sees an archive that is whole, and two writers each produce one.
+    let writing = archive.with_extension(format!("a.{}", std::process::id()));
 
     let rucc = cost::compiler()?;
     let status = Command::new(&rucc)
@@ -1190,11 +1229,17 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
         // would be the function calling itself. This is the flag the Rust crate spells
         // `#![no_builtins]`.
         .args(["-ffreestanding", "-fno-builtin", "-O2", "--emit=archive", "-o"])
-        .arg(&archive)
+        .arg(&writing)
         .args(&sources)
         .current_dir(root())
         .status()
         .map_err(|e| Error::Io(format!("could not run {}: {e}", rucc.display())))?;
+    if status.success() {
+        fs::rename(&writing, &archive)
+            .map_err(|e| Error::Io(format!("could not put {} in place: {e}", archive.display())))?;
+    } else {
+        let _ = fs::remove_file(&writing);
+    }
     if !status.success() {
         return Err(Error::Failed {
             task: "builtins",
@@ -1431,145 +1476,9 @@ fn provenance(args: &[String]) -> Result<()> {
     })
 }
 
-/// What to print about the checks that did not run.
-///
-/// Always a line, including when there is nothing to report. `cargo xtask ci` saying nothing about
-/// a check it skipped is how the command came to read as a complete account of the tree when it was
-/// not one, so the case where everything ran says so out loud rather than staying quiet and letting
-/// the absence of bad news stand in for good news.
-fn accounted(skipped: &[(&str, String)]) -> String {
-    if skipped.is_empty() {
-        return "xtask: ci ran every check it has".to_owned();
-    }
-    skipped
-        .iter()
-        .map(|(what, why)| format!("xtask: ci did not run {what}: {why}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn ci() -> Result<()> {
-    let steps: &[(&str, &[&str])] = &[
-        ("cargo", &["fmt", "--all", "--check"]),
-        (
-            "cargo",
-            &["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"],
-        ),
-        ("cargo", &["test", "--workspace", "--all-features"]),
-        ("cargo", &["doc", "--workspace", "--no-deps"]),
-    ];
-    // First, because it is the one check about the tree rather than about the code in it, and
-    // because what it catches stops the Windows job before that job can report anything.
-    paths()?;
-    layers()?;
-    style()?;
-    thresholds()?;
-    malformed()?;
-    interpose()?;
-    version()?;
-    targets(&["--check".to_owned()])?;
-    abi_corpus(&["--check".to_owned()])?;
-    abi_signatures(&["--check".to_owned()])?;
-    link_lines(&["--check".to_owned()])?;
-    provenance(&["--check".to_owned()])?;
-    for (bin, args) in steps {
-        println!("xtask: running {bin} {}", args.join(" "));
-        let status = Command::new(bin)
-            .args(*args)
-            .current_dir(root())
-            .status()
-            .map_err(|e| Error::Io(format!("could not run {bin}: {e}")))?;
-        if !status.success() {
-            return Err(Error::Failed {
-                task: "ci",
-                problems: vec![format!("{bin} {} failed", args.join(" "))],
-            });
-        }
-    }
-    // Last because these are the long ones, and only when there is something to run the programs
-    // on. They are x86-64 Linux programs, so an arm mac needs a container for them, and making the
-    // standard pre push command fail on a machine with no docker would push people off the command
-    // rather than onto docker. What it must not do is skip quietly, which is why the reason the
-    // runner gave is printed rather than thrown away. They are in the order they take, cheapest
-    // first, and a machine that cannot run one cannot run any of them and says so once per check
-    // rather than once.
-    let mut skipped: Vec<(&str, String)> = Vec::new();
-    match runner::Runner::find("the shared library check") {
-        Ok(_) => dso::dso()?,
-        Err(why) => skipped.push(("dso", why.to_string())),
-    }
-    match runner::Runner::find("the unwind table check") {
-        Ok(_) => unwind::unwind()?,
-        Err(why) => skipped.push(("unwind", why.to_string())),
-    }
-    // The one check here that runs arithmetic this compiler lowered rather than a program it
-    // compiled, and the reason it is not a test in the workspace is the reason the others are not
-    // either: it needs a machine the back end emits code for. What it holds is the 128-bit width,
-    // whose pass had only its own view of its own output behind it before this, at three
-    // optimization levels, because the optimizer is what tamnd/rucc#1054 needed to show up at all.
-    match runner::Runner::find("the wide arithmetic differential") {
-        Ok(_) => wide::wide()?,
-        Err(why) => skipped.push(("wide", why.to_string())),
-    }
-    // The same thing for the format no machine computes with at all, where every operation rather
-    // than four of them is a call. The routines are held against a Rust reference one layer down by
-    // `builtins-diff`, so what this adds is whether the call the pass wrote is the call the
-    // operation meant, which is a question about this compiler and not about the arithmetic.
-    match runner::Runner::find("the binary128 arithmetic differential") {
-        Ok(_) => quad::quad()?,
-        Err(why) => skipped.push(("quad", why.to_string())),
-    }
-    match runner::Runner::find("the safety suite") {
-        Ok(_) => safety::safety()?,
-        Err(why) => skipped.push(("safety", why.to_string())),
-    }
-    // The same programs at -O2, which is the only thing here that runs an instrumented program
-    // through the optimizer. Without it the whole back half of the compiler has no execution
-    // coverage in the command people are told to run before pushing, and tamnd/rucc#818 is what
-    // that costs: a divide by zero in loop splitting that this catches on a case already in the
-    // suite, sat on main until somebody compiled the amalgamation by hand. It was left out on the
-    // grounds that it takes too long, which measured is nineteen seconds against the suite's nine.
-    match runner::Runner::find("the differential accounting") {
-        Ok(_) => safety::accounting()?,
-        Err(why) => skipped.push(("accounting", why.to_string())),
-    }
-    // Programs nobody wrote, which is the only check here whose input is different every time it
-    // is asked for. A fixed seed, so the command is the same command twice in a row and a failure
-    // on main is a failure anybody can reproduce. The number that finds things is whatever somebody
-    // leaves running with `--count`, and what this default is for is a regression obvious enough to
-    // show up in two dozen programs.
-    match runner::Runner::find("the elimination fuzzer") {
-        Ok(_) => fuzz::fuzz(&[])?,
-        Err(why) => skipped.push(("fuzz", why.to_string())),
-    }
-    println!("{}", accounted(&skipped));
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{accounted, bare_integer, compared_literals};
-
-    #[test]
-    fn a_run_that_checked_everything_says_so() {
-        // The point of the line. Silence here is what let the command read as complete.
-        assert_eq!(accounted(&[]), "xtask: ci ran every check it has");
-    }
-
-    #[test]
-    fn a_check_that_did_not_run_is_named_along_with_why() {
-        let line = accounted(&[("safety", "docker is not answering".to_owned())]);
-        assert_eq!(line, "xtask: ci did not run safety: docker is not answering");
-    }
-
-    #[test]
-    fn each_check_that_did_not_run_gets_its_own_line() {
-        let line =
-            accounted(&[("safety", "no runner".to_owned()), ("accounting", "too slow".to_owned())]);
-        assert_eq!(line.lines().count(), 2);
-        assert!(line.contains("did not run safety"));
-        assert!(line.contains("did not run accounting"));
-    }
+    use super::{bare_integer, compared_literals};
 
     #[test]
     fn a_comparison_against_a_number_is_found() {

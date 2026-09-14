@@ -710,6 +710,15 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
 /// which means the directory can be mounted read only and a container running as root cannot leave
 /// anything behind in the tree.
 ///
+/// Which directory under `/tmp` is the work directory's own name, and that matters rather than
+/// being tidiness. Four things write this script: the suite, both halves of the accounting run and
+/// the fuzzer, they share the case names, and `cargo xtask ci` runs them at the same time. A fixed
+/// name would have one of them linking a program over the one another was running, which the
+/// kernel refuses with `Text file busy` if you are lucky and which runs the wrong program's answer
+/// into the wrong report if you are not. The name is the work directory rather than the process,
+/// so that a failing case is still sitting somewhere a person can find it and run again, which is
+/// what a directory named after the clock would take away.
+///
 /// `-no-pie` because the back end emits the small code model and not the position independent one.
 /// Making that a driver flag is the linker's part of document 11 and is not this suite's to
 /// decide.
@@ -726,7 +735,8 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
 pub(crate) const SCRIPT: &str = "\
 #!/bin/sh
 exec 2>/dev/null
-out=/tmp/safety
+here=$(pwd)
+out=/tmp/rucc-${here##*/}
 mkdir -p \"$out\"
 for source in lib/*.c; do
     [ -f \"$source\" ] || continue
@@ -783,6 +793,14 @@ pub(crate) fn read(text: &str) -> BTreeMap<String, Ran> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The suite, both halves of the accounting run and the fuzzer all write this script and the
+    /// gate runs them at once, so a name fixed in the text would be four runs in one directory.
+    #[test]
+    fn the_programs_go_somewhere_named_after_the_run_rather_than_somewhere_fixed() {
+        assert!(SCRIPT.contains("out=/tmp/rucc-${here##*/}"), "{SCRIPT}");
+        assert!(!SCRIPT.contains("out=/tmp/safety"), "the old fixed name is back: {SCRIPT}");
+    }
 
     #[test]
     fn a_directive_is_read_off_the_top_of_a_case_and_nowhere_else() {
