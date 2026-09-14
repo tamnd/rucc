@@ -24,6 +24,8 @@
 //! after_one:  endbr64; movapd %xmm1, %xmm0; ret
 //! take_mixed: endbr64; movq %rdi, %rax; ret
 //! take_both:  endbr64; ret
+//! ninth:      endbr64; movdqa 8(%rsp), %xmm0; ret
+//! tenth:      endbr64; movdqa 24(%rsp), %xmm0; ret
 //! ```
 
 use std::path::PathBuf;
@@ -33,7 +35,7 @@ use std::process::Command;
 /// are one machine's.
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 
-/// Five functions, each of which pins one register the classification has to choose.
+/// Seven functions, each of which pins one place the classification has to choose.
 ///
 /// `after_one` is the one that matters most. The `double` behind the aggregate is in the first
 /// vector register the aggregate did not take, so where it arrives says how many of them the
@@ -43,6 +45,10 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 /// INTEGER, which leaves the top of the `_Float128` above it with nothing to be the continuation
 /// of, and the psABI turns that back into an ordinary vector register. In `both` the first
 /// eightbyte stays SSE and the pair is one register holding the whole value.
+///
+/// The last two are about the other end of the convention, which is what happens once the vector
+/// registers have run out. There are eight of them, so the ninth quad and the tenth are in the
+/// caller's argument area, and where the tenth is says how much room the ninth was given.
 const SOURCE: &str = "\
 struct one { _Float128 x; };
 union mixed { _Float128 q; long a; };
@@ -53,6 +59,11 @@ struct one make_one(_Float128 x) { struct one v; v.x = x; return v; }
 double after_one(struct one v, double d) { return d; }
 long take_mixed(union mixed v) { return v.a; }
 _Float128 take_both(union both v) { return v.q; }
+
+_Float128 ninth(_Float128 a, _Float128 b, _Float128 c, _Float128 d, _Float128 e,
+                _Float128 f, _Float128 g, _Float128 h, _Float128 i) { return i; }
+_Float128 tenth(_Float128 a, _Float128 b, _Float128 c, _Float128 d, _Float128 e,
+                _Float128 f, _Float128 g, _Float128 h, _Float128 i, _Float128 j) { return j; }
 ";
 
 /// The fixture, under a directory of its own so that two of these running at once do not write
@@ -160,4 +171,30 @@ fn an_upper_half_with_nothing_under_it_gets_a_register_of_its_own() {
         assert!(!names(&text, "take_both", "%rdi"), "{level}:\n{text}");
         assert!(!names(&text, "take_both", "%xmm1"), "{level}:\n{text}");
     }
+}
+
+/// A quad the vector registers ran out before takes two words of the argument area and not one.
+///
+/// There are eight vector registers, so the ninth of these is the first one in the caller's area
+/// and the tenth is the one that says how much room it was given. gcc 13 reads them at `8(%rsp)`
+/// and `24(%rsp)`, which is sixteen bytes apart and each of them on a sixteen byte boundary.
+///
+/// A word apart is the failure, and it is not a wrong value. The tenth would sit on top of the
+/// upper half of the ninth, and what reads either of them is a `movaps`, which faults on an
+/// address that is not a multiple of sixteen rather than being slow about it. The signature corpus
+/// found this by segfaulting in `q_quads_past_the_registers` on both sides of the call.
+///
+/// Only at -O2, because the frame a lower level builds moves both numbers by its own size, and
+/// what is being asserted here is where the caller's area is rather than where this function put
+/// anything of its own.
+#[test]
+fn a_quad_past_the_last_vector_register_gets_two_words_of_the_argument_area() {
+    let text = asm("stack", "-O2");
+    assert!(names(&text, "ninth", "8(%rsp)"), "the first one in the area:\n{text}");
+    assert!(!names(&text, "ninth", "16(%rsp)"), "it starts at the bottom of the area:\n{text}");
+    assert!(names(&text, "tenth", "24(%rsp)"), "sixteen bytes above the ninth:\n{text}");
+    assert!(
+        !names(&text, "tenth", "16(%rsp)"),
+        "one word above the ninth is the top half of the ninth:\n{text}"
+    );
 }

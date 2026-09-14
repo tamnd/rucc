@@ -672,5 +672,45 @@ int main(void)
 		if (r != (short)(767))
 			abi_fail("v23", "return");
 	}
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		_Float128 r = q_quad_between_ints(6073874, 769.25f128, 6089712);
+		if (r != 771.25f128)
+			abi_fail("q_quad_between_ints", "return");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		_Float128 r = q_quads_past_the_registers(772.25f128, 773.25f128, 774.25f128, 775.25f128, 776.25f128, 777.25f128, 778.25f128, 779.25f128, 780.25f128, 781.25f128);
+		if (r != 782.25f128)
+			abi_fail("q_quads_past_the_registers", "return");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		struct quad_one a0 = { 783.25f128 };
+		struct quad_one r = q_struct_then_double(a0, 784.25, 6208497);
+		if (r.x != 786.25f128)
+			abi_fail("q_struct_then_double", "return.x");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		struct quad_two a1 = { 788.25f128, 789.25f128 };
+		struct quad_two r = q_memory_aggregate(6224335, a1, 6248092);
+		if (r.x != 791.25f128)
+			abi_fail("q_memory_aggregate", "return.x");
+		if (r.y != 792.25f128)
+			abi_fail("q_memory_aggregate", "return.y");
+	}
+#endif
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+	{
+		union quad_or_long a0 = { 793.25f128 };
+		union quad_or_long r = q_union_and_quad(a0, 794.25f128);
+		if (r.q != 795.25f128)
+			abi_fail("q_union_and_quad", "return.q");
+	}
+#endif
 	return abi_failures == 0 ? 0 : 1;
 }

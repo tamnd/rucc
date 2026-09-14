@@ -38,13 +38,24 @@
 //! names the function, the parameter and the member, and no two of them are the same value by
 //! accident.
 //!
-//! # What is not here yet
+//! # The types that are not on every row
 //!
-//! Variadic signatures, which are the next piece of this milestone and which are where Darwin
-//! arm64 and Windows diverge from everyone else. `__int128` is out too, for the same reason it is
-//! out of the seeded half of the record corpus: three rows of the target table do not have the
-//! type, and one source for every target is worth more than a corpus that needs a preprocessor
-//! conditional to say which types exist.
+//! `_Float128` is in here and it is written under a `#if`, which is the only conditional in the
+//! corpus. The quad is worth the exception because of what it does to an argument counter: it is
+//! the one type here that takes two eightbytes and one register, so an ABI that counts eightbytes
+//! and an ABI that counts registers place the argument behind it in different places, and nothing
+//! else in the corpus asks that question.
+//!
+//! The guard names two things and needs both. `__FLT128_MANT_DIG__` is the macro gcc defines
+//! wherever the type exists, so it is the question "is there a `_Float128` here" asked the way
+//! both compilers answer it, and `__x86_64__` is the row the harness runs. The second half is
+//! there because the two sides of a differential are two different compilers: a guard one of them
+//! takes and the other does not is a caller calling a function nobody defined, which is a link
+//! error rather than a finding.
+//!
+//! `_Float16` and `__int128` are still out, for the reason `__int128` is out of the seeded half of
+//! the record corpus: each would want a guard of its own, and a corpus is easier to read when the
+//! conditional in it is one.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -78,6 +89,13 @@ const DRAWN_VARIADIC: usize = 24;
 /// How many bytes the anchor array has, which is what a pointer argument points into.
 const ANCHOR: u64 = 64;
 
+/// The condition the `_Float128` cases are written under.
+///
+/// The module comment argues for both halves of it. The short version is that the first half asks
+/// whether the type is here and the second asks whether this is the row the harness runs, and a
+/// differential needs the answer to be the same on both sides of the call.
+const QUAD: &str = "defined(__FLT128_MANT_DIG__) && defined(__x86_64__)";
+
 /// What the generator was asked to do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -104,6 +122,11 @@ enum Scalar {
     Float,
     Double,
     LongDouble,
+    /// `_Float128`, which is the one scalar here that only some rows have.
+    ///
+    /// It is not in [`SCALARS`], so nothing drawn from the seed can be one. Everything it appears
+    /// in is written by hand and carries the guard.
+    Float128,
     Pointer,
 }
 
@@ -125,6 +148,7 @@ impl Scalar {
             Scalar::Float => "float",
             Scalar::Double => "double",
             Scalar::LongDouble => "long double",
+            Scalar::Float128 => "_Float128",
             Scalar::Pointer => "void *",
         }
     }
@@ -194,6 +218,11 @@ enum Member {
 struct Aggregate {
     name: &'static str,
     kind: Kind,
+    /// The `#if` the declaration is written under, and [`None`] for one every row has.
+    ///
+    /// A guarded aggregate is at the end of the table, because [`draw`] takes the unguarded ones
+    /// off the front by index and those indexes are in the checked in files.
+    guard: Option<&'static str>,
     /// Why it is here, written above it in the header.
     why: &'static str,
     members: &'static [Member],
@@ -210,6 +239,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "one_char",
         kind: Kind::Struct,
+        guard: None,
         why: "One byte in a struct, which is a register on every ABI here and a different \
               register from the one a bare char would use on none of them.",
         members: &[Member::Scalar("a", Scalar::Char)],
@@ -217,6 +247,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "three_char",
         kind: Kind::Struct,
+        guard: None,
         why: "Three bytes, so the size is not a power of two and the last byte of the register \
               it travels in is nobody's.",
         members: &[
@@ -228,6 +259,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "two_int",
         kind: Kind::Struct,
+        guard: None,
         why: "Eight bytes of integer, which is one register everywhere and the smallest \
               aggregate that fills one.",
         members: &[Member::Scalar("a", Scalar::Int), Member::Scalar("b", Scalar::Int)],
@@ -235,6 +267,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "int_float",
         kind: Kind::Struct,
+        guard: None,
         why: "An int and a float in one eightbyte. SysV classifies the eightbyte by what is in \
               it, so this is an integer register and two floats in the same space are not.",
         members: &[Member::Scalar("a", Scalar::Int), Member::Scalar("b", Scalar::Float)],
@@ -242,6 +275,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "two_float",
         kind: Kind::Struct,
+        guard: None,
         why: "Two floats, which is a homogeneous aggregate in two vector registers under AAPCS64 \
               and one SSE register holding both under SysV.",
         members: &[Member::Scalar("a", Scalar::Float), Member::Scalar("b", Scalar::Float)],
@@ -249,6 +283,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "four_float",
         kind: Kind::Struct,
+        guard: None,
         why: "Four floats, which is the largest homogeneous aggregate AAPCS64 will put in \
               registers and sixteen bytes of SSE under SysV.",
         members: &[
@@ -261,6 +296,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "two_double",
         kind: Kind::Struct,
+        guard: None,
         why: "Sixteen bytes of floating point, which is two registers under both rules and a \
               hidden pointer under Windows x64.",
         members: &[Member::Scalar("a", Scalar::Double), Member::Scalar("b", Scalar::Double)],
@@ -268,6 +304,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "long_double_one",
         kind: Kind::Struct,
+        guard: None,
         why: "A long double in a struct, which is the x87 eighty bit type on two rows, an IEEE \
               quad on several, a double double on ppc64le and a plain double on MSVC.",
         members: &[Member::Scalar("a", Scalar::LongDouble)],
@@ -275,6 +312,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "int_pointer",
         kind: Kind::Struct,
+        guard: None,
         why: "An int and a pointer, so the size and the padding both move with the pointer \
               width and the member after the padding is what says whether they moved together.",
         members: &[Member::Scalar("a", Scalar::Int), Member::Scalar("b", Scalar::Pointer)],
@@ -282,6 +320,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "six_int",
         kind: Kind::Struct,
+        guard: None,
         why: "Twenty four bytes, which is past the threshold on every ABI here, so it travels \
               as a copy the callee is given the address of rather than in registers.",
         members: &[
@@ -296,6 +335,7 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "nested",
         kind: Kind::Struct,
+        guard: None,
         why: "A struct inside a struct with a float after it. Flattening is what every \
               classification rule does first, so a rule that stops at the outer members gets \
               this one wrong and gets nothing else wrong.",
@@ -304,9 +344,40 @@ const AGGREGATES: &[Aggregate] = &[
     Aggregate {
         name: "int_or_float",
         kind: Kind::Union,
+        guard: None,
         why: "A union of an int and a float, which is one eightbyte with two classifications \
               and is why SysV's rule is a merge rather than a lookup.",
         members: &[Member::Scalar("a", Scalar::Int), Member::Scalar("b", Scalar::Float)],
+    },
+    Aggregate {
+        name: "quad_one",
+        kind: Kind::Struct,
+        guard: Some(QUAD),
+        why: "One _Float128 in a struct, which SysV calls an eightbyte of SSE and an eightbyte of \
+              SSEUP and puts in a single vector register. It is the only shape here that spends \
+              two eightbytes on one register, so a compiler that places arguments by counting \
+              eightbytes gets everything behind it wrong and gets nothing else wrong.",
+        members: &[Member::Scalar("x", Scalar::Float128)],
+    },
+    Aggregate {
+        name: "quad_two",
+        kind: Kind::Struct,
+        guard: Some(QUAD),
+        why: "Two of them, which is thirty two bytes and past the limit SysV classifies inside, \
+              so the whole thing goes to memory although every member of it is a float. AAPCS64 \
+              reads the same declaration as a homogeneous aggregate and gives it two vector \
+              registers, which is the sort of disagreement the corpus exists to find.",
+        members: &[Member::Scalar("x", Scalar::Float128), Member::Scalar("y", Scalar::Float128)],
+    },
+    Aggregate {
+        name: "quad_or_long",
+        kind: Kind::Union,
+        guard: Some(QUAD),
+        why: "A union of a _Float128 and a long, which is the merge rule and the post merge rules \
+              in one object: the first eightbyte is a float and an integer at once and comes out \
+              INTEGER, the second is an SSEUP with no SSE in front of it any more and is turned \
+              back into SSE, so sixteen bytes arrive split between the two register files.",
+        members: &[Member::Scalar("q", Scalar::Float128), Member::Scalar("a", Scalar::Long)],
     },
 ];
 
@@ -405,6 +476,11 @@ impl Ty {
 /// One function in the corpus, with the values that travel through it.
 struct Signature {
     name: String,
+    /// The `#if` the prototype, the definition and the call are written under.
+    ///
+    /// All three of them or none, because a prototype the caller cannot see is a call with no
+    /// declaration and a definition nobody calls is a warning at best.
+    guard: Option<&'static str>,
     /// Why it is here, written above the definition, and empty for a drawn one.
     why: &'static str,
     /// The return type, and [`None`] for a function returning `void`.
@@ -471,6 +547,10 @@ impl Values {
             Scalar::Float => format!("{}.25f", 1 + n % 1000),
             Scalar::Double => format!("{}.25", 1 + n % 100_000),
             Scalar::LongDouble => format!("{}.25L", 1 + n % 100_000),
+            // Lowercase, the way the `f` on a float here is, and it is the suffix rather than a
+            // cast because a quad written as a double and widened would be exact anyway and would
+            // stop saying which type the value was meant to be.
+            Scalar::Float128 => format!("{}.25f128", 1 + n % 100_000),
             Scalar::Pointer => format!("(void *)&anchor[{}]", n % ANCHOR),
         }
     }
@@ -794,6 +874,57 @@ fn signatures() -> Vec<Signature> {
         let ret = if rng.below(8) == 0 { None } else { Some(draw(&mut rng)) };
         out.push(build_variadic(&mut values, format!("v{index:02}"), "", ret, params, varargs));
     }
+
+    // The quad cases go last, after everything drawn from the seed, so that every other signature
+    // in the corpus carries the values it carried before this type was in here. A value counter
+    // that moves rewrites all four files, and a diff nobody can read is a diff nobody reads.
+    let mut quad = |name: &str, why: &'static str, ret: Option<Ty>, params: Vec<Ty>| {
+        let signature = build(&mut values, name.to_string(), why, ret, params);
+        out.push(Signature { guard: Some(QUAD), ..signature });
+    };
+
+    quad(
+        "q_quad_between_ints",
+        "A _Float128 between two integers and returned as one. The type is sixteen bytes with \
+         sixteen byte alignment and travels in a vector register on the row this runs on, so the \
+         integers either side of it are how a shift in either register file shows up.",
+        Some(Ty::Scalar(Scalar::Float128)),
+        vec![Ty::Scalar(Scalar::Int), Ty::Scalar(Scalar::Float128), Ty::Scalar(Scalar::Int)],
+    );
+    quad(
+        "q_quads_past_the_registers",
+        "Ten of them, which is more than SysV has vector registers, so the last two are on the \
+         stack and are the only arguments in this corpus whose stack slot has to be aligned to \
+         sixteen rather than to eight.",
+        Some(Ty::Scalar(Scalar::Float128)),
+        vec![Ty::Scalar(Scalar::Float128); 10],
+    );
+    quad(
+        "q_struct_then_double",
+        "The struct holding one quad with a double behind it, which is the case tamnd/rucc#1191 \
+         was about. The struct is two eightbytes and one register, so a compiler that counts the \
+         eightbytes hands the double a register the struct is already sitting in.",
+        Some(Ty::Aggregate(12)),
+        vec![Ty::Aggregate(12), Ty::Scalar(Scalar::Double), Ty::Scalar(Scalar::Int)],
+    );
+    quad(
+        "q_memory_aggregate",
+        "The thirty two byte one with an integer either side, which is the aggregate of floats \
+         that goes to memory anyway, so a caller that left the copy in the wrong place moves the \
+         argument after it as well.",
+        Some(Ty::Aggregate(13)),
+        vec![Ty::Scalar(Scalar::Int), Ty::Aggregate(13), Ty::Scalar(Scalar::Int)],
+    );
+    quad(
+        "q_union_and_quad",
+        "The union, returned and passed, with a bare quad behind it. The union spends one \
+         register of each file and the quad behind it spends a second vector register, so this is \
+         the one case here where the two counters have to move by different amounts for the same \
+         argument.",
+        Some(Ty::Aggregate(14)),
+        vec![Ty::Aggregate(14), Ty::Scalar(Scalar::Float128)],
+    );
+
     out
 }
 
@@ -804,10 +935,20 @@ fn signatures() -> Vec<Signature> {
 /// half of every ABI.
 fn draw(rng: &mut Rng) -> Ty {
     if rng.below(3) == 0 {
-        Ty::Aggregate(rng.below(AGGREGATES.len() as u64) as usize)
+        Ty::Aggregate(rng.below(drawable() as u64) as usize)
     } else {
         Ty::Scalar(SCALARS[rng.below(SCALARS.len() as u64) as usize])
     }
+}
+
+/// How many aggregates a draw may reach, which is the unguarded ones at the front of the table.
+///
+/// A drawn signature carries no guard, so a drawn parameter of a guarded type would be a use of a
+/// type the row it is compiled for may not have. This counts the prefix rather than filtering the
+/// table, because what a draw produces is an index into the table and the indexes already in the
+/// checked in files have to go on meaning what they meant.
+fn drawable() -> usize {
+    AGGREGATES.iter().position(|aggregate| aggregate.guard.is_some()).unwrap_or(AGGREGATES.len())
 }
 
 /// A signature with its values drawn.
@@ -852,7 +993,7 @@ fn build_variadic(
         Some(ty) => values.for_type(ty),
         None => Vec::new(),
     };
-    Signature { name, why, ret, ret_values, params, varargs }
+    Signature { name, guard: None, why, ret, ret_values, params, varargs }
 }
 
 /// The prototype of a signature, without the trailing semicolon.
@@ -911,6 +1052,20 @@ fn banner(out: &mut String, what: &str) {
     out.push_str(" */\n\n");
 }
 
+/// Opens the `#if` a guarded thing is written under, and writes nothing for an unguarded one.
+fn open_guard(out: &mut String, guard: Option<&'static str>) {
+    if let Some(guard) = guard {
+        let _ = writeln!(out, "#if {guard}");
+    }
+}
+
+/// Closes what [`open_guard`] opened.
+fn close_guard(out: &mut String, guard: Option<&'static str>) {
+    if guard.is_some() {
+        out.push_str("#endif\n");
+    }
+}
+
 /// A comment holding `why`, wrapped, or nothing at all when there is no reason to give.
 fn reason(out: &mut String, why: &str) {
     if why.is_empty() {
@@ -940,6 +1095,7 @@ fn header(signatures: &[Signature]) -> String {
 
     for aggregate in AGGREGATES {
         reason(&mut out, aggregate.why);
+        open_guard(&mut out, aggregate.guard);
         let keyword = match aggregate.kind {
             Kind::Struct => "struct",
             Kind::Union => "union",
@@ -955,7 +1111,9 @@ fn header(signatures: &[Signature]) -> String {
                 }
             }
         }
-        out.push_str("};\n\n");
+        out.push_str("};\n");
+        close_guard(&mut out, aggregate.guard);
+        out.push('\n');
     }
 
     out.push_str(
@@ -990,7 +1148,9 @@ fn header(signatures: &[Signature]) -> String {
 
     for signature in signatures {
         reason(&mut out, signature.why);
+        open_guard(&mut out, signature.guard);
         let _ = writeln!(out, "{};", prototype(signature));
+        close_guard(&mut out, signature.guard);
         if !signature.why.is_empty() {
             out.push('\n');
         }
@@ -1026,6 +1186,7 @@ fn callee(signatures: &[Signature]) -> String {
     out.push_str("#include \"abi.h\"\n\n");
 
     for signature in signatures {
+        open_guard(&mut out, signature.guard);
         let _ = writeln!(out, "{}\n{{", prototype(signature));
         if signature.is_variadic() {
             out.push_str("\tABI_VA_LIST ap;\n\n");
@@ -1078,7 +1239,9 @@ fn callee(signatures: &[Signature]) -> String {
                 }
             }
         }
-        out.push_str("}\n\n");
+        out.push_str("}\n");
+        close_guard(&mut out, signature.guard);
+        out.push('\n');
     }
     out
 }
@@ -1091,6 +1254,7 @@ fn caller(signatures: &[Signature]) -> String {
     out.push_str("int main(void)\n{\n");
 
     for signature in signatures {
+        open_guard(&mut out, signature.guard);
         out.push_str("\t{\n");
         let mut arguments = Vec::new();
         for param in &signature.params {
@@ -1137,6 +1301,7 @@ fn caller(signatures: &[Signature]) -> String {
             }
         }
         out.push_str("\t}\n");
+        close_guard(&mut out, signature.guard);
     }
 
     out.push_str("\treturn abi_failures == 0 ? 0 : 1;\n}\n");

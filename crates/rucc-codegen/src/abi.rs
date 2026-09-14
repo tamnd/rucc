@@ -148,6 +148,17 @@ fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
     if ty.is_float() && !on_the_stack(ty) { conv.sse_class } else { conv.int_class }
 }
 
+/// How many bytes of the argument area a value in the vector file takes.
+///
+/// Its own width, lanes included, which is what [`Places::float`] wants and is a number that only
+/// matters to a value the registers ran out before. Everything the machine computes in is a word
+/// or narrower and takes a word either way. The `_Float128` is the one that is not: two words, and
+/// aligned to two words, which is the difference between the argument behind it being placed after
+/// it and being placed on top of half of it.
+pub(crate) fn float_bytes(ty: Type) -> u32 {
+    ty.bits().div_ceil(8).saturating_mul(ty.lanes())
+}
+
 /// Whether a value of that type travels as bytes in the argument area because of what it is.
 ///
 /// One type does, and it is the `long double`. SysV classifies it X87 and X87UP, which is the
@@ -267,7 +278,7 @@ pub fn entry(
             ));
             continue;
         }
-        let at = if ty.is_float() { places.float() } else { places.integer() };
+        let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
         if let Some(missing) = refuses(ty) {
             return Err((index, missing));
         }
@@ -509,7 +520,7 @@ pub fn call(
             as_bytes.push((reg, up, plan));
             continue;
         }
-        let at = if ty.is_float() { places.float() } else { places.integer() };
+        let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
         if let Some(missing) = refuses(ty) {
             return Err(refused(missing));
         }
