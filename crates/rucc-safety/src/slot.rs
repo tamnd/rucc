@@ -46,6 +46,16 @@
 //! than a guess made from the region's class. `fresh` is the shape it recognises, and
 //! `rucc_safe_rt::recover`'s `made` is the load.
 //!
+//! And `cap_of` over anything else, which is the last box and turned out to be a fallback rather
+//! than a lowering of its own. It is the general question, every other producer is a special case of
+//! it that has a cheap answer, and by the time they all exist a `cap_of` this pass cannot trace is a
+//! pointer something really did lose track of. So it gets the plane walk, comes back marked as
+//! recovered, and is counted. Refusing it instead would leave every capability in the function where
+//! it was, which is not the more conservative direction: it is the same walk once per check rather
+//! than once per pointer. An interior pointer is always this answer rather than the cheap one, which
+//! is what document 05 section 5.2.3 leaves open, and it falls out of `fresh` asking for an
+//! allocation site's own result rather than out of a test for it.
+//!
 //! And `cap_load`, which is the third box and the one producer here whose numbers nobody has to work
 //! out at all, because an earlier part of the same program wrote them down. A pointer that lives in
 //! memory has its capability beside it in the aux plane, so reading the pointer and reading the
@@ -272,13 +282,17 @@ fn placeable(func: &Func) -> bool {
         let placed = matches!(
             opcode,
             Opcode::CapNull
+                | Opcode::CapOf
                 | Opcode::CapLoad
                 | Opcode::CapNarrow
                 | Opcode::CapRecover
                 | Opcode::CapArg
                 | Opcode::CapResult
         );
-        if opcode.makes_capability() && !placed && fresh(func, inst).is_none() {
+        // Every producer is on that list now, so nothing reaches this any more. It stays because
+        // the next one added would otherwise be placed nowhere and read as an address, which is the
+        // failure this whole function exists to keep out.
+        if opcode.makes_capability() && !placed {
             return false;
         }
         let reads = func[func[inst].args].iter().any(|&value| func[value].ty.is_cap());
@@ -390,9 +404,8 @@ fn nulled(func: &mut Func, word: Type, inst: Inst, address: Value) {
 /// program where it is wrong has larger problems than this. The result has to be the call's first,
 /// because a call with several is not one of those names.
 ///
-/// What happens for a pointer the flag is not on is a capability this pass cannot place, which
-/// leaves the whole function's capabilities where they were. That is the conservative direction and
-/// it costs nothing today, since every `cap_of` that is not read is gone by the time this runs.
+/// What happens for a pointer the flag is not on is the plane walk, which [`allocated`] is where it
+/// is argued. Nothing is refused here, and the answer being no is a cost rather than a failure.
 fn fresh(func: &Func, inst: Inst) -> Option<Value> {
     if func[inst].opcode != Opcode::CapOf {
         return None;
@@ -402,7 +415,26 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
     (func[call].opcode == Opcode::Call && func[call].flags.contains(Flags::HEAP)).then_some(base)
 }
 
-/// `cap_of` over a fresh allocation becomes `__rucc_cap_made(slot, base)`.
+/// `cap_of` becomes `__rucc_cap_made(slot, base)` or `__rucc_cap_recover(slot, at)`.
+///
+/// Which of the two is not a property of the instruction, it is what [`fresh`] could find out about
+/// the pointer. A pointer traced back to an allocation site gets the cheap answer, which is a
+/// subtract and a load off the header the allocator wrote. Anything else gets the plane walk, which
+/// is linear in the size of the object the address landed in and comes back marked as recovered so
+/// that the summary counts it. The two calls take the same two arguments, for the reason
+/// [`recovered`] gives, so the difference between them here is the name.
+///
+/// Falling back rather than refusing is the point of this being the last of the producers. Every
+/// other one is a pointer whose provenance the compiler still holds, and by the time they are all
+/// there a `cap_of` that cannot be traced is a pointer something really did lose track of. Refusing
+/// it would leave the whole function's capabilities where they were, which is not more conservative
+/// than the walk, it is the same walk once per check rather than once per pointer.
+///
+/// An interior pointer is always the second answer, and that is the question document 05 section
+/// 5.2.3 leaves open rather than a gap in it. `__rucc_cap_made` wants the base, because the header
+/// is behind the payload and finding it is a subtract by a constant. [`fresh`] hands it the call's
+/// own result or nothing, so the cheap answer is never reached with a pointer into the middle of
+/// something.
 ///
 /// Beside the instruction rather than in place of it, unlike every other rewrite in this pass and in
 /// [`mod@crate::lower`]. The call gives nothing back, because the capability it produced went into
@@ -414,10 +446,16 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
 /// pointer is: the call that produced it has run by then and nothing has to be kept live any longer
 /// than it already was. The slot itself is in the entry block for the reason [`reserve`] gives.
 fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
-    let Some(base) = fresh(func, inst) else { return };
+    let (routine, base) = match fresh(func, inst) {
+        Some(base) => ("__rucc_cap_made", base),
+        None => {
+            let &[at] = &func[func[inst].args] else { return };
+            ("__rucc_cap_recover", at)
+        }
+    };
     let params = &[Type::PTR; 2];
     let args = &[address, base];
-    let data = crate::lower::calling(func, names, "__rucc_cap_made", params, &[], args);
+    let data = crate::lower::calling(func, names, routine, params, &[], args);
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     func.remove_inst(inst);
@@ -697,14 +735,46 @@ mod tests {
     }
 
     #[test]
-    fn a_capability_for_a_pointer_nobody_vouched_for_is_left_where_it_was() {
+    fn a_capability_for_a_pointer_nobody_vouched_for_falls_back_to_the_plane_walk() {
         let mut names = Interner::new();
         let mut func = called(&mut names, false);
         frames(&mut func, &mut names, Type::int(64));
-        assert_eq!(count(&func, Opcode::CapOf), 1);
-        assert_eq!(count(&func, Opcode::CapStore), 1);
-        assert_eq!(count(&func, Opcode::Alloca), 0);
-        believed(&module(&mut names), &func, &names);
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert!(!any_capability(&func));
+        // The expensive answer and the only one that is always right. Refusing instead would leave
+        // every capability in the function where it was, which is the same walk once per check
+        // rather than once per pointer, so it is not the more conservative direction.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
+        assert!(!text.contains("__rucc_cap_made"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn the_cheap_answer_is_never_asked_about_a_pointer_into_the_middle_of_something() {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let mut func = built(&mut names, |b, _, at| {
+            let step = number(b, 16, word);
+            let args = b.func().push_values(&[at, step]);
+            let inner = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            let args = b.func().push_values(&[inner]);
+            let mine = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+            let args = b.func().push_values(&[mine, inner, inner, mine]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        });
+        frames(&mut func, &mut names, word);
+        // `__rucc_cap_made` subtracts a constant to reach the header, which is right for a pointer
+        // to the base of an object and wrong for one into the middle. This is the question document
+        // 05 section 5.2.3 leaves open, and the answer is that the cheap path is never reached with
+        // one, because what it asks for is an allocation site's own result.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
+        assert!(!text.contains("__rucc_cap_made"), "{text}");
+        believed(&unit, &func, &names);
     }
 
     /// An integer constant of that width, in the block being built.
@@ -763,12 +833,15 @@ mod tests {
             let taken = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
             let args = b.func().push_values(&[taken, at, at]);
             let got = b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
+            // A yield away from the return it is meant to be about, which is one of the refusals.
+            let args = b.func().push_values(&[got]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapYield) }, &[]);
             let args = b.func().push_values(&[got, at, at, got]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
         frames(&mut func, &mut names, Type::int(64));
-        // The read is one this pass understands and its container is not, and a slot for the read
-        // alone would be a call handed a container operand that is still a capability.
+        // Both producers are ones this pass understands and the yield beside them is not, and
+        // placing them anyway would leave the yield holding an operand that is now an address.
         assert_eq!(count(&func, Opcode::CapLoad), 1);
         assert_eq!(count(&func, Opcode::CapOf), 1);
         assert_eq!(count(&func, Opcode::Alloca), 0);
@@ -1228,7 +1301,10 @@ mod tests {
         let mut func = built(&mut names, |b, cap, at| {
             let args = b.func().push_values(&[at]);
             let taken = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
-            let args = b.func().push_values(&[taken, at, at, cap]);
+            // A publish in front of nothing, which is the refusal every producer has stopped being.
+            let args = b.func().push_values(&[taken]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
+            let args = b.func().push_values(&[cap, at, at, cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
         frames(&mut func, &mut names, Type::int(64));

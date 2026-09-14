@@ -170,6 +170,25 @@ pub enum Opcode {
     // these is emitted unless `-fsafety` asked for it, and a function compiled without it
     // contains not one of them.
     /// The capability of a pointer value, taken from the pointer's provenance.
+    ///
+    /// One operand, the pointer, and one capability out. This is the general question and the other
+    /// producers are all the special cases of it that have a cheap answer, which is why it is the
+    /// one that always works and the one to reach for last. A pointer whose provenance the compiler
+    /// still holds should have got its capability from wherever that provenance came from: from the
+    /// allocation site, from the aux slot beside it in memory, from the frame its caller wrote, or
+    /// from the derivation that narrowed it. One of these is what is left when none of those did.
+    ///
+    /// So it has two lowerings and which one it gets is not a property of the instruction. A pointer
+    /// the lowering can trace back to an allocation site gets the cheap answer, which is a subtract
+    /// and a load off the header the allocator wrote. Anything else gets the plane walk, which is
+    /// the expensive answer and the only one that is always available, and comes back marked as
+    /// recovered so the summary counts it as the weakening it is.
+    ///
+    /// An interior pointer is always the second of those, and that is the answer to the question
+    /// document 05 section 5.2.3 leaves open rather than a gap in it. The header is behind the
+    /// payload so that finding it is a subtract by a constant, which is true of a pointer to the
+    /// base of an object and false of a pointer to the middle of one, and the lowering asks for the
+    /// base by construction rather than by checking.
     CapOf,
     /// The capability in the auxiliary slot beside a stored pointer, read back.
     ///
