@@ -321,6 +321,15 @@ fn build(benches: &[Bench], level: &str, extra: &[String]) -> Result<PathBuf> {
 
 /// Builds the compiler this tree describes and gives back the path to it.
 pub(crate) fn compiler() -> Result<PathBuf> {
+    // A caller that has built it already can say where it put it. The gate does, because it runs
+    // seven checks that want this compiler at the same time as the tests, and seven `cargo build`
+    // runs waiting behind the tests for the build directory's lock would turn the whole lane back
+    // into something that starts only once the tests are over.
+    if let Ok(said) = std::env::var("RUCC_XTASK_COMPILER") {
+        if !said.is_empty() {
+            return Ok(PathBuf::from(said));
+        }
+    }
     let status = Command::new("cargo")
         .args(["build", "-q", "--release", "-p", "rucc"])
         .current_dir(root())
