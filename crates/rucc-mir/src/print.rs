@@ -311,6 +311,13 @@ impl<'a> Printer<'a> {
             let _ = write!(self.out, "@{}", self.names.resolve(symbol));
             written = true;
         }
+        // The address of a label, which names a block the way a branch does and is written the
+        // same way. It is never in the same address as a symbol, since one of them is a place in
+        // this function and the other is a name the linker resolves.
+        if let Some(block) = amode.block {
+            self.label(block);
+            written = true;
+        }
         if let Some(operand) = amode.base.and_then(|at| operands.get(usize::from(at))) {
             if written {
                 self.out.push_str(" + ");
@@ -341,17 +348,22 @@ impl<'a> Printer<'a> {
         self.out.push(']');
     }
 
-    /// One arm of a terminator: where it goes, and what it takes.
-    ///
-    /// The arguments carry no class, because the parameters they arrive as are declared at the
-    /// block they arrive in.
-    fn block_call(&mut self, func: &Func, call: &BlockCall) {
-        match self.labels.get(call.block.index()).copied() {
+    /// The label one block is written as, which is its place in the layout.
+    fn label(&mut self, block: Block) {
+        match self.labels.get(block.index()).copied() {
             Some(u32::MAX) | None => self.out.push_str("block?"),
             Some(number) => {
                 let _ = write!(self.out, "block{number}");
             }
         }
+    }
+
+    /// One arm of a terminator: where it goes, and what it takes.
+    ///
+    /// The arguments carry no class, because the parameters they arrive as are declared at the
+    /// block they arrive in.
+    fn block_call(&mut self, func: &Func, call: &BlockCall) {
+        self.label(call.block);
         if call.args.is_empty() {
             return;
         }

@@ -36,8 +36,9 @@
 //! `case 'a': case 'e': case 'i': case 'o': case 'u':` five compares before this and one after.
 //!
 //! The one that is not written is the jump table, and it is a variant this enum gains rather than a
-//! rewrite of anything here. It is waiting on `Opcode::IndirectBr`, which is tamnd/rucc#353 and is
-//! the same thing a computed goto waits on, and on a read only section to put the table in.
+//! rewrite of anything here. It is waiting on a read only section to put the table in. What it was
+//! also waiting on was `Opcode::IndirectBr`, which a computed goto needed as well and which
+//! tamnd/rucc#353 has since written, so what is left is the table rather than the jump.
 //!
 //! # Why the tree compares signed
 //!
@@ -109,8 +110,9 @@ use rucc_ir::{
 /// half. Thirty two is where those two lines cross.
 ///
 /// Two things would move it. The first is a jump table, which is what a dense `switch` this large
-/// should become and which is waiting on `Opcode::IndirectBr`. Once dense cases stop reaching the
-/// tree at all, what is left in it is sparser, and a sparser search may be worth starting sooner.
+/// should become and which is waiting on somewhere to put the table. Once dense cases stop
+/// reaching the tree at all, what is left in it is sparser, and a sparser search may be worth
+/// starting sooner.
 /// The second is knowing which case is hot, because a walk that tests the common case first is
 /// cheaper than any search and the tree cannot use that ordering. That is document 11's `Frequency`
 /// and it is not carried here yet.
