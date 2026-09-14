@@ -39,6 +39,22 @@
 //! them is settled by [`crate::finish`] writing every edit into the function, which is after the
 //! allocator has finished. The pair is visible once, here, and nowhere earlier.
 //!
+//! # Why it does not go through the change framework
+//!
+//! Because the one question [`crate::changes`] would answer about a removal is one that cannot be
+//! answered here. The framework refuses to take an instruction out while anything still reads a
+//! register it wrote, and it knows that from a count of the reads in the function, which is the
+//! whole answer while every register is written once and is not the answer at all afterwards: the
+//! register a reload writes is physical by the time this runs, the same one is written and read all
+//! over the function about other values, and the count says so. Every removal here would be turned
+//! down.
+//!
+//! What makes these safe is not a count but where the instruction came from. It is one of the
+//! allocator's own moves, [`crate::finish`] wrote it, and the value is in the register already
+//! because the store on the line above put it there. That is a reason the framework has no way to
+//! be told, and section 37.2's framework is about the machine's description of itself rather than
+//! about the allocator's, so this keeps its own.
+//!
 //! # What it does not do
 //!
 //! Only the pair that is next to itself. A reload with an instruction between it and the spill is

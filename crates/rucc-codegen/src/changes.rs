@@ -41,6 +41,21 @@
 //! That last one is what the set is for, so [`Changes`] is the thing that knows it rather than
 //! each pass.
 //!
+//! # What the read counts are worth after allocation
+//!
+//! Less, and they are still true. A count is how many operands in the function name a register,
+//! and while machine IR is in SSA form that is the whole answer to whether anything reads what an
+//! instruction wrote, because the register is written once. Once the allocator has run it is not:
+//! `%rax` is written all over the function and a count of the reads of it is a count of the reads
+//! of every one of those writes together.
+//!
+//! What that costs is optimizations rather than correctness. A count of zero still means nothing
+//! anywhere reads the register, so a removal the framework takes is a removal nothing was reading;
+//! what it will not take is the many where the register is read further down about a different
+//! write. So a pass that runs after allocation and removes instructions has to have its own reason,
+//! which is why [`crate::reload`] has one and says what it is, and a pass that rewrites rather than
+//! removes has the whole of the framework as usual.
+//!
 //! # Reading a register somewhere else
 //!
 //! A pass that takes an instruction out has to send whatever read it somewhere, and what that is
