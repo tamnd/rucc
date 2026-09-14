@@ -63,6 +63,7 @@ mod complex;
 mod constant;
 mod count;
 mod expect;
+mod frame;
 mod generic;
 mod math;
 mod overflow;

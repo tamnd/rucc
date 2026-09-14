@@ -1024,12 +1024,20 @@ impl<'a> Verifier<'a> {
                     self.error(format!("splat produces a vector and this one produces {}", res(0)));
                 }
             }
-            Opcode::GlobalAddr
-            | Opcode::StackSave
-            | Opcode::FrameAddress
-            | Opcode::ReturnAddress
-            | Opcode::ThreadPointer => {
+            Opcode::GlobalAddr | Opcode::StackSave | Opcode::ThreadPointer => {
                 if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "{} produces a pointer and this one produces {}",
+                        opcode.name(),
+                        res(0)
+                    ));
+                }
+            }
+            // The two that walk the frames, which answer a pointer like the three above and take
+            // nothing, since how far up to walk is the depth beside the instruction rather than
+            // anything computed.
+            Opcode::FrameAddress | Opcode::ReturnAddress => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).is_ptr() {
                     self.error(format!(
                         "{} produces a pointer and this one produces {}",
                         opcode.name(),

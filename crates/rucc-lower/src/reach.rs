@@ -187,6 +187,7 @@ impl Reach<'_> {
             | ExprKind::LabelAddr(_)
             | ExprKind::Unreachable
             | ExprKind::Trap
+            | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer => {}
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.

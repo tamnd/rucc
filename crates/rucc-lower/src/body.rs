@@ -35,8 +35,8 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, InitEntry,
-    Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, ExprId, ExprKind, ExprList, FrameAsk,
+    InitEntry, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
@@ -3858,6 +3858,17 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).inst(InstData::new(Opcode::Trap), &[]);
                 None
             }
+            // A question about the frames this function is running in, so there is nothing under it
+            // to lower either: how far up to walk is a number the checker settled, and it rides
+            // beside the instruction rather than being an operand of it.
+            ExprKind::FrameAddress { ask, depth } => {
+                let opcode = match ask {
+                    FrameAsk::Frame => Opcode::FrameAddress,
+                    FrameAsk::Return => Opcode::ReturnAddress,
+                };
+                let data = InstData { extra: Extra::Depth(depth), ..InstData::new(opcode) };
+                Some(self.build(span).value(data, Type::PTR))
+            }
             // A fact about the machine rather than about the program, so there is nothing under it
             // to lower first and the whole of it is the one instruction the back end writes.
             ExprKind::ThreadPointer => {
@@ -6211,6 +6222,7 @@ impl Scan<'_> {
             | ExprKind::Decl(_)
             | ExprKind::Unreachable
             | ExprKind::Trap
+            | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer => {}
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {

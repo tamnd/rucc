@@ -2741,6 +2741,75 @@ decl #0 x : int object external static defined
         assert!(text.contains("width"), "the argument that is not the answer still runs: {text}");
     }
 
+    /// Where a frame is, which on this machine is what the frame pointer holds.
+    ///
+    /// The first half is a function that would have kept no frame pointer at all, since it is a
+    /// leaf with no locals, and keeps one because it asked where its frame is. The answer being
+    /// `%rbp` rather than an offset off `%rsp` is the whole of the builtin at a depth of zero.
+    ///
+    /// The second half is the walk. Each link above zero is one load through the register the last
+    /// one wrote, so a depth of two is two loads and a depth of three is three, which is what gcc
+    /// 16.2.0 writes for the same programs at `-O2`.
+    #[test]
+    fn the_frame_address_is_the_frame_pointer_after_walking_that_many_links() {
+        let text = asm("void *here(void) { return __builtin_frame_address(0); }\n");
+        assert!(text.contains("pushq\t%rbp"), "a function that asks keeps a frame pointer: {text}");
+        assert!(text.contains("movq\t%rbp, %rax"), "{text}");
+        assert!(!text.contains("\tcall"), "a frame address is not a call to anything: {text}");
+
+        let walk = |depth: u32| {
+            let source = format!("void *up(void) {{ return __builtin_frame_address({depth}); }}\n");
+            asm(&source).matches("movq\t(%r").count()
+        };
+        assert_eq!(walk(1), 1, "one link is one load");
+        assert_eq!(walk(3), 3, "three links are three loads");
+    }
+
+    /// The address a frame returns to, which is one word above the frame the walk ended at.
+    ///
+    /// A word is eight bytes here and the `8(...)` is the whole claim: the call instruction pushed
+    /// the return address and the prologue pushed the caller's frame pointer under it, so what the
+    /// frame pointer points at is the link and what is above it is where control goes back to.
+    /// gcc 16.2.0 writes `movq 8(%rbp), %rax` for the first of these, measured at `-O2`.
+    ///
+    /// The second half is the same walk the frame address does, with the load at the end of it
+    /// reading one word further along rather than the register itself being the answer.
+    #[test]
+    fn the_return_address_is_one_word_above_the_frame_the_walk_ended_at() {
+        let text = asm("void *back(void) { return __builtin_return_address(0); }\n");
+        assert!(text.contains("pushq\t%rbp"), "a function that asks keeps a frame pointer: {text}");
+        assert!(text.contains("movq\t8(%rbp), %rax"), "{text}");
+        assert!(!text.contains("\tcall"), "a return address is not a call to anything: {text}");
+
+        let text = asm("void *back(void) { return __builtin_return_address(2); }\n");
+        assert_eq!(text.matches("movq\t(%r").count(), 2, "two links are two loads: {text}");
+        assert!(text.contains("movq\t8(%r"), "and the answer is above the last of them: {text}");
+    }
+
+    /// A depth that is not a constant is refused, and so is one past the limit.
+    ///
+    /// The first is gcc's rule and not a convenience: what the call becomes is a walk that many
+    /// links long, written out, so a number that is not known until the program runs has nothing
+    /// to walk. gcc 16.2.0 says `invalid argument to '__builtin_return_address'` for the same
+    /// program.
+    ///
+    /// The second is where this and gcc part company. gcc writes the walk however long it is, and
+    /// this refuses a depth no program has a use for rather than filling an object file with loads
+    /// that fault part way up.
+    #[test]
+    fn a_depth_that_is_not_a_small_constant_is_refused() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        for source in [
+            "void *up(int n) { return __builtin_return_address(n); }\n",
+            "void *up(void) { return __builtin_frame_address(1000); }\n",
+        ] {
+            let messages = run(&opts, source).messages;
+            let named = messages.iter().any(|m| m.contains("E0705"));
+            assert!(named, "expected a refusal in {messages:?}");
+        }
+    }
+
     /// Not a rewording of the check above: what the two paths agree about is the point.
     #[test]
     fn the_object_and_the_listing_are_two_spellings_of_one_compilation() {
@@ -4349,7 +4418,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         for (builtin, call) in [
-            ("__builtin_return_address", "(int)(long)__builtin_return_address(0)"),
+            ("__builtin_object_size", "(int)__builtin_object_size(&counter, 0)"),
             ("__builtin_alloca", "(int)(long)__builtin_alloca(8)"),
             ("__atomic_signal_fence", "(__atomic_signal_fence(5), 0)"),
         ] {
@@ -4369,14 +4438,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// is for but is what a definition in front of us means.
     #[test]
     fn what_is_refused_is_the_call_and_not_the_name() {
-        let text = ir("unsigned long n = sizeof(__builtin_return_address(0));\n");
+        let text = ir("unsigned long n = sizeof(__builtin_alloca(8));\n");
         assert!(text.contains("global @n : i64 = 8,"), "{text}");
 
         let text = ir(concat!(
-            "void *__builtin_return_address(unsigned x) { return 0; }\n",
-            "void *f(void) { return __builtin_return_address(0); }\n",
+            "void *__builtin_alloca(unsigned long n) { return 0; }\n",
+            "void *f(void) { return __builtin_alloca(8); }\n",
         ));
-        assert!(text.contains("call @__builtin_return_address"), "{text}");
+        assert!(text.contains("call @__builtin_alloca"), "{text}");
     }
 
     /// A `static` function nothing refers to is not emitted, and one that is refered to is.

@@ -402,6 +402,20 @@ pub enum ExprKind {
     /// instruction that does not exist and the operating system ends it. See
     /// `check/builtin/trap.rs`.
     Trap,
+    /// `__builtin_frame_address(n)` and `__builtin_return_address(n)`, which answer something about
+    /// the frame this function is running in or one of the frames above it.
+    ///
+    /// One node for both because the two are one walk and differ in what is read at the end of it,
+    /// which is the reason [`ExprKind::BitCount`] is one node for five builtins. The depth is a
+    /// number here rather than an expression because the walk is that many instructions long, so a
+    /// call that wrote something that would not fold has already been refused. See
+    /// `check/builtin/frame.rs`.
+    FrameAddress {
+        /// Which of the two things about the frame is being asked for.
+        ask: FrameAsk,
+        /// How many frames up from this one to walk, which is zero for this function's own.
+        depth: u32,
+    },
     /// `__builtin_thread_pointer()`, the address of the storage the running thread has.
     ///
     /// It has no operands, and it is a node rather than a call for the reason the one above it is:
@@ -409,6 +423,19 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+}
+
+/// Which of the two things about a frame one of the address builtins asks for.
+///
+/// The walk up to the frame is the same for both and only the last step differs, which is why the
+/// two builtins are one node with a question rather than two nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAsk {
+    /// `__builtin_frame_address`, which answers where the frame itself is.
+    Frame,
+    /// `__builtin_return_address`, which answers the address control goes back to from it, and is
+    /// one load further along than the answer above.
+    Return,
 }
 
 /// Which question one of the bit counting builtins asks.

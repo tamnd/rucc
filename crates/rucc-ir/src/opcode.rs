@@ -1061,6 +1061,11 @@ impl Opcode {
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
             Self::Prefetch => ExtraKind::Prefetch,
+            // How far up the chain of frames to walk, which is a number written in the instruction
+            // and never a value. The builtins these came from take a constant and nothing else, for
+            // the reason `prefetch` takes one: the instructions this becomes are a walk of that
+            // length, and a length not known until the program runs has nothing to walk.
+            Self::FrameAddress | Self::ReturnAddress => ExtraKind::Depth,
             Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
             Self::Switch => ExtraKind::Switch,
             Self::Call | Self::CallIndirect | Self::TailCall => ExtraKind::Call,
@@ -1094,6 +1099,8 @@ pub enum ExtraKind {
     Order,
     /// What a prefetch is a hint about.
     Prefetch,
+    /// How many frames up to walk.
+    Depth,
     /// Branch targets.
     Targets,
     /// A call.
@@ -1128,6 +1135,7 @@ impl ExtraKind {
             Self::Rmw => "a read-modify-write",
             Self::Order => "an ordering",
             Self::Prefetch => "a prefetch hint",
+            Self::Depth => "a depth",
             Self::Targets => "branch targets",
             Self::Call => "a call",
             Self::Switch => "a switch",

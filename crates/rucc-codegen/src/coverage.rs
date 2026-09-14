@@ -96,6 +96,12 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // Stopping, which is built here because it computes nothing for a rule to have a pattern for
     // and because what makes it right is the operating system rather than any bitvector.
     (Opcode::Trap, "`crate::lower`, as the `ud2` the program stops on"),
+    // The two that walk the frames, built here because how long the walk is comes out of a number
+    // beside the instruction and a pattern matches on an opcode and a type. What they start from is
+    // the frame pointer, which is not a register a rule could name either, and asking for one is
+    // part of building them.
+    (Opcode::FrameAddress, "`crate::lower`, as the walk up the saved frame pointers"),
+    (Opcode::ReturnAddress, "`crate::lower`, as the same walk with one load at the end of it"),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),
@@ -287,8 +293,6 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#226",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
-    (Opcode::FrameAddress, "a walk up the frame pointers", "tamnd/rucc#312"),
-    (Opcode::ReturnAddress, "the same walk, one word further along", "tamnd/rucc#312"),
     (
         Opcode::SetjmpMarker,
         "a call that returns twice, which the allocator has to be told about",
