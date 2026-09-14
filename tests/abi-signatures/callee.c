@@ -2382,3 +2382,85 @@ short v23(struct nested a0, ...)
 	return (short)(767);
 }
 
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 q_quad_between_ints(int a0, _Float128 a1, int a2)
+{
+	if (a0 != 6073874)
+		abi_fail("q_quad_between_ints", "a0");
+	if (a1 != 769.25f128)
+		abi_fail("q_quad_between_ints", "a1");
+	if (a2 != 6089712)
+		abi_fail("q_quad_between_ints", "a2");
+	return 771.25f128;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 q_quads_past_the_registers(_Float128 a0, _Float128 a1, _Float128 a2, _Float128 a3, _Float128 a4, _Float128 a5, _Float128 a6, _Float128 a7, _Float128 a8, _Float128 a9)
+{
+	if (a0 != 772.25f128)
+		abi_fail("q_quads_past_the_registers", "a0");
+	if (a1 != 773.25f128)
+		abi_fail("q_quads_past_the_registers", "a1");
+	if (a2 != 774.25f128)
+		abi_fail("q_quads_past_the_registers", "a2");
+	if (a3 != 775.25f128)
+		abi_fail("q_quads_past_the_registers", "a3");
+	if (a4 != 776.25f128)
+		abi_fail("q_quads_past_the_registers", "a4");
+	if (a5 != 777.25f128)
+		abi_fail("q_quads_past_the_registers", "a5");
+	if (a6 != 778.25f128)
+		abi_fail("q_quads_past_the_registers", "a6");
+	if (a7 != 779.25f128)
+		abi_fail("q_quads_past_the_registers", "a7");
+	if (a8 != 780.25f128)
+		abi_fail("q_quads_past_the_registers", "a8");
+	if (a9 != 781.25f128)
+		abi_fail("q_quads_past_the_registers", "a9");
+	return 782.25f128;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_one q_struct_then_double(struct quad_one a0, double a1, int a2)
+{
+	if (a0.x != 783.25f128)
+		abi_fail("q_struct_then_double", "a0.x");
+	if (a1 != 784.25)
+		abi_fail("q_struct_then_double", "a1");
+	if (a2 != 6208497)
+		abi_fail("q_struct_then_double", "a2");
+	struct quad_one r = { 786.25f128 };
+	return r;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2)
+{
+	if (a0 != 6224335)
+		abi_fail("q_memory_aggregate", "a0");
+	if (a1.x != 788.25f128)
+		abi_fail("q_memory_aggregate", "a1.x");
+	if (a1.y != 789.25f128)
+		abi_fail("q_memory_aggregate", "a1.y");
+	if (a2 != 6248092)
+		abi_fail("q_memory_aggregate", "a2");
+	struct quad_two r = { 791.25f128, 792.25f128 };
+	return r;
+}
+#endif
+
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1)
+{
+	if (a0.q != 793.25f128)
+		abi_fail("q_union_and_quad", "a0.q");
+	if (a1 != 794.25f128)
+		abi_fail("q_union_and_quad", "a1");
+	union quad_or_long r = { 795.25f128 };
+	return r;
+}
+#endif
+

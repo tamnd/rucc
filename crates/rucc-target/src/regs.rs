@@ -689,4 +689,25 @@ mod tests {
         assert_eq!(places.on_stack(8, 8), Where::Stack(64));
         assert_eq!(places.size(), 72);
     }
+
+    #[test]
+    fn a_float_wider_than_a_word_takes_two_of_them_once_the_registers_are_gone() {
+        let regs = convention(false, 0);
+        let mut places = Places::new(&regs);
+        assert_eq!(places.float(16), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.float(16), Where::Reg(PhysReg::new(11)));
+        // The vector registers are gone, and so are the two general purpose ones, so the rest of
+        // this is in the area. The word the integer took is not where the first quad starts,
+        // because sixteen bytes aligned to sixteen skips the odd word above it, and the second
+        // quad is sixteen bytes above the first rather than eight.
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
+        assert_eq!(places.integer(), Where::Stack(0));
+        assert_eq!(places.float(16), Where::Stack(16));
+        assert_eq!(places.float(16), Where::Stack(32));
+        assert_eq!(places.size(), 48);
+        // A float narrower than a word still takes one, which is what it took before any of this.
+        assert_eq!(places.float(4), Where::Stack(48));
+        assert_eq!(places.size(), 56);
+    }
 }

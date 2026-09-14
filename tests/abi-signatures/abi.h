@@ -105,6 +105,38 @@ union int_or_float {
 	float b;
 };
 
+/* One _Float128 in a struct, which SysV calls an eightbyte of SSE and an eightbyte of SSEUP and
+ * puts in a single vector register. It is the only shape here that spends two eightbytes on one
+ * register, so a compiler that places arguments by counting eightbytes gets everything behind it
+ * wrong and gets nothing else wrong. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_one {
+	_Float128 x;
+};
+#endif
+
+/* Two of them, which is thirty two bytes and past the limit SysV classifies inside, so the whole
+ * thing goes to memory although every member of it is a float. AAPCS64 reads the same
+ * declaration as a homogeneous aggregate and gives it two vector registers, which is the sort of
+ * disagreement the corpus exists to find. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_two {
+	_Float128 x;
+	_Float128 y;
+};
+#endif
+
+/* A union of a _Float128 and a long, which is the merge rule and the post merge rules in one
+ * object: the first eightbyte is a float and an integer at once and comes out INTEGER, the
+ * second is an SSEUP with no SSE in front of it any more and is turned back into SSE, so sixteen
+ * bytes arrive split between the two register files. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+union quad_or_long {
+	_Float128 q;
+	long a;
+};
+#endif
+
 /* The bytes a pointer argument points into, defined in report.c. Nothing reads them:
  * what travels is the address, and an address inside a known object is one both
  * sides can name without either of them having to agree about a number. */
@@ -290,5 +322,40 @@ void v20(struct int_float a0, ...);
 struct int_pointer v21(struct int_pointer a0, ...);
 unsigned char v22(struct two_float a0, ...);
 short v23(struct nested a0, ...);
+/* A _Float128 between two integers and returned as one. The type is sixteen bytes with sixteen
+ * byte alignment and travels in a vector register on the row this runs on, so the integers
+ * either side of it are how a shift in either register file shows up. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 q_quad_between_ints(int a0, _Float128 a1, int a2);
+#endif
+
+/* Ten of them, which is more than SysV has vector registers, so the last two are on the stack
+ * and are the only arguments in this corpus whose stack slot has to be aligned to sixteen rather
+ * than to eight. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+_Float128 q_quads_past_the_registers(_Float128 a0, _Float128 a1, _Float128 a2, _Float128 a3, _Float128 a4, _Float128 a5, _Float128 a6, _Float128 a7, _Float128 a8, _Float128 a9);
+#endif
+
+/* The struct holding one quad with a double behind it, which is the case tamnd/rucc#1191 was
+ * about. The struct is two eightbytes and one register, so a compiler that counts the eightbytes
+ * hands the double a register the struct is already sitting in. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_one q_struct_then_double(struct quad_one a0, double a1, int a2);
+#endif
+
+/* The thirty two byte one with an integer either side, which is the aggregate of floats that
+ * goes to memory anyway, so a caller that left the copy in the wrong place moves the argument
+ * after it as well. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2);
+#endif
+
+/* The union, returned and passed, with a bare quad behind it. The union spends one register of
+ * each file and the quad behind it spends a second vector register, so this is the one case here
+ * where the two counters have to move by different amounts for the same argument. */
+#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1);
+#endif
+
 
 #endif
