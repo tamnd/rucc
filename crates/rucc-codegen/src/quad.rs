@@ -34,11 +34,22 @@
 //!
 //! An operation at this format whose routine is not in the archive is left exactly as it was and
 //! refused below by name, the same way [`crate::wide`] leaves a conversion at eighty bits alone.
-//! That is a conversion against a `_Float16` or an eighty bit float, and a `select` of two quads,
-//! which is a move the rule set has no conditional form of. A refusal naming the instruction is the
-//! outcome every one of those had before this pass existed and it is still the right one: the
-//! alternative is a call to a routine no archive defines, which is a link that fails further from
-//! the cause.
+//! That is a conversion against a `_Float16` or an eighty bit float. A refusal naming the
+//! instruction is the outcome both of those had before this pass existed and it is still the right
+//! one: the alternative is a call to a routine no archive defines, which is a link that fails
+//! further from the cause.
+//!
+//! A `select` of two quads used to be listed here as a third one, and it is not, because nothing in
+//! this compiler can build one. `select` is an integer instruction: [`rucc_opt::phiopt`] is the only
+//! pass that turns a choice into one and it asks for a scalar integer of eight to sixty four bits
+//! before it will, every other writer of one in the tree is choosing between integers, and the rule
+//! set answers it with a conditional move, which this machine has for a general purpose register and
+//! for nothing else. A conditional expression over two quads is a branch and a phi and stays one. So
+//! the refusal that named it was a guard against a shape no front end path and no pass produces, and
+//! saying it was left alone was describing a gap that is not there. If a float `select` is ever
+//! wanted, what decides it is the machine rather than this pass, since a quad lives in a vector
+//! register and there is no conditional move for one, so it would be a mask and two ands and an or
+//! rather than a call.
 //!
 //! A conversion against a `__int128` is not in that list and is not this pass's work either.
 //! [`crate::wide`] runs above here and turns one into a call to `__floattitf`, `__floatuntitf`,

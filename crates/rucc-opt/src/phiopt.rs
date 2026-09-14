@@ -901,6 +901,11 @@ fn written_in(func: &Func, arm: Block, value: Value) -> Option<Inst> {
 /// The four widths `crates/rucc-ir/src/term.rs` names a `select` at. A wider integer, a float, a
 /// pointer, a bit or a vector has no head, so a `select` of one would be a term the rule set has
 /// no lowering for and the failure would be at instruction selection rather than here.
+///
+/// This function is also the whole answer to whether a `select` at any of those types can exist at
+/// all, since this pass is the only one that turns a choice into one and every other writer of one
+/// in the tree is choosing between integers it built itself. `crates/rucc-codegen/src/quad.rs`
+/// leans on that where it says a conditional expression over two `_Float128`s stays a branch.
 fn selectable(ty: Type) -> bool {
     ty.is_scalar() && ty.is_int() && matches!(ty.bits(), 8 | 16 | 32 | 64)
 }
@@ -993,8 +998,8 @@ fn convert(
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
-        Value,
+        Block, Builder, Flags, Float, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict,
+        Signature, Type, Value,
     };
 
     use super::PhiOpt;
@@ -1635,6 +1640,43 @@ mod tests {
             let mut build = Builder::new(&mut func, *arm);
             let it = build.iconst(Type::int(64), value);
             let it = build.unary(Opcode::IntToPtr, it, Type::PTR);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::NO_SELECT_AT_THAT_WIDTH), 1);
+    }
+
+    /// And nothing chooses between two floats either, at any format.
+    ///
+    /// Worth its own test although the answer is the pointer one's, because this is the pass that
+    /// decides it for every float in the language and `crates/rucc-codegen/src/quad.rs` says so in
+    /// its own documentation: a conditional expression over two quads is a branch and a phi and
+    /// stays one, so the back end never sees a `select` at that format and needs no lowering for
+    /// one. A quad here rather than a `double` since the quad is the format with no register of its
+    /// own arithmetic, which makes it the one a later change is most likely to reach for.
+    #[test]
+    fn a_choice_between_two_quads_keeps_its_branch_as_well() {
+        let mut names = Interner::new();
+        let quad = Type::float(Float::F128);
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let outside = func.append_param(head, Type::int(32));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        func.append_param(join, quad);
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, outside, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (arm, bits) in arms.iter().zip([0x3fff_u128 << 112, 0x4000_u128 << 112]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.fconst(quad, bits);
             build.jump(join, &[it]);
         }
         let mut build = Builder::new(&mut func, join);
