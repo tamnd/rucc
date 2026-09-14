@@ -174,10 +174,9 @@ typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
   atomic_fetch_xor_explicit(object, operand, __ATOMIC_SEQ_CST)
 
 /* One byte, whatever the type says, which is what the two builtins below reach. gcc wraps that
- * byte in a structure so that nothing but the four names here can touch it. A structure with the
- * qualifier on it is an object this compiler refuses, since an access to one is a copy and not a
- * value, so the byte is named directly and the standard already says a program may do nothing else
- * with one of these.
+ * byte in a structure so that nothing but the four names here can touch it. The byte is named
+ * directly here instead, which is a smaller type and the same one byte object, and the standard
+ * already says a program may do nothing with one of these but pass it to the four names below.
  *
  * An unsigned char rather than a `_Bool` because the two builtins work on a byte and neither of
  * them ever puts anything but a zero or a one in it, so nothing can tell the difference, and

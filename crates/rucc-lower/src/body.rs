@@ -1279,8 +1279,7 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// What an access to that type has to be, reporting where it has to be one this compiler
-    /// cannot make.
+    /// What an access to that type has to be.
     ///
     /// C11 6.5.16p3 and 5.1.2.4 make a plain read or a plain write of an atomic object a
     /// sequentially consistent one, which is the strongest ordering there is and the only one the
@@ -1292,23 +1291,15 @@ impl<'u> Body<'_, 'u> {
     /// table of locks, which is `runtime/builtins/atomic.c` and is libatomic's table under
     /// libatomic's names, so the two compilers' objects in one program take the same lock.
     ///
-    /// What is left over is an object with no value at all: a structure, a union or a vector. The
-    /// runtime would take the lock for one of those quite happily, since its four generic routines
-    /// work through pointers and a size, but the walk has nowhere to put what comes back, and an
-    /// aggregate access is a copy rather than a read. Those are still refused here.
-    fn atomic_access(&mut self, ty: TypeId, span: Span) -> Ordered {
+    /// Only an object with a value of its own asks this. A structure, a union, a complex object
+    /// and a vector are read by address rather than by value, so what an access to one of those
+    /// has to be is [`Self::ordered_read`] and [`Self::ordered_write`], which ask the same
+    /// question about the width and answer it by moving bytes.
+    fn atomic_access(&mut self, ty: TypeId) -> Ordered {
         if !self.is_atomic(ty) {
             return Ordered::No;
         }
-        let inner = self.underlying(ty);
-        let size = repr::size_of(self.types(), self.target(), ty);
-        let single = repr::value_type(self.types(), self.target(), ty).is_some()
-            && !rucc_types::is_vector(self.types(), inner);
-        if !single {
-            self.unsupported("an atomic object this compiler has no value for", span);
-            return Ordered::No;
-        }
-        if matches!(size, 1 | 2 | 4 | 8) { Ordered::Instruction } else { Ordered::Call }
+        if self.in_one_instruction(ty) { Ordered::Instruction } else { Ordered::Call }
     }
 
     /// Whether the machine reaches the whole of an object of that type in one instruction.
@@ -1319,6 +1310,12 @@ impl<'u> Body<'_, 'u> {
     /// it, so what decides between the instruction and the call is the size and nothing else.
     fn in_one_instruction(&mut self, ty: TypeId) -> bool {
         matches!(repr::size_of(self.types(), self.target(), ty), 1 | 2 | 4 | 8)
+    }
+
+    /// Whether an object of that type is something a register holds, which a structure, a union, a
+    /// complex object and a vector are not.
+    fn has_value(&mut self, ty: TypeId) -> bool {
+        repr::value_type(self.types(), self.target(), ty).is_some()
     }
 
     /// The IR type of a C type, reporting once for one that has none.
@@ -2429,8 +2426,13 @@ impl<'u> Body<'_, 'u> {
                 Place { restrict: through, ..Place::new(Where::Addr(addr), ty) }
             }
             // An aggregate is read by address rather than by value, so the conversion that
-            // reads one is the identity and the place under it is the answer.
-            ExprKind::Convert { kind: Conversion::Lvalue, operand } => self.place(operand),
+            // reads one is the identity and the place under it is the answer. Unless the object
+            // has the qualifier on it, where the read is a copy of the whole of it made under the
+            // ordering, and the answer is where that copy went.
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
+                let place = self.place(operand);
+                self.read_whole(place, ty, span)
+            }
             // `f().x` and `p = f()`, where what the call produced has to be somewhere before
             // anything can be read out of it. The call writes into a temporary and that is the
             // object, which is what C means by the value of a call having automatic storage
@@ -3597,7 +3599,7 @@ impl<'u> Body<'_, 'u> {
     /// Reads a place.
     fn read(&mut self, place: Place, span: Span) -> Option<Value> {
         let ty = repr::value_type(self.types(), self.target(), place.ty)?;
-        let ordered = self.atomic_access(place.ty, span);
+        let ordered = self.atomic_access(place.ty);
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
@@ -3629,7 +3631,7 @@ impl<'u> Body<'_, 'u> {
     /// A bit-field is the one place where what was written is not what a read gives back, and
     /// [`Self::write_back`] is what turns those bits into the value that does.
     fn write(&mut self, place: Place, value: Value, span: Span) -> Option<Value> {
-        let ordered = self.atomic_access(place.ty, span);
+        let ordered = self.atomic_access(place.ty);
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
@@ -4398,7 +4400,7 @@ impl<'u> Body<'_, 'u> {
         ty: TypeId,
         span: Span,
     ) -> Option<Value> {
-        let ordered = self.atomic_access(ty, span);
+        let ordered = self.atomic_access(ty);
         if ordered == Ordered::No {
             return None;
         }
@@ -5302,6 +5304,18 @@ impl<'u> Body<'_, 'u> {
             AtomicOp::Store => {
                 let written = self.tast()[args][1];
                 let stored = self.tast()[written].ty;
+                // `__atomic_store` written with three arguments over an object the walk has no
+                // value for, which is the shape a program uses for a structure. What goes in is
+                // already an object somewhere, so the copy is straight out of it, and the width
+                // and the alignment come from the object being written rather than from the
+                // value, since that is what says whether an instruction reaches it.
+                if !self.has_value(stored) {
+                    let held = self.pointee(self.tast()[object].ty);
+                    let from = self.place(written);
+                    let from = self.address_of(from, span);
+                    self.ordered_write(addr, from, held, order, span);
+                    return None;
+                }
                 let value = self.value(written);
                 if !self.in_one_instruction(stored) {
                     self.library_store(addr, value, stored, order, span);
@@ -5318,17 +5332,20 @@ impl<'u> Body<'_, 'u> {
             // other thread has its address, which is what the whole shape is for.
             AtomicOp::LoadInto => {
                 let place = self.tast()[args][1];
-                let object = self.pointee(self.tast()[place].ty);
-                let into = self.value_type(object, span);
-                let plain = self.access(object);
-                let mut info = plain;
-                info.order = order;
-                let flags = self.flags(object);
-                if !self.in_one_instruction(object) {
+                let read = self.pointee(self.tast()[place].ty);
+                // An object with no value of its own, or one no instruction reaches, is the copy
+                // that moves bytes, and the buffer it moves them into is the program's own.
+                if !self.has_value(read) || !self.in_one_instruction(read) {
+                    let held = self.pointee(self.tast()[object].ty);
                     let out = self.value(place);
-                    self.library_read(addr, out, object, order, span);
+                    self.ordered_read(out, addr, held, order, span);
                     return None;
                 }
+                let into = self.value_type(read, span);
+                let plain = self.access(read);
+                let mut info = plain;
+                info.order = order;
+                let flags = self.flags(read);
                 let held = self.build(span).atomic_load(into, addr, info, flags);
                 let out = self.value(place);
                 self.build(span).store(held, out, plain, flags);
@@ -5398,6 +5415,10 @@ impl<'u> Body<'_, 'u> {
     ) -> Option<Value> {
         let written = self.tast()[args][1];
         let object = self.tast()[written].ty;
+        if !self.has_value(object) {
+            self.unsupported("an atomic exchange of an object with no value of its own", span);
+            return None;
+        }
         let mut info = self.access(object);
         info.order = order;
         let flags = self.flags(object);
@@ -5500,6 +5521,10 @@ impl<'u> Body<'_, 'u> {
         let wanted = self.tast()[args][1];
         let put = self.tast()[args][2];
         let stored = self.tast()[put].ty;
+        if !self.has_value(stored) {
+            self.unsupported("an atomic exchange of an object with no value of its own", span);
+            return None;
+        }
         let plain = self.access(stored);
         let mut info = plain;
         info.order = order;
@@ -5804,7 +5829,7 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<Value> {
         let ty = place.ty;
-        let ordered = self.atomic_access(ty, span);
+        let ordered = self.atomic_access(ty);
         if ordered == Ordered::No {
             return None;
         }
@@ -6042,6 +6067,97 @@ impl<'u> Body<'_, 'u> {
         (old, new)
     }
 
+    /// Where an lvalue conversion over an object with no value of its own reads from, which is the
+    /// object itself where it is an ordinary one and a copy of it where it is atomic.
+    ///
+    /// Every reader of such an object goes through that conversion, which is what makes this one
+    /// place rather than six: `v = big`, `f(big)`, `return big` and an initializer all reach the
+    /// object through it, and each of them then reads the copy instead. The copy is a temporary of
+    /// this function whose address never leaves it, so what a reader finds in it is one value the
+    /// object held rather than a mixture of two, and the type it answers with is the conversion's
+    /// own, which has no `_Atomic` left on it, so nothing reads the copy under the lock a second
+    /// time.
+    ///
+    /// The cost of doing it here is a copy a program that only wanted one member did not ask for.
+    /// That is what the standard asks for: an atomic object is read whole or not at all, and there
+    /// is no way to name a piece of one.
+    fn read_whole(&mut self, place: Place, ty: TypeId, span: Span) -> Place {
+        if !self.is_atomic(place.ty) {
+            return place;
+        }
+        let object = place.ty;
+        let size = repr::size_of(self.types(), self.target(), object);
+        let align = repr::align_of(self.types(), self.target(), object);
+        let addr = self.address_of(place, span);
+        let slot = self.scratch(size, align, span);
+        self.ordered_read(slot, addr, object, MemOrder::SeqCst, span);
+        Place::new(Where::Addr(slot), ty)
+    }
+
+    /// A whole object copied out from under the ordering into a buffer of the caller's.
+    ///
+    /// What moves is a representation rather than a value, so a width the machine reaches goes
+    /// through an integer of that width whatever the object's type says. `_Atomic` raises the
+    /// alignment of an object to its size wherever the size is a power of two up to sixteen, which
+    /// `atomic_layout` in `rucc-types` does and gcc does, so a size of one, two, four or eight here
+    /// is aligned to itself and the instruction really is indivisible. That has to be the same rule
+    /// `__atomic_is_lock_free` answers by, and it is: a program told yes and then given a lock has
+    /// been lied to about the one thing the name exists to say.
+    ///
+    /// The ordering is the strongest, because only the operators reach this. A builtin handed a
+    /// pointer to one of these objects is the generic call with the program's own buffers on both
+    /// ends and never comes through here.
+    fn ordered_read(&mut self, into: Value, addr: Value, ty: TypeId, order: MemOrder, span: Span) {
+        let Some(raw) = self.representation(ty) else {
+            self.library_read(addr, into, ty, order, span);
+            return;
+        };
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let mut info = self.piece_info(align, 0);
+        info.order = order;
+        let held = self.build(span).atomic_load(raw, addr, info, Flags::NONE);
+        let plain = self.piece_info(align, 0);
+        self.build(span).store(held, into, plain, Flags::NONE);
+    }
+
+    /// The same copy the other way round, out of a buffer of the caller's and into the object.
+    fn ordered_write(&mut self, addr: Value, from: Value, ty: TypeId, order: MemOrder, span: Span) {
+        let Some(raw) = self.representation(ty) else {
+            self.library_write(addr, from, ty, order, span);
+            return;
+        };
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let plain = self.piece_info(align, 0);
+        let held = self.build(span).load(raw, from, plain, Flags::NONE);
+        let mut info = plain;
+        info.order = order;
+        self.build(span).atomic_store(held, addr, info, Flags::NONE);
+    }
+
+    /// The integer an object of that type is moved as, and [`None`] for one an instruction does
+    /// not reach.
+    ///
+    /// The alignment is asked about here and is not asked about on the value paths, and the reason
+    /// is that an object with no value can be short of it while a scalar cannot: a `long` is
+    /// aligned to eight everywhere in the matrix, and a structure of two `int`s is aligned to four
+    /// until something raises it. `_Atomic` raises it, so an object that has the qualifier on it
+    /// takes the instruction, and one the program reached through a builtin without it takes the
+    /// call. That is the rule `__atomic_is_lock_free` answers by, and the two have to say the same
+    /// thing: a program told yes and then given a lock has been lied to about the one thing the
+    /// name exists to say.
+    fn representation(&mut self, ty: TypeId) -> Option<Type> {
+        if !self.in_one_instruction(ty) {
+            return None;
+        }
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = u64::from(repr::align_of(self.types(), self.target(), ty));
+        if align < size {
+            return None;
+        }
+        let bits = u32::try_from(size * 8).expect("eight bytes of object is a width");
+        Some(Type::int(bits))
+    }
+
     /// [`Self::modified`] at a width no instruction reaches, which is the exchange as a call and
     /// each of the other twelve names as the loop beside it.
     ///
@@ -6263,17 +6379,20 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `a = b` where the two are structures, which is a copy and not a value.
+    ///
+    /// The right hand side is read first, and where it is an object with the qualifier on it that
+    /// read is already a copy under the lock by the time this looks, because the lvalue conversion
+    /// over it is where that happens. So `a = b` with both of them atomic is two ordered copies
+    /// through a temporary and never one lock held across the other, which is what would deadlock
+    /// a table that hashes two objects onto one entry.
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
-        // One with the qualifier on it, which is a copy that would have to happen all at once and
-        // cannot. [`Self::atomic_access`] is what reports it, and the copy is made anyway because
-        // a reported error is not a reason to build something else on top of it. Nothing reaches
-        // this today, since the front end turns the declaration of such an object down before
-        // there is anything to copy, and it stays here because that is the refusal this one is
-        // waiting on rather than a rule of its own.
-        let _ = self.atomic_access(ty, span);
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let destination = self.address_of(place, span);
+        if self.is_atomic(place.ty) {
+            self.ordered_write(destination, source, place.ty, MemOrder::SeqCst, span);
+            return None;
+        }
         let size = repr::size_of(self.types(), self.target(), ty);
         let align = repr::align_of(self.types(), self.target(), ty);
         self.memcpy(destination, source, size, align, span);
