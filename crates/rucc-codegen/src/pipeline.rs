@@ -28,7 +28,8 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, PhysReg, RegFile, TargetInfo, x86_64,
+    BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
+    TargetInfo, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -76,6 +77,9 @@ pub struct Machine {
     pub bits: &'static BitInsts,
     /// What each of the machine's instructions leaves in the condition state.
     pub flags: &'static FlagInsts,
+    /// What shape each of the machine's instructions is, which is what a pass proposing a new one
+    /// has its proposal held against.
+    pub shapes: &'static MachineInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -129,6 +133,7 @@ impl Machine {
             branch: &x86_64::BRANCH,
             bits: &x86_64::BITS,
             flags: &x86_64::FLAGS,
+            shapes: &x86_64::MACHINE,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -388,7 +393,7 @@ pub fn compile_recording(
         arguments: &mut stack.arguments,
         dynamic: &mut stack.dynamic,
     };
-    fold::addresses(&mut func, machine.insts, names, &mut pending);
+    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending);
 
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by

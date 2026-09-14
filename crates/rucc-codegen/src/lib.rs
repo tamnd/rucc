@@ -143,6 +143,7 @@
 
 pub mod abi;
 pub mod bits;
+pub mod changes;
 pub mod compare;
 pub mod coverage;
 pub mod elsewhere;
