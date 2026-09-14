@@ -1261,6 +1261,41 @@ mod tests {
         assert!(text.contains("half"), "{text}");
     }
 
+    /// The umbrella header reaches the three underneath it. This is brotli's use of it, from
+    /// `c/enc/matching_tag_mask.h`, which is the whole of what `tamnd/rucc#1236` was about: four
+    /// SSE2 names that were already shipped and no way to get at them by the name gcc uses.
+    #[test]
+    fn the_shipped_immintrin_reaches_the_names_the_headers_under_it_define() {
+        let text = shipped(concat!(
+            "#include <immintrin.h>\n",
+            "unsigned long long matching(unsigned char tag, unsigned char const *bucket) {\n",
+            "  __m128i const want = _mm_set1_epi8((char)tag);\n",
+            "  __m128i const chunk = _mm_loadu_si128((__m128i const *)(void const *)bucket);\n",
+            "  __m128i const same = _mm_cmpeq_epi8(chunk, want);\n",
+            "  return (unsigned long long)_mm_movemask_epi8(same);\n",
+            "}\n",
+            "__m64 narrow(__m64 a, __m64 b) { return _mm_add_pi32(a, b); }\n",
+            "__m128 single(__m128 a, __m128 b) { return _mm_add_ps(a, b); }\n",
+        ));
+        assert!(text.contains("matching"), "{text}");
+        assert!(text.contains("narrow"), "the MMX header is not reached: {text}");
+        assert!(text.contains("single"), "the SSE header is not reached: {text}");
+    }
+
+    /// Including it twice is the same as including it once, and so is including it beside the
+    /// header it reaches. A program that includes both spellings is the usual case rather than an
+    /// odd one, because one of its own headers includes the umbrella and another includes SSE2.
+    #[test]
+    fn the_umbrella_and_the_header_under_it_can_both_be_included() {
+        let text = shipped(concat!(
+            "#include <immintrin.h>\n",
+            "#include <emmintrin.h>\n",
+            "#include <immintrin.h>\n",
+            "__m128i twice(__m128i a, __m128i b) { return _mm_add_epi32(a, b); }\n",
+        ));
+        assert!(text.contains("twice"), "{text}");
+    }
+
     /// The float header omits four square roots and SSE2 omits the matching two, for the reason
     /// both headers write down. A later change that quietly defines one as an approximation
     /// would be a wrong answer nobody sees, so the absence is held in place here.

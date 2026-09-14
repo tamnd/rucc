@@ -38,6 +38,7 @@ pub const DIR: &str = "<builtin>";
 const HEADERS: &[(&str, &str)] = &[
     ("emmintrin.h", include_str!("../runtime/include/emmintrin.h")),
     ("float.h", include_str!("../runtime/include/float.h")),
+    ("immintrin.h", include_str!("../runtime/include/immintrin.h")),
     ("iso646.h", include_str!("../runtime/include/iso646.h")),
     ("limits.h", include_str!("../runtime/include/limits.h")),
     ("mm_malloc.h", include_str!("../runtime/include/mm_malloc.h")),
