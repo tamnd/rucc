@@ -387,10 +387,16 @@ mod tests {
     /// Every entry in the table is reachable, which is what the multiply is there for. Addresses
     /// sixteen bytes apart, which is how an array of atomic objects is laid out and is the case a
     /// hash that read the address directly would put onto one entry.
+    ///
+    /// It takes a few hundred of them to reach all sixty four. A step of sixteen bytes moves the
+    /// entry seven or eight places back, so the walk goes round the table many times over before
+    /// the entries it keeps stepping past have all been landed on: two hundred and fifty six
+    /// addresses leave seven of them out, and the last one comes in at two hundred and eighty
+    /// seven. The count below is eight times the table, which is that with room to spare.
     #[test]
     fn an_array_of_objects_spreads_across_the_whole_table() {
         let mut seen = [false; LOCKS];
-        for at in 0..LOCKS * 4 {
+        for at in 0..LOCKS * 8 {
             let address = (0x1000 + at * 16) as *const u8;
             let entry = (guard_for(address) as *const Guard as usize - TABLE.as_ptr() as usize)
                 / size_of::<Guard>();
