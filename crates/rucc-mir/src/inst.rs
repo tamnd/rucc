@@ -206,6 +206,9 @@ pub struct Amode {
     pub disp: i32,
     /// The symbol the address is relative to, for an access to a global.
     pub symbol: Option<Symbol>,
+    /// The block of this function the address is of, for the address of a label. See
+    /// [`Mem::block`].
+    pub block: Option<Block>,
     /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
@@ -220,6 +223,7 @@ impl Amode {
         scale: 1,
         disp: 0,
         symbol: None,
+        block: None,
         reach: Reach::Itself,
         segment: None,
     };
@@ -243,6 +247,8 @@ pub struct Mem {
     pub disp: i32,
     /// The symbol the address is relative to.
     pub symbol: Option<Symbol>,
+    /// The block of this function the address is of. See [`Mem::block`].
+    pub block: Option<Block>,
     /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
@@ -259,6 +265,7 @@ impl Mem {
             scale: 1,
             disp: 0,
             symbol: None,
+            block: None,
             reach: Reach::Itself,
             segment: None,
         }
@@ -273,6 +280,29 @@ impl Mem {
             scale: 1,
             disp: 0,
             symbol: Some(symbol),
+            block: None,
+            reach: Reach::Itself,
+            segment: None,
+        }
+    }
+
+    /// The address of that block of this function, which is what GNU's `&&label` is.
+    ///
+    /// A block rather than a symbol because the block it names is in this same function and has no
+    /// name outside it. What the assembler is given is the local label the block already carries,
+    /// which is a name the object file need not keep, and what the object writer is given is
+    /// nothing at all: the distance is between two places in one section and both of them are
+    /// known once the blocks have been laid out, so it is filled in here rather than left to a
+    /// linker the way the distance to a global is.
+    #[must_use]
+    pub const fn block(block: Block) -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            block: Some(block),
             reach: Reach::Itself,
             segment: None,
         }
@@ -290,6 +320,7 @@ impl Mem {
             scale: 1,
             disp,
             symbol: None,
+            block: None,
             reach: Reach::Itself,
             segment: Some(segment),
         }

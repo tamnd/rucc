@@ -50,6 +50,15 @@
 //! out swapped: what the condition meant is in the opcode afterwards, and what the arms mean is
 //! where the jump goes and what comes next.
 //!
+//! # The one block none of that is true of
+//!
+//! A block that ends in the jump through a register, which is what a computed `goto` is selected
+//! as. Where it goes is in the register, so the arms are the whole list of places it might arrive
+//! at and there may be any number of them. Nothing is written here for such a block: the jump is
+//! already in it, none of its arms is fallen into and none is jumped to from here, and a jump
+//! written behind that one would be a jump nothing reaches. The arms stay on the block for the
+//! reason they stay on every other one, which is that the liveness and this pass both read them.
+//!
 //! # The block a branch sometimes needs
 //!
 //! A branch whose second arm cannot be laid out next, because both its arms are blocks the walk
@@ -105,10 +114,11 @@ const SCALE: u128 = mir::Weight::SCALE as u128;
 ///
 /// # Panics
 ///
-/// Panics on a block with more than two successors, which nothing lowers to yet, and on a block
-/// with two whose last instruction is not the conditional branch the target named. Both are a
-/// function that was built wrongly somewhere earlier, and both are worth finding here rather than
-/// as a jump to the wrong place.
+/// Panics on a block with more than two successors that does not end in the jump through a
+/// register, which is the only thing that lowers to one, and on a block with two whose last
+/// instruction is not the conditional branch the target named. Both are a function that was built
+/// wrongly somewhere earlier, and both are worth finding here rather than as a jump to the wrong
+/// place.
 pub fn blocks(
     func: &mut mir::Func,
     insts: &BranchInsts,
@@ -509,6 +519,13 @@ impl Writer<'_> {
     /// Writes the jumps one block needs, given the block laid out after it, and gives back the
     /// block that has to go between the two when the branch needed one.
     fn edges(&mut self, block: mir::Block, next: Option<mir::Block>) -> Option<mir::Block> {
+        // A block that already ends in the jump through a register wants nothing written, whatever
+        // its arms are. Where it goes is in the register, so none of its arms is fallen into and
+        // none of them is jumped to from here, and a jump written behind that one would be a jump
+        // nothing reaches.
+        if self.leaves_indirectly(block) {
+            return None;
+        }
         match self.func[block].succs.len() {
             0 => None,
             1 => {
@@ -518,6 +535,13 @@ impl Writer<'_> {
             2 => self.two(block, next),
             arms => panic!("a block with {arms} arms, and nothing lowers to one"),
         }
+    }
+
+    /// Whether the block ends in the jump through a register a computed `goto` is selected as.
+    fn leaves_indirectly(&mut self, block: mir::Block) -> bool {
+        let Some(last) = self.func.terminator(block) else { return false };
+        let indirect = self.opcode(self.insts.indirect);
+        self.func[last].opcode == indirect
     }
 
     /// A block that goes to one place, which either follows it or has to be jumped to.
@@ -750,6 +774,30 @@ mod tests {
         assert_eq!(
             text,
             ["block0:", "x64.test_rr_8 $rax", "x64.jcc_e block2, block1", "block1:", "block2:"]
+        );
+    }
+
+    #[test]
+    fn a_block_that_leaves_through_a_register_is_given_no_jump_and_keeps_every_arm() {
+        let (mut names, mut func, made) = blank(4);
+        let jump = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(made[0], jump).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        *func.succs_mut(made[0]) = made[1..].iter().map(|&arm| BlockCall::to(arm)).collect();
+
+        let text = laid_out(&mut func, &mut names);
+
+        // Nothing written behind the jump that is already there, whatever the first arm is, since
+        // where this block goes is in the register. The arms stay on the block because they are
+        // how everything downstream finds out where control can go.
+        assert_eq!(
+            text,
+            [
+                "block0:",
+                "x64.jmp_reg $rax, block1, block2, block3",
+                "block1:",
+                "block2:",
+                "block3:"
+            ]
         );
     }
 
