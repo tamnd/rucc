@@ -95,7 +95,9 @@ use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_mir as mir;
-use rucc_target::{FrameInsts, Role};
+use rucc_target::{FrameInsts, MachineInsts, Role};
+
+use crate::changes::{Changes, Plan, Reads};
 
 /// The addresses [`crate::finish`] has still to write a displacement into.
 ///
@@ -195,11 +197,12 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 pub fn addresses(
     func: &mut mir::Func,
     insts: &FrameInsts,
+    machine: &MachineInsts,
     names: &mut Interner,
     pending: &mut Pending<'_>,
 ) -> usize {
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
-    let reads = reads(func);
+    let mut reads = Reads::of(func);
     let mut folded = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
@@ -208,21 +211,30 @@ pub fn addresses(
         let mut open: HashMap<mir::Reg, Open> = HashMap::new();
         for inst in func.insts(block).collect::<Vec<_>>() {
             if let Some(ready) = offer(func, &mut open, inst) {
+                // The set is the whole of what this fold is: every reader takes the address and
+                // the address computation goes, and a set that is missing either half is one that
+                // works the address out twice. So it is proposed together and the target is asked
+                // about all of it at once.
+                let mut set = Changes::new();
                 for folding in &ready.folds {
-                    let operands = func.push_operands(&folding.operands);
-                    let mem = func.add_amode(folding.amode);
-                    func[folding.into].operands = operands;
-                    func[folding.into].mem = Some(mem);
-                    folded += 1;
+                    let plan = Plan {
+                        operands: folding.operands.clone(),
+                        amode: Some(folding.amode),
+                        ..Plan::of(func, folding.into)
+                    };
+                    set.rewrite(folding.into, plan);
                 }
-                let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
-                pending.moved(ready.from, &took);
-                func.remove_inst(ready.from);
-                // Anything still open that was going to fold into the instruction just removed is
-                // holding a plan for an instruction that is not there any more. That is a chain
-                // whose middle went first, and the outer address waits for the next run of the
-                // pass rather than being written into a gap.
-                open.retain(|_, held| held.folds.iter().all(|fold| fold.into != ready.from));
+                set.remove(ready.from);
+                if set.commit(func, &mut reads, names, machine).is_ok() {
+                    folded += ready.folds.len();
+                    let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
+                    pending.moved(ready.from, &took);
+                    // Anything still open that was going to fold into the instruction just removed
+                    // is holding a plan for an instruction that is not there any more. That is a
+                    // chain whose middle went first, and the outer address waits for the next run
+                    // of the pass rather than being written into a gap.
+                    open.retain(|_, held| held.folds.iter().all(|fold| fold.into != ready.from));
+                }
             }
             for written in written(func, inst) {
                 open.retain(|reg, held| *reg != written && !touches(func, held.from, written));
@@ -313,54 +325,25 @@ fn times_read(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> usize {
         .count()
 }
 
-/// How many times each virtual register is read, counting the arguments an edge carries.
+/// The one virtual register an instruction writes, and how many reads of it there are, when it
+/// writes exactly one and something reads it.
 ///
 /// A `lea` is only worth folding when the instructions folding it are the whole of what reads the
 /// register, since folding does not delete the `lea` for anybody else and doing the address twice
 /// is not a saving. The count is what says when the set is complete, and it is taken over the whole
 /// function rather than over the block, so a read anywhere else is a set that never completes and
-/// an address that stays where it is. An argument on an edge is a read like any other and is not in
-/// any operand vector, which is the one place this is easy to get wrong.
-///
-/// [`crate::layout`] asks the same question about the byte a comparison wrote, for the same
-/// reason and while the registers are still virtual for the same reason, so it reads this rather
-/// than counting again.
-pub(crate) fn reads(func: &mir::Func) -> HashMap<mir::Reg, usize> {
-    let mut counts = HashMap::new();
-    for block in func.blocks() {
-        for inst in func.insts(block) {
-            for operand in &func[func[inst].operands] {
-                if operand.role == Role::Use {
-                    *counts.entry(operand.reg).or_insert(0) += 1;
-                }
-            }
-        }
-        for call in &func[block].succs {
-            for &arg in &call.args {
-                *counts.entry(arg).or_insert(0) += 1;
-            }
-        }
-    }
-    counts
-}
-
-/// The one virtual register an instruction writes, and how many reads of it there are, when it
-/// writes exactly one and something reads it.
+/// an address that stays where it is.
 ///
 /// A register nothing reads is left alone rather than folded into nothing, since an address whose
 /// answer is never wanted is dead code and belongs to the pass that removes dead code.
-fn folding_def(
-    func: &mir::Func,
-    reads: &HashMap<mir::Reg, usize>,
-    inst: mir::Inst,
-) -> Option<(mir::Reg, usize)> {
+fn folding_def(func: &mir::Func, reads: &Reads, inst: mir::Inst) -> Option<(mir::Reg, usize)> {
     let operands = &func[func[inst].operands];
     let mut defs = operands.iter().filter(|operand| operand.role != Role::Use);
     let def = defs.next()?;
     if defs.next().is_some() || !def.reg.is_virtual() {
         return None;
     }
-    let wanted = *reads.get(&def.reg)?;
+    let wanted = reads.count(def.reg);
     (wanted > 0).then_some((def.reg, wanted))
 }
 
@@ -448,7 +431,7 @@ fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) 
 
 #[cfg(test)]
 mod tests {
-    use rucc_target::x86_64::{FRAME, GPR, RDI};
+    use rucc_target::x86_64::{FRAME, GPR, MACHINE, RDI};
 
     use super::*;
 
@@ -469,6 +452,7 @@ mod tests {
         addresses(
             func,
             &FRAME,
+            &MACHINE,
             names,
             &mut Pending {
                 addresses: &mut locals,
@@ -1056,7 +1040,7 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        assert_eq!(addresses(&mut func, &FRAME, &mut names, &mut pending), 1);
+        assert_eq!(addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending), 1);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
@@ -1093,7 +1077,7 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        let folded = addresses(&mut func, &FRAME, &mut names, &mut pending);
+        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending);
         assert!(locals.is_empty(), "an argument is owed off the other list");
         (folded, func.insts(block).collect(), arguments)
     }

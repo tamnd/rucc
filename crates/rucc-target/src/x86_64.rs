@@ -50,6 +50,8 @@ use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
+use crate::machine::MachineInsts;
+use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
 
 /// The general purpose registers.
@@ -226,6 +228,41 @@ pub static PROBE: Probe = Probe { inst: "or_mi_8", interval: 4096 };
 /// [`Form::Convert`], which is what the eleven widenings, the four that widen a truth value and
 /// the three that take the low part are already marked as and what nothing else is.
 pub static BITS: BitInsts = BitInsts { prefix: "x64.", width: operand_width, copies_low };
+
+/// What an x86-64 instruction has to look like for this machine to have one.
+///
+/// Every answer is [`INSTS`] read back, which is the same table the allocator asks what an
+/// instruction does with its operands and the same one the encoder is written against. A pass
+/// proposing a rewrite is therefore held to the description the machine already had rather than
+/// to a second one, which is the point [`crate::MachineInsts`] makes at length.
+///
+/// The scales are the four an x86-64 addressing mode can multiply an index by, which the encoder
+/// writes into two bits of the scale index base byte.
+pub static MACHINE: MachineInsts = MachineInsts {
+    prefix: "x64.",
+    operands: machine_operands,
+    takes_imm: machine_takes_imm,
+    takes_mem: machine_takes_mem,
+    scales: &[1, 2, 4, 8],
+};
+
+/// The operands an instruction of that name has, or `None` if this machine has no such name.
+#[must_use]
+fn machine_operands(name: &str) -> Option<&'static [OperandDesc]> {
+    form(name).map(Form::operands)
+}
+
+/// Whether an instruction of that name carries an immediate.
+#[must_use]
+fn machine_takes_imm(name: &str) -> bool {
+    form(name).is_some_and(Form::takes_imm)
+}
+
+/// Whether an instruction of that name carries an addressing mode.
+#[must_use]
+fn machine_takes_mem(name: &str) -> bool {
+    form(name).is_some_and(Form::takes_mem)
+}
 
 /// Whether the instruction of that name is one that copies the low bits of its source.
 ///

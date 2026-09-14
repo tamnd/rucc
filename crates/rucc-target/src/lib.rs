@@ -49,6 +49,7 @@ mod bits;
 mod branch;
 mod flags;
 mod frame;
+mod machine;
 mod operand;
 mod regs;
 pub mod x86_64;
@@ -58,6 +59,7 @@ pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 pub use crate::frame::{ClassMoves, FrameInsts, Probe};
+pub use crate::machine::MachineInsts;
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
     CallRegs, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,

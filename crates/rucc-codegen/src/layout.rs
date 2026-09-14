@@ -482,7 +482,7 @@ fn table(insts: &BranchInsts, names: &mut Interner) -> HashMap<mir::Opcode, &'st
 pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> HashSet<mir::Inst> {
     let table = table(insts, names);
     let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
-    let reads = crate::fold::reads(func);
+    let reads = crate::changes::Reads::of(func);
     let mut found = HashSet::new();
     for block in func.blocks() {
         let insts: Vec<mir::Inst> = func.insts(block).collect();
@@ -494,7 +494,7 @@ pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> H
         let Some(byte) = operands.first().filter(|operand| operand.role != Role::Use) else {
             continue;
         };
-        if !byte.reg.is_virtual() || reads.get(&byte.reg) != Some(&1) {
+        if !byte.reg.is_virtual() || reads.count(byte.reg) != 1 {
             continue;
         }
         // And it is this branch that reads it rather than one in some other block, which the
