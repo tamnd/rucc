@@ -53,7 +53,7 @@ fn asm(what: &str, source: &str) -> String {
 /// What the compiler said about source it refuses.
 fn refusal(what: &str, source: &str) -> String {
     let (ok, _, said) = compile(what, source);
-    assert!(!ok, "the compiler accepted a fixture it has no instruction for:\n{said}");
+    assert!(!ok, "the compiler accepted a fixture it has no code for:\n{said}");
     said
 }
 
@@ -144,23 +144,120 @@ void walk(void) { p = room; p += 3; }
     assert!(text.contains(",4)"), "{text}");
 }
 
-/// An object that is not one value the machine reaches in one instruction is refused where it is
-/// written. gcc calls libatomic for one of these, which takes a lock out of a table keyed by the
-/// address, and a program half of whose accesses take that lock is not atomic at all.
+/// A width the machine has no instruction for is a call into the runtime's table of locks, which
+/// is what gcc does with one. The table is libatomic's, under libatomic's names, so an object rucc
+/// compiled and an object gcc compiled in one program are under the same lock.
 #[test]
-fn a_type_the_machine_cannot_reach_in_one_instruction_is_refused() {
-    let said = refusal(
+fn a_width_with_no_instruction_is_a_call_into_the_table() {
+    let text = asm(
         "wide",
+        "\
+_Atomic __int128 w;
+void put(__int128 v) { w = v; }
+__int128 get(void) { return w; }
+void add(__int128 v) { w += v; }
+",
+    );
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// `long double` is the other way to reach that width on this machine, and it is the one that
+/// shows the copy is of the object rather than of the value: ten bytes of value in sixteen bytes
+/// of object, and what the lock is around is all sixteen.
+#[test]
+fn a_long_double_is_a_call_as_well() {
+    let text = asm(
+        "long-double",
+        "\
+_Atomic long double ld;
+void put(long double v) { ld = v; }
+long double get(void) { return ld; }
+",
+    );
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_load"), "{text}");
+}
+
+/// An object the walk has no single value for is still refused where it is written. The runtime
+/// would take the lock for a structure quite happily, since the four routines it calls work
+/// through a pointer and a size, but an aggregate access is a copy rather than a read and there is
+/// nowhere to put what came back.
+#[test]
+fn a_type_with_no_value_is_refused() {
+    let said = refusal(
+        "struct",
         "\
 struct S { int a, b, c; };
 _Atomic struct S big;
 ",
     );
-    assert!(said.contains("no instruction for"), "{said}");
+    assert!(said.contains("structure or union"), "{said}");
     assert!(said.contains("E0519"), "{said}");
 
-    let said = refusal("long-double", "_Atomic long double ld;\n");
+    let said = refusal("complex", "_Atomic _Complex double z;\n");
+    assert!(said.contains("complex"), "{said}");
     assert!(said.contains("E0519"), "{said}");
+}
+
+/// The builtins go to the same table at that width, which is what makes the operators and the
+/// names in the header agree about an object too wide for an instruction.
+#[test]
+fn a_builtin_at_that_width_is_a_call_as_well() {
+    let text = asm(
+        "wide-builtin",
+        "\
+_Atomic __int128 w;
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+void put(__int128 v) { __atomic_store_n(&w, v, __ATOMIC_RELEASE); }
+__int128 swap(__int128 v) { return __atomic_exchange_n(&w, v, __ATOMIC_ACQ_REL); }
+__int128 bump(__int128 v) { return __atomic_add_fetch(&w, v, __ATOMIC_SEQ_CST); }
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&w, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+",
+    );
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_exchange"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// The ordering a builtin was written with travels to the call, unlike the operators, which are
+/// sequentially consistent because the language says so. None of the four routines reads the
+/// argument today and all four take one, so the truth goes in rather than a five.
+#[test]
+fn the_ordering_a_builtin_named_reaches_the_call() {
+    let text = asm(
+        "wide-order",
+        "\
+_Atomic __int128 w;
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+",
+    );
+    assert!(text.contains("$2,"), "{text}");
+    assert!(!text.contains("$5,"), "{text}");
+}
+
+/// The older family is the same routine with the value expected put into a slot first, and
+/// `__sync_val_compare_and_swap` reads that slot afterwards to find what was there. The routine
+/// writes the object's own bytes over the slot when it fails and leaves them alone when it does
+/// not, and what it leaves alone is the value that was expected, which is what the object held.
+#[test]
+fn the_older_exchange_reads_what_it_expected_back_out() {
+    let text = asm(
+        "wide-sync",
+        "\
+_Atomic __int128 w;
+__int128 was(__int128 old, __int128 new) { return __sync_val_compare_and_swap(&w, old, new); }
+_Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+",
+    );
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
 }
 
 /// A bit-field cannot carry the qualifier, because 6.7.2.1p5 says what a bit-field's type may be
