@@ -205,3 +205,30 @@ decl #30 local : int(int) function external defined
       return
         convert lvalue : int
           decl #31 n : _Atomic(int) lvalue
+decl #32 wide : _Atomic(__int128) object external static tentative
+decl #34 widen : void(__int128) function external defined
+  params
+    decl #33 v : __int128 object automatic defined
+  body
+    block
+      expr
+        assign = : __int128
+          decl #32 wide : _Atomic(__int128) lvalue
+          convert lvalue : __int128
+            decl #33 v : __int128 lvalue
+decl #35 taken : __int128(void) function external defined
+  body
+    block
+      return
+        convert lvalue : __int128
+          decl #32 wide : _Atomic(__int128) lvalue
+decl #37 raise : void(__int128) function external defined
+  params
+    decl #36 v : __int128 object automatic defined
+  body
+    block
+      expr
+        assign += : __int128
+          decl #32 wide : _Atomic(__int128) lvalue
+          convert lvalue : __int128
+            decl #36 v : __int128 lvalue
