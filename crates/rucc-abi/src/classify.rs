@@ -336,10 +336,9 @@ fn x87_stack(shape: &Shape<'_>) -> Option<Vec<Slot>> {
 
 /// The class of one eightbyte, section 3.2.3 of the SysV psABI.
 ///
-/// SSEUP and X87UP are not here. Both mean "the continuation of the eightbyte before this one",
-/// and the only two things that produce them are a vector wider than eight bytes, which is not
-/// an aggregate and does not come through here, and a `long double`, whose two eightbytes are
-/// treated as the one value they are.
+/// X87UP is not here. It means "the second eightbyte of the `long double` before this one", and
+/// an x87 value in an aggregate goes to memory on every path through here anyway, so the two
+/// classes would have the same answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
     /// Nothing reaches into it, which takes padding or an empty member.
@@ -348,6 +347,9 @@ enum Class {
     Integer,
     /// A vector register.
     Sse,
+    /// The rest of the value whose first eightbyte was [`Class::Sse`], which is what the upper
+    /// half of a `_Float128` is. The pair travels in one vector register rather than two.
+    SseUp,
     /// The x87 stack.
     X87,
     /// Memory, which takes the whole argument with it.
@@ -366,6 +368,8 @@ fn merge(left: Class, right: Class) -> Class {
         // The rule that surprises people: one `int` in an eightbyte sends the `float` beside it
         // into a general purpose register.
         (Class::Integer, _) | (_, Class::Integer) => Class::Integer,
+        // An upper half sharing its eightbyte with anything else is no longer an upper half, so
+        // the two of them are an ordinary vector register between them.
         _ => Class::Sse,
     }
 }
@@ -391,32 +395,55 @@ fn eightbytes(shape: &Shape<'_>, limit: u64) -> Option<Vec<Slot>> {
             Kind::Float(Format::X87Extended) => Class::X87,
             Kind::Float(_) => Class::Sse,
         };
-        for at in piece.offset / 8..=(piece.end() - 1) / 8 {
+        let first = piece.offset / 8;
+        for at in first..=(piece.end() - 1) / 8 {
             let slot = classes.get_mut(usize::try_from(at).ok()?)?;
+            // A member wider than an eightbyte is one value and not two. Its first eightbyte
+            // carries the class and every later one says "the same value again", which is what
+            // sends a `_Float128` into one vector register instead of two. An integer member is
+            // not this: `__int128` is two general purpose registers and the psABI classifies
+            // both of its eightbytes as INTEGER.
+            let class = if at > first && class == Class::Sse { Class::SseUp } else { class };
             *slot = merge(*slot, class);
         }
     }
     if classes.iter().any(|class| matches!(class, Class::Memory | Class::X87)) {
         return None;
     }
-    Some(
-        classes
-            .iter()
-            .enumerate()
-            .map(|(index, class)| {
-                let offset = index as u64 * 8;
-                let bytes = (shape.size - offset).min(8);
-                match class {
-                    // Four bytes or fewer of floating point is one `float`. More than that is a
-                    // `double` or two `float`s, which arrive in the same register either way.
-                    Class::Sse if bytes <= 4 => Slot::Float { offset, format: Format::Single },
-                    Class::Sse => Slot::Float { offset, format: Format::Double },
-                    // An eightbyte nothing reaches into still travels, and it travels in a
-                    // general purpose register, because an ABI does not leave a hole in the
-                    // middle of an argument.
-                    _ => Slot::Integer { offset, size: u32::try_from(bytes).unwrap_or(8) },
-                }
-            })
-            .collect(),
-    )
+    // Post merge rule (d). An upper half whose lower half was classified as something else is
+    // not the continuation of anything, so it stands on its own as an ordinary vector register.
+    // `union { _Float128 q; long a; }` is the shape that gets here: the first eightbyte is
+    // INTEGER because of the `long` and the second is the top of the `_Float128` with nothing
+    // above it any more.
+    for index in 0..classes.len() {
+        let above = index > 0 && matches!(classes[index - 1], Class::Sse | Class::SseUp);
+        if classes[index] == Class::SseUp && !above {
+            classes[index] = Class::Sse;
+        }
+    }
+    let mut slots = Vec::with_capacity(classes.len());
+    for (index, class) in classes.iter().enumerate() {
+        // An upper half is already part of the slot the eightbyte below it pushed.
+        if *class == Class::SseUp {
+            continue;
+        }
+        let offset = index as u64 * 8;
+        let bytes = (shape.size - offset).min(8);
+        slots.push(match class {
+            // A lower half with its upper half above it is the whole sixteen byte value in one
+            // register, and the only member that makes that shape is a `_Float128`.
+            Class::Sse if classes.get(index + 1) == Some(&Class::SseUp) => {
+                Slot::Float { offset, format: Format::Quad }
+            }
+            // Four bytes or fewer of floating point is one `float`. More than that is a
+            // `double` or two `float`s, which arrive in the same register either way.
+            Class::Sse if bytes <= 4 => Slot::Float { offset, format: Format::Single },
+            Class::Sse => Slot::Float { offset, format: Format::Double },
+            // An eightbyte nothing reaches into still travels, and it travels in a general
+            // purpose register, because an ABI does not leave a hole in the middle of an
+            // argument.
+            _ => Slot::Integer { offset, size: u32::try_from(bytes).unwrap_or(8) },
+        });
+    }
+    Some(slots)
 }

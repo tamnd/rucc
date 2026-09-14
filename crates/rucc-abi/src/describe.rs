@@ -254,7 +254,8 @@ pub enum Test {
         ///
         /// It is a consequence of the eight eightbyte limit rather than an independent rule: an
         /// aggregate over two eightbytes travels in registers only when every eightbyte after
-        /// the first is SSEUP, and only a vector produces those.
+        /// the first is SSEUP. A vector produces a run of those, and a `_Float128` produces one,
+        /// and sixteen bytes of `_Float128` is inside this limit rather than over it.
         limit: u64,
     },
 }

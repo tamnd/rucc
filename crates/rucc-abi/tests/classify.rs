@@ -107,6 +107,61 @@ fn sysv_reads_two_floats_in_one_eightbyte_as_one_double() {
 }
 
 #[test]
+fn sysv_puts_a_quad_in_one_vector_register_and_not_in_two() {
+    // `struct { _Float128 q; }`. Sixteen bytes is two eightbytes, and the psABI classifies the
+    // first SSE and the second SSEUP, which name one register between them. Two `double` slots
+    // here would be two registers, and every argument after this one would then be in a register
+    // the caller and the callee disagree about.
+    let members = pieces(&[float(Format::Quad, 16)]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 16);
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(sysv().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+
+    // And it costs one of the eight rather than two of them, which is the half of the answer a
+    // list of slots does not say on its own.
+    let mut call = sysv();
+    assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(call.float_left(), 7);
+}
+
+#[test]
+fn sysv_gives_an_upper_half_with_nothing_under_it_a_register_of_its_own() {
+    // `union { _Float128 q; long a; }`, where the `long` makes the first eightbyte INTEGER and
+    // leaves the top of the `_Float128` above it. Post merge rule (d) says an SSEUP that is not
+    // the continuation of anything becomes an ordinary SSE, so this is a general purpose
+    // register and a vector register rather than half of a sixteen byte value.
+    let members =
+        [Piece { offset: 0, scalar: float(Format::Quad, 16) }, Piece { offset: 0, scalar: int(8) }];
+    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false };
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(shape)),
+        Pass::Pieces(vec![gpr(0, 8), fpr(8, Format::Double)])
+    );
+
+    // With a `double` in the union instead, the first eightbyte is SSE again and the pair is one
+    // register holding the whole quad.
+    let members = [
+        Piece { offset: 0, scalar: float(Format::Quad, 16) },
+        Piece { offset: 0, scalar: float(Format::Double, 8) },
+    ];
+    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false };
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+}
+
+#[test]
+fn sysv_gives_a_sixteen_byte_integer_two_registers_where_a_quad_gets_one() {
+    // The two shapes are the same size and the same number of eightbytes, and the difference is
+    // the whole of what SSEUP is for: `__int128` is INTEGER and INTEGER, which is two registers,
+    // and a `_Float128` is SSE and SSEUP, which is one.
+    let members = pieces(&[Scalar { kind: Kind::Integer, size: 16, align: 16 }]);
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
 fn sysv_puts_anything_over_sixteen_bytes_in_memory() {
     let members = pieces(&[int(8), int(8), int(8)]);
     assert_eq!(sysv().argument(&Arg::Aggregate(record(&members))), Pass::Memory);
