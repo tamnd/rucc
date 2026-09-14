@@ -1580,6 +1580,19 @@ impl<'a> Verifier<'a> {
             Opcode::CapClear => {
                 self.takes(opcode, arity, 0);
             }
+            // And reading one back out at the other end, which is the pointer the parameter holds
+            // and which of the call's arguments it was. Nothing here says the position is a
+            // constant, because a position the frame does not reach is the recovery rather than an
+            // error and the recovery is what the pointer operand is for.
+            Opcode::CapArg => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
             Opcode::CapNarrow => {
                 if self.takes(opcode, arity, 3) {
                     self.capability(opcode, arg(0), 0);

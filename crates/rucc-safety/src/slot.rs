@@ -80,6 +80,13 @@
 //! a frame in thread local storage. [`mod@crate::frame`] is all of that, including why saying there
 //! is no frame is an instruction rather than the absence of one.
 //!
+//! And `cap_arg`, which is the sixth producer and the reading end of that pair. A pointer parameter
+//! of an instrumented function has a capability the caller wrote down, so the cheap answer is to
+//! read it, and the expensive one is there underneath for a function nobody published to. Which of
+//! the two happens is the runtime's decision rather than a branch here, and the frame it decides
+//! from is taken once at the top of the function, which is the one thing about this producer that is
+//! not a property of the instruction on its own.
+//!
 //! Until the rest exist a function can still hold a capability this pass cannot place, and the
 //! answer then is to leave every capability in the function alone. Placing some and not others means
 //! handing a `cap_store` the address of a slot that nothing ever wrote, which is worse than not
@@ -151,6 +158,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     }
     substitute(func, &moved);
     let mut frame: Option<Value> = None;
+    let mut given: Option<Value> = None;
     for inst in walk(func) {
         let slot = func[inst].results().next().and_then(|value| moved.get(&value).copied());
         match (func[inst].opcode, slot) {
@@ -172,6 +180,20 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
                 crate::frame::hand_over(func, names, word, inst, at);
             }
             (Opcode::CapClear, _) => crate::frame::cleared(func, names, inst),
+            // The reading end, whose frame comes from the take at the top of the function rather
+            // than from a reservation. Lazily for the same reason the publish's is, and once for a
+            // stronger one: taking consumes the frame, so a second take would answer null.
+            (Opcode::CapArg, Some(address)) => {
+                let at = match given {
+                    Some(at) => at,
+                    None => {
+                        let Some(at) = crate::frame::taken(func, names, inst) else { continue };
+                        given = Some(at);
+                        at
+                    }
+                };
+                crate::frame::argument(func, names, word, inst, address, at);
+            }
             _ => {}
         }
     }
@@ -222,7 +244,11 @@ fn placeable(func: &Func) -> bool {
         let opcode = func[inst].opcode;
         let placed = matches!(
             opcode,
-            Opcode::CapNull | Opcode::CapLoad | Opcode::CapNarrow | Opcode::CapRecover
+            Opcode::CapNull
+                | Opcode::CapLoad
+                | Opcode::CapNarrow
+                | Opcode::CapRecover
+                | Opcode::CapArg
         );
         if opcode.makes_capability() && !placed && fresh(func, inst).is_none() {
             return false;
@@ -969,6 +995,73 @@ mod tests {
         // silent weakening, and this way the back end says it cannot lower the instruction.
         assert_eq!(count(&func, Opcode::CapPublish), 1);
         assert_eq!(count(&func, Opcode::Alloca), 0);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    /// A function that asks for the capabilities of `count` of its own pointer arguments.
+    ///
+    /// One parameter, asked about at as many positions as the test wants, because what is being
+    /// tested is how many takes there are rather than how many parameters. Each answer is stored so
+    /// that something reads it, since a capability nobody reads goes in `prune` before any of this.
+    fn asking(names: &mut Interner, word: Type, count: i128) -> Func {
+        built(names, |b, _, at| {
+            for position in 0..count {
+                let position = b.iconst(word, position);
+                let args = b.func().push_values(&[at, position]);
+                let mine = b.value(InstData { args, ..InstData::new(Opcode::CapArg) }, Type::CAP);
+                let args = b.func().push_values(&[mine, at, at, mine]);
+                b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+            }
+        })
+    }
+
+    #[test]
+    fn a_pointer_parameter_gets_the_capability_its_caller_wrote_down() {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let mut func = asking(&mut names, word, 1);
+        frames(&mut func, &mut names, word);
+        assert_eq!(count(&func, Opcode::CapArg), 0);
+        // One reservation, which is the answer's. The frame is not one of these, because it is the
+        // caller's stack and this end is handed a pointer to it rather than making one.
+        assert_eq!(count(&func, Opcode::Alloca), 1);
+        assert!(!any_capability(&func));
+
+        // The take first and the question after it, which is the order that matters: taking
+        // consumes the frame, so anything that ran in between could only have consumed it first.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        let take = text.find("__rucc_frame_take").expect("the frame is taken");
+        let ask = text.find("__rucc_frame_arg").expect("the argument is asked about");
+        assert!(take < ask, "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn the_frame_is_taken_once_however_many_arguments_are_asked_about() {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let mut func = asking(&mut names, word, 3);
+        frames(&mut func, &mut names, word);
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        // Once, and this is the assertion the whole shape of the lowering is for. A second take
+        // finds the magic word already cleared and answers null, so a function that took twice
+        // would recover the arguments it had just been handed.
+        assert_eq!(text.matches("__rucc_frame_take").count(), 1, "{text}");
+        assert_eq!(text.matches("__rucc_frame_arg").count(), 3, "{text}");
+        assert_eq!(count(&func, Opcode::Alloca), 3);
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_position_narrower_than_a_word_is_widened_into_one() {
+        let mut names = Interner::new();
+        let mut func = asking(&mut names, Type::int(32), 1);
+        frames(&mut func, &mut names, Type::int(64));
+        // The runtime takes the position as a `size_t` and the front end is under no obligation to
+        // have produced one, which is the same thing `cap_narrow`'s offset and length need.
+        assert_eq!(count(&func, Opcode::ZExt), 1);
         believed(&module(&mut names), &func, &names);
     }
 

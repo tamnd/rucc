@@ -20,7 +20,26 @@
 //! needs are all there, with `__rucc_frame_publish`, `__rucc_frame_take`, `__rucc_frame_clear` and
 //! `__rucc_frame_restore` as the names generated code is compiled against. What was missing was a
 //! way for the IR to say which capability belongs to which argument of which call, and that is
-//! [`Opcode::CapPublish`] and [`Opcode::CapClear`].
+//! [`Opcode::CapPublish`] and [`Opcode::CapClear`] on the writing side and [`Opcode::CapArg`] on the
+//! reading one.
+//!
+//! # The reading end
+//!
+//! A callee takes the frame once, at the top of the function, and then asks it one question per
+//! pointer parameter, and the whole of what makes that pair work is that neither half has to know
+//! what kind of caller the function turned out to have.
+//!
+//! Taking consumes the frame, which is why it happens once and why it happens first. Once, because a
+//! second take finds the magic word already cleared and answers null, so a function that took twice
+//! would recover half its own arguments for nothing. First, because every call this function makes
+//! either publishes a frame of its own or clears, and a take after one of those finds what that call
+//! left rather than what this function was given.
+//!
+//! The question is a call rather than a branch on whether the frame is null, and the deciding is the
+//! runtime's. `rucc_safe_rt::recover::argument` is the whole of it: a capability the caller carried
+//! is the answer, and the bottom one is the signal to walk the planes. That is the expensive answer,
+//! it is counted as the weakening it is, and it is the one that is always available, which is what
+//! lets a function compiled this way be called from code that knows nothing about any of it.
 //!
 //! # Why the empty frame is an instruction rather than an absence
 //!
@@ -98,8 +117,8 @@ const HALF: u64 = 2;
 /// Where the frame this one was published over is kept.
 ///
 /// After the capabilities and after the one the callee writes its returned pointer's into, which is
-/// why the count below is one more than [`ARGS`]. Nothing reads that last one yet, because writing
-/// it is the callee's half and the callee's half is the next box.
+/// why the count below is one more than [`ARGS`]. Nothing reads that last one yet. The arguments are
+/// both halves now, and the returned pointer is neither of them, so it is the next box.
 const OUTER: u64 = HEAD + slot::BYTES * (ARGS as u64 + 1);
 
 /// The call a `cap_publish` or a `cap_clear` is about, which is the instruction after it.
@@ -264,6 +283,55 @@ pub(crate) fn reserve(func: &mut Func, inst: Inst) -> Option<Value> {
     let slot = func.create_inst(data, &[Type::PTR], func.span(inst));
     func.insert_before(slot, first);
     func[slot].results().next()
+}
+
+/// Calls `__rucc_frame_take()` at the top of the entry block and gives back what it found.
+///
+/// Once per function, at the very front, and both halves of that are load bearing rather than tidy.
+/// Once, because taking consumes the frame: a second take in the same body finds the magic word
+/// already cleared and answers null, so a function that took twice would recover half its arguments
+/// for no reason. At the front, because any call this function makes either publishes a frame of its
+/// own or clears, and both of those are gone by the time a take after them runs.
+///
+/// The answer is a pointer that may be null, and null is not an error. It is a call from code this
+/// build never compiled, a call whose caller could not vouch for this one, or a call this compiler
+/// decided needed no frame, and the runtime treats all three the same way, which is to work the
+/// capability out of the planes instead.
+pub(crate) fn taken(func: &mut Func, names: &mut Interner, inst: Inst) -> Option<Value> {
+    let entry = func.entry()?;
+    let first = func.insts(entry).next()?;
+    let data = crate::lower::calling(func, names, "__rucc_frame_take", &[], &[Type::PTR], &[]);
+    let made = func.create_inst(data, &[Type::PTR], func.span(inst));
+    func.insert_before(made, first);
+    func[made].results().next()
+}
+
+/// `cap_arg` becomes `__rucc_frame_arg(slot, frame, position, pointer)`.
+///
+/// The slot in front, which is where the capability goes, and then the three things the runtime
+/// needs to decide what it is: the frame the caller published or null, which of the call's arguments
+/// this one was, and the pointer itself. The last of those is the answer when the first is null, and
+/// putting the fallback in the runtime rather than in a branch here is what keeps this one call
+/// whatever kind of caller the function turns out to have.
+///
+/// Beside the instruction and not in place of it, the way every other producer here is rewritten,
+/// because the call gives nothing back and the instruction did.
+pub(crate) fn argument(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    inst: Inst,
+    address: Value,
+    frame: Value,
+) {
+    let [at, position] = func[func[inst].args] else { return };
+    let position = crate::lower::fitted(func, inst, position, word);
+    let params = &[Type::PTR, Type::PTR, word, Type::PTR];
+    let args = &[address, frame, position, at];
+    let data = crate::lower::calling(func, names, "__rucc_frame_arg", params, &[], args);
+    let made = func.create_inst(data, &[], func.span(inst));
+    func.insert_before(made, inst);
+    func.remove_inst(inst);
 }
 
 #[cfg(test)]
