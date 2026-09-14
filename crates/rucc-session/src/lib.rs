@@ -1738,6 +1738,18 @@ pub struct Options {
     /// than a `bool` because `-O2 -fno-reorder-blocks` and `-O0` have to be different things and
     /// a `bool` set from the level could not tell them apart.
     pub reorder_blocks: Option<bool>,
+    /// Whether two things in a frame that are never both wanted may be the same bytes, from
+    /// `-fstack-reuse=`.
+    ///
+    /// `None` is a command line that did not write the flag, and then the level decides: on above
+    /// `-O0`, off at it, so that a person stepping through unoptimized code sees every local in a
+    /// place of its own. Three way rather than a `bool` for the reason `reorder_blocks` above is,
+    /// which is that `-O2 -fstack-reuse=none` and `-O0` have to be different things.
+    ///
+    /// gcc's flag takes `all`, `named_vars` or `none`. The first two are the same answer here: what
+    /// rucc shares is a local whose address provably stays inside the function, which is narrower
+    /// than either of gcc's and is contained in both.
+    pub stack_reuse: Option<bool>,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
     /// Whether a prologue takes its frame a page at a time, from `-fstack-clash-protection`.
@@ -2080,6 +2092,7 @@ impl Options {
             frame_pointer: false,
             red_zone: true,
             reorder_blocks: None,
+            stack_reuse: None,
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),

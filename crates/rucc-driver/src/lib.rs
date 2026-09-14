@@ -1027,6 +1027,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // glibc's headers and a good deal of configure output write it, and because the answer
             // it asks about is one this compiler can state rather than guess at: there is no x87
             // target here, which is the machine the whole question was invented for.
+            // Whether a local and a spilled value that are never both wanted may be the same bytes
+            // of the frame. gcc's three values, and two of them mean the same thing here: what rucc
+            // shares is a local whose address provably never leaves the function, which is narrower
+            // than `named_vars` and narrower still than `all`, so both of them get it. `none` is
+            // the one that changes anything, and it is the flag a program that reads a local
+            // through a pointer it kept past the end of the block writes.
+            _ if arg.starts_with("-fstack-reuse=") => {
+                let how = &arg["-fstack-reuse=".len()..];
+                opts.stack_reuse = match how {
+                    "all" | "named_vars" => Some(true),
+                    "none" => Some(false),
+                    _ => {
+                        return Err(err(format!(
+                            "`{how}` is not a stack reuse, which is all, named_vars or none"
+                        )));
+                    }
+                };
+            }
             _ if arg.starts_with("-fexcess-precision=") => {
                 let how = &arg["-fexcess-precision=".len()..];
                 if !matches!(how, "16" | "fast" | "standard") {

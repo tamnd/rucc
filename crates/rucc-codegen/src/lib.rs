@@ -61,6 +61,12 @@
 //! nothing knows how many of those there are until the allocator has finished running out of
 //! registers.
 //!
+//! [`slots`] is what tells it which of those areas are the same bytes. A local and a spilled value
+//! that are never both wanted can share a run of the frame, which makes the frame the most either
+//! of them needs at once rather than the sum of the two, and what says they are never both wanted
+//! is the liveness the allocator already worked out. `spec/optimizer/36-lowering-and-isel.md`
+//! section 36.7 asks for the one slot allocator rather than two that cannot see each other.
+//!
 //! [`finish`] writes that frame into the function: the prologue that takes it, the moves the
 //! allocator handed back as edits, and the epilogue at the end of every block the function
 //! returns from. After it every register is physical and every offset into the frame is a
@@ -152,6 +158,7 @@ pub mod quad;
 pub mod reload;
 pub mod retry;
 pub mod select;
+pub mod slots;
 pub mod split;
 pub mod switch;
 pub mod varargs;
