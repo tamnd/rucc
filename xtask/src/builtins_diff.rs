@@ -40,6 +40,19 @@
 //! an instruction. `__udivdi3` and its five relatives are reached by saying their names rather than
 //! by writing a `/`, so a link that quietly resolved them in libgcc would be two programs agreeing
 //! about libgcc while this machine's own divide sat beside them unused.
+//!
+//! # The atomics, which have a third reason to be read out of the archive
+//!
+//! The four names with no width in them are not written as function names on either side. They are
+//! type generic builtins in every compiler that has them, so the definition carries an ordinary name
+//! with an assembler label on it and the exported name comes from the label. A label that did not
+//! take would leave an archive defining `generic_load` and a link that fails, or worse an archive
+//! defining both and a harness reaching the wrong one, so the same list the divisions are in names
+//! these too and the check is that the archive really did come out with them.
+//!
+//! The harness is linked with `-pthread`, which nothing above the atomics needed. One thread taking
+//! a lock nobody else wants is the same program whether the lock works or not, so the last group is
+//! four threads counting through the compare and exchange and the digest is what they counted to.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -148,12 +161,14 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
 /// `-fno-builtin` so the calls in the harness are calls, and the fortification off so they are
 /// calls to the names the archive defines rather than to glibc's checked versions of them. `-O1`
 /// rather than `-O0` because a harness nobody optimized is a harness whose loops are not the loops
-/// a program would make, and the digest is computed from memory either way.
+/// a program would make, and the digest is computed from memory either way. `-pthread` because the
+/// last group runs on four threads, which is the only way to ask whether the lock under the atomics
+/// is a lock.
 const SCRIPT: &str = "\
 #!/bin/sh
 out=/tmp/builtins-diff
 mkdir -p \"$out\"
-flags=\"-O1 -fno-builtin -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0\"
+flags=\"-O1 -fno-builtin -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -pthread\"
 gcc $flags -o \"$out/ours\" differential.c librucc_builtins.a || exit 1
 gcc $flags -o \"$out/reference\" differential.c libreference.a || exit 1
 for side in ours reference; do
@@ -184,7 +199,8 @@ for side in ours reference; do
         __floatsitf __floatunsitf __floatditf __floatunditf \\
         __fixtfsi __fixunstfsi __fixtfdi __fixunstfdi \\
         __floattitf __floatuntitf __fixtfti __fixunstfti \\
-        __extendsftf2 __trunctfsf2 __extenddftf2 __trunctfdf2; do
+        __extendsftf2 __trunctfsf2 __extenddftf2 __trunctfdf2 \\
+        __atomic_load __atomic_store __atomic_exchange __atomic_compare_exchange; do
         grep -qx \"$name\" \"$out/$side.names\" || echo \"$side missing $name\"
     done
 done

@@ -45,9 +45,13 @@
 //! format soft float set. Quad precision is here now as well, with the four operations, the negation
 //! and the eight comparisons on a `_Float128`, which is not a soft float set in the sense the other
 //! two are: no machine has an instruction at that format, so those thirteen are calls on every target
-//! rather than only on a target with no floating point unit. The rest of section 12.8, which is the
-//! conversions to and from a quad, the remaining `__int128` arithmetic, the eighty bit conversions and
-//! the atomics, is not written, and the set is driven by what the target ladder in
+//! rather than only on a target with no floating point unit. The conversions at that format are here
+//! too, which is the twelve against an integer at each of the three widths and in each direction, and
+//! the four that cross between a quad and a `float` or a `double`. The first of the atomics is here as
+//! well, which is the four routines libatomic exports without a width in their name and the table of
+//! locks under them, and is what an access to an object too wide for one instruction becomes. The rest
+//! of section 12.8, which is the remaining `__int128` arithmetic, the eighty bit conversions and the
+//! atomics that do carry a width, is not written, and the set is driven by what the target ladder in
 //! `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
@@ -57,6 +61,7 @@
 #![no_builtins]
 #![doc(html_root_url = "https://docs.rs/rucc-builtins/0.10.40")]
 
+pub mod atomic;
 pub mod convert;
 pub mod div;
 pub mod double;
