@@ -43,6 +43,17 @@ pub struct Allocation {
     pub assignment: assign::Assignment,
     /// The moves the places do not already make true, in the order they have to be made in.
     pub edits: Vec<rewrite::Edit>,
+    /// The line the function was laid out in while it was allocated, which the liveness below is
+    /// counted along.
+    pub order: order::Order,
+    /// Where every value was live.
+    ///
+    /// Handed back rather than dropped because the stack slot allocator shares one run of bytes
+    /// between two things that are never both wanted, and the only liveness that knows where a
+    /// spilled value is wanted is the one the spilling was decided from. Working a second one out
+    /// afterwards would cost a pass and would be free to disagree with this one.
+    /// `spec/optimizer/36-lowering-and-isel.md` section 36.7 asks for the one answer.
+    pub live: live::Live,
 }
 
 /// Allocates registers for a function the way `-O0` asks for, rewriting it as it goes.
@@ -87,7 +98,7 @@ pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Alloca
         let faults = trace::trace(func, &shape, &assignment, &edits);
         assert!(faults.is_empty(), "in '{called}': {}", trace::report(&faults));
     }
-    Allocation { assignment, edits }
+    Allocation { assignment, edits, order, live }
 }
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

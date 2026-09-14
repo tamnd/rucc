@@ -239,6 +239,10 @@ pub static ELSEWHERE: &[(Opcode, &str)] = &[
     // says there is no frame at all, which is what a callee nobody can vouch for gets.
     (Opcode::CapPublish, "`rucc_safety::frame`, into the frame a call hands its callee"),
     (Opcode::CapClear, "`rucc_safety::frame`, into the call that says there is no frame"),
+    // And the reading end of the first of those two, which is the one of the three that does make a
+    // capability. It is in the callee rather than in the caller and it answers whether or not there
+    // was a frame, because a pointer nobody described is one to be recovered from the planes.
+    (Opcode::CapArg, "`rucc_safety::frame`, into the read of the frame the caller published"),
     // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
     // about before taking the instruction out, so that a hint and a profile are the same thing to
     // everything downstream of the optimizer.

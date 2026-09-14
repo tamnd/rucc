@@ -258,6 +258,23 @@ pub enum Opcode {
     /// nothing rather than saying nothing at all, and document 10 section 10.8's callback recovers
     /// its arguments the way an entry from outside always does.
     CapClear,
+    /// The capability of a pointer parameter, out of the frame the caller published.
+    ///
+    /// The reading end of [`Opcode::CapPublish`], in the callee rather than in the caller. Two
+    /// operands, the parameter itself and which position it is in the call, and one capability out.
+    ///
+    /// The parameter is an operand because it is the answer when there is no frame. A function
+    /// entered from code this build never compiled finds nothing published, and so does one whose
+    /// caller could not vouch for it and said `cap_clear`, and in both cases the capability has to be
+    /// worked out from the pointer the way [`Opcode::CapRecover`] does. That is the expensive answer
+    /// the frame exists to avoid, it is available whatever the caller did, and it is counted as the
+    /// weakening it is.
+    ///
+    /// The position is an operand rather than a payload for the same reason [`Opcode::CapNarrow`]'s
+    /// offset and length are: it is a number the runtime is handed. A position the frame does not
+    /// reach is not an error either, since it is the recovery again, so nothing here has to know how
+    /// many capabilities a frame holds.
+    CapArg,
     /// An access is within its capability's bounds, aligned, and permitted.
     ///
     /// The size and the alignment are the access's, and they are in the memory payload rather
@@ -584,6 +601,7 @@ impl Opcode {
             Self::CapExtentBack => "cap_extent_back",
             Self::CapPublish => "cap_publish",
             Self::CapClear => "cap_clear",
+            Self::CapArg => "cap_arg",
             Self::CheckBounds => "check_bounds",
             Self::CheckLive => "check_live",
             Self::CheckType => "check_type",
@@ -841,6 +859,7 @@ impl Opcode {
                     | Self::Prefetch
                     | Self::CapLoad
                     | Self::CapRecover
+                    | Self::CapArg
                     | Self::CapExtent
                     | Self::CapExtentBack
                     | Self::CheckBounds
@@ -917,7 +936,7 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// Five of the ten `cap` instructions. The other five consume one instead, or none at all:
+    /// Six of the eleven `cap` instructions. The other five consume one instead, or none at all:
     /// `cap_store` writes one beside a pointer, `cap_extent` and `cap_extent_back` ask one a
     /// question about itself and answer with a number, `cap_publish` hands a call's worth of them
     /// to a callee, and `cap_clear` takes no operands because saying there is no frame is not a
@@ -929,7 +948,12 @@ impl Opcode {
     pub const fn makes_capability(self) -> bool {
         matches!(
             self,
-            Self::CapOf | Self::CapLoad | Self::CapNull | Self::CapNarrow | Self::CapRecover
+            Self::CapOf
+                | Self::CapLoad
+                | Self::CapNull
+                | Self::CapNarrow
+                | Self::CapRecover
+                | Self::CapArg
         )
     }
 
@@ -1135,6 +1159,7 @@ static ALL: &[Opcode] = &[
     Opcode::CapExtentBack,
     Opcode::CapPublish,
     Opcode::CapClear,
+    Opcode::CapArg,
     Opcode::CheckBounds,
     Opcode::CheckLive,
     Opcode::CheckType,
@@ -1556,7 +1581,8 @@ mod tests {
                 Opcode::CapLoad,
                 Opcode::CapNull,
                 Opcode::CapNarrow,
-                Opcode::CapRecover
+                Opcode::CapRecover,
+                Opcode::CapArg
             ]
         );
         // The other three read a capability rather than making one. `cap_store` writes it out and

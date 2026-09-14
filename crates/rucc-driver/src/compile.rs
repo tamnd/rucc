@@ -768,6 +768,11 @@ fn generate(
         // the blocks come out in the order they were written and a person stepping through the
         // code walks down the screen.
         reorder: opts.reorder_blocks.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
+        // On at every level above `-O0`, for the reason the line above is off at it. Sharing one
+        // run of bytes between two locals is a smaller frame and a worse debugger: a variable that
+        // is out of scope reads as whatever took its place, which is what `-O0` exists not to do.
+        // Above it the frame is the win, and `-fstack-reuse=` says either answer at any level.
+        reuse: opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

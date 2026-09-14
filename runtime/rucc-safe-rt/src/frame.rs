@@ -197,7 +197,10 @@ fn restore(frame: *mut Frame) {
 /// Separate from the functions above for the reason every other exports module in this crate is:
 /// these are an ABI and those are Rust.
 pub mod exports {
+    use core::ffi::c_void;
+
     use super::Frame;
+    use crate::layout::Cap;
 
     /// # Safety
     ///
@@ -237,6 +240,41 @@ pub mod exports {
     #[unsafe(no_mangle)]
     pub extern "C" fn __rucc_frame_clear() {
         super::clear();
+    }
+
+    /// The capability of the pointer argument at `at`, out of `frame` or worked out from `addr`.
+    ///
+    /// What a callee calls once per pointer parameter it still checks something about, with the
+    /// frame [`__rucc_frame_take`] gave it. A null frame is the ordinary case rather than the odd
+    /// one: it is an entry from code this build never compiled, and it is also a call whose caller
+    /// could not vouch for the callee and cleared instead. Both mean the same thing here, which is
+    /// that there is nothing carried and the capability is [`crate::recover`]'s to find.
+    ///
+    /// Through a pointer rather than returned, the same way every other producer in this runtime
+    /// answers, because a capability is four words and the convention for a structure that size is a
+    /// hidden pointer anyway.
+    ///
+    /// # Safety
+    ///
+    /// `out` is a writable, aligned [`Cap`] sized slot. `frame` is null or a frame this call was
+    /// given, which is the caller's stack and is good until this callee returns. `addr` is only ever
+    /// compared, never read through, so it may be any value at all including null.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_frame_arg(
+        out: *mut Cap,
+        frame: *mut Frame,
+        at: u64,
+        addr: *const c_void,
+    ) {
+        let carried = if frame.is_null() {
+            Cap::BOTTOM
+        } else {
+            // SAFETY: the caller says a frame that is not null is the one this call was given, and
+            // the reading of it is over before the function that owns it returns.
+            unsafe { (*frame).arg(usize::try_from(at).unwrap_or(usize::MAX)) }
+        };
+        // SAFETY: the caller's slot, which the contract above says is writable and aligned.
+        unsafe { out.write(crate::recover::argument(carried, addr)) }
     }
 
     /// # Safety
@@ -361,6 +399,42 @@ mod tests {
         assert_eq!(theirs.1, cap(8192, 4));
         // And nothing of theirs disturbed ours, which is still where it was.
         assert_eq!(take().expect("still ours").arg(0), cap(4096, 2));
+    }
+
+    #[test]
+    fn a_callee_reads_its_argument_out_of_the_frame_or_works_it_out() {
+        // The entry point generated code calls once per pointer parameter, and the one place the
+        // two halves of the boundary actually meet. Everything above is about the frame being
+        // believable, and this is what a callee does with the answer either way.
+        let carried = cap(4096, 2);
+        let mut frame = Frame::EMPTY;
+        frame.argc = 1;
+        frame.args[0] = carried;
+        let mut out = Cap::BOTTOM;
+
+        // SAFETY: both the slot and the frame are locals of this function.
+        unsafe { exports::__rucc_frame_arg(&raw mut out, &raw mut frame, 0, core::ptr::null()) };
+        assert_eq!(out, carried);
+
+        // A position the caller did not describe, which is the recovery rather than an error, and
+        // then a position no frame could hold. Whatever the planes say about the address is the
+        // answer to both, and the address here is one they have never heard of.
+        let found = crate::recover::recover(core::ptr::null());
+        // SAFETY: as above.
+        unsafe { exports::__rucc_frame_arg(&raw mut out, &raw mut frame, 1, core::ptr::null()) };
+        assert_eq!(out, found);
+        // SAFETY: as above, and `u64::MAX` is a position rather than something read through.
+        unsafe {
+            exports::__rucc_frame_arg(&raw mut out, &raw mut frame, u64::MAX, core::ptr::null());
+        }
+        assert_eq!(out, found);
+
+        // And no frame at all, which is an entry from uninstrumented code and is the same answer.
+        // SAFETY: null says there is no frame, which the contract allows.
+        unsafe {
+            exports::__rucc_frame_arg(&raw mut out, core::ptr::null_mut(), 0, core::ptr::null());
+        }
+        assert_eq!(out, found);
     }
 
     #[test]
