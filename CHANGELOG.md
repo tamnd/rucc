@@ -2,7 +2,11 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
-## Unreleased
+## 0.10.50
+
+### Fixed
+
+- An argument handed to the linker keeps the position it was written in. `-Wl,` and `-Xlinker` words were collected into a list of their own and appended to the end of the linker command line, and a great many of the linker's options are a bracket around the files after them, so an option that lost its place among those files says nothing at all. libsodium is what found it: libtool links the seven convenience archives with `-Wl,--whole-archive ./.libs/libaesni.a ... ./.libs/librdrand.a -Wl,--no-whole-archive`, both brackets landed behind every archive, and six of the seven survived anyway because something references a symbol in each of them. `librdrand.a` holds exactly one global that nothing inside libsodium names, and `--whole-archive` was the only reason it would have been there, so the library was built and shipped without `randombytes_internal_implementation` in it. A word for the linker is now a third kind of item in the ordered input list rather than an entry in a list of its own, which is the same argument already written on the list: link order is semantic, an archive is searched for what is undefined at the moment the linker reaches it, and three lists kept apart cannot represent what the user typed. Both places that assemble a command line take the new kind, the native one and the cross one. A word for the linker on a command line that does not link is dropped without a note, which is what gcc does with one. libsodium now builds and passes all eighty of its tests at `-O2`, matching gcc 16.2.0 case for case. Closes tamnd/rucc#1279.
 
 ### Changed
 
