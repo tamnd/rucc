@@ -53,7 +53,37 @@
 //! instruction that writes one has to stay behind everything that reads what was in it, and those
 //! orderings are real even though no value passes between the two instructions. That is most of
 //! what the graph below is made of, and it is why this pass finds less to do than one before
-//! allocation would. Section 38.8 owes the measurement that says how much less.
+//! allocation would.
+//!
+//! How much less has now been measured, and the honest answer is almost all of it. Five programs
+//! built with this on and with it off, best of five runs each, on a six core Xeon with gcc 16 as
+//! the reference:
+//!
+//! ```text
+//! program    off    on   accurate   gcc-16 -O2
+//! ilp         75    75     78          60
+//! serial     213   212    215          58
+//! mem         47    49     49          40
+//! fp         271   267    266         108
+//! branchy    119   122    121          81
+//! ```
+//!
+//! Milliseconds, and the run to run spread on this machine is a few of them, so every column here
+//! is the same column. That is the measurement section 38.8 asked for and it says this pass is
+//! currently worth nothing on these five programs. Two reasons, and the first is the one above: by
+//! the time this runs the registers have been handed out, so the same register holds a dozen values
+//! over a block and the anti and output edges that creates pin most of the order in place. The
+//! second is that the gap to gcc is not a scheduling gap. A factor of three and a half on `serial`
+//! and two and a half on `fp` is work gcc did before it got anywhere near an instruction order, and
+//! no permutation of the instructions rucc emits closes it.
+//!
+//! The pass stays, at `-O2` and above, for what it costs rather than for what it currently returns:
+//! it is sound, it is cheap, and it is the thing that has to exist before the latencies in
+//! [`rucc_target::TimingInsts`] mean anything at all. The column worth watching is `accurate`, which
+//! is the same model told to believe its own unit counts, and which is slightly worse on the one
+//! program with real instruction level parallelism in it. That is the model being wrong about units
+//! in exactly the way [`rucc_target::TimingInsts::accurate`] says it is, and it is why x86-64
+//! answers `false`.
 //!
 //! # What the graph is made of
 //!
