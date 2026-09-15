@@ -1,4 +1,4 @@
-//! The overflow checking builtins: `__builtin_add_overflow` and its two neighbours.
+//! The overflow checking builtins: `__builtin_add_overflow` and its five neighbours.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#309.
 //!
@@ -8,6 +8,19 @@
 //! is the whole of it, and it is the only portable way to write the check: `a + b < a` is a test
 //! on the wrapped answer, and for signed operands the wrap it is testing already had undefined
 //! behaviour before the test ran.
+//!
+//! # The three that answer without writing
+//!
+//! `__builtin_add_overflow_p` and the two beside it ask the same question and throw the value
+//! away. The third argument is a value of the type the answer would have gone into rather than a
+//! pointer to one, which is what a program writes when it wants the check and not the result, and
+//! gcc documents that the argument is there for its type alone. So it is not evaluated: a call
+//! written `__builtin_mul_overflow_p (a, b, (long) 0)` is two operands and a type, and the zero
+//! never reaches the IR.
+//!
+//! Everything else about them is the same, including the type the arithmetic happens at, because
+//! the question is the same question. What changes is one flag on the node, which is the whole of
+//! the difference by the time the walk to the IR sees it.
 //!
 //! SQLite is why this is here now. Its `sqlite3AddInt64`, `sqlite3SubInt64` and `sqlite3MulInt64`
 //! are one line each and the line is one of these, so an amalgamation build reaches all three
@@ -56,12 +69,25 @@ use rucc_types::{IntKind, IntegerInfo, TypeId, integer_info, pointee};
 use crate::check::Checker;
 use crate::expr::{Category, Expr, ExprId, ExprKind, OverflowOp};
 
-/// The three names and the arithmetic each asks for.
+/// The three arithmetics and the stem each is spelled with.
+///
+/// The `_p` suffix is not here because it is not part of the arithmetic, in the same way the width
+/// suffix is not part of the question in `check/builtin/count.rs`.
 const FAMILY: &[(&str, OverflowOp)] = &[
     ("__builtin_add_overflow", OverflowOp::Add),
     ("__builtin_sub_overflow", OverflowOp::Sub),
     ("__builtin_mul_overflow", OverflowOp::Mul),
 ];
+
+/// What a call to one of the six asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::check) struct Asked {
+    /// Which of the three arithmetics.
+    pub op: OverflowOp,
+    /// Whether the third argument is somewhere to put the answer, which is what separates the
+    /// three that write from the three that only ask.
+    pub stores: bool,
+}
 
 /// The widest type the arithmetic can be done at, because it is the widest the back end splits.
 ///
@@ -72,9 +98,13 @@ const FAMILY: &[(&str, OverflowOp)] = &[
 /// rather than at a wider type.
 const LIMIT: u32 = 128;
 
-/// Which of the three a name is, if it is one of them.
-pub(in crate::check) fn operation(spelled: &str) -> Option<OverflowOp> {
-    FAMILY.iter().find(|&&(name, _)| name == spelled).map(|&(_, op)| op)
+/// Which of the six a name is, if it is one of them.
+pub(in crate::check) fn operation(spelled: &str) -> Option<Asked> {
+    let (stem, stores) = match spelled.strip_suffix("_p") {
+        Some(stem) => (stem, false),
+        None => (spelled, true),
+    };
+    FAMILY.iter().find(|&&(name, _)| name == stem).map(|&(_, op)| Asked { op, stores })
 }
 
 /// The shape of the type the arithmetic has to happen at, given the three types in the call.
@@ -119,12 +149,19 @@ impl Checker<'_> {
     /// knows whether to sign extend or zero extend it.
     pub(in crate::check) fn overflow_builtin(
         &mut self,
-        op: OverflowOp,
+        asked: Asked,
         args: &[ExprId],
         span: Span,
     ) -> ExprId {
         let [lhs, rhs, out] = args[..] else { return self.poison(span) };
-        let written = pointee(&self.types, self.tast[out].ty);
+        // A pointer for the three that write, and the destination type itself for the three that
+        // only ask, which is the one place the two halves of the family take the third argument
+        // differently.
+        let written = if asked.stores {
+            pointee(&self.types, self.tast[out].ty)
+        } else {
+            Some(self.tast[out].ty)
+        };
         // Each of the three has already been checked to be an integer, or a pointer to one, by
         // `argument_fits`. The only way to be here without a shape is an enumeration whose
         // definition has not been seen, which has been complained about already.
@@ -141,7 +178,8 @@ impl Checker<'_> {
         // Left, right, destination, in that order, which is the order they were written in and the
         // order every walk over the node reads them back in.
         let args = self.tast.add_expr_refs(&[lhs, rhs, out]);
-        self.tast.expr(Expr::new(ExprKind::Overflow { op, at, args }, ty, Category::Rvalue), span)
+        let kind = ExprKind::Overflow { op: asked.op, at, args, stores: asked.stores };
+        self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span)
     }
 
     /// A standard integer type of the given shape.
@@ -175,12 +213,15 @@ mod tests {
     /// The names have to be rows of the roster, or `__has_builtin` has never heard of them, and
     /// they have to carry no signature, or the ordinary call checking would answer for them first.
     #[test]
-    fn all_three_names_are_rows_of_the_table_that_carry_no_signature() {
-        for &(name, _) in FAMILY {
-            let feature = rucc_gnu::lookup(Kind::Builtin, name).unwrap_or_else(|| {
-                panic!("{name} is not a row of features.toml");
-            });
-            assert!(feature.signature.is_empty(), "{name} has a signature and is type generic");
+    fn all_six_names_are_rows_of_the_table_that_carry_no_signature() {
+        for &(stem, _) in FAMILY {
+            for suffix in ["", "_p"] {
+                let name = format!("{stem}{suffix}");
+                let feature = rucc_gnu::lookup(Kind::Builtin, &name).unwrap_or_else(|| {
+                    panic!("{name} is not a row of features.toml");
+                });
+                assert!(feature.signature.is_empty(), "{name} has a signature and is type generic");
+            }
         }
     }
 
@@ -263,11 +304,15 @@ mod tests {
     /// spelled almost the same way.
     #[test]
     fn a_name_outside_the_family_asks_for_nothing() {
-        assert_eq!(operation("__builtin_add_overflow"), Some(OverflowOp::Add));
-        assert_eq!(operation("__builtin_sub_overflow"), Some(OverflowOp::Sub));
-        assert_eq!(operation("__builtin_mul_overflow"), Some(OverflowOp::Mul));
-        assert_eq!(operation("__builtin_add_overflow_p"), None);
-        assert_eq!(operation("add_overflow"), None);
-        assert_eq!(operation("__builtin_popcount"), None);
+        let asks = |name: &str| operation(name).map(|asked| (asked.op, asked.stores));
+        assert_eq!(asks("__builtin_add_overflow"), Some((OverflowOp::Add, true)));
+        assert_eq!(asks("__builtin_sub_overflow"), Some((OverflowOp::Sub, true)));
+        assert_eq!(asks("__builtin_mul_overflow"), Some((OverflowOp::Mul, true)));
+        assert_eq!(asks("__builtin_add_overflow_p"), Some((OverflowOp::Add, false)));
+        assert_eq!(asks("__builtin_sub_overflow_p"), Some((OverflowOp::Sub, false)));
+        assert_eq!(asks("__builtin_mul_overflow_p"), Some((OverflowOp::Mul, false)));
+        assert_eq!(asks("add_overflow"), None);
+        assert_eq!(asks("__builtin_popcount"), None);
+        assert_eq!(asks("__builtin_add_overflow_p_p"), None);
     }
 }

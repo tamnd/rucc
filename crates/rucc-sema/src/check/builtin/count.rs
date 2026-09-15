@@ -1,12 +1,13 @@
-//! The bit counting builtins: `clz`, `ctz`, `popcount`, `parity` and `ffs`, each in three widths.
+//! The bit counting builtins: `clz`, `ctz`, `popcount`, `parity`, `ffs` and `clrsb`, in three
+//! widths each.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#310.
 //!
-//! Five questions about which bits of a value are set. A program writes one to walk a bitmap, to
+//! Six questions about which bits of a value are set. A program writes one to walk a bitmap, to
 //! find the size of a number in bits, to round up to a power of two, or to pick the next free slot
 //! out of a word. The kernel's `find_next_bit` is built on them, ffmpeg counts leading zeroes in its
-//! bitstream reader, and SQLite uses one to size a page. Fifteen rows of `features.toml` and one
-//! node, because the five differ only in the question.
+//! bitstream reader, and SQLite uses one to size a page. Eighteen rows of `features.toml` and one
+//! node, because the six differ only in the question.
 //!
 //! # Why the name decides this
 //!
@@ -37,9 +38,10 @@
 //! `__builtin_clz(0)` and `__builtin_ctz(0)` are undefined, which is gcc's rule and is written down
 //! here because it is easy to assume it is an accident of some machine and it is not: `bsr` and
 //! `bsf` leave the destination unchanged for a zero input rather than writing an answer into it, so
-//! a rule for either claims nothing about zero. The other three are defined everywhere, and `ffs(0)`
+//! a rule for either claims nothing about zero. The other four are defined everywhere, and `ffs(0)`
 //! is zero rather than undefined, which is the one exception in the family and is the reason `ffs`
-//! costs a comparison that `ctz` does not.
+//! costs a comparison that `ctz` does not. `clrsb(0)` is the width less one, which is not an
+//! exception so much as the rule read at zero: every bit below the sign repeats it there.
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
@@ -47,18 +49,19 @@ use rucc_diag::Span;
 use crate::check::Checker;
 use crate::expr::{BitCount, Category, Expr, ExprId, ExprKind};
 
-/// The five questions and the stem each is spelled with.
+/// The six questions and the stem each is spelled with.
 ///
 /// The width suffix is not here because it is not part of the question: `__builtin_clz`,
 /// `__builtin_clzl` and `__builtin_clzll` all ask for leading zeroes and differ only in the type the
 /// signature converts the argument to. The test at the bottom of this file is what keeps this list
-/// and the fifteen rows of the table from drifting apart.
+/// and the eighteen rows of the table from drifting apart.
 const FAMILY: &[(&str, BitCount)] = &[
     ("clz", BitCount::Leading),
     ("ctz", BitCount::Trailing),
     ("popcount", BitCount::Ones),
     ("parity", BitCount::Parity),
     ("ffs", BitCount::FirstSet),
+    ("clrsb", BitCount::RedundantSign),
 ];
 
 /// The three width suffixes, in the order a longest match has to try them.
@@ -118,11 +121,22 @@ mod tests {
 
     use super::*;
 
-    /// Every one of the fifteen names is a row of the table carrying a signature, because the
+    /// Whether the value a question is asked about is signed.
+    ///
+    /// Four of the six are asked about an unsigned value, because the question is about the bits
+    /// and the sign would only get in the way of reading the answer. The other two are asked about
+    /// a signed one: `ffs` because that is the type the C library gives it, and `clrsb` because
+    /// the question it asks is about the sign bit and a type without one has nothing to ask. Only
+    /// the test below needs this, because in the compiler itself the signature is what says it.
+    const fn asks_about_a_signed_value(count: BitCount) -> bool {
+        matches!(count, BitCount::FirstSet | BitCount::RedundantSign)
+    }
+
+    /// Every one of the eighteen names is a row of the table carrying a signature, because the
     /// signature is what the call is checked against before this replaces it. A row without one
     /// would never be declared and the call would be to an undeclared name.
     #[test]
-    fn all_fifteen_names_are_rows_of_the_table_that_carry_a_signature() {
+    fn all_eighteen_names_are_rows_of_the_table_that_carry_a_signature() {
         for &(stem, want) in FAMILY {
             for &width in WIDTHS {
                 let name = format!("__builtin_{stem}{width}");
@@ -142,10 +156,8 @@ mod tests {
     /// `__builtin_popcountll(x) - 1` a different number when the count is zero.
     #[test]
     fn every_signature_answers_in_int_and_asks_about_the_width_its_name_says() {
-        for &(stem, _) in FAMILY {
-            // `ffs` is the one whose operand is signed, because that is what the C library's `ffs`
-            // takes and the builtin is the same function.
-            let of = if stem == "ffs" { "" } else { "unsigned " };
+        for &(stem, count) in FAMILY {
+            let of = if asks_about_a_signed_value(count) { "" } else { "unsigned " };
             for (width, spelled) in [("", "int"), ("l", "long"), ("ll", "long long")] {
                 let name = format!("__builtin_{stem}{width}");
                 let feature = rucc_gnu::lookup(Kind::Builtin, &name).expect("a row");
@@ -168,7 +180,7 @@ mod tests {
     /// the program. `ffs` is POSIX rather than ISO C and a program may define its own.
     #[test]
     fn a_name_without_the_prefix_or_outside_the_family_asks_nothing() {
-        for name in ["ffs", "clz", "popcount", "__builtin_clzlll", "__builtin_cl", "__builtin_"] {
+        for name in ["ffs", "clz", "clrsb", "__builtin_clzlll", "__builtin_cl", "__builtin_"] {
             assert_eq!(question(name), None, "{name}");
         }
     }

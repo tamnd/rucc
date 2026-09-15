@@ -3706,7 +3706,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
     /// The three bit counts the IR has an instruction for are that instruction and not a call.
     ///
-    /// Fifteen rows of `features.toml` come out of five questions, and three of the five are one
+    /// Eighteen rows of `features.toml` come out of six questions, and three of the six are one
     /// instruction each. The kernel's bitmap search is built on them, ffmpeg counts leading zeroes
     /// in its bitstream reader and SQLite uses one to size a page, so a call left standing here
     /// would not link against anything and would be slow if it did.
@@ -3774,6 +3774,99 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("%7 = sub %3, %6"), "spread to a mask: {text}");
         assert!(text.contains("%8 = and %4, %7"), "and kept only then: {text}");
         assert!(!text.contains("br_if"), "no branch: {text}");
+    }
+
+    /// `__builtin_clrsb` is how many bits below the sign bit repeat it, which is a leading zero
+    /// count of the value folded onto its own sign.
+    ///
+    /// Exclusive or with the sign spread over every bit turns a negative value into its complement
+    /// and leaves one that is not negative alone, so in both cases the top bit is clear and there
+    /// is one zero above the highest bit that does not repeat the sign. The answer is one less
+    /// than that count, and the shift left is what takes the one off, with the low bit set on the
+    /// way so that zero and minus one have something to count: both of them fold to a word with no
+    /// bits in it, which is the one input a leading zero count says nothing about.
+    #[test]
+    fn the_redundant_sign_bit_count_is_instructions_and_not_a_call() {
+        let text = body("int f(int x) { return __builtin_clrsb(x); }\n");
+        assert!(text.contains("%1 = iconst.i32 31"), "{text}");
+        assert!(text.contains("%2 = ashr %0, %1"), "the sign over every bit: {text}");
+        assert!(text.contains("%3 = xor %0, %2"), "folded onto it: {text}");
+        assert!(text.contains("%5 = shl %3, %4"), "one less than the count: {text}");
+        assert!(text.contains("%6 = or %5, %4"), "with something to count at zero: {text}");
+        assert!(text.contains("%7 = ctlz %6"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+        assert!(!text.contains("br_if"), "no branch: {text}");
+    }
+
+    /// The unsigned four are the same four instructions answering in the unsigned type.
+    ///
+    /// Which on a two's complement machine is the same bits, so what this checks is that the type
+    /// of the answer is the unsigned one. The reason the family exists is the most negative value,
+    /// whose magnitude is not representable in the signed type and is representable in this one.
+    #[test]
+    fn the_unsigned_absolute_value_family_answers_in_the_unsigned_type() {
+        let text = body("unsigned f(int x) { return __builtin_uabs(x); }\n");
+        assert!(text.contains("%1 = iconst.i32 31"), "{text}");
+        assert!(text.contains("%4 = sub %3, %2"), "{text}");
+        assert!(!text.contains("call"), "nothing declares uabs, so a call would not link: {text}");
+
+        let text = body("unsigned long long f(long long x) { return __builtin_ullabs(x); }\n");
+        assert!(text.contains("iconst.i64 63"), "at the width the name says: {text}");
+
+        // The answer is the unsigned type and not the signed one, which is what a comparison
+        // against it is decided by.
+        let text = body("int f(int x) { return __builtin_uabs(x) > 2147483647u; }\n");
+        assert!(text.contains("icmp ugt"), "compared unsigned: {text}");
+    }
+
+    /// `intmax_t` is not a fixed type, so the two widest spellings ask the target what it is.
+    ///
+    /// `long` where that is sixty four bits wide and `long long` where it is not, which is the rule
+    /// `rucc_pp::predef` writes `__INTMAX_TYPE__` out of. The three targets here are all LP64, so
+    /// the answer is `long` and the shift is sixty three, and the point of the test is that the
+    /// signature was understood at all rather than refused for naming a type the table could not
+    /// spell.
+    #[test]
+    fn the_widest_absolute_value_is_whichever_type_the_target_makes_intmax_t() {
+        let text = body("long f(long x) { return __builtin_imaxabs(x); }\n");
+        assert!(text.contains("iconst.i64 63"), "{text}");
+        assert!(text.contains("%4 = sub %3, %2"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text = body("unsigned long f(long x) { return __builtin_umaxabs(x); }\n");
+        assert!(text.contains("iconst.i64 63"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// The `_p` spellings ask the same question, write nothing, and do not evaluate the third
+    /// argument.
+    ///
+    /// gcc says the third argument is there for its type alone, so a call is two operands and a
+    /// type by the time it reaches the IR. What the type decides is the same thing it decides for
+    /// the three that write: whether the exact answer would have fit there, which is why the
+    /// second call below is done at a wider width than the first.
+    #[test]
+    fn an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would() {
+        let text =
+            body("int f(int a, int b) { return __builtin_add_overflow_p(a, b, (int) 0); }\n");
+        assert!(text.contains("%2, %3 = sadd_overflow.(i32, i1) %0, %1"), "{text}");
+        assert!(!text.contains("store"), "nothing is written: {text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // A wider destination is a wider arithmetic, and the narrowing test that goes with it is
+        // what says whether the answer got there, exactly as for the spelling that stores.
+        let text =
+            body("int f(int a, int b) { return __builtin_mul_overflow_p(a, b, (long long) 0); }\n");
+        assert!(text.contains("smul_overflow.(i64, i1)"), "{text}");
+        assert!(!text.contains("store"), "{text}");
+
+        // The third argument is a value and not a pointer, and a side effect written in it does
+        // not happen, because what the argument is there for is its type.
+        let text = body(concat!(
+            "int g(void);\n",
+            "int f(int a, int b) { return __builtin_sub_overflow_p(a, b, g()); }\n",
+        ));
+        assert!(!text.contains("call @g"), "the third argument is not evaluated: {text}");
     }
 
     /// The three overflow checks are arithmetic and a flag, and not a call to anything.

@@ -285,12 +285,13 @@ pub enum ExprKind {
         /// The value whose bytes these are.
         operand: ExprId,
     },
-    /// The bit counting builtins, which are five questions about which bits of a value are set.
+    /// The bit counting builtins, which are six questions about which bits of a value are set.
     ///
-    /// `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_parity` and
-    /// `__builtin_ffs`, each in the plain, `l` and `ll` widths. Nodes rather than calls for the
-    /// reason [`ExprKind::ByteSwap`] is one: no object file defines any of them, and every machine
-    /// can answer them with instructions it already has. See `check/builtin/count.rs`.
+    /// `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_parity`,
+    /// `__builtin_ffs` and `__builtin_clrsb`, each in the plain, `l` and `ll` widths. Nodes rather
+    /// than calls for the reason [`ExprKind::ByteSwap`] is one: no object file defines any of
+    /// them, and every machine can answer them with instructions it already has. See
+    /// `check/builtin/count.rs`.
     ///
     /// The operand keeps the width its declaration gave it, because that width is the question. The
     /// type of the whole node is `int` whatever that width is, which is the one place this differs
@@ -299,12 +300,13 @@ pub enum ExprKind {
     BitCount {
         /// The value whose bits are being counted.
         operand: ExprId,
-        /// Which of the five questions this asks.
+        /// Which of the six questions this asks.
         count: BitCount,
     },
     /// The overflow checking builtins, which do the arithmetic exactly and say whether it fit.
     ///
-    /// `__builtin_add_overflow`, `__builtin_sub_overflow` and `__builtin_mul_overflow`. A node
+    /// `__builtin_add_overflow`, `__builtin_sub_overflow` and `__builtin_mul_overflow`, and the
+    /// three `_p` spellings of them, which ask the same question and throw the value away. A node
     /// rather than a call for the reason [`ExprKind::ByteSwap`] is one, and for a second reason
     /// besides: the answer is two things, a value and a bit, and a call in C can only give back
     /// one. See `check/builtin/overflow.rs`.
@@ -324,9 +326,17 @@ pub enum ExprKind {
         /// and of what the third operand points at. Working it out is the whole of the type
         /// checking here.
         at: TypeId,
-        /// The two operands in the types they were written with, and then the pointer the exact
-        /// result is written through whether or not it fit. Always exactly three.
+        /// The two operands in the types they were written with, and then the third operand,
+        /// which is the pointer the exact result is written through where there is one and is a
+        /// value of the destination type where there is not. Always exactly three.
         args: ExprList,
+        /// Whether the third operand is somewhere to put the answer.
+        ///
+        /// True for the three that write it, false for the `_p` spellings, which ask only whether
+        /// the arithmetic would have fit and take a value of the destination type rather than a
+        /// pointer to one. Nothing is written for those and the third operand is not evaluated,
+        /// since it is there to name a type and gcc says so.
+        stores: bool,
     },
     /// The atomic accesses and the barriers, which carry a memory ordering.
     ///
@@ -454,8 +464,8 @@ pub enum FrameAsk {
 
 /// Which question one of the bit counting builtins asks.
 ///
-/// Three of these are an instruction on most machines and the other two are one of those and a
-/// little arithmetic, which is why they are one node with a question rather than five nodes.
+/// Three of these are an instruction on most machines and the other three are one of those and a
+/// little arithmetic, which is why they are one node with a question rather than six nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitCount {
     /// `__builtin_clz`, the number of zero bits above the highest set one. Undefined for a zero
@@ -472,9 +482,15 @@ pub enum BitCount {
     /// different question.
     Parity,
     /// `__builtin_ffs`, the position of the lowest set bit counting from one, and zero for a zero
-    /// argument. The one in the family that is defined at zero, and the one whose operand is
-    /// signed, because that is the signature the C library's `ffs` has.
+    /// argument. The one in the family that is defined at zero, and one of the two whose operand
+    /// is signed, because that is the signature the C library's `ffs` has.
     FirstSet,
+    /// `__builtin_clrsb`, how many bits below the sign bit repeat it, which is the leading zero
+    /// count of a value that has been folded onto its own sign less one. Defined everywhere,
+    /// including at zero and at minus one, where every bit below the sign repeats it and the
+    /// answer is the width less one. The other one whose operand is signed, for the obvious
+    /// reason: a value with no sign bit has no redundant sign bits either.
+    RedundantSign,
 }
 
 impl BitCount {
@@ -487,6 +503,7 @@ impl BitCount {
             BitCount::Ones => "set-bits",
             BitCount::Parity => "parity",
             BitCount::FirstSet => "first-set",
+            BitCount::RedundantSign => "redundant-sign-bits",
         }
     }
 }
