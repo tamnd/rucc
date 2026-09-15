@@ -1,17 +1,28 @@
 decl #1 release : void(void **) function external declared
 decl #2 decide : int(void) function external declared
 decl #4 note : void(int) function external declared
-decl #5 at_the_end : void(void) function external defined
+decl #6 give_back : void(void **) function internal defined
+  params
+    decl #5 held : void ** object automatic defined
+  body
+    block
+      expr
+        call : void
+          convert function-decay : void (*)(void **)
+            decl #1 release : void(void **) function
+          convert lvalue : void **
+            decl #5 held : void ** lvalue
+decl #7 at_the_end : void(void) function external defined
   body
     block
       decls
-        decl #6 first : void * object automatic defined cleanup release
+        decl #8 first : void * object automatic defined cleanup release
           init
             +0
               convert null-pointer : void *
                 const 0 : int
       decls
-        decl #7 second : void * object automatic defined cleanup release
+        decl #9 second : void * object automatic defined cleanup release
           init
             +0
               convert null-pointer : void *
@@ -21,11 +32,11 @@ decl #5 at_the_end : void(void) function external defined
           convert function-decay : void (*)(int)
             decl #4 note : void(int) function
           const 1 : int
-decl #8 on_return : int(void) function external defined
+decl #10 on_return : int(void) function external defined
   body
     block
       decls
-        decl #9 held : void * object automatic defined cleanup release
+        decl #11 held : void * object automatic defined cleanup release
           init
             +0
               convert null-pointer : void *
@@ -42,18 +53,18 @@ decl #8 on_return : int(void) function external defined
               const 1 : int
       return
         const 0 : int
-decl #10 nested : void(void) function external defined
+decl #12 nested : void(void) function external defined
   body
     block
       decls
-        decl #11 outer : void * object automatic defined cleanup release
+        decl #13 outer : void * object automatic defined cleanup release
           init
             +0
               convert null-pointer : void *
                 const 0 : int
       block
         decls
-          decl #12 inner : void * object automatic defined cleanup release
+          decl #14 inner : void * object automatic defined cleanup release
             init
               +0
                 convert null-pointer : void *
@@ -68,7 +79,7 @@ decl #10 nested : void(void) function external defined
           convert function-decay : void (*)(int)
             decl #4 note : void(int) function
           const 3 : int
-decl #13 in_a_loop : void(void) function external defined
+decl #15 in_a_loop : void(void) function external defined
   body
     block
       while
@@ -80,7 +91,7 @@ decl #13 in_a_loop : void(void) function external defined
         body
           block
             decls
-              decl #14 each : void * object automatic defined cleanup release
+              decl #16 each : void * object automatic defined cleanup release
                 init
                   +0
                     convert null-pointer : void *
@@ -108,18 +119,32 @@ decl #13 in_a_loop : void(void) function external defined
                 convert function-decay : void (*)(int)
                   decl #4 note : void(int) function
                 const 4 : int
-decl #15 jumped_out : int(void) function external defined
+decl #17 the_only_caller_is_the_attribute : void(void) function external defined
   body
     block
       decls
-        decl #16 held : void * object automatic defined cleanup release
+        decl #18 held : void * object automatic defined cleanup give_back
+          init
+            +0
+              convert null-pointer : void *
+                const 0 : int
+      expr
+        call : void
+          convert function-decay : void (*)(int)
+            decl #4 note : void(int) function
+          const 6 : int
+decl #19 jumped_out : int(void) function external defined
+  body
+    block
+      decls
+        decl #20 held : void * object automatic defined cleanup release
           init
             +0
               convert null-pointer : void *
                 const 0 : int
       block
         decls
-          decl #17 inner : void * object automatic defined cleanup release
+          decl #21 inner : void * object automatic defined cleanup release
             init
               +0
                 convert null-pointer : void *

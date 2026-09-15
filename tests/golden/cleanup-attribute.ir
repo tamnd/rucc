@@ -9,6 +9,12 @@ func @decide() -> i32, linkage(external);
 
 func @note(i32), linkage(external);
 
+func @give_back(ptr), linkage(internal) {
+block0(%0: ptr):
+    call @release(%0) : (ptr)
+    return
+}
+
 func @at_the_end(), linkage(external) {
 block0:
     %0 = alloca, size 8, align 8
@@ -115,6 +121,19 @@ block7:
     call @note(%13) : (i32)
     call @release(%0) : (ptr)
     jump block1
+}
+
+func @the_only_caller_is_the_attribute(), linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = iconst.i32 0
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    store %3 -> %0, align 8, tbaa !1
+    %4 = iconst.i32 6
+    call @note(%4) : (i32)
+    call @give_back(%0) : (ptr)
+    return
 }
 
 func @jumped_out() -> i32, linkage(external) {

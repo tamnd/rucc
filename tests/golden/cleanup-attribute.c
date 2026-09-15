@@ -8,6 +8,12 @@ void release(void **held);
 int decide(void);
 void note(int n);
 
+// The handler a header writes is almost always a `static inline` beside the type it releases, and
+// the attribute is the only thing in the file that names it. So the walk that decides which
+// internal definitions to emit has to follow the attribute, or the call below is a call to a
+// function this file left out.
+static void give_back(void **held) { release(held); }
+
 // The closing brace, and the reverse order: `second` goes first.
 void at_the_end(void) {
   void *first __attribute__((cleanup(release))) = 0;
@@ -48,6 +54,12 @@ void in_a_loop(void) {
     }
     note(4);
   }
+}
+
+// Nothing else names `give_back`, so its definition is here only because the attribute reaches it.
+void the_only_caller_is_the_attribute(void) {
+  void *held __attribute__((cleanup(give_back))) = 0;
+  note(6);
 }
 
 // A `goto` out of the block runs what the block owes on the way, which is the shape every library
