@@ -21,4 +21,4 @@ pub mod safety;
 pub mod strength;
 pub mod width;
 
-pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table, Test};
+pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};

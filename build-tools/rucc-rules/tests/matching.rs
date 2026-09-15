@@ -185,6 +185,28 @@ fn a_name_written_twice_is_tried_before_the_rule_that_takes_any_two() {
     assert!(shown.ends_with(wanted), "{shown}");
 }
 
+/// What a rule set costs to match against, which is the measurement
+/// `spec/optimizer/36-lowering-and-isel.md` section 36.5 asks for and which goes in the header of
+/// every generated table. The four rules here begin with one head between them, so the widest
+/// node is the one with the three second operands on it.
+#[test]
+fn a_rule_set_says_what_it_costs_to_match_against() {
+    let shape = matcher(RULES).shape();
+    assert_eq!(shape.widest, 3, "the second operand is where the branches are");
+    assert_eq!(shape.search, 2, "three branches are two comparisons rather than three");
+    assert_eq!(shape.mixed, 0, "nothing here asks two kinds of question about one place");
+    assert!(shape.nodes > shape.widest);
+
+    // The literal and the hole beside it are one node asking one kind of question, because a
+    // hole is not a question. A rule set where that is not true is one where the order the kinds
+    // are asked in decides something, and this is the number that would say so.
+    let both = matcher(
+        "(rule (lower (add.i64 (value x) (iconst 4))) (x64.inc4 x) (spec (= (bvadd x 4) (result))))\n\
+         (rule (lower (add.i64 (value x) 4)) (x64.inc4 x) (spec (= (bvadd x 4) (result))))",
+    );
+    assert_eq!(both.shape().mixed, 1, "a head and a literal asked about one place");
+}
+
 #[test]
 fn a_rule_that_can_never_fire_is_refused_rather_than_dropped() {
     let text = "\

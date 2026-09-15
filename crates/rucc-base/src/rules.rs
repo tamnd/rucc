@@ -34,11 +34,11 @@
 //! # A name written twice
 //!
 //! A pattern may write one name in two places, which is how `x & x` is said. The second place
-//! becomes [`Test::Same`] rather than a hole, and it asks the subject whether the two are the
-//! same thing rather than comparing nodes, because a node is a place and two places can hold one
-//! value. It is a concrete test, so it is tried before the wildcard for the same reason every
-//! other test is: a rule about one value in both operands is more specific than a rule about any
-//! two.
+//! becomes a branch in [`Node::same`] rather than a hole, and it asks the subject whether the two
+//! are the same thing rather than comparing nodes, because a node is a place and two places can
+//! hold one value. It is a concrete test, so it is tried before the wildcard for the same reason
+//! every other test is: a rule about one value in both operands is more specific than a rule
+//! about any two.
 //!
 //! # Order
 //!
@@ -46,6 +46,24 @@
 //! naming an operand is tried before a rule taking whatever is there. That is the maximal munch
 //! `spec/10-backend.md` asks for, and it falls out of the shape of the trie rather than being
 //! sorted for. Among rules that are equally specific the first one written wins.
+//!
+//! The concrete tests are three kinds of question and they are asked in this order: the head of
+//! the term, then its value as a constant, then whether it is what an earlier binding took.
+//! `spec/optimizer/36-lowering-and-isel.md` section 36.5 asks that the order be stated rather
+//! than left to be read out of what the matcher does, so it is stated here, next to the walk that
+//! applies it. It decides nothing in any rule set shipped today, because deciding something would
+//! need one node to ask two kinds of question about one place and none does, which is a number
+//! `rucc-rules` prints in the header of every table it generates.
+//!
+//! # Finding a branch
+//!
+//! A term has one head and a constant has one value, so at most one head branch and at most one
+//! value branch can match, and the two lists are sorted by the thing they are asked about. That
+//! makes finding the branch a binary search rather than a walk over the node, which is the
+//! difference section 36.5 is about: the widest node of the x86-64 rule set has a hundred and
+//! sixty seven heads on it, and the selector reaches that node once for every instruction in the
+//! program. A repeat of an earlier binding is not searchable, because two of them can hold the
+//! same value, so those stay in the order the rules were written and there are never many.
 //!
 //! A guard is part of deciding whether a rule fires, so a rule whose guard is false is a rule
 //! that did not match, and the walk carries on looking rather than giving up. What that costs is
@@ -85,33 +103,49 @@ pub trait Subject {
     fn same(&self, a: Self::Node, b: Self::Node) -> bool;
 }
 
-/// One test on one subterm.
-#[derive(Debug)]
-pub enum Test {
-    /// The subterm has to be this head applied to this many arguments.
-    App {
-        /// The name in head position.
-        head: &'static str,
-        /// How many arguments it takes.
-        arity: usize,
-    },
-    /// The subterm has to be this constant.
-    Int(i128),
-    /// The subterm has to be the same thing as a binding this pattern already made, named by
-    /// which binding it is. A pattern writes one where it writes a name for the second time, so
-    /// this is how `x & x` is told apart from `x & y`.
-    Same(usize),
-}
-
 /// One node of the trie over the patterns.
-#[derive(Debug)]
+///
+/// The branches are held by the kind of question they ask rather than in one list, which is what
+/// lets the two that can be searched be searched.
+#[derive(Debug, Clone, Copy)]
 pub struct Node {
-    /// The tests to try, in the order the rules were written, before the wildcard.
-    pub tests: &'static [(Test, u32)],
+    /// The branches taken on the head of the subterm, as the name, how many arguments it takes,
+    /// and where to go. Sorted by the first two, which is what [`Node::branch`] needs.
+    pub heads: &'static [(&'static str, usize, u32)],
+    /// The branches taken on the value of a subterm that is a constant, sorted by the value.
+    pub ints: &'static [(i128, u32)],
+    /// The branches taken when the subterm is the same thing as a binding this pattern already
+    /// made, named by which binding it is. A pattern writes one where it writes a name for the
+    /// second time, so this is how `x & x` is told apart from `x & y`. In the order the rules
+    /// were written, because two of them can match one subterm.
+    pub same: &'static [(usize, u32)],
     /// The branch that takes anything, and the name the first rule to reach it gave that hole.
     pub wildcard: Option<(&'static str, u32)>,
     /// The rule that ends here, if one does.
     pub accept: Option<u32>,
+}
+
+impl Node {
+    /// The branch for a term with this head and this many arguments, if the node has one.
+    ///
+    /// A binary search, which is the whole point of the list being sorted. At most one branch can
+    /// answer, so nothing about which rule fires depends on the list being in this order rather
+    /// than in the order the rules were written.
+    #[must_use]
+    pub fn branch(&self, head: &str, arity: usize) -> Option<u32> {
+        let found = self
+            .heads
+            .binary_search_by(|(have, count, _)| have.cmp(&head).then(count.cmp(&arity)))
+            .ok()?;
+        Some(self.heads[found].2)
+    }
+
+    /// The branch for a constant of this value, if the node has one.
+    #[must_use]
+    pub fn literal(&self, value: i128) -> Option<u32> {
+        let found = self.ints.binary_search_by(|(have, _)| have.cmp(&value)).ok()?;
+        Some(self.ints[found].1)
+    }
 }
 
 /// One piece of a replacement, in the pre-order that builds it.
@@ -222,32 +256,34 @@ impl Table {
         let node = &self.nodes[at];
         let head = subject.head(term);
 
-        for (test, next) in node.tests {
-            let matched = match test {
-                Test::Int(want) => subject.int(term) == Some(*want),
-                Test::App { head: want, arity } => {
-                    head.is_some_and(|(have, count)| have == *want && count == *arity)
-                }
-                // The binding is always there, because a pattern only writes a name for the
-                // second time after it has written it once and the trie keeps that order.
-                Test::Same(index) => {
-                    bindings.get(*index).is_some_and(|&bound| subject.same(bound, term))
-                }
-            };
-            if !matched {
-                continue;
-            }
-            let mut deeper = left.clone();
-            if let Some((_, arity)) = head {
-                for index in (0..arity).rev() {
-                    deeper.push(subject.arg(term, index));
-                }
-            }
-            let depth = bindings.len();
-            if let Some(rule) = self.run(subject, *next as usize, deeper, bindings) {
+        // The head of the term, which is the question nearly every branch of nearly every node
+        // is about and the one that has to be found rather than looked for.
+        if let Some(next) = head.and_then(|(name, arity)| node.branch(name, arity)) {
+            if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
                 return Some(rule);
             }
-            bindings.truncate(depth);
+        }
+
+        // Its value, if it is a constant and if this node asks about one. The emptiness is
+        // checked first because asking the subject for a value costs something and most nodes
+        // have nothing to compare it against.
+        if !node.ints.is_empty() {
+            if let Some(next) = subject.int(term).and_then(|value| node.literal(value)) {
+                if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
+                    return Some(rule);
+                }
+            }
+        }
+
+        // A repeat of an earlier binding. The binding is always there, because a pattern only
+        // writes a name for the second time after it has written it once and the trie keeps that
+        // order.
+        for &(index, next) in node.same {
+            if bindings.get(index).is_some_and(|&bound| subject.same(bound, term)) {
+                if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
+                    return Some(rule);
+                }
+            }
         }
 
         // The wildcard is last, which is the whole of what specificity order means here.
@@ -255,6 +291,34 @@ impl Table {
         let depth = bindings.len();
         bindings.push(term);
         if let Some(rule) = self.run(subject, *next as usize, left, bindings) {
+            return Some(rule);
+        }
+        bindings.truncate(depth);
+        None
+    }
+
+    /// Follow one branch, and give the bindings back as they were if it led nowhere.
+    ///
+    /// What goes on the stack is the arguments of the term, innermost last, whenever the term has
+    /// any. That is the same for every kind of branch, because what a branch decided is that this
+    /// subterm is matched and the walk carries on into what is under it.
+    fn take<S: Subject>(
+        &self,
+        subject: &S,
+        next: u32,
+        term: (S::Node, Option<(&str, usize)>),
+        left: &[S::Node],
+        bindings: &mut Vec<S::Node>,
+    ) -> Option<usize> {
+        let (term, head) = term;
+        let mut deeper = left.to_vec();
+        if let Some((_, arity)) = head {
+            for index in (0..arity).rev() {
+                deeper.push(subject.arg(term, index));
+            }
+        }
+        let depth = bindings.len();
+        if let Some(rule) = self.run(subject, next as usize, deeper, bindings) {
             return Some(rule);
         }
         bindings.truncate(depth);
@@ -279,7 +343,7 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
-    use super::{Match, Node, Piece, Rule, Subject, Table, Test};
+    use super::{Match, Node, Piece, Rule, Subject, Table};
 
     /// A term, in the only shape a test needs: a flat arena, because that is the shape the IR
     /// has and answering the questions out of one is what the callers will be doing.
@@ -345,30 +409,26 @@ mod tests {
     /// which is a concrete test before a wildcard, a guard that can refuse, and the search
     /// carrying on after it does. A third rule, `(and x x)`, is the one that writes a name
     /// twice.
+    /// A node with nothing on it, so that the ones below say only what they are about.
+    const NOTHING: Node = Node { heads: &[], ints: &[], same: &[], wildcard: None, accept: None };
+
     static NODES: &[Node] = &[
         // 0, the root.
-        Node {
-            tests: &[
-                (Test::App { head: "add", arity: 2 }, 1),
-                (Test::App { head: "and", arity: 2 }, 5),
-            ],
-            wildcard: None,
-            accept: None,
-        },
+        Node { heads: &[("add", 2, 1), ("and", 2, 5)], ..NOTHING },
         // 1, the first operand.
-        Node { tests: &[], wildcard: Some(("x", 2)), accept: None },
+        Node { wildcard: Some(("x", 2)), ..NOTHING },
         // 2, the second operand.
-        Node { tests: &[(Test::Int(0), 3)], wildcard: Some(("k", 4)), accept: None },
+        Node { ints: &[(0, 3)], wildcard: Some(("k", 4)), ..NOTHING },
         // 3, an addition of zero.
-        Node { tests: &[], wildcard: None, accept: Some(0) },
+        Node { accept: Some(0), ..NOTHING },
         // 4, an addition of anything, if the guard holds.
-        Node { tests: &[], wildcard: None, accept: Some(1) },
+        Node { accept: Some(1), ..NOTHING },
         // 5, the first operand of the conjunction, which is the one that binds.
-        Node { tests: &[], wildcard: Some(("x", 6)), accept: None },
+        Node { wildcard: Some(("x", 6)), ..NOTHING },
         // 6, the second operand, which has to be what the first one bound.
-        Node { tests: &[(Test::Same(0), 7)], wildcard: None, accept: None },
+        Node { same: &[(0, 7)], ..NOTHING },
         // 7, a conjunction of one thing with itself.
-        Node { tests: &[], wildcard: None, accept: Some(2) },
+        Node { accept: Some(2), ..NOTHING },
     ];
 
     fn not_negative(bound: &[Option<i128>]) -> bool {
@@ -488,6 +548,123 @@ mod tests {
         let y = terms.app("v1", &[]);
         let term = terms.app("and", &[x, y]);
         assert_eq!(TABLE.find(&terms, term), None);
+    }
+
+    /// The branch is found rather than looked for, which is the thing a node being sorted buys.
+    /// A node as wide as the root of a real rule set answers in the same number of comparisons a
+    /// node with eight branches does, and it answers about the head it was never given by not
+    /// finding one rather than by reading to the end.
+    #[test]
+    fn a_branch_is_found_by_searching_the_node_and_not_by_reading_it() {
+        static WIDE: &[(&str, usize, u32)] = &[
+            ("add.i16", 2, 1),
+            ("add.i32", 2, 2),
+            ("add.i64", 2, 3),
+            ("add.i64", 3, 4),
+            ("sub.i32", 2, 5),
+            ("sub.i64", 2, 6),
+            ("xor.i8", 2, 7),
+        ];
+        let node = Node { heads: WIDE, ..NOTHING };
+        assert!(WIDE.is_sorted(), "the search is only a search if the node is in order");
+        assert_eq!(node.branch("add.i64", 2), Some(3));
+        assert_eq!(node.branch("add.i16", 2), Some(1));
+        assert_eq!(node.branch("xor.i8", 2), Some(7));
+        // The same name at two arities is two branches, and they are told apart.
+        assert_eq!(node.branch("add.i64", 3), Some(4));
+        // A head no branch is about, and one the node has at another arity, are both nothing.
+        assert_eq!(node.branch("mul.i64", 2), None);
+        assert_eq!(node.branch("sub.i32", 3), None);
+    }
+
+    /// The same for a constant, which is the other kind of branch that can be searched.
+    #[test]
+    fn a_literal_is_found_by_searching_too() {
+        let node = Node { ints: &[(-8, 1), (0, 2), (1, 3), (4096, 4)], ..NOTHING };
+        assert_eq!(node.literal(-8), Some(1));
+        assert_eq!(node.literal(0), Some(2));
+        assert_eq!(node.literal(4096), Some(4));
+        assert_eq!(node.literal(7), None);
+    }
+
+    /// The order the kinds of question are asked in, which is the heuristic the module doc
+    /// states. It only decides anything when one node asks two kinds about one place and the
+    /// subject answers both, which is why this needs a subject of its own: the one above answers
+    /// either what a term is called or what number it is, never both, and so does the IR. What is
+    /// asserted is the order that is written down, so that a rule set which starts to depend on
+    /// it gets the answer somebody chose rather than the one that fell out.
+    #[test]
+    fn the_head_is_asked_about_before_the_value_and_the_value_before_a_repeat() {
+        /// `(f a a)`, where each operand is an application and a number at the same time and the
+        /// two of them are one thing. Every question a node can ask is true of them, so which
+        /// one is asked first is the only thing that decides the answer.
+        #[derive(Debug)]
+        struct Both;
+
+        impl Subject for Both {
+            type Node = u8;
+
+            fn head(&self, node: u8) -> Option<(&str, usize)> {
+                if node == 0 { Some(("f", 2)) } else { Some(("k", 0)) }
+            }
+
+            fn int(&self, node: u8) -> Option<i128> {
+                if node == 0 { None } else { Some(7) }
+            }
+
+            fn arg(&self, _: u8, _: usize) -> u8 {
+                1
+            }
+
+            fn same(&self, _: u8, _: u8) -> bool {
+                true
+            }
+        }
+
+        static FOUR: &[Rule] = &[
+            Rule { pattern: "the head", replacement: &[], guard: None, line: 1 },
+            Rule { pattern: "the value", replacement: &[], guard: None, line: 2 },
+            Rule { pattern: "the repeat", replacement: &[], guard: None, line: 3 },
+            Rule { pattern: "the hole", replacement: &[], guard: None, line: 4 },
+        ];
+
+        /// The four ends, and in front of them the node that binds the first operand so that
+        /// there is something for a repeat to be a repeat of.
+        fn table(second: &'static Node) -> Table {
+            let nodes: &'static [Node] = Box::leak(Box::new([
+                Node { heads: &[("f", 2, 1)], ..NOTHING },
+                Node { wildcard: Some(("x", 2)), ..NOTHING },
+                *second,
+                Node { accept: Some(0), ..NOTHING },
+                Node { accept: Some(1), ..NOTHING },
+                Node { accept: Some(2), ..NOTHING },
+                Node { accept: Some(3), ..NOTHING },
+            ]));
+            Table { source: "rules/test.rules", nodes, rules: FOUR }
+        }
+
+        // All three kinds on one node, with a hole behind them.
+        static MIXED: Node = Node {
+            heads: &[("k", 0, 3)],
+            ints: &[(7, 4)],
+            same: &[(0, 5)],
+            wildcard: Some(("y", 6)),
+            accept: None,
+        };
+        assert_eq!(table(&MIXED).find(&Both, 0).map(|found| found.rule), Some(0));
+
+        // The same node without the head, which is what puts the value in front.
+        static WITHOUT_HEAD: Node = Node { heads: &[], ..MIXED };
+        assert_eq!(table(&WITHOUT_HEAD).find(&Both, 0).map(|found| found.rule), Some(1));
+
+        // And without either, which leaves the repeat in front of the hole. That last pair is
+        // the one that is not a heuristic: a concrete question always comes before the hole.
+        static REPEAT: Node = Node { ints: &[], ..WITHOUT_HEAD };
+        assert_eq!(table(&REPEAT).find(&Both, 0).map(|found| found.rule), Some(2));
+
+        // And with nothing concrete left, the hole.
+        static HOLE: Node = Node { same: &[], ..REPEAT };
+        assert_eq!(table(&HOLE).find(&Both, 0).map(|found| found.rule), Some(3));
     }
 
     /// A match is what a caller keeps, so it says what it is when a test prints it.

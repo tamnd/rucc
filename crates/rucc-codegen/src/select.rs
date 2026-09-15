@@ -13,7 +13,7 @@
 
 pub mod x86_64;
 
-pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table, Test};
+pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};
 
 #[cfg(test)]
 mod tests {
@@ -87,6 +87,29 @@ mod tests {
     fn selects(terms: &Terms, term: usize) -> Option<&'static str> {
         let found = TABLE.find(terms, term)?;
         TABLE.rule(&found).head()
+    }
+
+    /// No pattern is reached by reading past the ones in front of it.
+    ///
+    /// `spec/optimizer/36-lowering-and-isel.md` section 36.5 asks for the decision to be on the
+    /// shape of the term, and the root of this table is where that is worth anything: every
+    /// instruction the selector looks at arrives there, and a hundred and sixty seven different
+    /// heads are written on it. Sorted, that is eight comparisons and the walk finds the branch.
+    /// In the order the rules happen to be written it would be a hundred and sixty seven, every
+    /// time, and worst for the terms no rule covers, which are the ones the selector has to see
+    /// the most of.
+    ///
+    /// What is asserted is the property the search needs, which is that every node is in order.
+    /// A node that is not is not a slower table, it is a wrong one, because a binary search over
+    /// an unsorted list finds nothing and the rule silently stops firing.
+    #[test]
+    fn no_rule_is_reached_by_reading_past_the_rules_in_front_of_it() {
+        let root = TABLE.nodes.first().expect("the table has a root");
+        assert!(root.heads.len() > 100, "the root is the node this is about");
+        for (at, node) in TABLE.nodes.iter().enumerate() {
+            assert!(node.heads.is_sorted(), "node {at} is not in an order a search can use");
+            assert!(node.ints.is_sorted(), "node {at} is not in an order a search can use");
+        }
     }
 
     #[test]
