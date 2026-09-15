@@ -847,7 +847,7 @@ impl Reader {
             [] => Ok(Held::Absolute(residue.constant as u64)),
             // `.set alias, real`, which is how a file gives something a second name without a
             // second copy of it. The two end up at the same place in the same section.
-            [(1, _, Some((part, offset)))] => {
+            [Left { coeff: 1, at: Some((part, offset)), .. }] => {
                 Ok(Held::In { part: *part, offset: (*offset + residue.constant) as u64 })
             }
             _ => Err(Trouble {
@@ -894,7 +894,7 @@ impl Reader {
                     continue;
                 }
                 // The address of something, which is the whole of what a table of pointers holds.
-                [(1, What::Symbol(name), _)] => {
+                [Left { coeff: 1, what: What::Symbol(name), .. }] => {
                     let kind = Reference::Address { bytes: fixup.width };
                     (name.clone(), kind, residue.constant)
                 }
@@ -902,8 +902,14 @@ impl Reader {
                 // table of offsets holds and what `.long foo - .` is asking for. The subtracted
                 // side has to be these bytes or somewhere else in the same section, because a
                 // distance to another section is not a number until the linker has laid both out.
-                [(1, What::Symbol(name), _), (-1, _, Some((part, offset)))]
-                | [(-1, _, Some((part, offset))), (1, What::Symbol(name), _)] => {
+                [
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                    Left { coeff: -1, at: Some((part, offset)), .. },
+                ]
+                | [
+                    Left { coeff: -1, at: Some((part, offset)), .. },
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                ] => {
                     if *part != fixup.part {
                         return Err(bad(
                             "a distance that is subtracted from somewhere in another section"
@@ -920,7 +926,7 @@ impl Reader {
                     let addend = residue.constant + offset - fixup.at as i64;
                     (name.clone(), Reference::Data, addend)
                 }
-                [(1, What::Here { .. }, _)] => {
+                [Left { coeff: 1, what: What::Here { .. }, .. }] => {
                     return Err(bad(
                         "the address of these bytes themselves, which has no symbol to be \
                          relocated against"
@@ -993,7 +999,7 @@ impl Reader {
                 }
             }
         }
-        let mut left: Vec<(i64, What, Option<(usize, i64)>)> = Vec::new();
+        let mut left: Vec<Left> = Vec::new();
         for (part, terms) in placed {
             let (_, chosen, base) = terms[0].clone();
             let mut net = 0;
@@ -1002,7 +1008,7 @@ impl Reader {
                 constant += coeff * (offset - base);
             }
             if net != 0 {
-                left.push((net, chosen, Some((part, base))));
+                left.push(Left { coeff: net, what: chosen, at: Some((part, base)) });
             }
         }
         let mut together: BTreeMap<String, i64> = BTreeMap::new();
@@ -1011,7 +1017,7 @@ impl Reader {
         }
         for (name, coeff) in together {
             if coeff != 0 {
-                left.push((coeff, What::Symbol(name), None));
+                left.push(Left { coeff, what: What::Symbol(name), at: None });
             }
         }
         Ok(Residue { constant, left })
@@ -1022,8 +1028,19 @@ impl Reader {
 #[derive(Debug, Clone)]
 struct Residue {
     constant: i64,
-    /// Each one is how many times it is counted, what it is, and where it is when that is known.
-    left: Vec<(i64, What, Option<(usize, i64)>)>,
+    left: Vec<Left>,
+}
+
+/// One name an expression would not get rid of.
+#[derive(Debug, Clone)]
+struct Left {
+    /// How many times it is counted, which is one for everything a relocation can say.
+    coeff: i64,
+    /// Which name it is, which is what a relocation points at.
+    what: What,
+    /// Which section it is in and how far into it, when this file is the one that knows. Nothing
+    /// for a name the linker has to find, which has no place here to be at.
+    at: Option<(usize, i64)>,
 }
 
 /// An expression, kept as a sum so that it survives until the names in it have values.
