@@ -79,6 +79,16 @@ impl OptLevel {
     pub const fn runs_optimizer(self) -> bool {
         !matches!(self, OptLevel::O0)
     }
+
+    /// Whether the instructions of a block are put in the order the machine finishes soonest.
+    ///
+    /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 says `-O2` and above, and gcc
+    /// turns `-fschedule-insns2` on at the two size levels as well, which costs nothing: a
+    /// schedule is a permutation of instructions that were all going to be written anyway, so it
+    /// is the one optimization here that cannot make a function larger.
+    pub const fn schedules(self) -> bool {
+        !matches!(self, OptLevel::O0 | OptLevel::O1)
+    }
 }
 
 impl fmt::Display for OptLevel {
@@ -1738,6 +1748,27 @@ pub struct Options {
     /// than a `bool` because `-O2 -fno-reorder-blocks` and `-O0` have to be different things and
     /// a `bool` set from the level could not tell them apart.
     pub reorder_blocks: Option<bool>,
+    /// Whether the instructions of a block are put in the order the machine finishes soonest, from
+    /// `-fschedule-insns2` and `-fno-schedule-insns2`.
+    ///
+    /// `None` is a command line that said neither, and then the level decides: on from `-O2`,
+    /// which is where gcc turns it on. Three way rather than a `bool` for the reason
+    /// `reorder_blocks` above is.
+    ///
+    /// gcc's name, and gcc's `2` in it, which is the one that runs after the registers are handed
+    /// out. `-fschedule-insns` without it is the pass before allocation, which rucc does not have:
+    /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 decides on one scheduler and puts
+    /// it after allocation, and section 38.8 owes the measurement that would justify a second.
+    pub schedule_insns: Option<bool>,
+    /// Whether the target's timing model is believed about the machine's units as well as about
+    /// its latencies, from `-Zcycle-accurate-model=`.
+    ///
+    /// `None` is a command line that said neither, and then the model's own answer decides. gcc
+    /// spells this `--param=cycle-accurate-model=`, `Init(1)`, and describes it as whether the
+    /// scheduling description "is mostly a cycle-accurate model of the target processor". No model
+    /// in this compiler is, every one of them says so, and this is how a person measuring the cost
+    /// of that can compile the same program both ways.
+    pub cycle_accurate_model: Option<bool>,
     /// Whether two things in a frame that are never both wanted may be the same bytes, from
     /// `-fstack-reuse=`.
     ///
@@ -2092,6 +2123,8 @@ impl Options {
             frame_pointer: false,
             red_zone: true,
             reorder_blocks: None,
+            schedule_insns: None,
+            cycle_accurate_model: None,
             stack_reuse: None,
             protector: Protector::default(),
             stack_clash: false,

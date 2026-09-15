@@ -588,6 +588,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // that wrote neither: see `reorder_blocks` in `rucc_session`.
             "-freorder-blocks" => opts.reorder_blocks = Some(true),
             "-fno-reorder-blocks" => opts.reorder_blocks = Some(false),
+            // gcc's name for the scheduler that runs after the registers are handed out, which is
+            // the only one rucc has: see `schedule_insns` in `rucc_session`. gcc also takes
+            // `-fschedule-insns` for the pass before allocation, and taking that one here would be
+            // a flag that says a pass ran when none did.
+            "-fschedule-insns2" => opts.schedule_insns = Some(true),
+            "-fno-schedule-insns2" => opts.schedule_insns = Some(false),
             "-mno-red-zone" => opts.red_zone = false,
             "-mred-zone" => opts.red_zone = true,
             // Four flags rather than one with an argument, which is how gcc spells them and how
@@ -1580,6 +1586,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 opts.rule_coverage = Some(file.to_owned());
             }
+            _ if arg.starts_with("-Zcycle-accurate-model=") => {
+                let value = &arg["-Zcycle-accurate-model=".len()..];
+                opts.cycle_accurate_model = match value {
+                    "yes" | "1" => Some(true),
+                    "no" | "0" => Some(false),
+                    _ => {
+                        return Err(err("-Zcycle-accurate-model= takes yes or no"));
+                    }
+                };
+            }
             _ if arg.starts_with("-Zregister-pressure=") => {
                 let file = &arg["-Zregister-pressure=".len()..];
                 if file.is_empty() {
@@ -2146,6 +2162,9 @@ pub fn print_config(opts: &Options) -> String {
         "registers: {}",
         if regs.is_empty() { "none".to_string() } else { regs.join(", ") }
     );
+    // What the schedule was chosen with, which is a sentence rather than a name on purpose: two
+    // runs of a benchmark that disagree are usually two models and not two compilers.
+    let _ = writeln!(out, "timing-model: {}", t.timing.map_or("none", |timing| timing.model));
     let _ = writeln!(out, "opt-level: {}", sess.opts.opt_level);
     let _ = writeln!(out, "safety: {}", sess.opts.safety);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
@@ -3009,6 +3028,44 @@ mod tests {
         assert!(parse_args(&args(&["-Zregister-pressure=", "a.c"])).is_err(), "no file named");
     }
 
+    /// Scheduling, which has the three way answer every optimization flag has: on, off, and
+    /// nothing said, which is whatever the optimization level asks for. The name is gcc's, and
+    /// gcc's has a two in it because gcc has a scheduler before allocation and one after and this
+    /// is the one after.
+    #[test]
+    fn scheduling_can_be_turned_on_and_off_and_left_to_the_optimization_level() {
+        let (on, _) = compile(&["-c", "-O0", "-fschedule-insns2", "a.c"]);
+        assert_eq!(on.schedule_insns, Some(true));
+
+        let (off, _) = compile(&["-c", "-O2", "-fno-schedule-insns2", "a.c"]);
+        assert_eq!(off.schedule_insns, Some(false));
+
+        let (quiet, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(quiet.schedule_insns, None, "nothing said, so the level decides");
+        assert!(quiet.opt_level.schedules(), "and at this level the level says yes");
+
+        let (none, _) = compile(&["-c", "a.c"]);
+        assert!(!none.opt_level.schedules(), "at no optimization it says no");
+    }
+
+    /// Whether the timing model is worth holding an instruction back over, which is a `-Z` because
+    /// it is a question about a target's description rather than about the program being compiled.
+    #[test]
+    fn whether_the_timing_model_is_cycle_accurate_can_be_overridden() {
+        let (yes, _) = compile(&["-c", "-O2", "-Zcycle-accurate-model=yes", "a.c"]);
+        assert_eq!(yes.cycle_accurate_model, Some(true));
+
+        let (no, _) = compile(&["-c", "-O2", "-Zcycle-accurate-model=no", "a.c"]);
+        assert_eq!(no.cycle_accurate_model, Some(false));
+
+        let (plain, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(plain.cycle_accurate_model, None, "the target's own answer stands");
+
+        let bad = parse_args(&args(&["-Zcycle-accurate-model=maybe", "a.c"]))
+            .expect_err("it takes yes or no");
+        assert!(bad.message.contains("yes or no"), "{}", bad.message);
+    }
+
     #[test]
     fn a_bare_dash_o_means_o1_the_way_gcc_reads_it() {
         let (opts, _) = compile(&["-O", "a.c"]);
@@ -3443,6 +3500,18 @@ mod tests {
         // RISC-V has a register file and this compiler has not written it down yet, and the
         // dump says which of those two it is rather than leaving the line out.
         assert!(text.contains("registers: none"), "{text}");
+        assert!(text.contains("timing-model: none"), "{text}");
+    }
+
+    /// The model the schedule was chosen with, which is a receipt anybody comparing two runs of a
+    /// benchmark needs: two numbers that disagree are usually two models and not two compilers.
+    #[test]
+    fn print_config_names_the_model_the_schedule_was_chosen_with() {
+        let opts = Options::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        let text = print_config(&opts);
+        let line = text.lines().find(|l| l.starts_with("timing-model:")).expect("the model");
+        assert!(line.contains("Skylake"), "{line}");
+        assert!(line.contains("published"), "a sentence saying where it came from: {line}");
     }
 
     #[test]
@@ -3453,7 +3522,7 @@ mod tests {
             text.lines().map(|l| l.split(':').next().unwrap_or_default()).collect();
         assert_eq!(keys[0], "version");
         assert_eq!(keys[1], "target");
-        assert_eq!(keys.len(), 25);
+        assert_eq!(keys.len(), 26);
         assert!(text.ends_with('\n'));
     }
 

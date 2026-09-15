@@ -773,6 +773,13 @@ fn generate(
         // is out of scope reads as whatever took its place, which is what `-O0` exists not to do.
         // Above it the frame is the win, and `-fstack-reuse=` says either answer at any level.
         reuse: opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
+        // On from `-O2`, which is where gcc turns `-fschedule-insns2` on and what
+        // `spec/optimizer/38-scheduling-and-layout.md` section 38.6 asks for. Not at `-O1`,
+        // because a schedule is a whole dependence graph per block and `-O1` is the level whose
+        // budget is roughly `-O0`'s. Not at `-O0` for the reason nothing else is.
+        schedule: opts.schedule_insns.unwrap_or_else(|| opts.opt_level.schedules()),
+        // Whatever the command line said, and the model's own answer when it said nothing.
+        accurate: opts.cycle_accurate_model,
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
