@@ -124,7 +124,7 @@ mod parse;
 pub use ast::{Rule, RuleKind, Term, TermKind};
 pub use emit::emit;
 pub use error::Error;
-pub use matcher::{Match, Matcher};
+pub use matcher::{Match, Matcher, Shape};
 pub use parse::{parse, parse_terms};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

@@ -56,7 +56,7 @@ use rucc_ir::Opcode;
 
 use crate::coverage::{GAPS, NAMES};
 use crate::lowering::Step;
-use crate::select::{Table, Test};
+use crate::select::Table;
 
 /// What rewrites an operation before the selector sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,25 +453,21 @@ pub fn rows(table: &Table) -> Vec<Row> {
     out
 }
 
-/// Every name a rule in a table is written about, which is the first test the trie makes.
+/// Every name a rule in a table is written about, which is the first question the trie asks.
 ///
 /// Node zero is the root of the trie over the patterns and the first thing any walk asks is what
-/// the term in hand is called, so its tests are exactly the set of pattern heads. There is no
-/// wildcard there to worry about: a rule matching any term at all is one nobody has written and
-/// one that would be an error to write, since a lowering has to know what it is lowering.
+/// the term in hand is called, so the branches on the head there are exactly the set of pattern
+/// heads. Nothing else can be at the root: a pattern is a term with a head, so the first step of
+/// every one of them is a head, there is no constant to compare and nothing bound yet to be the
+/// same as. There is no wildcard there to worry about either, since a rule matching any term at
+/// all is one nobody has written and one that would be an error to write, because a lowering has
+/// to know what it is lowering.
+///
+/// The names come out sorted and without repeats because the root is sorted, which is what the
+/// walk needs it to be, so there is nothing to do here but read it.
 pub(crate) fn pattern_heads(table: &Table) -> Vec<&'static str> {
     let Some(root) = table.nodes.first() else { return Vec::new() };
-    let mut found: Vec<&'static str> = root
-        .tests
-        .iter()
-        .filter_map(|(test, _)| match test {
-            Test::App { head, .. } => Some(*head),
-            // Neither can be at the root. A pattern is a term with a head, so the first step of
-            // every one of them is a head, and there is nothing bound yet to be the same as.
-            Test::Int(_) | Test::Same(_) => None,
-        })
-        .collect();
-    found.sort_unstable();
+    let mut found: Vec<&'static str> = root.heads.iter().map(|&(head, ..)| head).collect();
     found.dedup();
     found
 }

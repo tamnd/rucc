@@ -23,6 +23,40 @@
 //! `x - x`. The second occurrence becomes a test rather than a binding, so it costs one
 //! comparison and sits with the other concrete tests, ahead of the wildcard, where a rule about
 //! one value in both operands belongs.
+//!
+//! # Choosing a branch without reading every branch
+//!
+//! `spec/optimizer/36-lowering-and-isel.md` section 36.5 asks for the decision to be on the shape
+//! of the term rather than on the identity of the pattern, which is the difference between a trie
+//! that is a tree and a trie that is a tree with a list at every node. Sharing a prefix already
+//! means the head of a term is tested once rather than once per rule, but it does not say how the
+//! branch is found, and reading a node's branches in the order the rules were written is a scan
+//! over all of them. That costs what the widest node is wide: the x86-64 rule set has a hundred
+//! and sixty seven different heads a pattern can begin with, so choosing the branch for an
+//! `add.i64` meant asking a hundred and sixty six other questions first, once for every
+//! instruction the selector looks at, and a term no rule covers asked all of them.
+//!
+//! So a node holds its branches by the kind of question they ask, and the two kinds that can be
+//! searched are kept sorted: the heads by name and then by how many arguments they take, and the
+//! literals by value. At most one of either can match a subterm, because a term has one head and
+//! a constant has one value, so the order inside those two is not observable and sorting them
+//! costs nothing. Finding the branch is then a binary search, which is eight comparisons at that
+//! widest node rather than a hundred and sixty seven.
+//!
+//! # The order the kinds are tried in
+//!
+//! Which kind is asked first is a heuristic, and section 36.5 is explicit that a heuristic is to
+//! be stated rather than left to be discovered by reading what came out. The order is: the head
+//! of the term, then its value as a literal, then whether it is what an earlier binding took,
+//! then the hole that takes anything. The first three are all concrete and the hole is last,
+//! which is the specificity order above and is the part that decides which rule fires.
+//!
+//! The order among the first three decides nothing in any rule set here, because deciding
+//! something would need one node to ask two kinds of question about one place, and none does: a
+//! literal is only ever written where a pattern has descended into a constant, and a name written
+//! twice is only ever written where the first occurrence put a hole. [`Matcher::shape`] counts
+//! the nodes that mix kinds for exactly this reason, so that a rule set which starts to depend on
+//! the order is a number that changed rather than a surprise in the output.
 
 use std::fmt;
 
@@ -43,24 +77,66 @@ enum Step {
     Same(usize),
 }
 
-/// A test on one subterm. This is [`Step`] without the wildcard, because a wildcard is not a
-/// test: it is the branch taken when no test matched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Test {
-    App { head: String, arity: usize },
-    Int(i128),
-    Same(usize),
-}
-
 /// One node of the trie.
+///
+/// The branches are held by the kind of question they ask rather than in one list, which is what
+/// lets the two searchable kinds be searched. A hole is not one of them: it is not a question, it
+/// is what is left when none of the questions was answered.
 #[derive(Debug, Default)]
 pub(crate) struct Node {
-    /// The concrete tests, in the order they were first written, tried before the wildcard.
-    pub(crate) tests: Vec<(Test, usize)>,
+    /// The branches taken on the head of the subterm, sorted by name and then by how many
+    /// arguments it takes.
+    pub(crate) heads: Vec<(String, usize, usize)>,
+    /// The branches taken on the value of a subterm that is a constant, sorted by value.
+    pub(crate) ints: Vec<(i128, usize)>,
+    /// The branches taken when the subterm is what an earlier binding took, in the order the
+    /// rules were written, because two of them can match one subterm.
+    pub(crate) same: Vec<(usize, usize)>,
     /// The branch that takes anything, and the name it binds it under.
     pub(crate) wildcard: Option<(String, usize)>,
     /// The rule that ends here, if one does.
     pub(crate) accept: Option<usize>,
+}
+
+impl Node {
+    /// Every branch this node has, in the order the walk tries them, which is what printing it
+    /// and counting it are both written against.
+    fn branches(&self) -> impl Iterator<Item = (Shown<'_>, usize)> {
+        let heads = self.heads.iter().map(|(head, arity, next)| (Shown::App(head, *arity), *next));
+        let ints = self.ints.iter().map(|&(value, next)| (Shown::Int(value), next));
+        let same = self.same.iter().map(|&(index, next)| (Shown::Same(index), next));
+        heads.chain(ints).chain(same)
+    }
+
+    /// How many kinds of question this node asks. More than one means the order the kinds are
+    /// tried in decides which rule fires here.
+    fn kinds(&self) -> usize {
+        usize::from(!self.heads.is_empty())
+            + usize::from(!self.ints.is_empty())
+            + usize::from(!self.same.is_empty())
+    }
+}
+
+/// One branch of a node as something to print.
+enum Shown<'a> {
+    App(&'a str, usize),
+    Int(i128),
+    Same(usize),
+}
+
+/// What a rule set costs to match against, which is what the header of a generated table says
+/// and what a test that the tree is a tree asserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    /// How many nodes the trie has.
+    pub nodes: usize,
+    /// How many branches the widest node has, which is what a scan over it would cost.
+    pub widest: usize,
+    /// How many comparisons a binary search over that many branches takes.
+    pub search: usize,
+    /// How many nodes ask more than one kind of question, and so depend on the order the kinds
+    /// are tried in. Nothing shipped here does.
+    pub mixed: usize,
 }
 
 /// The automaton a rule set compiles into.
@@ -117,15 +193,48 @@ impl Matcher {
             }
         }
 
-        if errors.is_empty() { Ok(matcher) } else { Err(errors) }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        matcher.sort();
+        Ok(matcher)
     }
 
     /// Add one step at one node, reusing the branch if it is already there.
     fn follow(&mut self, at: usize, step: Step) -> usize {
-        let test = match step {
-            Step::App { head, arity } => Test::App { head, arity },
-            Step::Int(value) => Test::Int(value),
-            Step::Same(index) => Test::Same(index),
+        match step {
+            Step::App { head, arity } => {
+                let found = self.nodes[at]
+                    .heads
+                    .iter()
+                    .find(|(have, count, _)| *have == head && *count == arity);
+                if let Some(&(_, _, next)) = found {
+                    return next;
+                }
+                let next = self.push();
+                self.nodes[at].heads.push((head, arity, next));
+                next
+            }
+            Step::Int(value) => {
+                if let Some(&(_, next)) =
+                    self.nodes[at].ints.iter().find(|(have, _)| *have == value)
+                {
+                    return next;
+                }
+                let next = self.push();
+                self.nodes[at].ints.push((value, next));
+                next
+            }
+            Step::Same(index) => {
+                if let Some(&(_, next)) =
+                    self.nodes[at].same.iter().find(|(have, _)| *have == index)
+                {
+                    return next;
+                }
+                let next = self.push();
+                self.nodes[at].same.push((index, next));
+                next
+            }
             Step::Bind(name) => {
                 if let Some((_, next)) = &self.nodes[at].wildcard {
                     // The name is the first one written. Two rules that put different names in
@@ -135,15 +244,24 @@ impl Matcher {
                 }
                 let next = self.push();
                 self.nodes[at].wildcard = Some((name, next));
-                return next;
+                next
             }
-        };
-        if let Some((_, next)) = self.nodes[at].tests.iter().find(|(have, _)| *have == test) {
-            return *next;
         }
-        let next = self.push();
-        self.nodes[at].tests.push((test, next));
-        next
+    }
+
+    /// Put the searchable branches in the order a search needs them.
+    ///
+    /// This is the last thing the build does, so that everything before it can add a branch by
+    /// pushing. Nothing about which rule fires depends on it: one head matches a term and one
+    /// value matches a constant, so the order inside either list is not something a match can
+    /// observe. What it buys is that the walk can binary search rather than read the list.
+    fn sort(&mut self) {
+        for node in &mut self.nodes {
+            node.heads.sort_by(|(head, arity, _), (other, count, _)| {
+                head.cmp(other).then(arity.cmp(count))
+            });
+            node.ints.sort_by_key(|&(value, _)| value);
+        }
     }
 
     fn push(&mut self) -> usize {
@@ -177,28 +295,38 @@ impl Matcher {
         };
         let node = &self.nodes[at];
 
-        for (test, next) in &node.tests {
-            let matched = match (test, &subject.kind) {
-                (Test::Int(want), TermKind::Int(have)) => want == have,
-                (Test::App { head, arity }, TermKind::App { head: name, args }) => {
-                    head == name && *arity == args.len()
-                }
-                // Written out rather than compared with `==`, because a term carries where it
-                // was written and two occurrences of one name are in two different places.
-                (Test::Same(index), _) => {
-                    bindings.get(*index).is_some_and(|(_, bound)| alike(bound, subject))
-                }
-                _ => false,
-            };
-            if !matched {
-                continue;
+        // The head, the value and the repeat, in that order, which is the heuristic the module
+        // doc states. At most one head and at most one value can match, so each of those is a
+        // search rather than a walk, which is the same shape the compiler's own walk has.
+        let mut taken: Vec<usize> = Vec::new();
+        if let TermKind::App { head, args } = &subject.kind {
+            let found = node
+                .heads
+                .binary_search_by(|(have, count, _)| {
+                    have.as_str().cmp(head.as_str()).then(count.cmp(&args.len()))
+                })
+                .ok();
+            taken.extend(found.map(|at| node.heads[at].2));
+        }
+        if let TermKind::Int(value) = &subject.kind {
+            let found = node.ints.binary_search_by(|(have, _)| have.cmp(value)).ok();
+            taken.extend(found.map(|at| node.ints[at].1));
+        }
+        // Written out rather than compared with `==`, because a term carries where it was
+        // written and two occurrences of one name are in two different places.
+        for &(index, next) in &node.same {
+            if bindings.get(index).is_some_and(|(_, bound)| alike(bound, subject)) {
+                taken.push(next);
             }
+        }
+
+        for next in taken {
             let mut deeper = left.clone();
             if let TermKind::App { args, .. } = &subject.kind {
                 deeper.extend(args.iter().rev());
             }
             let depth = bindings.len();
-            if let Some(rule) = self.run(*next, deeper, bindings) {
+            if let Some(rule) = self.run(next, deeper, bindings) {
                 return Some(rule);
             }
             bindings.truncate(depth);
@@ -225,6 +353,23 @@ impl Matcher {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.len() <= 1
+    }
+
+    /// What this rule set costs to match against.
+    ///
+    /// The widest node is the measurement that matters, because it is the one the shape of the
+    /// tree was changed for: it is what a scan would read to the end of and what a search reads
+    /// eight of. It goes in the header of the generated table, where somebody reviewing a rule
+    /// they added can see what adding it did.
+    #[must_use]
+    pub fn shape(&self) -> Shape {
+        let widest = self.nodes.iter().map(|node| node.branches().count()).max().unwrap_or(0);
+        Shape {
+            nodes: self.nodes.len(),
+            widest,
+            search: usize::try_from(widest.next_power_of_two().trailing_zeros()).unwrap_or(0),
+            mixed: self.nodes.iter().filter(|node| node.kinds() > 1).count(),
+        }
     }
 }
 
@@ -290,13 +435,13 @@ impl Matcher {
         if let Some(rule) = node.accept {
             writeln!(f, "{pad}=> rule {rule}")?;
         }
-        for (test, next) in &node.tests {
-            match test {
-                Test::App { head, arity } => writeln!(f, "{pad}{head}/{arity}")?,
-                Test::Int(value) => writeln!(f, "{pad}{value}")?,
-                Test::Same(index) => writeln!(f, "{pad}same as binding {index}")?,
+        for (branch, next) in node.branches() {
+            match branch {
+                Shown::App(head, arity) => writeln!(f, "{pad}{head}/{arity}")?,
+                Shown::Int(value) => writeln!(f, "{pad}{value}")?,
+                Shown::Same(index) => writeln!(f, "{pad}same as binding {index}")?,
             }
-            self.show(f, *next, depth + 1)?;
+            self.show(f, next, depth + 1)?;
         }
         if let Some((name, next)) = &node.wildcard {
             writeln!(f, "{pad}bind {name}")?;
