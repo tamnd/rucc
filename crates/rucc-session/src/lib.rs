@@ -2102,6 +2102,16 @@ pub struct Options {
     /// says why: a capability in flight is four words, and if materializing one spills something
     /// else in a hot loop then check elimination cannot save it.
     pub register_pressure: Option<String>,
+    /// Where `-Zlowering=FILE` writes what the pre-selection lowering group did.
+    ///
+    /// A measurement and spelled with a `-Z` for the same reason as the two above: nothing about
+    /// the code that comes out changes when it is on. One file per run of the compiler, one block
+    /// per function, holding every member of the group in the order it ran and what each of them
+    /// found and left behind. What it is read for is a function that came out of the back end in a
+    /// shape somebody did not expect, since the block says which lowering changed it, and what it
+    /// is read for after that is a construct the selector refused by name, since the block says
+    /// whether the step that answers for that construct was offered it and walked away.
+    pub lowering_dump: Option<String>,
 }
 
 impl Options {
@@ -2178,6 +2188,7 @@ impl Options {
             verify_each: cfg!(debug_assertions),
             rule_coverage: None,
             register_pressure: None,
+            lowering_dump: None,
         }
     }
 

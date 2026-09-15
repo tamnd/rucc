@@ -167,6 +167,7 @@ pub mod fold;
 pub mod frame;
 pub mod layout;
 pub mod lower;
+pub mod lowering;
 pub mod pipeline;
 pub mod pressure;
 pub mod quad;
