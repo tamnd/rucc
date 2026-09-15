@@ -160,15 +160,15 @@ fn an_object_file_is_not_this_and_is_still_passed_through() {
 }
 
 #[test]
-fn stopping_before_the_assembler_leaves_the_text_alone() {
-    // `rucc -E probe.s` asks for the preprocessor and assembly enters after it, so there is no
-    // phase left to run and no object to write. What comes out is text, and the directives in it
-    // are untouched, because the preprocessor has no business with a line that starts with a dot.
+fn stopping_before_the_assembler_writes_nothing_and_says_nothing() {
+    // A `.s` has no preprocessing phase, so `rucc -E probe.s` asks for a phase the file does not
+    // have and there is nothing left to do. gcc 16 exits zero and writes no file at all for the
+    // same command, and this is here because the obvious reading of `-E` is that it copies the text
+    // through, which would leave a file beside a build that never asked for one.
     let dir = dir("stopped");
     write(&dir, "probe.s", ASSEMBLY);
     let (ok, said) = run(&dir, &["-E", "probe.s", "-o", "out.i"]);
     assert!(ok, "a mode that never reaches the assembler was refused:\n{said}");
-    let text = std::fs::read_to_string(dir.join("out.i")).expect("the preprocessed file is there");
-    assert!(text.contains(".globl probe"), "the directives did not survive:\n{text}");
+    assert!(!dir.join("out.i").exists(), "a file was written for a phase the input does not have");
     assert!(!dir.join("probe.o").exists(), "an object was written by a mode that stops before one");
 }
