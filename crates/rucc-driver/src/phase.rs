@@ -198,33 +198,63 @@ impl std::fmt::Display for XError {
 
 impl std::error::Error for XError {}
 
+/// What one entry of the input list was written as.
+///
+/// Three things share the list because all three are positional and the position is what they mean.
+/// An archive is searched for what is undefined at the moment the linker reaches it, so a library
+/// named before the object that needs it contributes nothing. A great many of the linker's own
+/// options are a bracket around the files after them, so an option moved away from what it brackets
+/// says nothing at all. Keeping a list of files, a list of libraries and a list of linker words
+/// apart would lose the one fact each of them depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A path, which is a file this command line may have something to do to.
+    File,
+    /// `-l<name>`, which the linker resolves against its search path.
+    Library,
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    Linker,
+}
+
 /// One input file, with the `-x` setting that was in effect where it appeared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
-    /// The path as it was written on the command line, or the name of a `-l` library.
+    /// The path as it was written on the command line, the name of a `-l` library, or one word
+    /// handed straight to the linker.
     pub path: String,
     /// The language forced by an earlier `-x`, if any. `-x none` clears it.
     pub forced: Option<InputKind>,
-    /// Whether this came from `-l<name>` rather than being a path.
-    ///
-    /// A library is an input to the link and is held here rather than beside the other link
-    /// flags, because where it falls among the objects is what decides whether it is searched
-    /// for what they left undefined. A list of objects and a separate list of libraries would
-    /// lose exactly that.
-    pub library: bool,
+    /// Which of the three this is, and so what its position means.
+    pub role: Role,
 }
 
 impl Input {
     /// An input with no `-x` in effect.
     #[must_use]
     pub fn new(path: impl Into<String>) -> Input {
-        Input { path: path.into(), forced: None, library: false }
+        Input { path: path.into(), forced: None, role: Role::File }
     }
 
     /// `-l<name>`, which is an input to the link and to nothing else.
     #[must_use]
     pub fn library(name: impl Into<String>) -> Input {
-        Input { path: name.into(), forced: None, library: true }
+        Input { path: name.into(), forced: None, role: Role::Library }
+    }
+
+    /// One word of `-Wl,` or `-Xlinker`, which is read by the linker and by nothing here.
+    #[must_use]
+    pub fn linker(arg: impl Into<String>) -> Input {
+        Input { path: arg.into(), forced: None, role: Role::Linker }
+    }
+
+    /// How this input is named in a message about it.
+    #[must_use]
+    pub fn named(&self) -> String {
+        match self.role {
+            Role::File => self.path.clone(),
+            Role::Library => format!("-l{}", self.path),
+            Role::Linker => format!("-Wl,{}", self.path),
+        }
     }
 
     /// What this input is, taking `-x` into account.
@@ -233,7 +263,7 @@ impl Input {
     ///
     /// Returns the extension when it names a language that is out of scope.
     pub fn kind(&self) -> Result<InputKind, XError> {
-        if self.library {
+        if self.role != Role::File {
             return Ok(InputKind::LinkerInput);
         }
         match self.forced {
@@ -552,6 +582,18 @@ impl Plan {
         let mut members = Vec::new();
 
         for (input, kind) in inputs.iter().zip(kinds) {
+            // A word the user handed the linker is not a file and nothing here does anything to it,
+            // so it is neither a job nor something an archive could hold. It is in this list rather
+            // than beside the other link flags so that it reaches the linker among the files it was
+            // written among, which is the note on [`Role`]. On a command line that does not link it
+            // is dropped without a word, which is what GCC does with one.
+            if input.role == Role::Linker {
+                if linking {
+                    link_inputs.push(Item::Linker(input.path.clone()));
+                }
+                continue;
+            }
+
             // An object, an archive or a shared library has nothing done to it. It reaches the
             // linker under the name it was written with, and its name is not derived from
             // anything, which is why this case is separate rather than falling out of the
@@ -564,11 +606,7 @@ impl Plan {
                 // leaving the file out would be an archive that is quietly missing half of what
                 // was asked for, which a link finds out about much later.
                 if archiving {
-                    let named = if input.library {
-                        format!("-l{}", input.path)
-                    } else {
-                        input.path.clone()
-                    };
+                    let named = input.named();
                     return Err(plan_err(format!(
                         "{named}: an archive is written from the objects this command line \
                          compiles, and the symbol index in it needs the names each member \
@@ -577,7 +615,7 @@ impl Plan {
                     )));
                 }
                 if linking {
-                    link_inputs.push(if input.library {
+                    link_inputs.push(if input.role == Role::Library {
                         Item::Library(input.path.clone())
                     } else {
                         Item::File(input.path.clone())
@@ -587,17 +625,13 @@ impl Plan {
                     // this is a note rather than an error.
                     notes.push(format!(
                         "{}: linker input unused because linking was not requested",
-                        if input.library {
-                            format!("-l{}", input.path)
-                        } else {
-                            input.path.clone()
-                        }
+                        input.named()
                     ));
                 }
                 // A library is not a file this compilation does anything to, so it gets no job.
                 // One would print a line under `-###` saying nothing happens to it, next to the
                 // note above already saying so.
-                if input.library {
+                if input.role == Role::Library {
                     continue;
                 }
                 jobs.push(Job {
@@ -939,7 +973,7 @@ mod tests {
 
     #[test]
     fn dash_x_overrides_the_extension() {
-        let inputs = [Input { path: "a.txt".into(), forced: Some(InputKind::C), library: false }];
+        let inputs = [Input { path: "a.txt".into(), forced: Some(InputKind::C), role: Role::File }];
         let p = Plan::new(&linux(), &inputs, None).expect("expected a plan");
         assert_eq!(p.jobs[0].kind, InputKind::C);
         assert_eq!(p.jobs[0].phases.first(), Some(&Phase::Preprocess));
