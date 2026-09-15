@@ -22,9 +22,10 @@
 //! or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
 //!
 //! Everything else is nothing at all rather than a guess, and the caller turns that into a refusal
-//! that names the statement. Labels and directives are not read, because a label inside a function
-//! is a place something can jump to and the block layout has already decided where the places are.
-//! The scaled index of an addressing mode is not read. Neither is an instruction whose opcode has
+//! that names the statement. Labels are not read, because a label inside a function is a place
+//! something can jump to and the block layout has already decided where the places are. Directives
+//! are not read either, with one exception, which is [`alignment`] and has a section of its own
+//! below. The scaled index of an addressing mode is not read. Neither is an instruction whose opcode has
 //! an operand nothing at all says anything about, which [`machine`] explains. Two things do say.
 //! An operand the description fixes to a register is read, because there is only one register it
 //! could be, and it comes back as a [`Piece::Implicit`] for the caller to say whether anything of
@@ -41,10 +42,27 @@
 //! read here too, and the width comes from the caller: the statement's operands have C types, the
 //! caller knows them, and it passes their widths in. Every register argument has to agree on one
 //! width, since two that disagree are an instruction the program will have to spell out itself.
+//!
+//! # The one directive that is read
+//!
+//! An alignment, which is `.p2align`, `.align` and `.balign`, and which is not an instruction at
+//! all. It says that whatever comes after it begins at an address that is a multiple of a number,
+//! and it is the one thing a template asks for that is about where an instruction is rather than
+//! about what one does.
+//!
+//! It is read rather than refused because a program that writes one measured something. zstd puts
+//! `.p2align 5` in front of the match loop of `ZSTD_compressBlock_lazy_generic` with a comment
+//! saying it measured a five per cent loss on two compression levels when the loop moved across a
+//! cache line boundary, which is a program asking to be insulated from a compiler's layout rather
+//! than asking for anything to be computed. The right answer to that is to do what it says.
+//!
+//! What comes back is [`ALIGN`] with the boundary in bytes on it, and everything downstream treats
+//! it the way it treats a fence: an instruction moved across one is an alignment of something other
+//! than what the program pointed at.
 
 use crate::operand::{Constraint, OperandDesc};
 use crate::regs::{PhysReg, Segment};
-use crate::x86_64::insts::form;
+use crate::x86_64::insts::{ALIGN, form};
 use crate::x86_64::text::{Arg, Shape, Width, gpr_named, machine, written};
 
 /// What one operand of an instruction in a template is filled with.
@@ -142,6 +160,17 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Line>> {
             carried = true;
             continue;
         }
+        // A directive before an instruction, because a directive is not a mnemonic and would be
+        // refused by the one below. Only the alignments are read and everything else falls through
+        // to that refusal, which is what a template asking for a section or a symbol gets. A repeat
+        // prefix in front of one is half an instruction and is refused like any other.
+        if let Some(line) = alignment(text) {
+            if carried {
+                return None;
+            }
+            lines.push(line);
+            continue;
+        }
         lines.push(instruction(text, carried, widths)?);
         carried = false;
     }
@@ -149,6 +178,47 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Line>> {
     // the reason the whole of one is.
     if carried { None } else { Some(lines) }
 }
+
+/// The alignment that line asks for, or nothing for a line that is not one of the three that ask.
+///
+/// The three are one request spelled three ways and the difference between them is what the number
+/// means. `.p2align` counts in powers of two, `.balign` counts in bytes, and `.align` is whichever
+/// of the two the target decided, which on x86 with an ELF assembler is bytes. What comes back is
+/// always the boundary in bytes, so the three spellings are one [`Line`] and nothing downstream has
+/// to know which was written.
+///
+/// A second argument is refused rather than ignored, and there are two of them an assembler takes.
+/// The first is the byte to fill with, which this decides rather than the program: what a gap in the
+/// middle of a function is reached by is falling into it, so it has to be filled with something that
+/// does nothing and a program that asked for anything else asked for an instruction stream this
+/// cannot write. The second is a limit on how far to skip, which says to align only when it is cheap
+/// enough, and that is a different request from this one rather than a decoration on it.
+fn alignment(text: &str) -> Option<Line> {
+    let (name, rest) = text.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if rest.contains(',') {
+        return None;
+    }
+    let number: u32 = rest.parse().ok()?;
+    let bytes = match name {
+        // A power of two, and one too large to be a boundary on any machine is refused here rather
+        // than overflowing into one that is.
+        ".p2align" => 1u32.checked_shl(number).filter(|&bytes| bytes <= MOST)?,
+        ".align" | ".balign" => number,
+        _ => return None,
+    };
+    if !bytes.is_power_of_two() || bytes > MOST {
+        return None;
+    }
+    Some(Line { opcode: ALIGN, operands: Vec::new(), at: None, imm: Some(i64::from(bytes)) })
+}
+
+/// The largest boundary a template may ask for, which is a page.
+///
+/// A number rather than no limit at all, because the padding is written into the function and a
+/// boundary larger than the pages the program is loaded in is a request the section alignment cannot
+/// carry anyway. Nothing real asks for more: what programs ask for is a cache line or two.
+const MOST: u32 = 4096;
 
 /// Whether a word is the repeat prefix, in any of the spellings that mean the same thing.
 ///
@@ -630,5 +700,43 @@ mod tests {
             let lines = read(&text, &[]).unwrap_or_else(|| panic!("{text} is a load"));
             assert_eq!(lines[0].at.expect("an address").disp, disp, "{text}");
         }
+    }
+
+    /// The three spellings of a boundary, all of which mean the same thing and two of which say it
+    /// in bytes while the first says it as a power. zstd writes the first one in front of the match
+    /// loop of its lazy matcher, and the other two are what a program written for another assembler
+    /// says.
+    #[test]
+    fn an_alignment_is_read_in_all_three_spellings_and_carries_its_boundary_in_bytes() {
+        let cases = [(".p2align 5", 32), (".align 16", 16), (".balign 8", 8), (".p2align 0", 1)];
+        for (template, bytes) in cases {
+            let lines = read(template, &[]).unwrap_or_else(|| panic!("{template} is an alignment"));
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, ALIGN, "{template}");
+            assert!(lines[0].operands.is_empty(), "{template}");
+            assert_eq!(lines[0].at, None, "{template}");
+            assert_eq!(lines[0].imm, Some(bytes), "{template}");
+        }
+        let lines = read(".p2align 4\n\tpause", &[]).expect("an alignment in front of one");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].opcode, ALIGN);
+        assert_eq!(lines[1].opcode, "pause");
+    }
+
+    /// What an alignment this cannot promise looks like. A second argument is a fill byte or a
+    /// number of bytes to stop after, and either one means something this does not do, so it is
+    /// refused rather than dropped on the floor. A boundary that is not a power of two or is larger
+    /// than a page is one nothing here can give.
+    #[test]
+    fn an_alignment_that_asks_for_more_than_a_boundary_is_refused() {
+        assert_eq!(read(".p2align 4, 0x90", &[]), None, "a fill byte");
+        assert_eq!(read(".p2align 4, 0x90, 8", &[]), None, "a most to skip");
+        assert_eq!(read(".align 24", &[]), None, "a boundary that is not a power of two");
+        assert_eq!(read(".balign 8192", &[]), None, "a boundary larger than a page");
+        assert_eq!(read(".p2align 20", &[]), None, "a power larger than a page");
+        assert_eq!(read(".p2align", &[]), None, "a boundary that was left out");
+        assert_eq!(read(".p2align four", &[]), None, "a boundary that is not a number");
+        assert_eq!(read(".skip 16", &[]), None, "a directive that is not an alignment");
+        assert_eq!(read("rep; .p2align 4", &[]), None, "a prefix in front of one");
     }
 }

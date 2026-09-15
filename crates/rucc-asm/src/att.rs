@@ -311,6 +311,23 @@ impl Writer<'_> {
         let data = func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        // The one opcode that is not an instruction and is still written down. Everything below
+        // spells a mnemonic and its arguments, and this has neither: what it says is where the next
+        // instruction starts, which in a listing is the assembler's own directive. The fill byte is
+        // the one that does nothing, because a gap in the middle of a function is reached by falling
+        // into it rather than by jumping over it.
+        if opcode == x86_64::ALIGN {
+            let bytes = data.imm.map_or(0, |imm| func[imm].0);
+            let boundary = u32::try_from(bytes).ok().filter(|at| at.is_power_of_two());
+            let Some(boundary) = boundary else {
+                return Err(Error::Opcode {
+                    func: func_name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            let _ = writeln!(self.out, "\t.p2align\t{}, 0x90", boundary.trailing_zeros());
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: func_name.to_owned(), opcode: spelled.to_owned() });
         };
@@ -631,6 +648,21 @@ mod tests {
             let ret = Opcode::new(names.intern("x64.ret_val_32"));
             func.build(block, ret).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
         });
+        assert_eq!(body(&text), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn an_alignment_is_written_as_the_directive_that_asks_for_it() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let align = Opcode::new(names.intern("x64.align"));
+            func.build(block, align).imm(32).finish();
+        });
+        // The boundary is a power here and a count of bytes in the machine IR, because the
+        // assembler reads the one and a program writes the other. The fill is the one byte that
+        // does nothing, so a jump that lands in the padding still arrives. A directive rather than
+        // an instruction, which is why it is looked for in the whole text and not in the body.
+        assert!(text.contains("\n\t.p2align\t5, 0x90\n"), "{text}");
         assert_eq!(body(&text), Vec::<&str>::new());
     }
 

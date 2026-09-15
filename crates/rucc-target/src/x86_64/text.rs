@@ -721,6 +721,13 @@ static TEXT: &[(&str, &[Written])] = &[
     // the name is the whole of it.
     ("pause", &[spell("pause", &[])]),
     ("cpuid", &[spell("cpuid", &[])]),
+    // Where the next instruction starts, which is written as no instructions at all for the reason
+    // the `ret_val` family below is: it is a fact the writers act on rather than something the
+    // processor does. What each of them writes for it is a directive in the listing and a run of
+    // padding in the bytes, neither of which is a mnemonic, so there is nothing for this table to
+    // spell. The number is on the instruction rather than here, since two alignments are the same
+    // opcode asking for different boundaries.
+    ("align", &[]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of
@@ -1202,7 +1209,7 @@ pub fn gpr_name(reg: PhysReg, width: Width) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::operand::Constraint;
-    use crate::x86_64::insts::{Form, INSTS, form};
+    use crate::x86_64::insts::{ALIGN, Form, INSTS, form};
     use crate::x86_64::{GPR, REGS};
 
     /// Every index into the operand vector that one of these arguments names.
@@ -1351,6 +1358,10 @@ mod tests {
         {
             assert_eq!(written(name), Some([].as_slice()), "{name}");
         }
+        // The alignment is here for a different reason than the rest of them. The others leave
+        // nothing behind at all, and it leaves a directive, which is not a mnemonic and so is not
+        // anything this table could spell. Each writer puts its own down by name.
+        assert_eq!(written(ALIGN), Some([].as_slice()));
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
             assert_eq!(
@@ -1364,6 +1375,7 @@ mod tests {
                         | Form::RetVal2Vec
                         | Form::ArgValVec
                         | Form::BrCond
+                        | Form::Align
                 ),
                 "{name} and whether it is an instruction disagree"
             );

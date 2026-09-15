@@ -249,6 +249,30 @@ impl Assembler<'_> {
         let data = self.func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        // The one opcode that is not an instruction. Where the listing writes the assembler's own
+        // directive this has to do what the assembler would have done, which is pad up to the
+        // boundary with the byte that does nothing, since the gap is reached by falling into it.
+        //
+        // The section has to be told as well. The padding puts the next instruction at a multiple of
+        // the boundary counted from the front of the section, and what makes that an address the
+        // program sees is the section itself landing on one, so the boundary goes on the section's
+        // alignment the way a function's own does.
+        if opcode == x86_64::ALIGN {
+            let bytes = data.imm.map_or(0, |imm| self.func[imm].0);
+            let boundary = u32::try_from(bytes).ok().filter(|at| at.is_power_of_two());
+            let Some(boundary) = boundary else {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            self.text.align = self.text.align.max(boundary);
+            let step = boundary as usize;
+            while self.text.bytes.len() % step != 0 {
+                self.text.bytes.push(NOP);
+            }
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
         };
@@ -481,6 +505,32 @@ mod tests {
             func.build(block, ret).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
         });
         assert!(text.bytes.is_empty(), "{:?}", text.bytes);
+    }
+
+    #[test]
+    fn an_alignment_is_the_bytes_between_where_it_is_and_the_boundary_it_asks_for() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
+            let align = Opcode::new(names.intern("x64.align"));
+            let two = |func: &mut Func| {
+                func.build(block, add)
+                    .operand(Operand::write(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RCX), GPR))
+                    .finish();
+            };
+            two(func);
+            func.build(block, align).imm(8).finish();
+            two(func);
+        });
+        // Two bytes of addition, six of nothing, two more of addition. The padding is the one byte
+        // instruction that does nothing rather than a run of zeroes, because the processor may walk
+        // through it to get to what comes after, which is the whole reason a program asks.
+        assert_eq!(hex(&text.bytes), "01 c8 90 90 90 90 90 90 01 c8");
+        // The section has to be told as well. A function aligned to eight inside a section aligned
+        // to one is aligned to eight in its own reckoning and to nothing at all in the program's.
+        assert!(text.align >= 8, "{}", text.align);
     }
 
     #[test]
