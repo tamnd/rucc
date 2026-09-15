@@ -46,6 +46,8 @@ use rucc_ir::{
     Opcode, Signature, Type, Value,
 };
 
+use crate::capability;
+
 /// Rewrites every ordered access into the plain access this machine already makes ordered, and
 /// leaves a barrier where the machine needs one.
 ///
@@ -1038,7 +1040,7 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32) {
         match func[inst].opcode {
             Opcode::Memcpy => copy(func, names, inst, word),
             Opcode::Memset => fill(func, names, inst, word),
-            Opcode::Memmove => library(func, names, inst, "memmove", word),
+            Opcode::Memmove => library(func, names, inst, Opcode::Memmove, word),
             _ => {}
         }
     }
@@ -1055,7 +1057,9 @@ fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
     let [into, from] = func[func[inst].args] else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let Some(plan) = chunks(info, word) else { return library(func, names, inst, "memcpy", word) };
+    let Some(plan) = chunks(info, word) else {
+        return library(func, names, inst, Opcode::Memcpy, word);
+    };
     for (at, width) in plan {
         let ty = Type::int(width * 8);
         let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
@@ -1078,9 +1082,11 @@ fn fill(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
     let Some(spelled) = literal(func, byte) else {
-        return library(func, names, inst, "memset", word);
+        return library(func, names, inst, Opcode::Memset, word);
     };
-    let Some(plan) = chunks(info, word) else { return library(func, names, inst, "memset", word) };
+    let Some(plan) = chunks(info, word) else {
+        return library(func, names, inst, Opcode::Memset, word);
+    };
     for (at, width) in plan {
         let ty = Type::int(width * 8);
         let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
@@ -1103,7 +1109,13 @@ fn fill(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
 /// a constant in a register and the byte is widened. The value each returns is its first argument,
 /// which nothing reads, so the call is built as returning nothing rather than as returning a
 /// pointer nobody looks at.
-fn library(func: &mut Func, names: &mut Interner, inst: Inst, routine: &str, word: u32) {
+fn library(func: &mut Func, names: &mut Interner, inst: Inst, opcode: Opcode, word: u32) {
+    // What each of the three is called is in the capability table, since a call standing in for an
+    // operation the machine has no instruction for is exactly what that table is a list of. A copy
+    // and a fill answer at the size this pass gives up at and a move answers at any size, which is
+    // the mode each is written down under there.
+    let mode = if opcode == Opcode::Memmove { "any" } else { "big" };
+    let Some(routine) = capability::libcall(opcode, mode) else { return };
     let [into, second] = func[func[inst].args] else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
@@ -1115,14 +1127,11 @@ fn library(func: &mut Func, names: &mut Interner, inst: Inst, routine: &str, wor
     let count = ahead_const(func, inst, Imm::int(i128::from(size), words), words);
     // A fill passes an `int` where the IR passes the byte itself, and the widening is a zero
     // extension because the routine looks at the low eight bits and nothing else.
-    let second = match routine {
-        "memset" => widened(func, inst, second),
-        _ => second,
-    };
+    let second = if opcode == Opcode::Memset { widened(func, inst, second) } else { second };
 
     let sig = func.add_signature(Signature::new().with_params(&[
         Type::PTR,
-        if routine == "memset" { Type::int(32) } else { Type::PTR },
+        if opcode == Opcode::Memset { Type::int(32) } else { Type::PTR },
         words,
     ]));
     let callee = names.intern(routine);
