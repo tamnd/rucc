@@ -52,6 +52,20 @@ pub struct AsmOperand {
     /// `"0"` is the whole of what a matching constraint says: this input and that output are one
     /// place, so whatever the assembly leaves there is what the output gets.
     pub tied: Option<usize>,
+    /// The letter that names a register, for a constraint that names one.
+    ///
+    /// `"=a"` is an output in `rax` and `"c"` is an input in `rcx`. This matters because a
+    /// constraint letter is the only thing in an assembly statement that can say a register the
+    /// template does not name, and an instruction may use a register without its text saying so:
+    /// `cpuid` takes its leaf in `eax` and leaves its answer in all four registers, and which of
+    /// the statement's operands is in each of them is said here or nowhere.
+    ///
+    /// The letter rather than the register, because which register `a` means is the target's
+    /// business and this crate has no targets in it.
+    ///
+    /// `None` when no letter named a register, and also when more than one did, since a constraint
+    /// offering a choice of registers has not named one.
+    pub fixed: Option<char>,
 }
 
 /// The operands of one assembly statement, in the order the template counts them.
@@ -88,6 +102,7 @@ impl AsmOperands {
                 result: taken,
                 value: read,
                 tied: entry.tied,
+                fixed: entry.fixed,
             });
         }
 
@@ -146,6 +161,7 @@ struct Entry {
     memory: bool,
     updates: bool,
     tied: Option<usize>,
+    fixed: Option<char>,
 }
 
 impl Entry {
@@ -160,6 +176,8 @@ impl Entry {
         let mut memory = false;
         let mut register = false;
         let mut tied = None;
+        let mut fixed = None;
+        let mut several = false;
 
         let mut rest = text.chars().peekable();
         while let Some(letter) = rest.next() {
@@ -176,12 +194,24 @@ impl Entry {
                 // The memory forms. `o` and `V` are the offsettable and the non offsettable halves
                 // of `m`, and all three are an address as far as anything here is concerned.
                 'm' | 'o' | 'V' => memory = true,
+                // The letters that name one register rather than a class of them, which are the
+                // first four registers and the two index registers. Kept as well as counted,
+                // because an instruction may use a register its text does not name and this is the
+                // only thing in the statement that could say what is in it. Which register each
+                // letter means is not decided here. See [`AsmOperand::fixed`].
+                'a' | 'b' | 'c' | 'd' | 'S' | 'D' => {
+                    register = true;
+                    if fixed.replace(letter).is_some() {
+                        several = true;
+                    }
+                }
                 // A register, an immediate, or either. `g` and `X` allow memory as well, and the
                 // front end takes the register when it has the choice, so they count as registers
-                // here for the same reason `rm` does.
-                'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'A'
-                | 'q' | 'Q' | 'f' | 't' | 'u' | 'x' | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j'
-                | 'z' | 'w' => register = true,
+                // here for the same reason `rm` does. `A` is `rdx` and `rax` at once, so it is
+                // counted here rather than above: it names a pair and the question above is which
+                // one register an operand is in.
+                'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
+                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' => register = true,
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
                 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' => {
@@ -208,7 +238,8 @@ impl Entry {
         if !memory && !register {
             return None;
         }
-        Some(Entry { role, memory: memory && !register, updates, tied })
+        let fixed = if several { None } else { fixed };
+        Some(Entry { role, memory: memory && !register, updates, tied, fixed })
     }
 }
 
@@ -310,6 +341,28 @@ mod tests {
     #[test]
     fn a_number_naming_an_output_in_memory_is_refused() {
         assert_eq!(AsmOperands::read("=m,0", &[], &values(2)), None);
+    }
+
+    #[test]
+    fn a_letter_that_names_a_register_is_kept_and_one_that_names_a_class_is_not() {
+        let results = values(1);
+        let args = values(2);
+        let read = AsmOperands::read("=a,c,r", &results, &args).expect("the three of them");
+        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        assert_eq!(list[0].fixed, Some('a'), "an output in rax");
+        assert_eq!(list[1].fixed, Some('c'), "an input in rcx");
+        assert_eq!(list[2].fixed, None, "an input the allocator places");
+    }
+
+    /// A constraint offering a choice of registers has not named one, and neither has the letter
+    /// that names a pair of them.
+    #[test]
+    fn a_letter_that_names_more_than_one_register_names_none_of_them() {
+        let args = values(2);
+        let read = AsmOperands::read("ad,A", &[], &args).expect("two inputs");
+        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        assert_eq!(list[0].fixed, None, "a choice between two registers");
+        assert_eq!(list[1].fixed, None, "the letter that names a pair");
     }
 
     #[test]

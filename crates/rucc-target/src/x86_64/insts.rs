@@ -36,15 +36,15 @@
 //! than a simplification of the machine.
 
 use crate::operand::{Constraint, OperandDesc};
-use crate::x86_64::{GPR, RAX, RCX, RDX, XMM, xmm};
+use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
     AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi,
     CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
-    ConvertFromVec, ConvertToVec, ConvertVec, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing,
-    Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push, PushX87,
-    Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec,
-    Test, TestCmov, Trap, UnaryR, UnaryX87,
+    ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg,
+    Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push,
+    PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store,
+    StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -339,6 +339,20 @@ pub enum Form {
     /// rule selects one: the only thing that writes one is an `asm` statement that asked for it by
     /// name.
     Spin,
+    /// What the processor is asked about itself, which reads two registers and writes four.
+    ///
+    /// The one form here whose every operand is fixed by the instruction and named by nothing
+    /// that spells it. `cpuid` takes the leaf in `eax` and the subleaf in `ecx` and leaves its
+    /// answer in all four of `eax`, `ebx`, `ecx` and `edx`, and the text is the mnemonic alone,
+    /// so a reader of a template has to get the operands from the description rather than from
+    /// what was written. That is why it is here at all: no rule selects one, nothing the front
+    /// end reads asks for one, and the only thing that ever writes one is an `asm` statement,
+    /// which is the same reason [`Form::Spin`] is here.
+    ///
+    /// Every program that asks a processor what it can do writes this, because there is no other
+    /// way to ask. zstd writes four of them in `lib/common/cpu.h` to find out whether the machine
+    /// it is running on has the vector instructions it would rather use.
+    CpuId,
     /// A hint that an address is about to be used, which reads nothing and writes nothing.
     ///
     /// What `__builtin_prefetch` asks for. The machine is told to start bringing a line closer, and
@@ -560,6 +574,19 @@ static LOAD_IMM: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static ONE_TO_ONE: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(GPR)];
 static TWO_TO_ONE: [OperandDesc; 3] =
     [OperandDesc::write(GPR), OperandDesc::read(GPR), OperandDesc::read(GPR)];
+// What the processor is asked about itself. Every one of its operands is fixed by the instruction
+// and none of them is written anywhere it is spelled, which is what makes it the first form here
+// that an `asm` template can name and no rule can select. The leaf goes in `eax` and the subleaf
+// in `ecx`, and all four registers come back written, `ebx` among them, which is why a function
+// that asks gets `rbx` saved in its prologue like any other register it writes.
+static CPU_ID: [OperandDesc; 6] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RBX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RCX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
+];
 // The dividend is in `rax` and the divisor is anywhere else. A division produces both answers
 // and this opcode is one of them, so the register the other one lands in is written here as
 // well, and it is written early: the sign extension that fills it runs before the division
@@ -732,6 +759,7 @@ impl Form {
             CmpRi => &CMP_RI,
             Set => &ONE_WRITTEN,
             Convert => &ONE_TO_ONE,
+            CpuId => &CPU_ID,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
             Lea => &ADDRESS,
@@ -1245,6 +1273,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The hint a spin loop writes, which is the first instruction here that only an `asm`
     // statement can reach. Nothing the front end reads asks for one and no rule selects one.
     ("pause", Spin),
+    // What the processor is asked about itself, which is the second instruction here that only an
+    // `asm` statement can reach and the first whose operands are all implicit.
+    ("cpuid", CpuId),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -1487,7 +1518,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 401);
+        assert_eq!(described, 402);
     }
 
     #[test]

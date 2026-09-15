@@ -86,7 +86,7 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{CallRegs, Constraint, OperandDesc, RegClass, Role, Segment};
+use rucc_target::{CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -149,6 +149,24 @@ const X87_TRUNCATE: i64 = 0x0c00;
 /// that touches one is written out by hand in this file.
 fn on_x87(ty: Type) -> bool {
     ty.is_scalar() && ty.is_float() && ty.bits() == 80
+}
+
+/// Which of an assembly statement's operands is in that register, for an instruction that reaches
+/// the register without its text saying so.
+///
+/// The constraint letter is what says so, and it is the only thing in such a statement that could:
+/// `"=a"` is an output in `rax` and `"c"` is an input in `rcx`, and a register nothing names is a
+/// register nobody has said anything about. So a write looks among the outputs and a read among the
+/// inputs, and an output written `+` answers for either, since it is read before it is written.
+///
+/// `None` is a register the instruction uses and the statement put nothing in, which is the usual
+/// answer rather than an unusual one. `cpuid` writes four registers and a program that wanted one
+/// of them names one. See [`Lowering::spare`], which is where that one goes.
+fn bound(list: &[AsmOperand], reg: PhysReg, role: Role) -> Option<usize> {
+    list.iter().position(|operand| {
+        operand.fixed.and_then(x86_64::gpr_letter) == Some(reg)
+            && if role.is_def() { operand.result.is_some() } else { operand.value.is_some() }
+    })
 }
 
 /// Why a function could not be lowered.
@@ -249,6 +267,8 @@ pub enum Written {
     Goto,
     /// An operand this cannot put where the constraint says it goes.
     Operand,
+    /// A clobber list naming something this has no register for.
+    Clobber,
 }
 
 impl Written {
@@ -262,6 +282,7 @@ impl Written {
             Written::Template => "has instructions in its template, which nothing here assembles",
             Written::Goto => "jumps to a label, which nothing here builds an edge for",
             Written::Operand => "has an operand this cannot place",
+            Written::Clobber => "says it destroys a register this has no name for",
         }
     }
 }
@@ -2424,8 +2445,9 @@ impl<'a> Lowering<'a> {
     ///
     /// A register the template named itself. The registers an instruction here names are the ones
     /// the allocator handed out, and a name in the text is a claim on a register nobody told the
-    /// allocator about. Doing it properly is the clobber list and a fixed operand, and that is the
-    /// next piece of this rather than something to approximate now.
+    /// allocator about. A register a constraint letter names is a different thing and is placed,
+    /// which the paragraph below is about: there the statement said which of its own operands is
+    /// in the register, and a name in the middle of a template says no such thing.
     ///
     /// An output the template writes more than once, and an output that is tied to an input and
     /// written. Both are one place with two definitions in it, and the machine IR between here and
@@ -2435,9 +2457,44 @@ impl<'a> Lowering<'a> {
     /// been written yet is not a value, and an input the assembly writes over is a value something
     /// else may still be using.
     ///
-    /// The clobber list is still not read. On an empty template that is right rather than an
-    /// omission, since a template with no instructions in it ruins nothing, and on a template with
-    /// instructions in it the only registers reachable are the ones named above, which are refused.
+    /// # A register the instruction uses without being told
+    ///
+    /// An instruction may reach a register its text does not name, and `cpuid` is all of them at
+    /// once: the leaf goes in `eax`, the subleaf in `ecx`, and the answer comes back in all four
+    /// registers. The description holds every bit of that already, so what is left is to say which
+    /// of the statement's operands is in each of those registers, and the constraint letter is the
+    /// one thing in an assembly statement that says it. `"=a"` is an output in `rax` and `"c"` is
+    /// an input in `rcx`, which is why a program writing `cpuid` writes its constraints that way
+    /// and has no choice about it.
+    ///
+    /// A register no letter named is one the statement put nothing in, and that is the usual case
+    /// rather than an unusual one, since an instruction that answers four questions is written by
+    /// programs that asked one. A write of one is the register being destroyed and gets a register
+    /// of its own, which is what tells the allocator to keep everything else out of it. A read of
+    /// one is a register the instruction looks at and the program never filled, which gets a zero
+    /// for the reason [`Self::undefined`] gives.
+    ///
+    /// # The clobber list
+    ///
+    /// Read now, as the registers it names being written by every instruction of the template. By
+    /// every one rather than by one of them, because the list says the assembly as a whole leaves
+    /// them ruined and nothing here knows which line did it. Every entry has to be a register this
+    /// machine has a name for or the statement is refused, since a name nobody read is a register
+    /// nobody is keeping out of.
+    ///
+    /// `memory` and `cc` are the two entries that are not registers and both are skipped. `memory`
+    /// says the assembly touches storage, which is already true of every `asm` this writes and is
+    /// nothing a register list could hold. `cc` says it ruins the condition flags, and the flag
+    /// tracking already has that from the instructions the template was read into, since it takes
+    /// every instruction it does not recognize as writing them and every instruction here is one
+    /// this machine describes.
+    ///
+    /// A clobber the instruction already writes is left off it. `cpuid` writes all four registers
+    /// by description, and a statement listing three of them as clobbers as well is saying the
+    /// same thing twice, which the allocator would read as one register with two definitions.
+    ///
+    /// On a template with nothing in it the list is ignored, as it was before, since a template
+    /// with no instructions ruins nothing whatever it said about what it ruins.
     fn assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
@@ -2468,9 +2525,20 @@ impl<'a> Lowering<'a> {
         for line in &lines {
             let form = x86_64::form(line.opcode).ok_or_else(refused)?;
             for (desc, piece) in form.operands().iter().zip(&line.operands) {
-                let x86_64::Piece::Operand { index, .. } = piece else { continue };
+                // An operand the instruction reaches without its text saying so is the statement's
+                // only when a constraint letter put something there. One that is nobody's writes
+                // nothing of the program's, so it is counted nowhere and is dealt with where it is
+                // placed.
+                let index = match *piece {
+                    x86_64::Piece::Operand { index, .. } => index,
+                    x86_64::Piece::Implicit { reg } => match bound(&list, reg, desc.role) {
+                        Some(index) => index,
+                        None => continue,
+                    },
+                    x86_64::Piece::Reg { .. } => continue,
+                };
                 if matches!(desc.role, Role::Def | Role::EarlyDef) {
-                    *writes.get_mut(*index).ok_or_else(refused)? += 1;
+                    *writes.get_mut(index).ok_or_else(refused)? += 1;
                 }
             }
         }
@@ -2509,10 +2577,42 @@ impl<'a> Lowering<'a> {
             }
         }
 
+        // Worked out once for the whole template, since the list is one list and every instruction
+        // of the template gets it. Not worked out at all for a template with no instructions, which
+        // is where there is nothing for it to go on.
+        let clobbers = self.names.resolve(info.clobbers).to_string();
+        let clobbered =
+            if lines.is_empty() { Vec::new() } else { Self::clobbered(inst, &clobbers)? };
+
         for line in &lines {
-            self.instruction(inst, line, &places, &list)?;
+            self.instruction(inst, line, &places, &list, &clobbered)?;
         }
         Ok(())
+    }
+
+    /// The registers a clobber list names, in the order it named them.
+    ///
+    /// Nothing is dropped. A name this has no register for is refused, because the list is the
+    /// program telling the compiler which registers it may not leave anything in, and an entry
+    /// nobody read is a register something may still be left in. See [`Self::assembly`] for the
+    /// two entries that are not registers and for why they are skipped rather than refused.
+    fn clobbered(inst: Inst, clobbers: &str) -> Result<Vec<PhysReg>, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Clobber };
+        let mut named = Vec::new();
+        for entry in clobbers.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            // The sigil is optional in a clobber list and means nothing when it is there, unlike
+            // in a template, where it is what tells a register from an operand.
+            let entry = entry.strip_prefix('%').unwrap_or(entry);
+            if entry.is_empty() || entry == "memory" || entry == "cc" {
+                continue;
+            }
+            let (reg, _) = x86_64::gpr_named(entry).ok_or_else(refused)?;
+            if !named.contains(&reg) {
+                named.push(reg);
+            }
+        }
+        Ok(named)
     }
 
     /// One instruction of a template, as the machine instruction it was read back into.
@@ -2522,12 +2622,23 @@ impl<'a> Lowering<'a> {
         line: &x86_64::Line,
         places: &[Option<mir::Reg>],
         list: &[AsmOperand],
+        clobbered: &[PhysReg],
     ) -> Result<(), Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let form = x86_64::form(line.opcode).ok_or_else(refused)?;
-        let mut built = Vec::with_capacity(line.operands.len());
+        let mut built = Vec::with_capacity(line.operands.len() + clobbered.len());
         for (desc, piece) in form.operands().iter().zip(&line.operands) {
             built.push(self.placed(inst, *desc, *piece, places, list)?);
+        }
+        // The clobbers go in among the definitions rather than behind the reads, because an operand
+        // vector in the machine IR is every definition and then every use and what counts them
+        // reads that order rather than each operand's role.
+        let defs = built.iter().take_while(|operand| operand.role.is_def()).count();
+        for &reg in clobbered {
+            if form.operands().iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
+                continue;
+            }
+            built.insert(defs, mir::Operand::write(mir::Reg::physical(reg), self.gpr));
         }
         let at = match line.at {
             Some(at) => Some(self.addressed(inst, at, places)?),
@@ -2561,7 +2672,18 @@ impl<'a> Lowering<'a> {
         list: &[AsmOperand],
     ) -> Result<mir::Operand, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
-        let x86_64::Piece::Operand { index, width } = piece else { return Err(refused()) };
+        // A register the instruction reaches without its text naming it belongs to whichever of the
+        // statement's operands a constraint letter put there, and to nobody when no letter did.
+        // There is no width to check in that case: the operand is the register the letter named and
+        // the instruction does what it does to it, which is what a program writing `"=a"` asked for.
+        let (index, width) = match piece {
+            x86_64::Piece::Operand { index, width } => (index, Some(width)),
+            x86_64::Piece::Implicit { reg } => match bound(list, reg, desc.role) {
+                Some(index) => (index, None),
+                None => return self.spare(inst, desc),
+            },
+            x86_64::Piece::Reg { .. } => return Err(refused()),
+        };
         let operand = list.get(index).copied().ok_or_else(refused)?;
         let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
 
@@ -2578,8 +2700,38 @@ impl<'a> Lowering<'a> {
             (None, None) => return Err(refused()),
         };
         let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
-        if !placeable || self.class_of(ty) != desc.class || bits != width.bits() {
+        if !placeable || self.class_of(ty) != desc.class {
             return Err(refused());
+        }
+        if width.is_some_and(|width| bits != width.bits()) {
+            return Err(refused());
+        }
+        Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
+    }
+
+    /// A register an instruction of a template uses and the statement put nothing in.
+    ///
+    /// A write of one is the register being destroyed, which is what a clobber list is usually
+    /// written to say and what an instruction with more answers than the program asked for does
+    /// anyway: `cpuid` writes all four registers whether or not the statement wanted all four. A
+    /// register of its own is the whole of what that needs, since a value nothing reads is one the
+    /// allocator may put anywhere and is told about so that nothing else is put there.
+    ///
+    /// A read of one is a register the instruction looks at and the program never filled, which
+    /// gcc leaves as whatever happened to be there. A zero is written instead, for the reason
+    /// [`Self::undefined`] gives: the allocator has to be given a definition before a use, and a
+    /// zero is the one answer that reads the same on every run.
+    fn spare(&mut self, inst: Inst, desc: OperandDesc) -> Result<mir::Operand, Unsupported> {
+        let refused = Unsupported::Assembly { inst, refused: Written::Operand };
+        if desc.class != self.gpr {
+            return Err(refused);
+        }
+        let reg = self.out.new_vreg(desc.class);
+        if !desc.role.is_def() {
+            let block = self.at.expect("a block is being filled");
+            let span = self.source.span(inst);
+            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
+            self.out.build(block, put).at(span).def(reg, desc.class).imm(0).finish();
         }
         Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
     }
@@ -2598,7 +2750,12 @@ impl<'a> Lowering<'a> {
                 let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
                 Some(mir::Operand::read(reg, self.gpr))
             }
-            Some(x86_64::Piece::Reg { .. }) => return Err(refused()),
+            // An address counted from a register the instruction reaches without being told is
+            // not something this machine has: every addressing mode is written out in the text it
+            // is part of, so a base that got here another way is a base nothing wrote down.
+            Some(x86_64::Piece::Reg { .. } | x86_64::Piece::Implicit { .. }) => {
+                return Err(refused());
+            }
         };
         Ok(mir::Mem { base, scale: 1, disp: at.disp, segment: at.segment, ..mir::Mem::default() })
     }
@@ -3232,8 +3389,8 @@ mod tests {
     /// somewhere to be read into. Which two does not matter, and holding back the last two the
     /// convention would reach for leaves every expectation below unchanged.
     fn env() -> Env {
-        const SCRATCH: [rucc_target::PhysReg; 2] = [x86_64::R10, x86_64::R11];
-        let order: Vec<rucc_target::PhysReg> =
+        const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
+        let order: Vec<PhysReg> =
             SYSV.int_order.iter().copied().filter(|reg| !SCRATCH.contains(reg)).collect();
         Env::new().with(x86_64::GPR, &order, &SCRATCH)
     }
@@ -4631,13 +4788,93 @@ mod tests {
         args: &[Value],
         results: &[Type],
     ) -> Inst {
+        clobbering(source, block, names, template, constraints, "memory", args, results)
+    }
+
+    /// The same with a clobber list of its own, for the statements that are about one.
+    #[allow(clippy::too_many_arguments)]
+    fn clobbering(
+        source: &mut Func,
+        block: Block,
+        names: &mut Interner,
+        template: &str,
+        constraints: &str,
+        clobbers: &str,
+        args: &[Value],
+        results: &[Type],
+    ) -> Inst {
         let info = AsmInfo {
             template: names.intern(template),
             constraints: names.intern(constraints),
-            clobbers: names.intern("memory"),
+            clobbers: names.intern(clobbers),
             targets: rucc_ir::BlockCallList::EMPTY,
         };
         Builder::new(source, block).inline_asm(info, args, results, Flags::VOLATILE)
+    }
+
+    /// What a program asking the processor what it can do writes, which is the instruction whose
+    /// every operand is a register its text does not name.
+    #[test]
+    fn a_template_whose_registers_are_named_by_the_constraints_places_them_from_the_letters() {
+        let u32 = Type::int(32);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let zero = Builder::new(&mut source, block).iconst(u32, 0);
+        let out = clobbering(
+            &mut source,
+            block,
+            &mut names,
+            "cpuid",
+            "=a,a",
+            "ebx,ecx,edx",
+            &[zero],
+            &[u32],
+        );
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // `asm ("cpuid" : "=a" (n) : "a" (0) : "ebx", "ecx", "edx")`, which is the first thing
+        // every program that has a faster path on some machines writes. Four registers written and
+        // two read, none of them in the template, all of them out of the description, and the two
+        // that the letters named are the statement's own. The subleaf is a zero because the
+        // instruction reads `ecx` and the program said nothing about what is in it. The three
+        // clobbers are gone because `cpuid` writes those three anyway, and saying it twice is one
+        // register with two definitions.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 0\n    \
+             %1:gpr = x64.mov_ri_64 0\n    \
+             %2:gpr($rax), %3:gpr($rbx), %4:gpr($rcx), %5:gpr($rdx) = x64.cpuid %0($rax), \
+             %1($rcx)\n    x64.ret_val_32 %2($rax)\n}\n"
+        );
+    }
+
+    /// A clobber the instruction does not write itself, which is the case the list is there for.
+    /// It goes on as a definition of the register, in among the other definitions, because that is
+    /// the whole of how a machine function says a register is not worth anything after this.
+    #[test]
+    fn a_clobber_the_instruction_does_not_write_itself_is_a_definition_of_that_register() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(&mut source, block, &mut names, "pause", "", "rsi,cc,memory", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    $rsi = x64.pause\n}\n");
+    }
+
+    /// A clobber naming something this has no register for. Refused rather than dropped, since the
+    /// list is the program saying which registers it may not leave anything in, and an entry
+    /// nobody read is a register something may still be left in.
+    #[test]
+    fn a_clobber_this_has_no_register_for_is_refused() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(&mut source, block, &mut names, "pause", "", "zmm0", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("there is no such register here");
+        assert_eq!(
+            failed.to_string(),
+            "this `asm` says it destroys a register this has no name for"
+        );
     }
 
     #[test]
@@ -4746,9 +4983,11 @@ mod tests {
         );
     }
 
-    /// A register the template named is a claim on a register nobody told the allocator about, and
-    /// the clobber list that would say so is not read yet. Refused rather than placed, because a
-    /// register two things believe they own is a wrong program that nothing reports.
+    /// A register the template named is a claim on a register nobody told the allocator about.
+    /// Refused rather than placed, because a register two things believe they own is a wrong
+    /// program that nothing reports. A register a constraint letter names is a different thing and
+    /// is placed, which the test above is about: there the statement said which of its own operands
+    /// is in the register, and a name in the middle of a template says no such thing.
     #[test]
     fn a_template_naming_a_register_the_allocator_did_not_hand_out_is_refused() {
         let i64 = Type::int(64);

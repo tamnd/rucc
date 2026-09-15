@@ -39,6 +39,7 @@
 //! because the machine has no two-operand multiply narrower than that and the low eight bits of a
 //! product depend on nothing but the low eight bits of what went into it.
 
+use crate::operand::Constraint;
 use crate::regs::PhysReg;
 
 use Arg::{Imm, Label, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
@@ -669,6 +670,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // The hint a spin loop writes. No operands and one spelling, the same as the two above it, and
     // the name is the whole of it.
     ("pause", &[spell("pause", &[])]),
+    ("cpuid", &[spell("cpuid", &[])]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of
@@ -961,10 +963,17 @@ pub enum Shape {
 /// out different rows and neither answers for the other. The mnemonic belongs to an opcode the
 /// machine writes as more than one instruction, such as a division or a comparison and the byte
 /// behind it, and half of one of those is not an instruction. Or the opcode has an operand its
-/// spelling does not name, which is a fixed register the instruction reads without being told, the
-/// way a compare and exchange reads `rax`: the operand is there so the allocator keeps out of the
-/// register, and a template that named the instruction did not thereby say anything about who owns
-/// that register.
+/// spelling does not name and the description does not fix to a register, which is an operand with
+/// nothing anywhere to say what goes in it: a shift by `cl` names its count and does not name the
+/// value being shifted, so a template that wrote `shlq %cl, %0` said one of the two things the
+/// instruction needs.
+///
+/// An operand the description does fix is not that, which is the one relaxation here. There is
+/// only one register such an operand could be, so filling it in is reading the table rather than
+/// guessing at it, and whether anything of the program's is in that register is said by the
+/// constraints beside the template rather than by the template. That is how `cpuid` is read, whose
+/// text is the mnemonic alone and whose six operands are all of them registers it uses without
+/// being told.
 ///
 /// More than one row matching is treated the same way, since two opcodes that are the same
 /// instruction with the same arguments would leave nothing here to choose between them.
@@ -1003,17 +1012,46 @@ fn shape_of(arg: Arg) -> Option<Shape> {
     }
 }
 
-/// Whether the spelling of that opcode names every operand the opcode has.
+/// Whether the spelling of that opcode names every operand the description does not fix.
 ///
 /// The question behind the last of the four refusals above. An operand no argument names is one
 /// the instruction uses without being told, and a template that wrote the instruction said nothing
-/// about it, so there is nobody to ask what goes there.
+/// about it, so there is nobody to ask what goes there. Unless the description already said, which
+/// is what fixing an operand to a register is: then there is one answer and it is written down
+/// here rather than in the text, and the caller fills it in.
 fn names_every_operand(name: &str, args: &[Arg]) -> bool {
     let Some(form) = crate::x86_64::insts::form(name) else { return false };
-    (0..form.operands().len()).all(|index| {
+    form.operands().iter().enumerate().all(|(index, desc)| {
+        if matches!(desc.constraint, Constraint::Fixed(_)) {
+            return true;
+        }
         let index = u8::try_from(index).unwrap_or(u8::MAX);
         args.iter().any(|&arg| matches!(arg, Reg(at, _) if at == index))
     })
+}
+
+/// Which general purpose register a constraint letter names, for the letters that name one.
+///
+/// `a` through `d` are the first four registers and `S` and `D` are the two index registers, and
+/// that is the whole of the list: every other letter a constraint may carry names a class of
+/// places or a kind of constant rather than one register. This sits beside [`gpr_named`] because
+/// it is the same question asked in the other vocabulary, and it is in this file at all because
+/// which register `a` means is this machine's business and not the machine IR's.
+///
+/// `A` is not here. It names `rdx` and `rax` at once, so it is a pair rather than a register, and
+/// what a caller wants from this is the one register something implicit is in.
+#[must_use]
+pub fn gpr_letter(letter: char) -> Option<PhysReg> {
+    let name = match letter {
+        'a' => "rax",
+        'b' => "rbx",
+        'c' => "rcx",
+        'd' => "rdx",
+        'S' => "rsi",
+        'D' => "rdi",
+        _ => return None,
+    };
+    Some(gpr_named(name)?.0)
 }
 
 /// How many bits of the operand at that index the instruction of that name uses.
@@ -1203,12 +1241,19 @@ mod tests {
     /// written with, so what is named here is not an index and there is nothing for the count below
     /// to match it against. The check that it is named at all is in the test above, where the
     /// argument it is named by is the thing being read.
+    ///
+    /// The question put to the processor is a fourth, and it is the compare and exchange taken as
+    /// far as it goes: every one of its six operands is a register it uses without being told, so
+    /// there is nothing at all for its text to name and the text is the mnemonic on its own.
     #[test]
     fn an_operand_no_instruction_names_is_one_that_is_not_written() {
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
             if insts.is_empty()
-                || matches!(form, Form::DivQuo | Form::DivRem | Form::CmpXchg | Form::JmpReg)
+                || matches!(
+                    form,
+                    Form::DivQuo | Form::DivRem | Form::CmpXchg | Form::JmpReg | Form::CpuId
+                )
             {
                 continue;
             }

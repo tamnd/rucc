@@ -683,6 +683,10 @@ static ENCODINGS: &[Encoding] = &[
     // which is why the hint could be added to the instruction set without breaking anything that
     // was already written.
     bytes("pause", &NO_ARGS, Long, &[0xF3, 0x90], NO_MODRM, NO_IMM),
+    // What the processor is asked about itself. No arguments in the encoding for the reason there
+    // are none in the text: every register it touches is named by the instruction rather than by
+    // anything written beside it, so there is no addressing byte and nothing to put in one.
+    bytes("cpuid", &NO_ARGS, Long, &[0x0F, 0xA2], NO_MODRM, NO_IMM),
     // The lock prefix, which is a row of its own because that is what it is in the encoding: one
     // byte in front of the instruction it applies to, and not a bit of anything the instruction
     // itself writes. An assembler reads it the same way, so the text form is the word on a line of
