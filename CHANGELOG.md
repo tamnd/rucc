@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- An alignment directive in an `asm` template, which is what zstd writes immediately in front of the match loop of `ZSTD_compressBlock_lazy_generic` and is what every level of its build stopped on once the conditional move was done. Every other directive is refused, and this one is read, because it is the one that is a fact about the code being generated rather than a request for something to be copied through to an assembler: a program that writes `.p2align 5` is saying where the next instruction starts, and where instructions go is a question this compiler is already answering. It is carried as an opcode of the machine with no operands and the boundary in bytes on its immediate, so the passes between selection and the writers see it the way they see everything else, and each writer answers it in the terms it has. The listing writes the directive back out with the byte that does nothing as the fill, so a jump that lands in the padding still arrives, and the object writer pads to the boundary and raises the alignment of the section it is filling, since a function aligned to thirty two inside a section aligned to one is aligned to nothing at all in the program's reckoning. The timing model calls it fixed, which makes the scheduler treat it as a barrier, and that is the point rather than an implementation detail: what an alignment is about is which instruction comes after it, so an instruction moved across one is an alignment of something other than what the program asked for. `.align` and `.balign` are read as well and say the boundary in bytes where `.p2align` says it as a power. An alignment that asks for more than a boundary is refused rather than half answered, which covers a fill byte, a number of bytes to stop after, a boundary that is not a power of two, and one larger than a page. Closes tamnd/rucc#1273.
+
 ## 0.10.48
 
 ### Added
