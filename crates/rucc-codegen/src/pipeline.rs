@@ -29,7 +29,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
-    TargetInfo, x86_64,
+    TargetInfo, TimingInsts, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -48,6 +48,7 @@ use crate::lower::{self, Unsupported};
 use crate::pressure::{Cost, Pressure};
 use crate::quad;
 use crate::retry;
+use crate::schedule;
 use crate::slots::{self, Slots};
 use crate::split;
 use crate::switch;
@@ -81,6 +82,8 @@ pub struct Machine {
     /// What shape each of the machine's instructions is, which is what a pass proposing a new one
     /// has its proposal held against.
     pub shapes: &'static MachineInsts,
+    /// How long each of the machine's instructions takes, and what it takes it on.
+    pub timing: &'static TimingInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -141,6 +144,7 @@ impl Machine {
             bits: &x86_64::BITS,
             flags: &x86_64::FLAGS,
             shapes: &x86_64::MACHINE,
+            timing: &x86_64::TIMING,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -233,13 +237,25 @@ pub struct Flags {
     /// Whether two things in the frame that are never both wanted may be the same bytes, which
     /// `-fstack-reuse=none` turns off. See [`crate::slots`].
     pub reuse: bool,
+    /// Whether the instructions of a block are put in the order the machine finishes soonest,
+    /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
+    /// [`crate::schedule`].
+    pub schedule: bool,
+    /// Whether the target's timing model is believed about the machine's units as well as about
+    /// its latencies, which `-Zcycle-accurate-model=` says and the model itself answers otherwise.
+    ///
+    /// `None` is a command line that did not say, which is nearly every one, and then the model's
+    /// own answer decides. It is here rather than only on the model because section 38.1 asks for
+    /// a way to say the model is better or worse than it claims without editing the model, and
+    /// because the measurement section 38.8 owes is the same corpus compiled both ways.
+    pub accurate: Option<bool>,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
-    /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives and
-    /// nothing in the frame sharing with anything, which is what a convention that has a red zone
-    /// says at `-O0` when nobody on the command line has said otherwise.
+    /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
+    /// nothing in the frame sharing with anything and no scheduling, which is what a convention
+    /// that has a red zone says at `-O0` when nobody on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -250,6 +266,8 @@ impl Default for Flags {
             patch: Room::default(),
             reorder: false,
             reuse: false,
+            schedule: false,
+            accurate: None,
         }
     }
 }
@@ -536,6 +554,24 @@ pub fn compile_recording(
     // both went into. Before the layout, because the layout is where the instruction sequence
     // stops being something a pass may edit.
     copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, names);
+
+    // After the allocator's moves have been cleaned up, because a schedule chosen around a move
+    // that is about to be taken out is a schedule built around an instruction that is not in the
+    // output. Before the layout, because the layout is the freeze: it writes the jumps the block
+    // order needs and it puts a comparison and the branch that reads it together, and neither
+    // survives an instruction being moved in afterwards. That is section 38.6's placement, and the
+    // reason it is after allocation rather than before is in [`crate::schedule`].
+    if flags.schedule {
+        schedule::insts(
+            &mut func,
+            machine.timing,
+            machine.shapes,
+            machine.flags,
+            names,
+            flags.accurate.unwrap_or(machine.timing.accurate),
+            &fusable,
+        );
+    }
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.

@@ -52,6 +52,7 @@ mod frame;
 mod machine;
 mod operand;
 mod regs;
+mod timing;
 pub mod x86_64;
 
 pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
@@ -64,6 +65,7 @@ pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
     CallRegs, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
 };
+pub use crate::timing::{Timing, TimingInsts, Unit};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -613,6 +615,13 @@ pub struct TargetInfo {
     /// Which registers the calling convention gives which job, or `None` while the
     /// architecture has no register file to name them out of.
     pub call_regs: Option<&'static CallRegs>,
+    /// How long this machine's instructions take, or `None` for an architecture with no backend.
+    ///
+    /// [`None`] rather than a model of a machine nobody measured, for the reason the two fields
+    /// above are: a scheduler told made up numbers about a processor has no way to find out they
+    /// were made up. `--print-config` prints [`TimingInsts::model`] off this, which is the first
+    /// thing anybody comparing two runs of a benchmark wants to know.
+    pub timing: Option<&'static TimingInsts>,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -743,6 +752,12 @@ impl TargetInfo {
             (tuple::Arch::X86_64, _) => Some(&x86_64::SYSV),
             _ => None,
         };
+        // The same rule as the register file. A model is a measurement of a processor, and there
+        // is nothing to measure until there is a backend emitting instructions for it.
+        let timing = match target.arch() {
+            tuple::Arch::X86_64 => Some(&x86_64::TIMING),
+            _ => None,
+        };
         Self {
             tuple: target,
             scalars: layout,
@@ -775,6 +790,7 @@ impl TargetInfo {
             va_list: va_list(target),
             regs,
             call_regs,
+            timing,
         }
     }
 
@@ -1276,6 +1292,24 @@ mod tests {
         let arm = of("aarch64-unknown-linux-gnu");
         assert!(arm.regs.is_empty());
         assert!(arm.call_regs.is_none());
+    }
+
+    /// The timing model, which follows the register file: an architecture with no backend has
+    /// nothing to measure and says so rather than borrowing a neighbour's numbers.
+    #[test]
+    fn a_target_carries_the_model_its_schedules_were_chosen_with() {
+        let of = |triple: &str| TargetInfo::new(triple.parse().unwrap());
+        let linux = of("x86_64-unknown-linux-gnu");
+        let timing = linux.timing.expect("x86-64 has a backend and so has a model");
+        assert!(timing.model.contains("Skylake"), "{}", timing.model);
+        assert!(!timing.accurate, "and it says it is not a cycle accurate one");
+        assert_eq!(timing.of("x64.imul_rr_64").map(|cost| cost.unit), Some(Unit::Mul));
+
+        // The same model whatever the operating system, since a model is about the processor.
+        assert_eq!(of("x86_64-apple-darwin").timing, linux.timing);
+        assert_eq!(of("x86_64-pc-windows-msvc").timing, linux.timing);
+
+        assert!(of("aarch64-unknown-linux-gnu").timing.is_none(), "nobody has measured it here");
     }
 
     #[test]

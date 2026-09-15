@@ -36,6 +36,7 @@ mod encode;
 mod insts;
 mod read;
 mod text;
+mod timing;
 
 pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
@@ -45,6 +46,7 @@ pub use crate::x86_64::read::{At, Line, Piece, read};
 pub use crate::x86_64::text::{
     Arg, Shape, Width, Written, gpr_name, gpr_named, machine, operand_width, written,
 };
+pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion};
