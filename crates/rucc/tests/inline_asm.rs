@@ -160,6 +160,38 @@ char *f(unsigned a, unsigned b, char *p, char *q) {
 }
 
 #[test]
+fn an_alignment_in_a_template_reaches_the_listing_as_the_directive_it_asks_for() {
+    // What zstd writes immediately in front of the match loop of `ZSTD_compressBlock_lazy_generic`,
+    // in `lib/compress/zstd_lazy.c`. The loop is the hot one of the whole compressor and the
+    // program is asking that it start on a boundary, which is a thing to say about where the next
+    // instruction goes rather than an instruction of its own.
+    let source = "\
+int f(int n) {
+  int total = 0;
+  for (int i = 0; i < n; i++) {
+    asm volatile (\".p2align 5\");
+    total += i;
+  }
+  return total;
+}
+";
+    let text = asm("align", source);
+    let body = body(&text, "f");
+    assert!(body.contains(".p2align\t5"), "the alignment never reached the listing:\n{body}");
+}
+
+#[test]
+fn an_alignment_this_cannot_promise_says_so_rather_than_dropping_it() {
+    // A second argument is a fill byte or a number of bytes to stop after, and both are things this
+    // does not do. Quietly writing the boundary without the rest of what was asked for is a program
+    // that builds and is not the one that was written.
+    let source = "void f(void) { asm volatile (\".p2align 4, 0x90, 8\"); }\n";
+    let (ok, _, said) = run("align-fill", source);
+    assert!(!ok, "an alignment with more in it than a boundary was accepted");
+    assert!(said.contains("which nothing here assembles"), "{said}");
+}
+
+#[test]
 fn an_asm_goto_says_what_is_missing_too() {
     let source = "int f(int x) { asm goto (\"\" : : : : away); return x; away: return 0; }\n";
     let (ok, _, said) = run("goto", source);

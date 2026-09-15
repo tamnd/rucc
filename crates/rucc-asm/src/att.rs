@@ -652,6 +652,21 @@ mod tests {
     }
 
     #[test]
+    fn an_alignment_is_written_as_the_directive_that_asks_for_it() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let align = Opcode::new(names.intern("x64.align"));
+            func.build(block, align).imm(32).finish();
+        });
+        // The boundary is a power here and a count of bytes in the machine IR, because the
+        // assembler reads the one and a program writes the other. The fill is the one byte that
+        // does nothing, so a jump that lands in the padding still arrives. A directive rather than
+        // an instruction, which is why it is looked for in the whole text and not in the body.
+        assert!(text.contains("\n\t.p2align\t5, 0x90\n"), "{text}");
+        assert_eq!(body(&text), Vec::<&str>::new());
+    }
+
+    #[test]
     fn an_address_is_a_displacement_and_then_the_registers_it_names() {
         let text = write(|func, names| {
             let block = func.create_block();

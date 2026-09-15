@@ -1639,6 +1639,11 @@ mod tests {
             // somewhere a value may be told to live, so there is no operand to write down for the
             // end of a move that is not the address, and none at all for the arithmetic: both of
             // its sources and its answer are depths.
+            //
+            // The alignment is the one entry that computes nothing and does nothing and is still
+            // worth having, because it is not an instruction. What it says is where the next one
+            // starts, and something has to carry that from the template it was written in to the
+            // writer that turns it into bytes.
             assert!(
                 defs > 0
                     || matches!(
@@ -1671,6 +1676,7 @@ mod tests {
                             | Spin
                             | Prefetch
                             | Trap
+                            | Align
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -1833,6 +1839,7 @@ mod tests {
                             | Spin
                             | Prefetch
                             | Trap
+                            | Align
                     )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"

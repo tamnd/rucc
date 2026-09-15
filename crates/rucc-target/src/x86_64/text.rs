@@ -1209,7 +1209,7 @@ pub fn gpr_name(reg: PhysReg, width: Width) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::operand::Constraint;
-    use crate::x86_64::insts::{Form, INSTS, form};
+    use crate::x86_64::insts::{ALIGN, Form, INSTS, form};
     use crate::x86_64::{GPR, REGS};
 
     /// Every index into the operand vector that one of these arguments names.
@@ -1358,6 +1358,10 @@ mod tests {
         {
             assert_eq!(written(name), Some([].as_slice()), "{name}");
         }
+        // The alignment is here for a different reason than the rest of them. The others leave
+        // nothing behind at all, and it leaves a directive, which is not a mnemonic and so is not
+        // anything this table could spell. Each writer puts its own down by name.
+        assert_eq!(written(ALIGN), Some([].as_slice()));
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
             assert_eq!(
@@ -1371,6 +1375,7 @@ mod tests {
                         | Form::RetVal2Vec
                         | Form::ArgValVec
                         | Form::BrCond
+                        | Form::Align
                 ),
                 "{name} and whether it is an instruction disagree"
             );

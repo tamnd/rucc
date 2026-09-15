@@ -508,6 +508,32 @@ mod tests {
     }
 
     #[test]
+    fn an_alignment_is_the_bytes_between_where_it_is_and_the_boundary_it_asks_for() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
+            let align = Opcode::new(names.intern("x64.align"));
+            let mut two = |func: &mut Func| {
+                func.build(block, add)
+                    .operand(Operand::write(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RCX), GPR))
+                    .finish();
+            };
+            two(func);
+            func.build(block, align).imm(8).finish();
+            two(func);
+        });
+        // Two bytes of addition, six of nothing, two more of addition. The padding is the one byte
+        // instruction that does nothing rather than a run of zeroes, because the processor may walk
+        // through it to get to what comes after, which is the whole reason a program asks.
+        assert_eq!(hex(&text.bytes), "01 c8 90 90 90 90 90 90 01 c8");
+        // The section has to be told as well. A function aligned to eight inside a section aligned
+        // to one is aligned to eight in its own reckoning and to nothing at all in the program's.
+        assert!(text.align >= 8, "{}", text.align);
+    }
+
+    #[test]
     fn a_jump_inside_a_function_is_filled_in_rather_than_left_to_the_linker() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));

@@ -701,4 +701,42 @@ mod tests {
             assert_eq!(lines[0].at.expect("an address").disp, disp, "{text}");
         }
     }
+
+    /// The three spellings of a boundary, all of which mean the same thing and two of which say it
+    /// in bytes while the first says it as a power. zstd writes the first one in front of the match
+    /// loop of its lazy matcher, and the other two are what a program written for another assembler
+    /// says.
+    #[test]
+    fn an_alignment_is_read_in_all_three_spellings_and_carries_its_boundary_in_bytes() {
+        let cases = [(".p2align 5", 32), (".align 16", 16), (".balign 8", 8), (".p2align 0", 1)];
+        for (template, bytes) in cases {
+            let lines = read(template, &[]).unwrap_or_else(|| panic!("{template} is an alignment"));
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, ALIGN, "{template}");
+            assert!(lines[0].operands.is_empty(), "{template}");
+            assert_eq!(lines[0].at, None, "{template}");
+            assert_eq!(lines[0].imm, Some(bytes), "{template}");
+        }
+        let lines = read(".p2align 4\n\tpause", &[]).expect("an alignment in front of one");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].opcode, ALIGN);
+        assert_eq!(lines[1].opcode, "pause");
+    }
+
+    /// What an alignment this cannot promise looks like. A second argument is a fill byte or a
+    /// number of bytes to stop after, and either one means something this does not do, so it is
+    /// refused rather than dropped on the floor. A boundary that is not a power of two or is larger
+    /// than a page is one nothing here can give.
+    #[test]
+    fn an_alignment_that_asks_for_more_than_a_boundary_is_refused() {
+        assert_eq!(read(".p2align 4, 0x90", &[]), None, "a fill byte");
+        assert_eq!(read(".p2align 4, 0x90, 8", &[]), None, "a most to skip");
+        assert_eq!(read(".align 24", &[]), None, "a boundary that is not a power of two");
+        assert_eq!(read(".balign 8192", &[]), None, "a boundary larger than a page");
+        assert_eq!(read(".p2align 20", &[]), None, "a power larger than a page");
+        assert_eq!(read(".p2align", &[]), None, "a boundary that was left out");
+        assert_eq!(read(".p2align four", &[]), None, "a boundary that is not a number");
+        assert_eq!(read(".skip 16", &[]), None, "a directive that is not an alignment");
+        assert_eq!(read("rep; .p2align 4", &[]), None, "a prefix in front of one");
+    }
 }
