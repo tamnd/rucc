@@ -39,7 +39,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         out.text
     } else {
         match fs.read(std::path::Path::new(name)) {
-            Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
                 Ok(text) => text,
                 Err(_) => {
                     messages.push(format!("rucc: error: {name}: this is not text"));
