@@ -60,7 +60,7 @@ use rucc_tuple::TargetTuple;
 use crate::link::LinkOptions;
 
 pub use crate::compile::{Artifact, Compiled, Temps, compile, compile_ir};
-pub use crate::phase::{ArchiveJob, Input, InputKind, Job, LinkJob, Output, Phase, Plan};
+pub use crate::phase::{ArchiveJob, Input, InputKind, Job, LinkJob, Output, Phase, Plan, Role};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
 pub use crate::schedule::Jobs;
 
@@ -956,15 +956,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fbuiltins-lib" => link.no_builtins_lib = false,
             "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
             "-s" => link.strip = true,
+            // Into the ordered input list rather than a list of its own, because a great many of
+            // the linker's options are a bracket around the files after them and an option that
+            // lost its place among them says nothing. `--whole-archive` is the one that found this.
             "-Xlinker" => {
                 let next = args.get(i).ok_or_else(|| err("-Xlinker requires an argument"))?;
                 i += 1;
-                link.passthrough.push(next.clone());
+                inputs.push(Input::linker(next));
             }
             _ if arg.starts_with("-Wl,") => {
                 // Commas separate arguments rather than being part of one, which is what makes
                 // `-Wl,-rpath,/opt/lib` two words to the linker and one word here.
-                link.passthrough.extend(arg["-Wl,".len()..].split(',').map(str::to_owned));
+                inputs.extend(arg["-Wl,".len()..].split(',').map(Input::linker));
             }
             _ if arg.starts_with("-fuse-ld=") => {
                 link.use_ld = Some(arg["-fuse-ld=".len()..].to_owned());
@@ -1721,7 +1724,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 // flag table is populated is to reject everything we do not know.
                 return Err(err(format!("unknown option `{arg}`")));
             }
-            _ => inputs.push(Input { path: arg.to_owned(), forced, library: false }),
+            _ => inputs.push(Input { path: arg.to_owned(), forced, role: Role::File }),
         }
     }
 
@@ -2518,14 +2521,15 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         return 1;
     }
 
-    // The items in command line order with the temporaries filled in. A library contributes no
-    // job and passes through, and every file item takes the next job's real output, which is
-    // what keeps a library that was written between two objects between them here.
+    // The items in command line order with the temporaries filled in. A library and a word for the
+    // linker contribute no job and pass through, and every file item takes the next job's real
+    // output, which is what keeps whatever was written between two objects between them here.
     let mut outputs = produced.into_iter();
     let mut items = Vec::with_capacity(job.inputs.len());
     for item in &job.inputs {
         match item {
             link::Item::Library(name) => items.push(link::Item::Library(name.clone())),
+            link::Item::Linker(arg) => items.push(link::Item::Linker(arg.clone())),
             link::Item::File(_) => match outputs.next() {
                 Some(path) => items.push(link::Item::File(path)),
                 None => return complain("the plan asks the linker for a file nothing produced"),
@@ -4718,8 +4722,56 @@ mod tests {
 
     #[test]
     fn a_comma_in_dash_wl_separates_two_arguments() {
-        let (link, _) = linking(&["-Wl,-rpath,/opt/lib", "-Xlinker", "--as-needed", "a.c"]);
-        assert_eq!(link.passthrough, vec!["-rpath", "/opt/lib", "--as-needed"]);
+        let (_, plan) = linking(&["-Wl,-rpath,/opt/lib", "-Xlinker", "--as-needed", "a.c"]);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![
+                link::Item::Linker("-rpath".into()),
+                link::Item::Linker("/opt/lib".into()),
+                link::Item::Linker("--as-needed".into()),
+                link::Item::File("a.o".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_word_for_the_linker_keeps_its_place_among_the_files_too() {
+        // What libtool writes around a set of convenience archives, and what #1279 was. Both words
+        // are about the files between them, so the pair collected out of the line and appended to
+        // the end is two options that bracket nothing and an archive that went in empty.
+        let (_, plan) = linking(&[
+            "--target=x86_64-unknown-linux-gnu",
+            "a.c",
+            "-Wl,--whole-archive",
+            "libaesni.a",
+            "-Wl,--no-whole-archive",
+            "-lm",
+        ]);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![
+                link::Item::File("a.o".into()),
+                link::Item::Linker("--whole-archive".into()),
+                link::Item::File("libaesni.a".into()),
+                link::Item::Linker("--no-whole-archive".into()),
+                link::Item::Library("m".into()),
+            ]
+        );
+        // And it is not a job, because there is nothing to compile in a word for the linker.
+        assert_eq!(plan.jobs.len(), 2);
+    }
+
+    #[test]
+    fn a_word_for_the_linker_on_a_dash_c_line_is_dropped_without_a_word() {
+        // GCC says nothing about one either. `-Wl,` on a compile line is what a build system
+        // writes when one variable holds the flags for both, and a note here would be a note on
+        // every compile of every autotools project.
+        let (_, plan) = linking(&["-c", "-Wl,--as-needed", "a.c"]);
+        assert!(plan.link.is_none());
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert_eq!(plan.jobs.len(), 1);
     }
 
     #[test]

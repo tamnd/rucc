@@ -59,6 +59,15 @@ pub enum Item {
     File(PathBuf),
     /// `-l<name>`, which the linker resolves against the search path.
     Library(String),
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    ///
+    /// Here for the reason the other two are. A great many of the linker's options are a bracket
+    /// around the files after them, so an option moved away from what it brackets means something
+    /// else or nothing at all: `--whole-archive` takes every member of every archive after it
+    /// whether anything referenced it or not, `--start-group` searches the archives after it again
+    /// until nothing more comes out, and `-Bstatic` picks which half of a library that ships both
+    /// is wanted.
+    Linker(String),
 }
 
 /// What the driver knows that the line needs, beyond the target and the sysroot.
@@ -76,9 +85,6 @@ pub struct Invocation<'a> {
     /// `-L`, in the order given. The user's own, and they come before ours, because somebody who
     /// passed `-L` meant it to win.
     pub search: &'a [PathBuf],
-    /// `-Wl,` and `-Xlinker`, passed through untouched and last, so that anything the user said
-    /// wins over anything decided here.
-    pub passthrough: &'a [String],
     /// `-nostartfiles`, which leaves `crt1.o`, `crti.o` and `crtn.o` off.
     pub no_startfiles: bool,
     /// `-nodefaultlibs`, which leaves the libc and our runtime off.
@@ -204,8 +210,7 @@ impl std::error::Error for Unsupported {}
 ///
 /// Two formats reach a line here and the difference between them is the flags rather than the shape.
 /// Both are written in the GNU style, which is what `ld`, `ld.lld` and `ld.lld` in its MinGW mode all
-/// read, so the inputs, the `-L` directories and the passthrough are assembled once for both rather
-/// than twice.
+/// read, so the inputs and the `-L` directories are assembled once for both rather than twice.
 ///
 /// # Errors
 ///
@@ -344,9 +349,12 @@ fn sysroot_flag(sysroot: &Sysroot) -> String {
 /// and whatever the user told the linker directly.
 ///
 /// One function for both formats, because none of this differs between them. What has to be linked
-/// is [`LinkLine`]'s answer and it is already a per target one, `-L` and `-l` are spelled the same
-/// by every linker that reads a GNU command line, and the passthrough is last in both so that
-/// anything the user said wins over anything decided here.
+/// is [`LinkLine`]'s answer and it is already a per target one, and `-L`, `-l` and everything a user
+/// hands the linker directly are spelled the same by every linker that reads a GNU command line.
+///
+/// What the user said goes where the user wrote it, in among the inputs, rather than at the end. An
+/// option that brackets the files after it means nothing once it is moved behind them, which is what
+/// [`Item::Linker`] is about.
 fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     let mut args = Vec::new();
     let line = LinkLine::for_target(sysroot, options.mode);
@@ -366,6 +374,7 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
         match input {
             Item::File(path) => args.push(path.display().to_string()),
             Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
         }
     }
 
@@ -376,7 +385,6 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
         args.extend(shown(&line.end));
     }
 
-    args.extend(options.passthrough.iter().cloned());
     args
 }
 
@@ -719,16 +727,30 @@ mod tests {
     }
 
     #[test]
-    fn what_the_user_told_the_linker_comes_after_what_this_told_it() {
-        let passthrough = ["--no-eh-frame-hdr".to_owned()];
-        let options = Invocation {
-            mode: LinkMode::Dynamic,
-            passthrough: &passthrough,
-            ..Invocation::default()
-        };
+    fn what_the_user_told_the_linker_stays_where_the_user_wrote_it() {
+        // The pair libtool writes around a set of convenience archives. Both words bracket the files
+        // between them, so a line that collects them and appends them to the end has two options
+        // that say nothing and an archive that went in empty. Written in the middle here for that
+        // reason: what is checked is the position rather than the presence.
+        let inputs = [
+            Item::File(Path::new("main.o").to_path_buf()),
+            Item::Linker("--whole-archive".to_owned()),
+            Item::File(Path::new("libaesni.a").to_path_buf()),
+            Item::Linker("--no-whole-archive".to_owned()),
+            Item::Library("m".to_owned()),
+        ];
+        let options =
+            Invocation { mode: LinkMode::Dynamic, inputs: &inputs, ..Invocation::default() };
         let args = argv(target("x86_64-linux-gnu"), &sysroot("x86_64-linux-gnu"), &options)
             .expect("a line");
-        assert_eq!(args.last().map(String::as_str), Some("--no-eh-frame-hdr"));
+        let at = |what: &str| args.iter().position(|arg| arg == what).expect(what);
+        assert!(at("main.o") < at("--whole-archive"), "{args:?}");
+        assert!(at("--whole-archive") < at("libaesni.a"), "{args:?}");
+        assert!(at("libaesni.a") < at("--no-whole-archive"), "{args:?}");
+        assert!(at("--no-whole-archive") < at("-lm"), "{args:?}");
+        // And still in front of the libc and the end start files, which are ours and go after every
+        // input whatever kind each one turned out to be.
+        assert!(args.iter().position(|arg| arg.ends_with("crtn.o")).expect("crtn") > at("-lm"));
     }
 
     #[test]

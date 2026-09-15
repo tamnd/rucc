@@ -87,8 +87,6 @@ pub struct LinkOptions {
     pub use_ld: Option<String>,
     /// `-L<dir>`, in order, because the linker takes the first library it finds.
     pub search: Vec<PathBuf>,
-    /// `-Wl,<arg>` and `-Xlinker <arg>`, in order, passed through untouched.
-    pub passthrough: Vec<String>,
     /// `-B<prefix>`, which is where to look for the linker before looking on the path.
     pub prefixes: Vec<PathBuf>,
     /// `--sysroot=<dir>`, which prefixes the directories this looks in.
@@ -169,6 +167,16 @@ pub enum Item {
     File(String),
     /// `-l<name>`, which the linker resolves against its search path.
     Library(String),
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    ///
+    /// Here rather than in a list of its own because a great many of the linker's options are a
+    /// bracket around the files after them, and an option moved away from what it brackets means
+    /// something else or nothing at all. `--whole-archive` says that every member of every archive
+    /// named after it goes in whether anything referenced it or not, `--start-group` says that the
+    /// archives after it are searched again until nothing more comes out, and `-Bstatic` says which
+    /// half of a library that ships both is wanted. Collecting them and appending them to the end
+    /// leaves each of those pointing at nothing.
+    Linker(String),
 }
 
 impl std::fmt::Display for Item {
@@ -176,6 +184,7 @@ impl std::fmt::Display for Item {
         match self {
             Item::File(path) => f.write_str(path),
             Item::Library(name) => write!(f, "-l{name}"),
+            Item::Linker(arg) => write!(f, "-Wl,{arg}"),
         }
     }
 }
@@ -457,6 +466,7 @@ fn cross_line(
         .map(|item| match item {
             Item::File(path) => argv::Item::File(PathBuf::from(path)),
             Item::Library(name) => argv::Item::Library(name.clone()),
+            Item::Linker(arg) => argv::Item::Linker(arg.clone()),
         })
         .collect();
     let output = PathBuf::from(output);
@@ -465,7 +475,6 @@ fn cross_line(
         output: Some(&output),
         mode: mode(opts),
         search: &opts.search,
-        passthrough: &opts.passthrough,
         no_startfiles: !opts.wants_startfiles(),
         no_defaultlibs: !opts.wants_defaultlibs(),
         no_builtins_lib: opts.no_builtins_lib,
@@ -678,6 +687,7 @@ pub fn line(
         match item {
             Item::File(path) => args.push(path.clone()),
             Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
         }
     }
     // After the objects, because a static archive is searched for what is undefined at the point
@@ -696,9 +706,6 @@ pub fn line(
         }
     }
 
-    // Last, so that anything the user said wins over anything decided above, which is what
-    // `-Wl,` is for.
-    args.extend(opts.passthrough.iter().cloned());
     Ok(args)
 }
 
@@ -1153,13 +1160,24 @@ mod tests {
     }
 
     #[test]
-    fn what_the_user_told_the_linker_comes_after_what_this_told_it() {
-        let opts = LinkOptions {
-            passthrough: vec!["--no-eh-frame-hdr".to_owned()],
-            ..LinkOptions::default()
-        };
-        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
-        assert_eq!(args.last().map(String::as_str), Some("--no-eh-frame-hdr"));
+    fn what_the_user_told_the_linker_stays_where_the_user_wrote_it() {
+        // The pair libtool writes around a set of convenience archives, which is what found this.
+        // Both words are about the files between them, so a line that collects them and puts them
+        // at the end has two options that do nothing and an archive whose members were all dropped.
+        let items = vec![
+            Item::File("a.o".to_owned()),
+            Item::Linker("--whole-archive".to_owned()),
+            Item::File("libaesni.a".to_owned()),
+            Item::Linker("--no-whole-archive".to_owned()),
+            Item::Library("m".to_owned()),
+        ];
+        let args = line(linux(), &LinkOptions::default(), &items, "a.out").expect("a line");
+        let at = |what: &str| args.iter().position(|a| a == what).expect(what);
+        assert!(at("a.o") < at("--whole-archive"), "{args:?}");
+        assert!(at("--whole-archive") < at("libaesni.a"), "{args:?}");
+        assert!(at("libaesni.a") < at("--no-whole-archive"), "{args:?}");
+        assert!(at("--no-whole-archive") < at("-lm"), "{args:?}");
+        assert!(at("-lm") < at("-lc"), "{args:?}");
     }
 
     #[test]
