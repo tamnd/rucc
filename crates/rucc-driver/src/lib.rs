@@ -2296,6 +2296,31 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
     i32::from(failed)
 }
 
+/// Whether this job is a file of assembly that has to be assembled and that nothing here assembles.
+///
+/// The phases rather than the kind, because there are two kinds of assembly input and one of them
+/// is preprocessed first, and because an object file also has no compile phase and is not this: it
+/// has no phases at all and goes to the linker as it is. A `.s` on a `-c` line has exactly
+/// [`Phase::Assemble`] left, and a `.S` has the preprocessor in front of it, and neither has
+/// anything the front end can do.
+fn needs_an_assembler(job: &Job) -> bool {
+    job.phases.contains(&Phase::Assemble) && !job.phases.contains(&Phase::Compile)
+}
+
+/// What is said about one, which is the same sentence wherever it is found.
+///
+/// Said and counted as a failure rather than passed over. Exiting zero having written nothing is
+/// the worse of the two ways to be wrong, because every caller that checks the status believes it
+/// worked: GMP's configure assembles three small files to find out how the local assembler spells
+/// a thirty two bit word, reads all three exit statuses as success, finds no object beside any of
+/// them, and concludes that none of the three spellings works.
+fn no_assembler(input: &str) -> String {
+    format!(
+        "rucc: error: {input}: this compiler has no assembler for a file of assembly yet, so \
+         nothing was written for it"
+    )
+}
+
 /// Runs the front end over every input that has a compile phase, and writes what came out.
 ///
 /// The same rule as [`preprocess_all`]: one input that fails does not stop the others, and the
@@ -2311,6 +2336,11 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let mut pressure = Pressure::new();
     let mut lowerings = Lowerings::new();
     for job in &plan.jobs {
+        if needs_an_assembler(job) {
+            let _ = writeln!(stderr, "{}", no_assembler(&job.input));
+            failed = true;
+            continue;
+        }
         if !job.phases.contains(&Phase::Compile) {
             continue;
         }
@@ -2458,6 +2488,14 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 Output::Stdout => continue,
             };
             produced.push(out.clone());
+            // Before the linker is handed a path to a file that is never going to be there. What
+            // the linker says about one is that it cannot find a temporary in a directory nobody
+            // named, which is a message about this and does not read like one.
+            if needs_an_assembler(job) {
+                let _ = writeln!(stderr, "{}", no_assembler(&job.input));
+                failed = true;
+                continue;
+            }
             if !job.phases.contains(&Phase::Compile) {
                 continue;
             }
@@ -2472,7 +2510,6 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             }
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
-            lowerings.merge(&result.lowerings);
             lowerings.merge(&result.lowerings);
             failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
@@ -2613,15 +2650,9 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
                 return complain("the plan asks the archive for a member nothing produced");
             };
             if !plan_job.phases.contains(&Phase::Compile) {
-                // Assembly, which enters the pipeline after the compile phase. There is no
-                // assembler for a file of text in this compiler, so there is no object to put in,
-                // and an archive quietly missing one is worse than a message about it.
-                let _ = writeln!(
-                    &mut stderr,
-                    "rucc: error: {}: this compiler has no assembler for a file of assembly yet, \
-                     so it cannot go into an archive",
-                    plan_job.input
-                );
+                // Assembly, which enters the pipeline after the compile phase, so there is no
+                // object to put in and an archive quietly missing one is worse than a message.
+                let _ = writeln!(&mut stderr, "{}", no_assembler(&plan_job.input));
                 failed = true;
                 continue;
             }
@@ -2636,7 +2667,6 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             }
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
-            lowerings.merge(&result.lowerings);
             lowerings.merge(&result.lowerings);
             failed |= !write_dumps(&plan_job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
