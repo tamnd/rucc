@@ -373,3 +373,272 @@ fn sort_of(sort: Sort) -> SymbolKind {
         Sort::Untyped => SymbolKind::Label,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use object::read::elf::{FileHeader as _, SectionHeader as _, Sym as _};
+    use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use rucc_target::{Arch as TargetArch, Env, Os, Triple};
+
+    use crate::section::Reference;
+
+    /// A linux x86-64 target, which is the only one this writes.
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(TargetArch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// One section of that name holding those bytes, with the flags the name implies.
+    fn part(name: &str, bytes: Vec<u8>) -> Part {
+        Part {
+            name: name.to_owned(),
+            size: bytes.len() as u64,
+            bytes,
+            align: 1,
+            shape: Shape::of(name),
+            relocs: Vec::new(),
+        }
+    }
+
+    /// One name at an offset into the first section.
+    fn at(name: &str, offset: u64, sort: Sort, binding: Binding) -> Name {
+        Name {
+            name: name.to_owned(),
+            at: Held::In { part: 0, offset },
+            size: 0,
+            sort,
+            binding,
+            visibility: Visibility::Default,
+        }
+    }
+
+    /// The raw `st_info` of a symbol, which is where the two halves nothing else exposes live.
+    ///
+    /// The reader's own `kind()` and `is_global()` are a translation of these, and a translation is
+    /// what a couple of the cases below are about, so they ask the file rather than the reading.
+    fn st_info(bytes: &[u8], want: &str) -> u8 {
+        let header = object::elf::FileHeader64::<Endianness>::parse(bytes).expect("a header");
+        let endian = header.endian().expect("an endianness");
+        let table = header.sections(endian, bytes).expect("the sections");
+        let symbols =
+            table.symbols(endian, bytes, object::elf::SHT_SYMTAB).expect("a symbol table");
+        for symbol in symbols.iter() {
+            if symbols.symbol_name(endian, symbol).expect("a name") == want.as_bytes() {
+                return symbol.st_info();
+            }
+        }
+        panic!("there is no symbol called '{want}'");
+    }
+
+    #[test]
+    fn a_section_carries_the_flags_the_source_said_and_not_the_ones_its_name_suggests() {
+        // The whole reason a shape is separate facts rather than a kind. A program may write
+        // `.section .init.text,"ax"` and mean a section with a name this compiler has never heard
+        // of, and what it said about it is the letters.
+        let mut odd = part(".init.text", vec![0x90]);
+        odd.shape = Shape { alloc: true, exec: true, bits: true, ..Shape::default() };
+        let input = Assembled { parts: vec![odd], names: Vec::new() };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".init.text").expect("the section");
+        assert_eq!(section.data().expect("the bytes"), &[0x90]);
+        let SectionFlags::Elf { sh_flags, sh_type } = section.flags() else {
+            panic!("this is an ELF file");
+        };
+        assert_eq!(sh_flags, u64::from(elf::SHF_ALLOC.0 | elf::SHF_EXECINSTR.0));
+        assert_eq!(sh_flags & u64::from(elf::SHF_WRITE.0), 0, "nothing said it was writable");
+        assert_eq!(sh_type, elf::SHT_PROGBITS.0);
+    }
+
+    #[test]
+    fn a_section_that_holds_no_bytes_still_says_how_long_it_is() {
+        // `.bss` is a length and no bytes, and a writer that appended its data would produce a file
+        // with that much zero in it, which is the difference between an object and a big object.
+        let mut room = part(".bss", Vec::new());
+        room.size = 4096;
+        room.align = 16;
+        let input = Assembled { parts: vec![room], names: Vec::new() };
+        let bytes = assembled(&input, &target()).expect("an object");
+        assert!(bytes.len() < 4096, "the empty space was written out: {} bytes", bytes.len());
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".bss").expect("the section");
+        assert_eq!(section.size(), 4096);
+        assert_eq!(section.align(), 16);
+        let SectionFlags::Elf { sh_type, .. } = section.flags() else { panic!("an ELF file") };
+        assert_eq!(sh_type, elf::SHT_NOBITS.0);
+    }
+
+    #[test]
+    fn a_label_nobody_stated_a_type_for_is_a_symbol_with_no_type() {
+        // `STT_NOTYPE` is what gas writes for one, and it is a real answer rather than a missing
+        // one. The writer underneath refuses a defined symbol whose kind is `Unknown` outright, so
+        // this is also the case that says the mapping went to `Label` and not there.
+        let input = Assembled {
+            parts: vec![part(".text", vec![0; 8])],
+            names: vec![at("plain", 4, Sort::Untyped, Binding::Global)],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let plain = file.symbols().find(|s| s.name() == Ok("plain")).expect("the label");
+        assert_eq!(plain.address(), 4);
+        assert_eq!(st_info(&bytes, "plain") & 0xf, elf::STT_NOTYPE);
+    }
+
+    #[test]
+    fn what_type_said_is_what_the_symbol_gets() {
+        let input = Assembled {
+            parts: vec![part(".text", vec![0; 8])],
+            names: vec![
+                at("run", 0, Sort::Func, Binding::Global),
+                at("held", 4, Sort::Object, Binding::Local),
+            ],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        assert_eq!(st_info(&bytes, "run") & 0xf, elf::STT_FUNC);
+        assert_eq!(st_info(&bytes, "held") & 0xf, elf::STT_OBJECT);
+        assert_eq!(st_info(&bytes, "run") >> 4, elf::STB_GLOBAL);
+        assert_eq!(st_info(&bytes, "held") >> 4, elf::STB_LOCAL);
+    }
+
+    #[test]
+    fn a_common_symbol_is_written_the_way_gas_writes_one() {
+        // The writer underneath records `STT_COMMON` and gas records `STT_OBJECT` for the same
+        // `.comm`. Both are a request for storage and a linker takes either, and the one gas writes
+        // is the one written here, so an object of ours and an object of theirs do not differ in a
+        // field somebody's tool reads years from now.
+        let input = Assembled {
+            parts: Vec::new(),
+            names: vec![Name {
+                name: "shared".to_owned(),
+                at: Held::Common { size: 8, align: 8 },
+                size: 0,
+                sort: Sort::Object,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+            }],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        assert_eq!(st_info(&bytes, "shared"), elf::STB_GLOBAL << 4 | elf::STT_OBJECT);
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let shared = file.symbols().find(|s| s.name() == Ok("shared")).expect("the symbol");
+        assert!(shared.is_common(), "the linker has to be asked for the space");
+        assert_eq!(shared.size(), 8);
+        // Where an ordinary symbol keeps its address, which is why the two cannot both be said.
+        assert_eq!(shared.address(), 8, "the boundary it has to start on");
+    }
+
+    #[test]
+    fn a_set_is_a_number_rather_than_a_place() {
+        let input = Assembled {
+            parts: vec![part(".text", vec![0; 8])],
+            names: vec![Name {
+                name: "size_of_it".to_owned(),
+                at: Held::Absolute(25),
+                size: 0,
+                sort: Sort::Untyped,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+            }],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let sym = file.symbols().find(|s| s.name() == Ok("size_of_it")).expect("the symbol");
+        assert_eq!(sym.address(), 25);
+        assert_eq!(sym.section(), object::SymbolSection::Absolute, "it is not in any section");
+    }
+
+    #[test]
+    fn a_relocation_names_a_symbol_and_lands_where_the_bytes_are() {
+        let mut data = part(".data", vec![0; 8]);
+        data.relocs.push(Reloc {
+            at: 0,
+            symbol: "message".to_owned(),
+            kind: Reference::Address { bytes: 8 },
+            addend: 0,
+        });
+        let input = Assembled {
+            parts: vec![data],
+            names: vec![Name {
+                name: "message".to_owned(),
+                at: Held::Undefined,
+                size: 0,
+                sort: Sort::Untyped,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+            }],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".data").expect("the section");
+        let (at, reloc) = section.relocations().next().expect("one relocation");
+        assert_eq!(at, 0);
+        assert_eq!(reloc.addend(), 0);
+        let object::RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("an ELF file") };
+        assert_eq!(r_type, elf::R_X86_64_64);
+    }
+
+    #[test]
+    fn a_relocation_against_a_name_the_file_never_mentions_is_refused() {
+        // Rather than written against symbol zero, which is a file that links and resolves the
+        // reference to address zero. The list of names is the whole of what the reader found, so a
+        // relocation naming something outside it is a mistake in this compiler.
+        let mut data = part(".data", vec![0; 8]);
+        data.relocs.push(Reloc {
+            at: 0,
+            symbol: "nowhere".to_owned(),
+            kind: Reference::Address { bytes: 8 },
+            addend: 0,
+        });
+        let input = Assembled { parts: vec![data], names: Vec::new() };
+        let why = assembled(&input, &target()).expect_err("this cannot be written");
+        assert!(format!("{why}").contains("nowhere"), "{why}");
+    }
+
+    #[test]
+    fn the_stack_is_marked_once_whoever_asked_for_it() {
+        // A linker that does not find this marker in every input marks the stack executable, and a
+        // file written by hand for one that cares often says it itself.
+        let bare = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
+        let bytes = assembled(&bare, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(".note.GNU-stack").is_some(), "the marker was left out");
+
+        let said = Assembled {
+            parts: vec![part(".text", vec![0x90]), part(".note.GNU-stack", Vec::new())],
+            names: Vec::new(),
+        };
+        let bytes = assembled(&said, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let marks = file.sections().filter(|s| s.name() == Ok(".note.GNU-stack")).count();
+        assert_eq!(marks, 1, "the file said it and it was said again");
+    }
+
+    #[test]
+    fn only_the_names_a_linker_could_find_are_offered_to_an_archive() {
+        let input = Assembled {
+            parts: vec![part(".text", vec![0; 8])],
+            names: vec![
+                at("reachable", 0, Sort::Func, Binding::Global),
+                at("mine", 4, Sort::Func, Binding::Local),
+                Name {
+                    name: "elsewhere".to_owned(),
+                    at: Held::Undefined,
+                    size: 0,
+                    sort: Sort::Untyped,
+                    binding: Binding::Global,
+                    visibility: Visibility::Default,
+                },
+            ],
+        };
+        assert_eq!(assembled_defines(&input), vec!["reachable".to_owned()]);
+    }
+
+    #[test]
+    fn a_machine_this_does_not_write_is_refused_rather_than_written_wrong() {
+        let input = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
+        let elsewhere = TargetInfo::new(Triple::new(TargetArch::AArch64, Os::Linux, Env::Gnu));
+        let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
+        assert!(format!("{why}").contains("aarch64"), "{why}");
+    }
+}

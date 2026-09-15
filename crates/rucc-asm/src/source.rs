@@ -1573,3 +1573,308 @@ fn split(text: &str, on: char) -> Vec<String> {
     }
     out.into_iter().map(|piece| piece.trim().to_owned()).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rucc_object::Reference;
+
+    /// The file, read, with a failure reported as a panic naming the line it was on.
+    fn assembled(text: &str) -> Assembled {
+        match read(text) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        }
+    }
+
+    /// The bytes of the section of that name.
+    fn bytes(assembled: &Assembled, name: &str) -> Vec<u8> {
+        let part = assembled
+            .parts
+            .iter()
+            .find(|part| part.name == name)
+            .unwrap_or_else(|| panic!("there is no section called '{name}'"));
+        part.bytes.clone()
+    }
+
+    /// The name of that name.
+    fn name<'a>(assembled: &'a Assembled, want: &str) -> &'a Name {
+        assembled
+            .names
+            .iter()
+            .find(|name| name.name == want)
+            .unwrap_or_else(|| panic!("there is no name called '{want}'"))
+    }
+
+    /// What a file this could not read said about it.
+    fn refused(text: &str) -> Trouble {
+        read(text).err().unwrap_or_else(|| panic!("this was read and should not have been"))
+    }
+
+    #[test]
+    fn the_probe_gmp_writes() {
+        // The case the whole crate exists for. Four lines, no instruction, and the answer configure
+        // is after is the value of the symbol: four, because the `.long` in front of it took four
+        // bytes. It seds that number out of `nm` and writes it into a header.
+        let out = assembled("\t.data\n\t.globl foo\n\t.long 0\nfoo:\n\t.byte 0\n");
+        assert_eq!(bytes(&out, ".data"), vec![0, 0, 0, 0, 0]);
+        let foo = name(&out, "foo");
+        assert_eq!(foo.at, Held::In { part: 0, offset: 4 });
+        assert_eq!(foo.binding, Binding::Global);
+    }
+
+    #[test]
+    fn every_width_of_number_is_the_bytes_it_says_it_is() {
+        let out = assembled(
+            "\t.data\n\t.byte 1\n\t.short 2\n\t.long 3\n\t.quad 4\n\t.byte 0x7f, 0377, 'a', '\\n'\n",
+        );
+        let mut want = vec![1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+        want.extend_from_slice(&[0x7f, 0xff, b'a', b'\n']);
+        assert_eq!(bytes(&out, ".data"), want);
+    }
+
+    #[test]
+    fn a_number_that_is_negative_is_written_as_the_width_asked_for() {
+        // Two's complement in that many bytes, not a refusal, because `.short -1` is how a file
+        // says two bytes of ones and every table of small offsets somewhere has one in it.
+        let out = assembled("\t.data\n\t.short -1\n\t.long -2\n");
+        assert_eq!(bytes(&out, ".data"), vec![0xff, 0xff, 0xfe, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn the_three_kinds_of_string_differ_only_in_the_zero_on_the_end() {
+        let out = assembled("\t.data\n\t.ascii \"ab\"\n\t.asciz \"cd\"\n\t.string \"e\\tf\"\n");
+        assert_eq!(bytes(&out, ".data"), b"abcd\0e\tf\0".to_vec());
+    }
+
+    #[test]
+    fn space_and_fill_put_that_many_bytes_there() {
+        let out = assembled("\t.data\n\t.byte 1\n\t.zero 3\n\t.space 2, 0x41\n\t.fill 2, 1, 7\n");
+        assert_eq!(bytes(&out, ".data"), vec![1, 0, 0, 0, 0x41, 0x41, 7, 7]);
+    }
+
+    #[test]
+    fn aligning_moves_on_to_the_boundary_and_no_further() {
+        // `.align` on this machine is a byte count and `.p2align` is a power of two, which is the
+        // one thing about them somebody porting a file from another assembler gets wrong.
+        let out = assembled("\t.data\n\t.byte 1\n\t.align 8\n\t.byte 2\n\t.p2align 4\n\t.byte 3\n");
+        let data = bytes(&out, ".data");
+        assert_eq!(data.len(), 17);
+        assert_eq!(data[0], 1);
+        assert_eq!(data[8], 2);
+        assert_eq!(data[16], 3);
+        assert_eq!(out.parts[0].align, 16, "the section has to start where the widest ask does");
+    }
+
+    #[test]
+    fn a_section_that_holds_no_bytes_counts_them_rather_than_carrying_them() {
+        let out = assembled("\t.bss\n\t.globl room\nroom:\n\t.zero 4096\n");
+        let part = &out.parts[0];
+        assert_eq!(part.name, ".bss");
+        assert_eq!(part.size, 4096);
+        assert!(part.bytes.is_empty(), "the zeroes were carried after all");
+        assert!(!part.shape.bits);
+    }
+
+    #[test]
+    fn what_a_section_directive_said_about_a_section_is_what_it_is() {
+        let out = assembled("\t.section .init.text,\"ax\",@progbits\n\t.byte 0x90\n");
+        let part = out.parts.iter().find(|part| part.name == ".init.text").expect("the section");
+        assert!(part.shape.alloc && part.shape.exec && part.shape.bits);
+        assert!(!part.shape.write, "nothing said it was writable");
+    }
+
+    #[test]
+    fn the_same_section_named_twice_is_one_section_and_the_bytes_run_on() {
+        let out = assembled("\t.data\n\t.byte 1\n\t.text\n\t.byte 0x90\n\t.data\n\t.byte 2\n");
+        assert_eq!(bytes(&out, ".data"), vec![1, 2]);
+        assert_eq!(bytes(&out, ".text"), vec![0x90]);
+    }
+
+    #[test]
+    fn pushing_a_section_and_coming_back_leaves_the_first_one_where_it_was() {
+        let out = assembled(
+            "\t.data\n\t.byte 1\n\t.pushsection .rodata\n\t.byte 9\n\t.popsection\n\t.byte 2\n",
+        );
+        assert_eq!(bytes(&out, ".data"), vec![1, 2]);
+        assert_eq!(bytes(&out, ".rodata"), vec![9]);
+    }
+
+    #[test]
+    fn a_size_that_counts_from_here_back_to_a_label_is_a_number() {
+        // `.size foo, .-foo` is on the end of nearly every function gas ever wrote. Both ends are in
+        // the same section, so the difference is known here and there is nothing to ask the linker.
+        let out = assembled(
+            "\t.text\n\t.globl f\n\t.type f, @function\nf:\n\t.byte 0,0,0,0,0\n\t.size f, .-f\n",
+        );
+        let f = name(&out, "f");
+        assert_eq!(f.size, 5);
+        assert_eq!(f.sort, Sort::Func);
+    }
+
+    #[test]
+    fn a_set_may_name_something_further_down_the_file() {
+        // Nothing can be worked out as it is parsed, which is why an expression is kept as a sum
+        // until the end. `table_end` does not exist yet on the line that subtracts it.
+        let out = assembled(
+            "\t.data\ntable:\n\t.long 1, 2, 3\ntable_end:\n\t.globl width\n\t.set width, \
+             table_end - table\n",
+        );
+        assert_eq!(name(&out, "width").at, Held::Absolute(12));
+    }
+
+    #[test]
+    fn a_set_that_names_another_set_is_worked_at_until_it_stops_moving() {
+        let out = assembled("\t.set a, b + 1\n\t.set b, c * 2\n\t.set c, 5\n");
+        assert_eq!(name(&out, "a").at, Held::Absolute(11));
+        assert_eq!(name(&out, "b").at, Held::Absolute(10));
+    }
+
+    #[test]
+    fn two_sets_that_name_each_other_are_refused_rather_than_looped_over() {
+        let why = refused("\t.set a, b\n\t.set b, a\n");
+        assert!(why.why.contains("neither has a value"), "{why}");
+    }
+
+    #[test]
+    fn a_pointer_to_something_else_is_a_relocation_for_the_whole_address() {
+        let out = assembled("\t.data\n\t.quad message\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!(reloc.at, 0);
+        assert_eq!(reloc.symbol, "message");
+        assert_eq!(reloc.kind, Reference::Address { bytes: 8 });
+        assert_eq!(reloc.addend, 0);
+        assert_eq!(name(&out, "message").at, Held::Undefined);
+    }
+
+    #[test]
+    fn a_distance_from_here_to_something_else_is_a_relocation_relative_to_here() {
+        // The other shape a reduced expression can have, and the one whose addend is not zero: the
+        // four bytes sit at offset four, and a relocation counts from where it starts.
+        let out = assembled("\t.data\n\t.quad 0\n\t.long message - .\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!(reloc.at, 8);
+        assert_eq!(reloc.symbol, "message");
+        assert_eq!(reloc.kind, Reference::Data);
+        assert_eq!(reloc.addend, 0);
+    }
+
+    #[test]
+    fn a_number_added_to_a_name_rides_along_in_the_addend() {
+        let out = assembled("\t.data\n\t.quad message + 16\n");
+        assert_eq!(out.parts[0].relocs[0].addend, 16);
+    }
+
+    #[test]
+    fn comm_and_lcomm_ask_the_linker_for_room_rather_than_carrying_it() {
+        let out = assembled("\t.comm shared, 8, 8\n\t.lcomm mine, 32, 16\n");
+        assert_eq!(name(&out, "shared").at, Held::Common { size: 8, align: 8 });
+        assert_eq!(name(&out, "shared").binding, Binding::Global);
+        // `.lcomm` is space in `.bss` under a local name, which is a different thing from `.comm`
+        // however much the two names look alike.
+        assert_eq!(name(&out, "mine").binding, Binding::Local);
+        assert!(matches!(name(&out, "mine").at, Held::In { .. }));
+    }
+
+    #[test]
+    fn what_a_file_says_about_who_can_see_a_name_is_kept() {
+        let out = assembled(
+            "\t.text\n\t.globl seen\n\t.weak maybe\n\t.hidden inside\n\t.globl \
+             inside\nseen:\nmaybe:\ninside:\n\t.byte 0\n",
+        );
+        assert_eq!(name(&out, "seen").binding, Binding::Global);
+        assert_eq!(name(&out, "maybe").binding, Binding::Weak);
+        assert_eq!(name(&out, "inside").visibility, Visibility::Hidden);
+    }
+
+    #[test]
+    fn the_name_of_the_file_is_a_symbol_of_its_own() {
+        // And not one that can collide with something in the file, which is why it is kept apart
+        // from the rest until the end.
+        let out = assembled("\t.file \"big.s\"\n\t.data\nbig:\n\t.byte 0\n");
+        assert_eq!(out.names[0].name, "big.s");
+        assert_eq!(out.names[0].sort, Sort::File);
+        assert_eq!(out.names[0].binding, Binding::Local);
+        assert!(out.names.iter().any(|name| name.name == "big"), "the label was lost");
+    }
+
+    #[test]
+    fn a_numbered_file_is_a_note_for_a_debugger_and_not_a_name() {
+        // `.file 1 "foo.c"` is the DWARF form and names an entry in a line table, which is a
+        // different directive wearing the same word.
+        let out = assembled("\t.file 1 \"foo.c\"\n\t.data\n\t.byte 0\n");
+        assert!(out.names.is_empty(), "{:?}", out.names);
+    }
+
+    #[test]
+    fn an_instruction_is_refused_by_name_and_by_line() {
+        // The failure this crate is written to prevent. An assembler that skipped what it did not
+        // recognise would write an object that links, and what would be wrong with it is a run of
+        // missing bytes in the middle of a function.
+        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tret\n");
+        assert_eq!(why.line, 3);
+        assert!(why.why.contains("movq"), "{why}");
+        assert!(why.why.contains("instruction"), "{why}");
+    }
+
+    #[test]
+    fn a_directive_this_does_not_know_is_refused_by_name_and_by_line() {
+        let why = refused("\t.text\n\t.byte 0\n\t.reloc 0, R_X86_64_NONE, f\n");
+        assert_eq!(why.line, 3);
+        assert!(why.why.contains(".reloc"), "{why}");
+    }
+
+    #[test]
+    fn the_comments_the_three_ways_of_writing_one_make_are_not_read() {
+        // The `#` one is why the output of the preprocessor can be handed straight to this: a
+        // `# 42 "foo.h"` line marker is a comment and nothing has to know it is one.
+        let out = assembled(
+            "# 1 \"foo.S\"\n\t.data\n\t.byte 1 # one\n\t.byte 2 // two\n\t/* a\n\tcomment */\t.byte \
+             3\n",
+        );
+        assert_eq!(bytes(&out, ".data"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_comment_left_open_at_the_end_of_the_file_is_said_rather_than_ignored() {
+        let why = refused("\t.data\n\t/* and then nothing\n");
+        assert!(why.why.contains("never closed"), "{why}");
+    }
+
+    #[test]
+    fn a_string_with_a_comment_character_in_it_is_a_string() {
+        let out = assembled("\t.data\n\t.ascii \"a#b/*c\"\n");
+        assert_eq!(bytes(&out, ".data"), b"a#b/*c".to_vec());
+    }
+
+    #[test]
+    fn several_statements_on_one_line_are_several_statements() {
+        let out = assembled("\t.data; .byte 1; .byte 2\n");
+        assert_eq!(bytes(&out, ".data"), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_section_nothing_was_ever_put_in_is_dropped() {
+        // Every file starts in `.text` whether or not it says so, and a `.section` inside a macro
+        // that turned out to be unused should not leave a header behind either.
+        let out = assembled("\t.data\n\t.byte 1\n");
+        assert_eq!(out.parts.len(), 1);
+        assert_eq!(out.parts[0].name, ".data");
+    }
+
+    #[test]
+    fn a_section_with_nothing_in_it_but_a_name_is_kept() {
+        // Because the name has to point somewhere, and dropping the section under it would leave a
+        // symbol pointing at a section that is not there.
+        let out = assembled("\t.text\n\t.globl marker\nmarker:\n");
+        assert_eq!(out.parts.len(), 1);
+        assert_eq!(name(&out, "marker").at, Held::In { part: 0, offset: 0 });
+    }
+
+    #[test]
+    fn an_error_directive_is_the_file_saying_it_refuses_itself() {
+        let why = refused("\t.error \"this is not the machine for it\"\n");
+        assert!(why.why.contains("not the machine for it"), "{why}");
+    }
+}
