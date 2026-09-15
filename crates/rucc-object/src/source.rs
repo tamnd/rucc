@@ -378,7 +378,7 @@ fn sort_of(sort: Sort) -> SymbolKind {
 mod tests {
     use super::*;
 
-    use object::read::elf::{FileHeader as _, SectionHeader as _, Sym as _};
+    use object::read::elf::{FileHeader as _, Sym as _};
     use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
     use rucc_target::{Arch as TargetArch, Env, Os, Triple};
 
@@ -418,14 +418,13 @@ mod tests {
     /// The reader's own `kind()` and `is_global()` are a translation of these, and a translation is
     /// what a couple of the cases below are about, so they ask the file rather than the reading.
     fn st_info(bytes: &[u8], want: &str) -> u8 {
-        let header = object::elf::FileHeader64::<Endianness>::parse(bytes).expect("a header");
+        let header = elf::FileHeader64::<Endianness>::parse(bytes).expect("a header");
         let endian = header.endian().expect("an endianness");
         let table = header.sections(endian, bytes).expect("the sections");
-        let symbols =
-            table.symbols(endian, bytes, object::elf::SHT_SYMTAB).expect("a symbol table");
+        let symbols = table.symbols(endian, bytes, elf::SHT_SYMTAB).expect("a symbol table");
         for symbol in symbols.iter() {
             if symbols.symbol_name(endian, symbol).expect("a name") == want.as_bytes() {
-                return symbol.st_info();
+                return symbol.st_info().0;
             }
         }
         panic!("there is no symbol called '{want}'");
@@ -446,9 +445,9 @@ mod tests {
         let SectionFlags::Elf { sh_flags, sh_type } = section.flags() else {
             panic!("this is an ELF file");
         };
-        assert_eq!(sh_flags, u64::from(elf::SHF_ALLOC.0 | elf::SHF_EXECINSTR.0));
-        assert_eq!(sh_flags & u64::from(elf::SHF_WRITE.0), 0, "nothing said it was writable");
-        assert_eq!(sh_type, elf::SHT_PROGBITS.0);
+        assert_eq!(sh_flags.0, u64::from(elf::SHF_ALLOC.0 | elf::SHF_EXECINSTR.0));
+        assert_eq!(sh_flags.0 & u64::from(elf::SHF_WRITE.0), 0, "nothing said it was writable");
+        assert_eq!(sh_type, elf::SHT_PROGBITS);
     }
 
     #[test]
@@ -466,7 +465,7 @@ mod tests {
         assert_eq!(section.size(), 4096);
         assert_eq!(section.align(), 16);
         let SectionFlags::Elf { sh_type, .. } = section.flags() else { panic!("an ELF file") };
-        assert_eq!(sh_type, elf::SHT_NOBITS.0);
+        assert_eq!(sh_type, elf::SHT_NOBITS);
     }
 
     #[test]
@@ -482,7 +481,7 @@ mod tests {
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let plain = file.symbols().find(|s| s.name() == Ok("plain")).expect("the label");
         assert_eq!(plain.address(), 4);
-        assert_eq!(st_info(&bytes, "plain") & 0xf, elf::STT_NOTYPE);
+        assert_eq!(st_info(&bytes, "plain") & 0xf, elf::STT_NOTYPE.0);
     }
 
     #[test]
@@ -495,10 +494,10 @@ mod tests {
             ],
         };
         let bytes = assembled(&input, &target()).expect("an object");
-        assert_eq!(st_info(&bytes, "run") & 0xf, elf::STT_FUNC);
-        assert_eq!(st_info(&bytes, "held") & 0xf, elf::STT_OBJECT);
-        assert_eq!(st_info(&bytes, "run") >> 4, elf::STB_GLOBAL);
-        assert_eq!(st_info(&bytes, "held") >> 4, elf::STB_LOCAL);
+        assert_eq!(st_info(&bytes, "run") & 0xf, elf::STT_FUNC.0);
+        assert_eq!(st_info(&bytes, "held") & 0xf, elf::STT_OBJECT.0);
+        assert_eq!(st_info(&bytes, "run") >> 4, elf::STB_GLOBAL.0);
+        assert_eq!(st_info(&bytes, "held") >> 4, elf::STB_LOCAL.0);
     }
 
     #[test]
@@ -519,7 +518,7 @@ mod tests {
             }],
         };
         let bytes = assembled(&input, &target()).expect("an object");
-        assert_eq!(st_info(&bytes, "shared"), elf::STB_GLOBAL << 4 | elf::STT_OBJECT);
+        assert_eq!(st_info(&bytes, "shared"), elf::STB_GLOBAL.0 << 4 | elf::STT_OBJECT.0);
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let shared = file.symbols().find(|s| s.name() == Ok("shared")).expect("the symbol");
         assert!(shared.is_common(), "the linker has to be asked for the space");
@@ -574,7 +573,7 @@ mod tests {
         let (at, reloc) = section.relocations().next().expect("one relocation");
         assert_eq!(at, 0);
         assert_eq!(reloc.addend(), 0);
-        let object::RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("an ELF file") };
+        let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("an ELF file") };
         assert_eq!(r_type, elf::R_X86_64_64);
     }
 
@@ -637,7 +636,7 @@ mod tests {
     #[test]
     fn a_machine_this_does_not_write_is_refused_rather_than_written_wrong() {
         let input = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
-        let elsewhere = TargetInfo::new(Triple::new(TargetArch::AArch64, Os::Linux, Env::Gnu));
+        let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
         assert!(format!("{why}").contains("aarch64"), "{why}");
     }
