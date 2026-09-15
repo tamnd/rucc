@@ -248,6 +248,9 @@ impl Reader {
         let end = at + written.bytes.len() as u64;
         for hole in written.holes {
             let branch = hole.sort == crate::instruction::Sort::Branch;
+            // Written down as a name the file mentions, which is what a call to something in
+            // another object is and the only way it gets into the symbol table at all.
+            self.sym(&hole.name);
             let sum = Sum {
                 constant: 0,
                 terms: vec![
