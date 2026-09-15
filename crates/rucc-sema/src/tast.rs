@@ -544,11 +544,21 @@ mod tests {
     /// assembler name above it are merged: a header writes the attribute and the definition below
     /// it writes nothing, so the answer has to travel with the declarations of a name rather than
     /// with the one that was written.
+    ///
+    /// Sixty eight to seventy two for the handler a `cleanup` attribute names, which is four
+    /// bytes and none of them padding: it is one index and it lands where the fields of that
+    /// width already are. Unlike every field above it this one is a fact about the declaration
+    /// rather than about the name, since the attribute is only allowed on an object inside a
+    /// block and such an object is declared once, so there is nothing for the merge to carry. A
+    /// side table was the alternative and was not taken for the reason the assembler name above
+    /// did not take one: it is asked about at every declaration the lowering walks past, which
+    /// is every local in the program, and a table that is empty for all but a handful of them is
+    /// a lookup per local to find nothing.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 68);
+        assert_eq!(size_of::<Decl>(), 72);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -601,6 +611,7 @@ mod tests {
                 visibility: None,
                 startup: Startup::default(),
                 init: None,
+                cleanup: None,
                 params: DeclList::EMPTY,
                 body: None,
             },

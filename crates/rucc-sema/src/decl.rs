@@ -147,6 +147,19 @@ pub struct Decl {
     /// and keeps the first when a later one disagrees, since the calls above it have already been
     /// compiled against the answer it gave.
     pub visibility: Option<Visibility>,
+    /// The function `__attribute__((cleanup(f)))` named, which runs on every way out of the block
+    /// the object was declared in, and nothing when the attribute was not written.
+    ///
+    /// The handler takes a pointer to the object and is called with its address, in reverse order
+    /// of declaration among the objects of one block, at the closing brace and at every `return`,
+    /// `break`, `continue` and `goto` that leaves the block. It is a fact about this declaration
+    /// rather than about the name, unlike most of the fields above, because the attribute is only
+    /// allowed on an object with automatic storage and such an object is declared once.
+    ///
+    /// This is what glib spells `g_autoptr` and systemd spells `_cleanup_free_`, and what
+    /// jansson spells `json_auto_t`. A compiler that reads past it leaks whatever the handler
+    /// would have given back, which is the shape of wrongness hardest to notice.
+    pub cleanup: Option<DeclId>,
     /// The parameters of a function definition, in order, and empty for everything else.
     ///
     /// A parameter is an object with automatic storage like any other, and the body refers to

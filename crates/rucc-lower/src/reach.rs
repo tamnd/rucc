@@ -88,15 +88,25 @@ impl Reach<'_> {
         }
     }
 
-    /// What one declaration reaches, which is its initializer and its body.
+    /// What one declaration reaches, which is its initializer, its body and the handler a
+    /// `cleanup` attribute on it names.
+    ///
+    /// The handler is the one reference in the file that is not an expression, so it is reached
+    /// here rather than in the walk over the body. It has to be reached at all, because the
+    /// handler is usually a `static inline` in the same header as the type it releases and
+    /// nothing else in the file names it, and a call this walk has not seen is a call to a
+    /// definition the file did not emit.
     fn decl(&mut self, decl: DeclId) {
         let node = &self.tast[decl];
-        let (init, body) = (node.init, node.body);
+        let (init, body, cleanup) = (node.init, node.body, node.cleanup);
         if let Some(init) = init {
             self.init(init);
         }
         if let Some(body) = body {
             self.stmt(body);
+        }
+        if let Some(handler) = cleanup {
+            self.mark(handler);
         }
     }
 

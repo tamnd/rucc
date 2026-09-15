@@ -89,6 +89,9 @@ struct Declared {
     startup: Startup,
     /// How far this declaration said the name reaches outside a shared library.
     visibility: Option<Visibility>,
+    /// The function a `cleanup` attribute on this declaration asks to have called on the way out
+    /// of the block the object is in.
+    cleanup: Option<DeclId>,
     /// Whether the declaration says nothing about which linkage it wants and so takes whatever the
     /// declaration before it had. This is not the same as having external linkage. A file scope
     /// `int x;` has external linkage and no keyword, and the difference between the two is what
@@ -301,6 +304,10 @@ impl Checker<'_> {
             // And the specifiers only here as well, which is where a definition carrying one of
             // the two attributes has put it.
             startup: self.startup(specs.attrs, DeclKind::Function),
+            // A function is not an object with a block to leave, so this is where the attribute
+            // gets the warning gcc gives it rather than where it does anything. Read from the
+            // specifiers only, for the reason the three above are.
+            cleanup: self.cleanup(specs.attrs, DeclKind::Function, duration),
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
@@ -595,6 +602,12 @@ impl Checker<'_> {
                 || self.never_returns(item.attrs),
             // Both places, for the reason `retained` above reads both.
             visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
+            // Both places, for the reason `retained` above reads both. The kind and the duration
+            // go with them because the attribute only means something on an object inside a block
+            // and the warning for anything else is given where it was written.
+            cleanup: self
+                .cleanup(specs.attrs, kind, duration)
+                .or_else(|| self.cleanup(item.attrs, kind, duration)),
             // Both places as well, and the kind goes with them because only a function can be in
             // either order and the warning for anything else is given where the attribute was
             // written rather than later.
@@ -1303,6 +1316,7 @@ impl Checker<'_> {
             visibility: declared.visibility,
             startup: declared.startup,
             init: None,
+            cleanup: declared.cleanup,
             params: DeclList::EMPTY,
             body: None,
         };

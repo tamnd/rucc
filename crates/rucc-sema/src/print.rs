@@ -147,6 +147,14 @@ impl<'a> Printer<'a> {
         if node.noreturn {
             head.push_str(" noreturn");
         }
+        // The handler is a declaration rather than a name, so what is written is the name it was
+        // resolved to, which is what makes a dump show which function the call will go to.
+        if let Some(handler) = node.cleanup {
+            let spelled = self.tast[handler]
+                .name
+                .map_or_else(|| "?".to_string(), |name| self.names.resolve(name).to_string());
+            head.push_str(&format!(" cleanup {spelled}"));
+        }
         // Each on its own, because a function may be in both orders, and a bare one carries no
         // number because it is not at any number: it runs after every numbered one.
         if let Some(priority) = node.startup.before {
@@ -881,6 +889,7 @@ decl #0 : int[2] object automatic defined
             visibility: None,
             startup: Startup::default(),
             init: None,
+            cleanup: None,
             params: DeclList::EMPTY,
             body: None,
         }

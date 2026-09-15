@@ -378,6 +378,7 @@ impl<'a> Checker<'a> {
                 visibility: None,
                 startup: Startup::default(),
                 init: Some(entries),
+                cleanup: None,
                 params: DeclList::EMPTY,
                 body: None,
             },
