@@ -420,9 +420,11 @@ pub static FLAGS: FlagInsts = FlagInsts {
 ///
 /// Written as the ones that do not, because that is the list that can be checked against the
 /// machine: a move, an address computation, a load, a store, a conversion between widths, a
-/// constant into a register, a push, a pop and a `setcc` are the instructions Intel's description
-/// of each says nothing about the flags in, and the vector unit's arithmetic writes its own status
-/// word rather than this one. Everything else writes them, and so does every name this target does
+/// constant into a register, a push, a pop, a `setcc` and a `cmovcc` are the instructions Intel's
+/// description of each says nothing about the flags in, and the vector unit's arithmetic writes its
+/// own status word rather than this one. The last two read the state and leave it alone, which is
+/// what puts them in this list and in the one below it both. Everything else writes them, and so
+/// does every name this target does
 /// not have, which is what keeps a rule set that grows an opcode from quietly growing a wrong
 /// answer here.
 #[must_use]
@@ -439,6 +441,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Push
             | Form::Pop
             | Form::Set
+            | Form::Cmov
             | Form::Jcc
             | Form::Jmp
             | Form::Nop
@@ -562,10 +565,11 @@ static COMPARES: [Compare; 88] = [
 /// Every instruction that reads the condition state, and which part of it each names.
 ///
 /// A comparison that keeps a byte is in here as well as above, because the condition on the front
-/// of it is a condition whoever set the bits it reads. The `setcc` with no comparison and the ten
-/// jumps are the rest. The two that are about the carry and the zero together are filed under the
-/// carry, since an entry says which part has to be right and both of theirs do.
-static READERS: [Reader; 100] = [
+/// of it is a condition whoever set the bits it reads. The `setcc` with no comparison, the thirty
+/// conditional moves with no comparison and the ten jumps are the rest. The two that are about the
+/// carry and the zero together are filed under the carry, since an entry says which part has to be
+/// right and both of theirs do.
+static READERS: [Reader; 130] = [
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -656,6 +660,36 @@ static READERS: [Reader; 100] = [
     Reader { name: "set_be", reads: Reads::Unsigned },
     Reader { name: "set_a", reads: Reads::Unsigned },
     Reader { name: "set_ae", reads: Reads::Unsigned },
+    Reader { name: "cmov_e_16", reads: Reads::Zero },
+    Reader { name: "cmov_e_32", reads: Reads::Zero },
+    Reader { name: "cmov_e_64", reads: Reads::Zero },
+    Reader { name: "cmov_ne_16", reads: Reads::Zero },
+    Reader { name: "cmov_ne_32", reads: Reads::Zero },
+    Reader { name: "cmov_ne_64", reads: Reads::Zero },
+    Reader { name: "cmov_l_16", reads: Reads::Signed },
+    Reader { name: "cmov_l_32", reads: Reads::Signed },
+    Reader { name: "cmov_l_64", reads: Reads::Signed },
+    Reader { name: "cmov_le_16", reads: Reads::Signed },
+    Reader { name: "cmov_le_32", reads: Reads::Signed },
+    Reader { name: "cmov_le_64", reads: Reads::Signed },
+    Reader { name: "cmov_g_16", reads: Reads::Signed },
+    Reader { name: "cmov_g_32", reads: Reads::Signed },
+    Reader { name: "cmov_g_64", reads: Reads::Signed },
+    Reader { name: "cmov_ge_16", reads: Reads::Signed },
+    Reader { name: "cmov_ge_32", reads: Reads::Signed },
+    Reader { name: "cmov_ge_64", reads: Reads::Signed },
+    Reader { name: "cmov_b_16", reads: Reads::Unsigned },
+    Reader { name: "cmov_b_32", reads: Reads::Unsigned },
+    Reader { name: "cmov_b_64", reads: Reads::Unsigned },
+    Reader { name: "cmov_be_16", reads: Reads::Unsigned },
+    Reader { name: "cmov_be_32", reads: Reads::Unsigned },
+    Reader { name: "cmov_be_64", reads: Reads::Unsigned },
+    Reader { name: "cmov_a_16", reads: Reads::Unsigned },
+    Reader { name: "cmov_a_32", reads: Reads::Unsigned },
+    Reader { name: "cmov_a_64", reads: Reads::Unsigned },
+    Reader { name: "cmov_ae_16", reads: Reads::Unsigned },
+    Reader { name: "cmov_ae_32", reads: Reads::Unsigned },
+    Reader { name: "cmov_ae_64", reads: Reads::Unsigned },
     Reader { name: "jcc_e", reads: Reads::Zero },
     Reader { name: "jcc_ne", reads: Reads::Zero },
     Reader { name: "jcc_l", reads: Reads::Signed },
@@ -1055,6 +1089,7 @@ mod tests {
         let name = name
             .strip_prefix("cmp_set_")
             .or_else(|| name.strip_prefix("set_"))
+            .or_else(|| name.strip_prefix("cmov_"))
             .or_else(|| name.strip_prefix("jcc_"))
             .expect("an opcode with a condition in its name");
         let name = name.rsplit_once('_').map_or(name, |(front, back)| {
@@ -1110,13 +1145,13 @@ mod tests {
     /// does not see, and the instruction it belongs to would be left reading the bits of whatever
     /// the pass decided to keep instead, so the list is again taken from the descriptions. That
     /// each entry names the right part is checked against the condition in the opcode's own name,
-    /// which is a hundred rows that cannot be hand checked and three groups that can.
+    /// which is a hundred and thirty rows that cannot be hand checked and three groups that can.
     #[test]
     fn every_condition_says_which_part_of_the_state_it_is_about() {
         let readers: Vec<&str> = INSTS
             .iter()
             .filter(|&&(_, shape)| {
-                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::Set | Form::Jcc)
+                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::Set | Form::Cmov | Form::Jcc)
             })
             .map(|&(opcode, _)| opcode)
             .collect();
@@ -1138,13 +1173,13 @@ mod tests {
     ///
     /// The pass looks forward from a comparison it wants to take out for everything that would end
     /// up reading what it leaves instead, and it stops at the first instruction that writes the
-    /// state, because past that point what is there is not its business. A byte or a jump wrongly
-    /// counted as a writer would stop that walk early and leave a condition behind it unaccounted
-    /// for, which is the one way this pass could be wrong rather than merely unhelpful.
+    /// state, because past that point what is there is not its business. A byte, a move or a jump
+    /// wrongly counted as a writer would stop that walk early and leave a condition behind it
+    /// unaccounted for, which is the one way this pass could be wrong rather than merely unhelpful.
     #[test]
-    fn a_byte_or_a_jump_leaves_the_condition_state_where_it_found_it() {
+    fn a_byte_a_move_or_a_jump_leaves_the_condition_state_where_it_found_it() {
         for entry in &READERS {
-            if matches!(form(entry.name), Some(Form::Set | Form::Jcc)) {
+            if matches!(form(entry.name), Some(Form::Set | Form::Cmov | Form::Jcc)) {
                 assert!(!writes_flags(entry.name), "{} is said to write the state", entry.name);
             } else {
                 assert!(writes_flags(entry.name), "{} makes a comparison", entry.name);

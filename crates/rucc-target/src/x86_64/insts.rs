@@ -39,8 +39,8 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmp, CmpRi,
-    CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
+    AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmov, Cmp,
+    CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
     ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg,
     Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push,
     PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store,
@@ -194,6 +194,7 @@ pub enum Form {
     /// allocator never sees one. What makes that sound is that this and the jump that reads it
     /// are put in by the block layout, next to each other, after allocation has finished, so
     /// there is nothing left that could put an instruction between them.
+    Test,
     /// A test of a condition and the conditional move that reads its flags, as one instruction.
     ///
     /// The same argument [`Form::CmpSet`] is written under. The flags between the two halves are
@@ -208,7 +209,25 @@ pub enum Form {
     /// has and is handled the same way, by a copy the allocator inserts when the false arm is still
     /// live afterwards.
     TestCmov,
-    Test,
+    /// The move alone, reading a condition state something else left.
+    ///
+    /// [`Form::TestCmov`] with its front half gone, and it stands to that form the way [`Form::Cmp`]
+    /// stands to [`Form::CmpSet`]. Nothing selects one, for the same reason nothing selects those:
+    /// what it reads is the flags, and the flags are not a term a pattern can bind. What writes one
+    /// is an `asm` template, where the program has written the comparison on one line and the move
+    /// on the next and means exactly that, which is how a branchless select is written by somebody
+    /// who does not trust the compiler to keep it branchless.
+    ///
+    /// Two registers read and one written, with the same `Reuse` the pair above has and for the
+    /// same reason: the destination is the arm taken when the condition does not hold, because that
+    /// is the value already sitting in the register the instruction may overwrite.
+    ///
+    /// What keeps it behind the comparison that set the flags, once the two are ordinary
+    /// instructions in a block, is the scheduler's fourth kind of edge. It asks the target which
+    /// instructions write the condition state and which read it, and this one is in the second list
+    /// and not the first, so a comparison in front of it is something it waits for and a comparison
+    /// behind it is something that waits for it.
+    Cmov,
     /// A jump taken when the flags say so, whose target is on the block.
     ///
     /// Where it goes is the block's first successor, for the reason every other arm is on the
@@ -661,6 +680,13 @@ static TEST_CMOV: [OperandDesc; 4] = [
     OperandDesc::read(GPR),
     OperandDesc::read(GPR),
 ];
+// The same three without the condition in front of them, which is `TEST_CMOV` with the operand the
+// test read taken off. The destination is still the false arm and still reuses it.
+static CMOV: [OperandDesc; 3] = [
+    OperandDesc::write(GPR).with(Constraint::Reuse(1)),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
 static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A comparison that keeps only the flags, which is `TWO_TO_ONE` and `ONE_TO_ONE` with the byte
 // they wrote gone. Both sources stay reads and neither is tied to anything, since there is no
@@ -772,6 +798,7 @@ impl Form {
             Call => &CALL,
             Test => &TEST,
             TestCmov => &TEST_CMOV,
+            Cmov => &CMOV,
             Jcc | Jmp => &JUMP,
             JmpReg => &JUMP_REG,
             Move => &ONE_TO_ONE,
@@ -1223,6 +1250,41 @@ pub static INSTS: &[(&str, Form)] = &[
     ("set_be", Set),
     ("set_a", Set),
     ("set_ae", Set),
+    // The move the flags choose, with the comparison in front of it gone. Ten conditions at three
+    // widths, and three rather than four because this machine has no conditional move of a byte:
+    // the instruction is sixteen bits and wider and always has been. What writes one is an `asm`
+    // template, and the ten are all here rather than the one zstd writes because the machine has
+    // ten and a table that answered for one of them would be a description of a program.
+    ("cmov_e_16", Cmov),
+    ("cmov_e_32", Cmov),
+    ("cmov_e_64", Cmov),
+    ("cmov_ne_16", Cmov),
+    ("cmov_ne_32", Cmov),
+    ("cmov_ne_64", Cmov),
+    ("cmov_l_16", Cmov),
+    ("cmov_l_32", Cmov),
+    ("cmov_l_64", Cmov),
+    ("cmov_le_16", Cmov),
+    ("cmov_le_32", Cmov),
+    ("cmov_le_64", Cmov),
+    ("cmov_g_16", Cmov),
+    ("cmov_g_32", Cmov),
+    ("cmov_g_64", Cmov),
+    ("cmov_ge_16", Cmov),
+    ("cmov_ge_32", Cmov),
+    ("cmov_ge_64", Cmov),
+    ("cmov_b_16", Cmov),
+    ("cmov_b_32", Cmov),
+    ("cmov_b_64", Cmov),
+    ("cmov_be_16", Cmov),
+    ("cmov_be_32", Cmov),
+    ("cmov_be_64", Cmov),
+    ("cmov_a_16", Cmov),
+    ("cmov_a_32", Cmov),
+    ("cmov_a_64", Cmov),
+    ("cmov_ae_16", Cmov),
+    ("cmov_ae_32", Cmov),
+    ("cmov_ae_64", Cmov),
     // The ten conditions a jump can name, which are the ten a comparison can write a byte for.
     // Two of them are what a test of a byte against itself comes to, and the eight below are
     // only ever reached from a comparison the layout put the jump behind.
@@ -1518,7 +1580,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 402);
+        assert_eq!(described, 432);
     }
 
     #[test]

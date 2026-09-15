@@ -62,23 +62,8 @@ use rucc_ir::{
     MemOrder, Opcode, Restrict, Signature, Type, Value,
 };
 
-use crate::capability;
-
-/// The routine the capability table names for this operation at this mode.
-///
-/// Every mode this pass asks about is one no instruction on this machine covers, which is the whole
-/// reason the pass exists, so the table always has an answer. A missing one is the table and this
-/// pass having gone out of step rather than anything a program can reach.
-fn routine(opcode: Opcode, mode: &str) -> &'static str {
-    capability::libcall(opcode, mode)
-        .unwrap_or_else(|| panic!("no routine for `{}` at `{mode}`", opcode.name()))
-}
-
 /// The format this pass is about.
 const QUAD: Float = Float::F128;
-
-/// What the capability table calls that format, which is how the rule language spells one.
-const MODE: &str = "f128";
 
 /// How wide it is, in bits and then in bytes.
 const BITS: u32 = 128;
@@ -135,11 +120,13 @@ fn arithmetic(func: &mut Func, names: &mut Interner, inst: Inst) {
     }
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
-    // Which opcodes are a binary operation is a fact about their shape and is decided here. Which
-    // routine each one is, is a fact about what this target cannot do and is in the table.
-    let opcode = func[inst].opcode;
-    let (Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv) = opcode else { return };
-    let Some(routine) = capability::libcall(opcode, MODE) else { return };
+    let routine = match func[inst].opcode {
+        Opcode::FAdd => "__addtf3",
+        Opcode::FSub => "__subtf3",
+        Opcode::FMul => "__multf3",
+        Opcode::FDiv => "__divtf3",
+        _ => return,
+    };
     into_call(func, names, inst, routine, &[a, b]);
 }
 
@@ -155,7 +142,7 @@ fn negate(func: &mut Func, names: &mut Interner, inst: Inst) {
     if !quad(ty) {
         return;
     }
-    into_call(func, names, inst, routine(Opcode::FNeg, MODE), &[arg]);
+    into_call(func, names, inst, "__negtf2", &[arg]);
 }
 
 /// A comparison, as the call that answers it and the test of that answer against zero.
@@ -202,8 +189,8 @@ fn compare(func: &mut Func, names: &mut Interner, inst: Inst) {
         return;
     }
     let (FloatPred::One | FloatPred::Ueq) = pred else { return };
-    let ordered = pair(func, names, inst, routine(Opcode::FCmp, "uno.f128"), a, b, IntPred::Eq);
-    let different = pair(func, names, inst, routine(Opcode::FCmp, "une.f128"), a, b, IntPred::Ne);
+    let ordered = pair(func, names, inst, "__unordtf2", a, b, IntPred::Eq);
+    let different = pair(func, names, inst, "__netf2", a, b, IntPred::Ne);
     // Ordered and different, or the negation of it, which by De Morgan is unordered or the same.
     let (opcode, args) = if pred == FloatPred::One {
         (Opcode::And, [ordered, different])
@@ -217,26 +204,22 @@ fn compare(func: &mut Func, names: &mut Interner, inst: Inst) {
 
 /// The routine for a predicate that is one call, and the test its answer is read with.
 fn single(pred: FloatPred) -> Option<(&'static str, IntPred)> {
-    // The left of each pair is the routine, which the table names by the predicate the routine
-    // itself answers, and the right is how this predicate reads that answer. The four unordered
-    // ones are an ordered routine read as its negation, which is why the two halves differ there.
-    let (named, test) = match pred {
-        FloatPred::Oeq => ("oeq.f128", IntPred::Eq),
-        FloatPred::Une => ("une.f128", IntPred::Ne),
-        FloatPred::Olt => ("olt.f128", IntPred::Slt),
-        FloatPred::Ole => ("ole.f128", IntPred::Sle),
-        FloatPred::Ogt => ("ogt.f128", IntPred::Sgt),
-        FloatPred::Oge => ("oge.f128", IntPred::Sge),
-        FloatPred::Uno => ("uno.f128", IntPred::Ne),
-        FloatPred::Ord => ("uno.f128", IntPred::Eq),
+    Some(match pred {
+        FloatPred::Oeq => ("__eqtf2", IntPred::Eq),
+        FloatPred::Une => ("__netf2", IntPred::Ne),
+        FloatPred::Olt => ("__lttf2", IntPred::Slt),
+        FloatPred::Ole => ("__letf2", IntPred::Sle),
+        FloatPred::Ogt => ("__gttf2", IntPred::Sgt),
+        FloatPred::Oge => ("__getf2", IntPred::Sge),
+        FloatPred::Uno => ("__unordtf2", IntPred::Ne),
+        FloatPred::Ord => ("__unordtf2", IntPred::Eq),
         // The four that are one of the ordered answers read as its negation.
-        FloatPred::Ult => ("oge.f128", IntPred::Slt),
-        FloatPred::Ule => ("ogt.f128", IntPred::Sle),
-        FloatPred::Ugt => ("ole.f128", IntPred::Sgt),
-        FloatPred::Uge => ("olt.f128", IntPred::Sge),
+        FloatPred::Ult => ("__getf2", IntPred::Slt),
+        FloatPred::Ule => ("__gttf2", IntPred::Sle),
+        FloatPred::Ugt => ("__letf2", IntPred::Sgt),
+        FloatPred::Uge => ("__lttf2", IntPred::Sge),
         _ => return None,
-    };
-    Some((routine(Opcode::FCmp, named), test))
+    })
 }
 
 /// One of the two calls a `one` or a `ueq` is made of, and its answer tested against zero.
@@ -323,12 +306,11 @@ fn widen(func: &mut Func, names: &mut Interner, inst: Inst) {
     if !quad(ty) {
         return;
     }
-    let mode = match func[arg].ty.format() {
-        Some(Float::F32) => "f32.f128",
-        Some(Float::F64) => "f64.f128",
+    let routine = match func[arg].ty.format() {
+        Some(Float::F32) => "__extendsftf2",
+        Some(Float::F64) => "__extenddftf2",
         _ => return,
     };
-    let routine = routine(Opcode::FPExt, mode);
     into_call(func, names, inst, routine, &[arg]);
 }
 
@@ -339,12 +321,11 @@ fn narrow(func: &mut Func, names: &mut Interner, inst: Inst) {
     if !quad(func[arg].ty) {
         return;
     }
-    let mode = match ty.format() {
-        Some(Float::F32) => "f128.f32",
-        Some(Float::F64) => "f128.f64",
+    let routine = match ty.format() {
+        Some(Float::F32) => "__trunctfsf2",
+        Some(Float::F64) => "__trunctfdf2",
         _ => return,
     };
-    let routine = routine(Opcode::FPTrunc, mode);
     into_call(func, names, inst, routine, &[arg]);
 }
 
@@ -374,8 +355,12 @@ fn from_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
     }
     let signed = func[inst].opcode == Opcode::SIToFP;
     let Some(width) = holder(from.bits()) else { return };
-    let opcode = if signed { Opcode::SIToFP } else { Opcode::UIToFP };
-    let routine = routine(opcode, if width == NARROW { "i32.f128" } else { "i64.f128" });
+    let routine = match (signed, width) {
+        (true, NARROW) => "__floatsitf",
+        (false, NARROW) => "__floatunsitf",
+        (true, _) => "__floatditf",
+        (false, _) => "__floatunditf",
+    };
     let value = if from.bits() == width {
         arg
     } else {
@@ -407,8 +392,12 @@ fn to_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
     }
     let signed = func[inst].opcode == Opcode::FPToSI;
     let Some(width) = holder(ty.bits()) else { return };
-    let opcode = if signed { Opcode::FPToSI } else { Opcode::FPToUI };
-    let routine = routine(opcode, if width == NARROW { "f128.i32" } else { "f128.i64" });
+    let routine = match (signed, width) {
+        (true, NARROW) => "__fixtfsi",
+        (false, NARROW) => "__fixunstfsi",
+        (true, _) => "__fixtfdi",
+        (false, _) => "__fixunstfdi",
+    };
     if ty.bits() == width {
         into_call(func, names, inst, routine, &[arg]);
         return;

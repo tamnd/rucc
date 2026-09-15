@@ -280,7 +280,54 @@ mod tests {
     /// `pause` is the hint a spin lock writes between two tries at the lock. `cpuid` is how a
     /// program asks the processor what it can do, which there is no other way to ask, so every
     /// program that takes a faster path on some machines than on others has one of these in it.
+    ///
     const TEMPLATE: &[&str] = &["cpuid", "pause"];
+
+    /// The instructions a template asks for that are right because of the line above them.
+    ///
+    /// These are exempt for the reason the ten bytes in [`COMPARE`] are, one step further out. A
+    /// rule selects a conditional move with its comparison in front of it, because that pair is the
+    /// shape a select has. The move on its own computes the same term and what makes it right is the
+    /// comparison somewhere behind it rather than anything about its own operands, so no pattern
+    /// could say what it means. The compare pass does not write one either, because it replaces a
+    /// comparison it found was already made and there is no earlier move here to replace: what
+    /// writes one is a program that put the comparison on one line of a template and the move on the
+    /// next, which is what zstd does to keep a bounds check from becoming a branch.
+    ///
+    /// So these have operands a rule could have named, unlike everything in [`TEMPLATE`], and they
+    /// are still not instructions a rule could have been written for.
+    const CONDITIONAL: &[&str] = &[
+        "cmov_e_16",
+        "cmov_e_32",
+        "cmov_e_64",
+        "cmov_ne_16",
+        "cmov_ne_32",
+        "cmov_ne_64",
+        "cmov_l_16",
+        "cmov_l_32",
+        "cmov_l_64",
+        "cmov_le_16",
+        "cmov_le_32",
+        "cmov_le_64",
+        "cmov_g_16",
+        "cmov_g_32",
+        "cmov_g_64",
+        "cmov_ge_16",
+        "cmov_ge_32",
+        "cmov_ge_64",
+        "cmov_b_16",
+        "cmov_b_32",
+        "cmov_b_64",
+        "cmov_be_16",
+        "cmov_be_32",
+        "cmov_be_64",
+        "cmov_a_16",
+        "cmov_a_32",
+        "cmov_a_64",
+        "cmov_ae_16",
+        "cmov_ae_32",
+        "cmov_ae_64",
+    ];
 
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
@@ -567,6 +614,9 @@ mod tests {
             if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
                 continue;
             }
+            if CONDITIONAL.contains(&opcode) {
+                continue;
+            }
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
@@ -634,6 +684,26 @@ mod tests {
                 .all(|desc| matches!(desc.constraint, rucc_target::Constraint::Fixed(_)));
             assert!(fixed, "{opcode} has an operand a rule could name");
             assert!(!form.takes_mem(), "{opcode} is given an address, so a rule could name it");
+        }
+    }
+
+    /// The same claim about the conditional moves, read off the flag description the way the compare
+    /// pass's list is taken from it rather than typed out twice. An instruction is exempt for this
+    /// reason exactly when it reads the condition state and leaves it as it found it, which is what
+    /// says the instruction in front of it is where its meaning comes from. One that wrote the state
+    /// as well would be one a pattern could match on its own.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_a_comparison_gives_it_its_meaning_reads_one() {
+        for &opcode in CONDITIONAL {
+            x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(
+                x86_64::FLAGS.reads(opcode).is_some(),
+                "{opcode} reads no comparison, so a rule could name it"
+            );
+            assert!(
+                !(x86_64::FLAGS.writes)(opcode),
+                "{opcode} writes the condition state, so a rule could name it"
+            );
         }
     }
 

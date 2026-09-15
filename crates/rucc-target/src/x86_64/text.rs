@@ -74,6 +74,23 @@ impl Width {
         }
     }
 
+    /// The one of the four that is that many bits, when one of them is.
+    ///
+    /// The other direction of [`Self::bits`], and the reason it is needed is a template that left
+    /// the suffix off its mnemonic: the width is then the width of the statement's operands, those
+    /// have C types, and a C type says its size in bits. Nothing for a size no register here has,
+    /// which a `long double` and anything larger than a register are.
+    #[must_use]
+    pub fn of_bits(bits: u32) -> Option<Self> {
+        match bits {
+            8 => Some(Byte),
+            16 => Some(Word),
+            32 => Some(Long),
+            64 => Some(Quad),
+            _ => None,
+        }
+    }
+
     /// Which of the four spellings of a register this is, counting from the narrowest.
     #[must_use]
     pub fn index(self) -> usize {
@@ -630,6 +647,39 @@ static TEXT: &[(&str, &[Written])] = &[
     ("set_be", &[spell("setbe", &SET)]),
     ("set_a", &[spell("seta", &SET)]),
     ("set_ae", &[spell("setae", &SET)]),
+    // The move on its own, which is the `test_cmov_` pair above cut the way the `cmp_rr_` rows cut
+    // the `cmp_set_` ones. The same three arguments in the same places, since taking the test off
+    // the front of the pair takes nothing off the move behind it.
+    ("cmov_e_16", &[spell("cmovew", &CMOV_16)]),
+    ("cmov_e_32", &[spell("cmovel", &CMOV_32)]),
+    ("cmov_e_64", &[spell("cmoveq", &CMOV_64)]),
+    ("cmov_ne_16", &[spell("cmovnew", &CMOV_16)]),
+    ("cmov_ne_32", &[spell("cmovnel", &CMOV_32)]),
+    ("cmov_ne_64", &[spell("cmovneq", &CMOV_64)]),
+    ("cmov_l_16", &[spell("cmovlw", &CMOV_16)]),
+    ("cmov_l_32", &[spell("cmovll", &CMOV_32)]),
+    ("cmov_l_64", &[spell("cmovlq", &CMOV_64)]),
+    ("cmov_le_16", &[spell("cmovlew", &CMOV_16)]),
+    ("cmov_le_32", &[spell("cmovlel", &CMOV_32)]),
+    ("cmov_le_64", &[spell("cmovleq", &CMOV_64)]),
+    ("cmov_g_16", &[spell("cmovgw", &CMOV_16)]),
+    ("cmov_g_32", &[spell("cmovgl", &CMOV_32)]),
+    ("cmov_g_64", &[spell("cmovgq", &CMOV_64)]),
+    ("cmov_ge_16", &[spell("cmovgew", &CMOV_16)]),
+    ("cmov_ge_32", &[spell("cmovgel", &CMOV_32)]),
+    ("cmov_ge_64", &[spell("cmovgeq", &CMOV_64)]),
+    ("cmov_b_16", &[spell("cmovbw", &CMOV_16)]),
+    ("cmov_b_32", &[spell("cmovbl", &CMOV_32)]),
+    ("cmov_b_64", &[spell("cmovbq", &CMOV_64)]),
+    ("cmov_be_16", &[spell("cmovbew", &CMOV_16)]),
+    ("cmov_be_32", &[spell("cmovbel", &CMOV_32)]),
+    ("cmov_be_64", &[spell("cmovbeq", &CMOV_64)]),
+    ("cmov_a_16", &[spell("cmovaw", &CMOV_16)]),
+    ("cmov_a_32", &[spell("cmoval", &CMOV_32)]),
+    ("cmov_a_64", &[spell("cmovaq", &CMOV_64)]),
+    ("cmov_ae_16", &[spell("cmovaew", &CMOV_16)]),
+    ("cmov_ae_32", &[spell("cmovael", &CMOV_32)]),
+    ("cmov_ae_64", &[spell("cmovaeq", &CMOV_64)]),
     ("jcc_e", &[spell("je", &[Label])]),
     ("jcc_ne", &[spell("jne", &[Label])]),
     ("jcc_l", &[spell("jl", &[Label])]),
@@ -962,18 +1012,23 @@ pub enum Shape {
 /// one but its arguments are a different shape, so `movq %rax, %rbx` and `movq (%rax), %rbx` pick
 /// out different rows and neither answers for the other. The mnemonic belongs to an opcode the
 /// machine writes as more than one instruction, such as a division or a comparison and the byte
-/// behind it, and half of one of those is not an instruction. Or the opcode has an operand its
-/// spelling does not name and the description does not fix to a register, which is an operand with
-/// nothing anywhere to say what goes in it: a shift by `cl` names its count and does not name the
-/// value being shifted, so a template that wrote `shlq %cl, %0` said one of the two things the
-/// instruction needs.
+/// behind it, and half of one of those is not an instruction. Or the opcode has an operand nothing
+/// says anything about, which means its spelling does not name it, the description does not fix it
+/// to a register, and no operand the spelling did name is tied to it.
 ///
-/// An operand the description does fix is not that, which is the one relaxation here. There is
-/// only one register such an operand could be, so filling it in is reading the table rather than
-/// guessing at it, and whether anything of the program's is in that register is said by the
-/// constraints beside the template rather than by the template. That is how `cpuid` is read, whose
-/// text is the mnemonic alone and whose six operands are all of them registers it uses without
-/// being told.
+/// Two relaxations, and neither is a guess. An operand the description fixes has one register it
+/// could be, so filling it in is reading the table rather than guessing at it, and whether anything
+/// of the program's is in that register is said by the constraints beside the template rather than
+/// by the template. That is how `cpuid` is read, whose text is the mnemonic alone and whose six
+/// operands are all of them registers it uses without being told.
+///
+/// An operand tied to another by [`Constraint::Reuse`] has one answer too, which is whatever the
+/// operand it is tied to has. This is what a two-address instruction on this machine is, and it is
+/// why `addq %1, %0` and `cmova %3, %0` are instructions rather than half of one: the destination
+/// and the first source are one register, the text names it once because once is all AT&T writes,
+/// and the description is where it says so. What that relaxation does not decide is whether the
+/// statement's operand may be both read and written, which is `"+r"` against `"=r"` and is checked
+/// where the constraints are, not here.
 ///
 /// More than one row matching is treated the same way, since two opcodes that are the same
 /// instruction with the same arguments would leave nothing here to choose between them.
@@ -1012,21 +1067,38 @@ fn shape_of(arg: Arg) -> Option<Shape> {
     }
 }
 
-/// Whether the spelling of that opcode names every operand the description does not fix.
+/// Whether anything at all says what goes in each operand of that opcode.
 ///
-/// The question behind the last of the four refusals above. An operand no argument names is one
-/// the instruction uses without being told, and a template that wrote the instruction said nothing
+/// The question behind the last of the refusals above. An operand no argument names is one the
+/// instruction uses without being told, and a template that wrote the instruction said nothing
 /// about it, so there is nobody to ask what goes there. Unless the description already said, which
-/// is what fixing an operand to a register is: then there is one answer and it is written down
-/// here rather than in the text, and the caller fills it in.
+/// it does in two ways: fixing the operand to a register, and tying it to another operand. Either
+/// way there is one answer, it is written down here rather than in the text, and the caller fills
+/// it in.
+///
+/// No row of the table trips this today, now that a tie counts. It is kept because a row added
+/// later could, and the answer for one that does has to be a refusal rather than a register picked
+/// because it was lying around.
 fn names_every_operand(name: &str, args: &[Arg]) -> bool {
     let Some(form) = crate::x86_64::insts::form(name) else { return false };
-    form.operands().iter().enumerate().all(|(index, desc)| {
-        if matches!(desc.constraint, Constraint::Fixed(_)) {
+    let described = form.operands();
+    let named = |index: usize| {
+        let Ok(index) = u8::try_from(index) else { return false };
+        args.iter().any(|&arg| matches!(arg, Reg(at, _) if at == index))
+    };
+    described.iter().enumerate().all(|(index, desc)| {
+        if matches!(desc.constraint, Constraint::Fixed(_)) || named(index) {
             return true;
         }
-        let index = u8::try_from(index).unwrap_or(u8::MAX);
-        args.iter().any(|&arg| matches!(arg, Reg(at, _) if at == index))
+        if let Constraint::Reuse(other) = desc.constraint {
+            if named(usize::from(other)) {
+                return true;
+            }
+        }
+        described.iter().enumerate().any(|(at, other)| {
+            matches!(other.constraint, Constraint::Reuse(back) if usize::from(back) == index)
+                && named(at)
+        })
     })
 }
 

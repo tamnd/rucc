@@ -72,14 +72,10 @@ use rucc_ir::{
 };
 use rucc_target::{CallRegs, Places, Where};
 
-use crate::capability;
 use crate::expand;
 
 /// The width this pass is about, which is the one width a C program writes that no register holds.
 const WIDE: u32 = 128;
-
-/// What the capability table calls that width, which is how the rule language spells one.
-const MODE: &str = "i128";
 
 /// The width each half is, which is a register on every target this pass runs for.
 const HALF: u32 = 64;
@@ -551,10 +547,12 @@ fn divide(func: &mut Func, names: &mut Interner, halves: &mut Halves, inst: Inst
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    // The four that need the whole value at once, which is why they are calls rather than a pair
-    // of half width instructions like everything else in this pass. Which call each one is, is in
-    // the capability table, since a routine name is a fact about what this target cannot do.
-    let Some(routine) = capability::libcall(opcode, MODE) else { return };
+    let routine = match opcode {
+        Opcode::UDiv => "__udivti3",
+        Opcode::SDiv => "__divti3",
+        Opcode::URem => "__umodti3",
+        _ => "__modti3",
+    };
     let made =
         runtime(func, names, inst, routine, &[a_low, a_high, b_low, b_high], &[half(), half()]);
     let mut results = func[made].results();
@@ -623,31 +621,26 @@ fn from_float(
 /// than a named one so that a format added to that list arrives here as a routine that does not
 /// exist rather than as a name that is wrong.
 fn going_up(signed: bool, format: Float) -> &'static str {
-    let mode = match format {
-        Float::F32 => "i128.f32",
-        Float::F64 => "i128.f64",
-        _ => "i128.f128",
-    };
-    routine(if signed { Opcode::SIToFP } else { Opcode::UIToFP }, mode)
+    match (signed, format) {
+        (true, Float::F32) => "__floattisf",
+        (true, Float::F64) => "__floattidf",
+        (true, _) => "__floattitf",
+        (false, Float::F32) => "__floatuntisf",
+        (false, Float::F64) => "__floatuntidf",
+        (false, _) => "__floatuntitf",
+    }
 }
 
 /// The routine that turns a float of that format into an integer this wide.
 fn coming_down(signed: bool, format: Float) -> &'static str {
-    let mode = match format {
-        Float::F32 => "f32.i128",
-        Float::F64 => "f64.i128",
-        _ => "f128.i128",
-    };
-    routine(if signed { Opcode::FPToSI } else { Opcode::FPToUI }, mode)
-}
-
-/// The routine the capability table names for this operation at this width.
-///
-/// Every mode this pass asks about is one this machine has no register wide enough for, so the
-/// table always has an answer and a missing one is the table and this pass having gone out of step.
-fn routine(opcode: Opcode, mode: &str) -> &'static str {
-    capability::libcall(opcode, mode)
-        .unwrap_or_else(|| panic!("no routine for `{}` at `{mode}`", opcode.name()))
+    match (signed, format) {
+        (true, Float::F32) => "__fixsfti",
+        (true, Float::F64) => "__fixdfti",
+        (true, _) => "__fixtfti",
+        (false, Float::F32) => "__fixunssfti",
+        (false, Float::F64) => "__fixunsdfti",
+        (false, _) => "__fixunstfti",
+    }
 }
 
 /// A call to a routine in the compiler runtime, written in front of an instruction.
