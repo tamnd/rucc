@@ -344,14 +344,15 @@ pub fn assembled_defines(input: &Assembled) -> Vec<String> {
 
 /// What the writer underneath calls one of these.
 ///
-/// `Label` is not among them. That is what the compiler's own path uses for a name it minted inside
-/// a function, and a label in a hand written file is an ordinary untyped symbol that the file may
-/// well have made global.
+/// `Label` is the one that is not obvious from its name. It is what that writer turns into
+/// `STT_NOTYPE`, which is what gas records for a label nobody stated a type for, and it says
+/// nothing about whether the name is local: `Unknown` would have been the reading of the name, and
+/// that writer refuses a defined one of those outright.
 fn sort_of(sort: Sort) -> SymbolKind {
     match sort {
         Sort::Func => SymbolKind::Text,
         Sort::Object => SymbolKind::Data,
         Sort::Thread => SymbolKind::Tls,
-        Sort::Untyped => SymbolKind::Unknown,
+        Sort::Untyped => SymbolKind::Label,
     }
 }

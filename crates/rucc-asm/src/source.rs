@@ -629,6 +629,10 @@ impl Reader {
             return Err(self.bad(&what));
         }
         let sym = self.sym(&name);
+        // Both spellings ask for storage, so both name data, and gas records that whether or not
+        // the file also wrote a `.type` for it. A `.type` afterwards still overrides this, since
+        // this is only what the directive itself says.
+        self.syms[sym].sort = Sort::Object;
         if local {
             let was = self.here;
             self.section(".bss", Shape::of(".bss"));
