@@ -44,7 +44,7 @@ pub use crate::x86_64::encode::{
 pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
 pub use crate::x86_64::read::{At, Line, Piece, read};
 pub use crate::x86_64::text::{
-    Arg, Shape, Width, Written, gpr_name, gpr_named, machine, operand_width, written,
+    Arg, Shape, Width, Written, gpr_letter, gpr_name, gpr_named, machine, operand_width, written,
 };
 pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 

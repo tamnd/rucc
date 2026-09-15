@@ -25,10 +25,14 @@
 //! that names the statement. Labels and directives are not read, because a label inside a function
 //! is a place something can jump to and the block layout has already decided where the places are.
 //! The scaled index of an addressing mode is not read. Neither is an instruction whose opcode has
-//! an operand its spelling does not name, which [`machine`] explains. The rule throughout is that
+//! an operand its spelling does not name and the description does not fix to a register, which
+//! [`machine`] explains. An operand the description does fix is read, because there is only one
+//! register it could be, and it comes back as a [`Piece::Implicit`] for the caller to say whether
+//! anything of the program's is in. The rule throughout is that
 //! an instruction this compiler cannot place is refused out loud, since the alternative is a
 //! program that assembles into something other than what it says.
 
+use crate::operand::Constraint;
 use crate::regs::{PhysReg, Segment};
 use crate::x86_64::insts::form;
 use crate::x86_64::text::{Arg, Shape, Width, gpr_named, machine, written};
@@ -47,6 +51,17 @@ pub enum Piece {
         /// How much of the register the instruction uses, which the opcode says and the template
         /// does not.
         width: Width,
+    },
+    /// A register the instruction uses without its text saying so.
+    ///
+    /// The description fixes the operand to it, which is the whole of why this can be filled in at
+    /// all, and `cpuid` is six of them: the leaf in `eax`, the subleaf in `ecx` and the answer in
+    /// all four registers. Whether the statement has anything in that register is not read here
+    /// and is not this file's business, since the thing that says so is the constraint beside the
+    /// template rather than the template.
+    Implicit {
+        /// The register, which is the whole of what the description says about it.
+        reg: PhysReg,
     },
     /// `%rax`, a register the template named itself.
     ///
@@ -178,7 +193,8 @@ fn instruction(text: &str, prefixed: bool) -> Option<Line> {
     // The opcode's own order, which is not the order the arguments were written in: AT&T puts the
     // source first and an instruction may name one operand twice. Which argument goes where is
     // what the table says, and reading it is the whole of the translation.
-    let mut operands = vec![None; form(opcode)?.operands().len()];
+    let described = form(opcode)?.operands();
+    let mut operands = vec![None; described.len()];
     let mut at = None;
     let mut imm = None;
     for (&arg, &given) in only.args.iter().zip(&given) {
@@ -196,6 +212,15 @@ fn instruction(text: &str, prefixed: bool) -> Option<Line> {
             (Arg::Imm, Given::Imm(value)) => imm = Some(value),
             (Arg::Mem, Given::Mem(address)) => at = Some(address),
             _ => return None,
+        }
+    }
+    // An operand the opcode has and its spelling did not name. [`machine`] lets one through when
+    // the description fixes it to a register and refuses it otherwise, so anything still empty
+    // here has one possible answer and this writes it down.
+    for (slot, desc) in operands.iter_mut().zip(described) {
+        if slot.is_none() {
+            let Constraint::Fixed(reg) = desc.constraint else { return None };
+            *slot = Some(Piece::Implicit { reg });
         }
     }
     let operands: Vec<Piece> = operands.into_iter().collect::<Option<_>>()?;
@@ -392,6 +417,35 @@ mod tests {
             assert_eq!(lines[0].opcode, "pause", "{template}");
             assert!(lines[0].operands.is_empty(), "{template}");
         }
+    }
+
+    /// What a program asking a processor what it can do writes, which is the one instruction here
+    /// whose text names none of its operands and whose description names all of them.
+    #[test]
+    fn an_instruction_whose_operands_are_all_implicit_is_read_from_the_description() {
+        let lines = read("cpuid").expect("cpuid is an instruction");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opcode, "cpuid");
+        let regs: Vec<PhysReg> = lines[0]
+            .operands
+            .iter()
+            .map(|piece| match *piece {
+                Piece::Implicit { reg } => reg,
+                other => panic!("{other:?} is a piece the text named"),
+            })
+            .collect();
+        let expected = ["rax", "rbx", "rcx", "rdx", "rax", "rcx"];
+        let expected: Vec<PhysReg> =
+            expected.iter().map(|name| gpr_named(name).expect("a register").0).collect();
+        assert_eq!(regs, expected, "four written and then the two read");
+    }
+
+    /// The relaxation above reaches an operand the description fixes and no further. A shift by
+    /// `cl` has one of each: the count is fixed to `rcx` and the value being shifted is tied to the
+    /// destination, and the second of those is still nobody's to fill in.
+    #[test]
+    fn an_operand_the_description_does_not_fix_is_still_refused_when_nothing_names_it() {
+        assert_eq!(read("shlq %%cl, %0"), None, "the value being shifted is named nowhere");
     }
 
     /// A prefix in front of anything else, which is refused rather than dropped. Dropping the

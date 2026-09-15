@@ -271,12 +271,16 @@ mod tests {
     /// The instructions nothing but an `asm` statement asks for.
     ///
     /// One step further out again. A prefetch is a hint and is still something the compiler decides
-    /// to write, out of a builtin the program called. This is a hint the program wrote down as an
-    /// instruction, by name, in a template, and nothing else in the language reaches it: there is no
-    /// builtin for it, no rule could match a term that produces it because it produces no value, and
-    /// `crate::lower` writes it only because [`rucc_target::x86_64::read`] found the name in a
-    /// template and said which opcode that is.
-    const TEMPLATE: &[&str] = &["pause"];
+    /// to write, out of a builtin the program called. These are instructions the program wrote down
+    /// itself, by name, in a template, and nothing else in the language reaches them: there is no
+    /// builtin for either, no rule could match a term that produces one, and `crate::lower` writes
+    /// them only because [`rucc_target::x86_64::read`] found the name in a template and said which
+    /// opcode that is.
+    ///
+    /// `pause` is the hint a spin lock writes between two tries at the lock. `cpuid` is how a
+    /// program asks the processor what it can do, which there is no other way to ask, so every
+    /// program that takes a faster path on some machines than on others has one of these in it.
+    const TEMPLATE: &[&str] = &["cpuid", "pause"];
 
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
@@ -614,14 +618,21 @@ mod tests {
     }
 
     /// The same claim about the template list. An instruction is exempt for this reason exactly
-    /// when it computes nothing and is given nothing, since anything with an operand or an address
-    /// is something a rule or a builtin could have been written for, and the whole of the claim is
-    /// that there was nowhere else for it to come from.
+    /// when there is nothing about it for a rule to name, and there are two ways to have nothing.
+    /// No operands and no address, which is the hint. Or every operand fixed to one register by the
+    /// description, which is the question put to the processor: a rule names the operands of a term
+    /// and binds them to the values underneath it, and an operand that can be nothing but `rax` is
+    /// not a place a value goes. Either way the whole of the claim holds, which is that there was
+    /// nowhere else for the instruction to come from.
     #[test]
     fn every_instruction_exempt_from_a_rule_because_only_a_template_asks_for_it_is_bare() {
         for &opcode in TEMPLATE {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
-            assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
+            let fixed = form
+                .operands()
+                .iter()
+                .all(|desc| matches!(desc.constraint, rucc_target::Constraint::Fixed(_)));
+            assert!(fixed, "{opcode} has an operand a rule could name");
             assert!(!form.takes_mem(), "{opcode} is given an address, so a rule could name it");
         }
     }

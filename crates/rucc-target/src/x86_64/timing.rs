@@ -168,6 +168,12 @@ fn plain(form: Form) -> Timing {
         // from moving one or from moving anything past one.
         Barrier | Trap | Landing | Nop | Spin => (1, Unit::Fixed),
         Prefetch => (1, Unit::Load),
+        // Asking the processor about itself, which drains it first. It is the most expensive
+        // instruction in this table by a long way, in the hundreds of cycles on every machine
+        // anyone has measured, and the number here is a floor on that rather than a measurement
+        // for the same reason the locked forms carry one: what a schedule needs to know is that
+        // it is expensive and that nothing moves past it, and `Unit::Fixed` is the second.
+        CpuId => (100, Unit::Fixed),
     };
     Timing { latency, unit }
 }
