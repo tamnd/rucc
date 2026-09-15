@@ -1,0 +1,102 @@
+decl #1 takes : int(union <anonymous>) function external declared
+decl #4 passes_each_member : int(struct one *, struct two *) function external defined
+  params
+    decl #2 a : struct one * object automatic defined
+    decl #3 b : struct two * object automatic defined
+  body
+    block
+      return
+        binary + : int
+          call : int
+            convert function-decay : int (*)(union <anonymous>)
+              decl #1 takes : int(union <anonymous>) function
+            compound-literal #5 : union <anonymous>
+              decl #5 : union <anonymous> object automatic defined
+                init
+                  +0
+                    convert lvalue : struct one *
+                      decl #2 a : struct one * lvalue
+          call : int
+            convert function-decay : int (*)(union <anonymous>)
+              decl #1 takes : int(union <anonymous>) function
+            compound-literal #6 : union <anonymous>
+              decl #6 : union <anonymous> object automatic defined
+                init
+                  +0
+                    convert lvalue : struct two *
+                      decl #3 b : struct two * lvalue
+decl #8 passes_what_only_the_last_member_takes : int(char *) function external defined
+  params
+    decl #7 c : char * object automatic defined
+  body
+    block
+      return
+        binary + : int
+          call : int
+            convert function-decay : int (*)(union <anonymous>)
+              decl #1 takes : int(union <anonymous>) function
+            compound-literal #9 : union <anonymous>
+              decl #9 : union <anonymous> object automatic defined
+                init
+                  +0
+                    convert pointer : void *
+                      convert lvalue : char *
+                        decl #7 c : char * lvalue
+          call : int
+            convert function-decay : int (*)(union <anonymous>)
+              decl #1 takes : int(union <anonymous>) function
+            compound-literal #10 : union <anonymous>
+              decl #10 : union <anonymous> object automatic defined
+                init
+                  +0
+                    convert null-pointer : struct one *
+                      const 0 : int
+decl #12 passes_the_union_itself : int(union <anonymous>) function external defined
+  params
+    decl #11 v : union <anonymous> object automatic defined
+  body
+    block
+      return
+        call : int
+          convert function-decay : int (*)(union <anonymous>)
+            decl #1 takes : int(union <anonymous>) function
+          convert lvalue : union <anonymous>
+            decl #11 v : union <anonymous> lvalue
+decl #14 also_takes : int(union <anonymous>) function external declared
+decl #17 as_the_member : int (*)(struct one *) object external static defined
+  init
+    +0
+      convert pointer : int (*)(struct one *)
+        convert function-decay : int (*)(union <anonymous>)
+          decl #14 also_takes : int(union <anonymous>) function
+decl #19 as_the_union : int (*)(union <anonymous>) object external static defined
+  init
+    +0
+      convert function-decay : int (*)(union <anonymous>)
+        decl #14 also_takes : int(union <anonymous>) function
+decl #22 install : void(union <anonymous>) function external declared
+decl #23 nothing : void(void) function external declared
+decl #25 something : void(int) function external declared
+decl #26 installs_either : void(void) function external defined
+  body
+    block
+      expr
+        call : void
+          convert function-decay : void (*)(union <anonymous>)
+            decl #22 install : void(union <anonymous>) function
+          compound-literal #27 : union <anonymous>
+            decl #27 : union <anonymous> object automatic defined
+              init
+                +0
+                  convert function-decay : void (*)(void)
+                    decl #23 nothing : void(void) function
+      expr
+        call : void
+          convert function-decay : void (*)(union <anonymous>)
+            decl #22 install : void(union <anonymous>) function
+          compound-literal #28 : union <anonymous>
+            decl #28 : union <anonymous> object automatic defined
+              init
+                +0
+                  convert function-decay : void (*)(int)
+                    decl #25 something : void(int) function

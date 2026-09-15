@@ -89,6 +89,25 @@ fn same(
         // apart as parameter types.
         return false;
     }
+    shapes(types, left, right, assumed)
+}
+
+/// The same question with the outermost qualifiers already agreed about, on two canonical ids.
+///
+/// Split out of [`same`] for the one caller that has to ask it with the qualifiers set aside,
+/// which is [`through_transparent`]: a member of glibc's socket union is a `struct sockaddr
+/// *__restrict` and the parameter it faces is a `struct sockaddr *`, and a `restrict` there is a
+/// promise the function makes to itself rather than part of the type it takes. Stripping the
+/// qualifier instead would mean interning a type, which this module has no mutable table for.
+fn shapes(
+    types: &Types,
+    left: TypeId,
+    right: TypeId,
+    assumed: &mut Vec<(RecordId, RecordId)>,
+) -> bool {
+    if left == right {
+        return true;
+    }
     match (types.kind(left), types.kind(right)) {
         // Two different enumeration declarations are two different types. Each is compatible
         // with what it is represented in, and whether a redefinition of one tag makes the same
@@ -146,7 +165,9 @@ fn functions(
         (true, true) => {
             left.variadic == right.variadic
                 && left.params.len() == right.params.len()
-                && left.params.iter().zip(&right.params).all(|(&a, &b)| same(types, a, b, assumed))
+                && left.params.iter().zip(&right.params).all(|(&a, &b)| {
+                    same(types, a, b, assumed) || through_transparent(types, a, b, assumed)
+                })
         }
         // An old style definition is the one unprototyped type that knows what its parameters
         // are, and 6.7.6.3p15 holds it to a stricter rule than a declaration that knows nothing:
@@ -161,6 +182,48 @@ fn functions(
         (false, true) => stands_for(types, right),
         (false, false) => true,
     }
+}
+
+/// Whether one of two parameter types is a transparent union the other is a member of.
+///
+/// This is the half of `transparent_union` that is about declarations rather than about values.
+/// `accept` takes a union of eleven socket address pointers, and a program that declares it as
+/// taking a `struct sockaddr *` has declared the same function, which is what lets gnulib assign
+/// the one to a pointer to the other and what the attribute is for. Either side may be the union,
+/// since a program may declare the function either way round and the pair has to be compatible
+/// both ways for a redeclaration to be accepted.
+///
+/// Any member counts and not only the first. The first member is what decides how the union is
+/// passed, so it is the one the attribute needs to be well defined, but every member is a type the
+/// union takes a value of and gcc accepts a declaration written with any of them.
+///
+/// A bit-field member is not one of them, since there is no value of a bit-field's type to pass
+/// and nothing could be assigned into it whole.
+fn through_transparent(
+    types: &Types,
+    left: TypeId,
+    right: TypeId,
+    assumed: &mut Vec<(RecordId, RecordId)>,
+) -> bool {
+    member_of(types, left, right, assumed) || member_of(types, right, left, assumed)
+}
+
+/// Whether the first type is a transparent union and the second is one of its members.
+fn member_of(
+    types: &Types,
+    union: TypeId,
+    other: TypeId,
+    assumed: &mut Vec<(RecordId, RecordId)>,
+) -> bool {
+    let TypeKind::Record(id) = types.kind(types.canonical(union)) else { return false };
+    let info = types.record_info(id);
+    if !info.transparent {
+        return false;
+    }
+    let other = types.canonical(other);
+    info.fields.iter().any(|field| {
+        field.bits.is_none() && shapes(types, types.canonical(field.ty), other, assumed)
+    })
 }
 
 /// Whether a prototype and an old style definition describe the same function, 6.7.6.3p15.

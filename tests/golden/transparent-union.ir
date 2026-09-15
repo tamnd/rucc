@@ -1,0 +1,75 @@
+; ModuleID = 'tests/golden/transparent-union.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+global @as_the_member : bytes 8 = { addr.8 @also_takes }, align 8, linkage(external)
+global @as_the_union : bytes 8 = { addr.8 @also_takes }, align 8, linkage(external)
+
+func @takes(i64) -> i32, linkage(external);
+
+func @passes_each_member(ptr, ptr) -> i32, linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = alloca, size 8, align 8
+    %3 = alloca, size 8, align 8
+    store %0 -> %2, align 8, tbaa !1
+    %4 = load.i64 %2, align 8
+    %5 = call @takes(%4) : (i64) -> i32
+    store %1 -> %3, align 8, tbaa !1
+    %6 = load.i64 %3, align 8
+    %7 = call @takes(%6) : (i64) -> i32
+    %8 = add.nsw %5, %7
+    return %8
+}
+
+func @passes_what_only_the_last_member_takes(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = alloca, size 8, align 8
+    %2 = alloca, size 8, align 8
+    store %0 -> %1, align 8, tbaa !1
+    %3 = load.i64 %1, align 8
+    %4 = call @takes(%3) : (i64) -> i32
+    %5 = iconst.i32 0
+    %6 = iconst.i64 0
+    %7 = inttoptr.ptr %6
+    store %7 -> %2, align 8, tbaa !1
+    %8 = load.i64 %2, align 8
+    %9 = call @takes(%8) : (i64) -> i32
+    %10 = add.nsw %4, %9
+    return %10
+}
+
+func @passes_the_union_itself(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 8
+    store %0 -> %1, align 8
+    %2 = load.i64 %1, align 8
+    %3 = call @takes(%2) : (i64) -> i32
+    return %3
+}
+
+func @also_takes(i64) -> i32, linkage(external);
+
+func @install(i64), linkage(external);
+
+func @nothing(), linkage(external);
+
+func @something(i32), linkage(external);
+
+func @installs_either(), linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = alloca, size 8, align 8
+    %2 = global_addr @nothing
+    store %2 -> %0, align 8, tbaa !1
+    %3 = load.i64 %0, align 8
+    call @install(%3) : (i64)
+    %4 = global_addr @something
+    store %4 -> %1, align 8, tbaa !1
+    %5 = load.i64 %1, align 8
+    call @install(%5) : (i64)
+    return
+}
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "pointer", parent !0, offset 0

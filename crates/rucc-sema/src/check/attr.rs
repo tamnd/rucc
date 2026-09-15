@@ -199,6 +199,21 @@ impl Checker<'_> {
         packing
     }
 
+    /// Where `transparent_union` was written in an attribute list, if it was.
+    ///
+    /// The span comes back rather than a flag because whether the attribute holds up is decided by
+    /// the members of the union it is on, and the sentence about a union it cannot hold up on has
+    /// to point at the attribute. The armour and the namespace are read the way [`Self::packing`]
+    /// reads them, and glibc writes the armoured spelling.
+    pub(in crate::check) fn transparent_union(&self, attrs: AttrList) -> Option<Span> {
+        self.ast[attrs].iter().find_map(|attr| {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                return None;
+            }
+            (rucc_gnu::unarmour(self.text(attr.name)) == "transparent_union").then_some(attr.span)
+        })
+    }
+
     /// Whether an attribute list asks for the declaration to be kept where nothing refers to it.
     ///
     /// The armour and the namespace are read the same way [`Self::packing`] reads them. What this

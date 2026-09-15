@@ -42,7 +42,8 @@ use rucc_types::{
 use crate::check::expr::typeop::Measure;
 use crate::check::{Checker, Promoted};
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, Linkage, Startup, StorageDuration,
+    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitEntry, Linkage, Startup,
+    StorageDuration,
 };
 use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
@@ -1716,6 +1717,9 @@ impl Checker<'_> {
         if compatible(&self.types, bare_target, bare_source) {
             return self.conv().to_type(value, target);
         }
+        if let Some(built) = self.put_in_transparent_union(bare_target, value, span) {
+            return built;
+        }
         // Two vectors of the same size, which GNU C converts between rather than refusing. The
         // conversion is a reinterpretation and is written as a cast node, since that is what the
         // same thing spelled `(V)x` already lowers to.
@@ -1761,6 +1765,89 @@ impl Checker<'_> {
         };
         self.report(Diagnostic::error(message, span).with_code("E0515"));
         self.poison(span)
+    }
+
+    /// A value put into whichever member of a transparent union it fits, and [`None`] when the
+    /// type is not one or no member takes it.
+    ///
+    /// This is the half of `transparent_union` that is about values. `bind(fd, &address, len)`
+    /// passes a `struct sockaddr_in *` to a parameter declared as a union of eleven socket address
+    /// pointers, and what the attribute says is that the pointer goes into the member that has its
+    /// type. So what comes back is the same object a cast to a union builds, which is the GNU
+    /// extension this is the implicit form of, and nothing further down has to know that the
+    /// parameter is unusual: it is a union value passed by value like any other, and the rule that
+    /// the union is the size and the alignment of its first member is what makes the machine agree
+    /// with gcc about where it goes.
+    ///
+    /// Two passes, which is gcc's search and not a shortcut. A member whose type the value already
+    /// has wins outright, wherever it is in the list. Failing that a pointer member takes a null
+    /// pointer constant or a pointer that would assign to it without a diagnostic, which is what
+    /// makes a `void *` member the catch-all it looks like. The first such member is the answer,
+    /// since a program that wrote two of them has said they are interchangeable.
+    fn put_in_transparent_union(
+        &mut self,
+        target: TypeId,
+        value: ExprId,
+        span: Span,
+    ) -> Option<ExprId> {
+        let TypeKind::Record(id) = self.types.kind(self.types.canonical(target)) else {
+            return None;
+        };
+        if !self.types.record_info(id).transparent {
+            return None;
+        }
+        let source = self.types.unqualified(self.tast[value].ty);
+        // Copied out because finding the member asks the type table questions it cannot answer
+        // while the member list is borrowed from it, which is how the explicit cast reads it too.
+        let fields = self.types.record_info(id).fields.to_vec();
+        let mut exact = None;
+        let mut marginal = None;
+        for field in fields {
+            if field.bits.is_some() {
+                continue;
+            }
+            let ty = self.types.unqualified(field.ty);
+            if compatible(&self.types, ty, source) {
+                exact = Some(field);
+                break;
+            }
+            if marginal.is_some() || !is_pointer(&self.types, ty) {
+                continue;
+            }
+            if self.takes_pointer(ty, source, value) {
+                marginal = Some(field);
+            }
+        }
+        let field = exact.or(marginal)?;
+        let member = self.types.unqualified(field.ty);
+        let value = self.conv().to_type(value, member);
+        let entries = self.tast.add_init_entries(&[InitEntry::at(field.offset, value)]);
+        let decl = self.literal_decl(target, entries, span);
+        Some(
+            self.tast
+                .expr(Expr::new(ExprKind::CompoundLiteral(decl), target, Category::Rvalue), span),
+        )
+    }
+
+    /// Whether a pointer member of a transparent union would take this value without a word said.
+    ///
+    /// The same rule [`Self::check_pointer_assignment`] is silent about, which is a null pointer
+    /// constant, a `void *` on either side, or two pointers to compatible things. A member that
+    /// would only take the value with a warning is not one gcc picks, because the program wrote
+    /// nothing for the warning to be about.
+    fn takes_pointer(&mut self, member: TypeId, source: TypeId, value: ExprId) -> bool {
+        if self.conv().is_null_pointer_constant(value) {
+            return true;
+        }
+        if !is_pointer(&self.types, source) {
+            return false;
+        }
+        let (a, b) = (
+            pointee(&self.types, member).expect("a pointer"),
+            pointee(&self.types, source).expect("a pointer"),
+        );
+        let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
+        is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b)
     }
 
     /// What is wrong, if anything, with assigning one pointer to another.

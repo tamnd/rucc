@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `__attribute__((transparent_union))`, which is what a union is given when passing it and passing one of its members are meant to be the same thing. It buys two rules and this implements both. A value assigned to the union, which in practice means an argument passed to a parameter of the union type, goes into whichever member it fits, and a parameter of the union type is compatible with a parameter of any member's type, so a program may declare the function either way round and get one function. The member search is gcc's and has two passes: a member whose type the value already has wins outright wherever it sits in the list, and failing that the first pointer member that would take the value without a word said takes it, which is a null pointer constant, a `void *` on either side, or compatible pointees. What comes out is the same object a cast to a union builds, so nothing below the checker learns that the parameter is unusual, and the reason that agrees with gcc about where the argument goes is the promise being checked rather than believed: the attribute is dropped with a warning on anything that is not a union, on a union whose first member is a bit-field, and on a union that is not the size and the alignment of its first member, which is gcc's own question and gcc's own answer to getting it wrong. Both places gcc takes the attribute are read, after the closing brace and on the declarator of a typedef, the second because that is where glibc writes it: `sys/socket.h` declares `__SOCKADDR_ARG` as a transparent union of thirteen socket address pointers under `__USE_GNU`, which is why `bind(fd, &address, len)` with a `struct sockaddr_in *` is accepted there and refused everywhere else, and why gnulib assigns `bind` to a function pointer spelled with a plain `struct sockaddr *`. A socket program doing both compiles under rucc at every optimisation level and prints what the same program built by gcc 16.2.0 prints. Closes tamnd/rucc#829.
+
 ## 0.10.46
 
 ### Added

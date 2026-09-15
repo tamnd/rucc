@@ -52,7 +52,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, EnumId, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError, RecordError, RecordId,
     RecordKind, RecordLayout, RecordOptions, TypeId, TypeKind, integer_info, is_complete,
-    is_function, is_void, layout_record,
+    is_function, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -202,6 +202,55 @@ impl Checker<'_> {
         let laid_out =
             laid_out.unwrap_or(RecordLayout { layout: Layout::new(0, 1), fields: Vec::new() });
         self.types.complete_record(id, laid_out);
+        if let Some(at) = self.transparent_union(attrs) {
+            self.make_transparent(id, at);
+        }
+    }
+
+    /// `transparent_union` on a union, checked against the union it was written on.
+    ///
+    /// What the attribute promises is that passing the union and passing its first member are the
+    /// same thing, so the promise is only one this compiler can keep when the union is the size
+    /// and the alignment of that member. gcc asks the same question through the machine mode and
+    /// says the same thing when the answer is no: the attribute is dropped with a warning and the
+    /// union goes on being an ordinary union, because a program whose union does not fit the rule
+    /// is one gcc still compiles.
+    ///
+    /// A `struct` is the other way to get here and is dropped as well. gcc has a second attribute
+    /// for the structure case, which it spells `transparent_union` too and applies only to a
+    /// one-member structure, and no program in the corpus writes it.
+    pub(in crate::check) fn make_transparent(&mut self, id: RecordId, at: Span) {
+        let info = self.types.record_info(id);
+        let whole = info.layout;
+        let kind = info.kind;
+        let first = info.fields.first().copied();
+        let dropped = |note: &str, checker: &mut Self| {
+            let what = "'transparent_union' attribute ignored";
+            let warned = Diagnostic::warning(what, at).with_code("E0708");
+            checker.report(warned.note(note.to_owned(), at));
+        };
+        if kind != RecordKind::Union {
+            dropped("only a union is passed the way one of its members is", self);
+            return;
+        }
+        let (Some(whole), Some(first)) = (whole, first) else {
+            dropped("a union with no members has no member to be passed as", self);
+            return;
+        };
+        if first.bits.is_some() {
+            dropped("a bit-field is not a member a whole value can be passed as", self);
+            return;
+        }
+        let Ok(member) = layout(&self.types, first.ty, self.cx.target) else {
+            dropped("the first member has no layout of its own", self);
+            return;
+        };
+        if member.size != whole.size || member.align != whole.align {
+            let note = "the union is not the size and the alignment of its first member";
+            dropped(note, self);
+            return;
+        }
+        self.types.make_transparent(id);
     }
 
     /// One member, or nothing where what was written does not declare one.
