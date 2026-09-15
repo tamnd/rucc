@@ -39,23 +39,17 @@ use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
-use crate::expand;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
 use crate::layout;
 use crate::lower::{self, Unsupported};
+use crate::lowering::{self, Lowerings};
 use crate::pressure::{Cost, Pressure};
-use crate::quad;
-use crate::retry;
 use crate::schedule;
 use crate::slots::{self, Slots};
 use crate::split;
-use crate::switch;
-use crate::varargs;
 use crate::weights;
-use crate::wide;
-use crate::widths;
 
 /// Everything about a machine that compiling a function for it needs.
 ///
@@ -299,80 +293,64 @@ pub fn compile(
     elsewhere: &Elsewhere,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
+    let (mut fired, mut pressure, mut lowerings) =
+        (Fired::new(), Pressure::new(), Lowerings::new());
     compile_recording(
         source,
         names,
         machine,
         elsewhere,
         flags,
-        &mut Fired::new(),
-        &mut Pressure::new(),
+        &mut Recording { fired: &mut fired, pressure: &mut pressure, lowerings: &mut lowerings },
     )
+}
+
+/// Somewhere to put what a compilation did along the way, for the flags that ask.
+///
+/// One of these rather than three parameters, because they are one thing: a caller either wants
+/// the measurements or does not, and a caller that does wants the same three to cover every
+/// function of every file on the command line.
+#[derive(Debug)]
+pub struct Recording<'a> {
+    /// Which lowering rules fired, for `-Zrule-coverage`.
+    pub fired: &'a mut Fired,
+    /// What the allocator had to put on the stack, for `-Zregister-pressure`.
+    pub pressure: &'a mut Pressure,
+    /// What the pre-selection lowering group did, for `-Zlowering`.
+    pub lowerings: &'a mut Lowerings,
 }
 
 /// The same compilation, with what it did along the way recorded.
 ///
 /// Two functions rather than one that takes options, because a caller that does not want the
-/// numbers should not have to say so. What `fired` is for is `-Zrule-coverage`, which is how the
-/// harness in `tamnd/rucc-compat` turns coverage of the rule set into a number over a corpus. What
-/// `pressure` is for is `-Zregister-pressure`, which is how much of the frame the allocator had to
-/// use and is the metric `spec/safe-memory/13-performance.md` section 13.1 asks for.
-///
-/// Both are added to rather than replaced, so a caller can pass the same pair for every function of
-/// a module and every module of a command line and get the answer for all of them.
+/// numbers should not have to say so. What each field of the [`Recording`] is for is on the field,
+/// and all of them are added to rather than replaced, so a caller passes the same one for every
+/// function of a module and every module of a command line and gets the answer for all of them.
 ///
 /// # Errors
 ///
-/// The same as [`compile`]. A function that was refused contributes nothing to either, since a
-/// function that did not compile is not evidence about what a rule set or a frame would have done.
+/// The same as [`compile`]. A function that was refused contributes nothing to any of them, since
+/// a function that did not compile is not evidence about what a rule set or a frame would have
+/// done.
 pub fn compile_recording(
     source: &mut ir::Func,
     names: &mut Interner,
     machine: &Machine,
     elsewhere: &Elsewhere,
     flags: Flags,
-    fired: &mut Fired,
-    pressure: &mut Pressure,
+    recording: &mut Recording<'_>,
 ) -> Result<mir::Func, Unsupported> {
-    switch::switches(source);
-    // Beside the switches rather than down with the rest of the rewriting, because both of them
-    // make blocks and nothing in `expand` may. Before the orderings as well, since the head of the
-    // loop it builds reads with an `atomic_load` and the pass below is what turns that into the
-    // plain load this machine does anyway.
-    retry::loops(source);
-    // Before the width legalisation and everything after it, because what an ordered access
-    // becomes here is a plain one and every pass below is written about a plain one by name.
-    expand::orderings(source, machine.conv.word);
-    // Above the splitting rather than below it, because an overflow check is the one instruction
-    // whose result is two things and the splitting has no answer for that, while the arithmetic it
-    // becomes here is adds, multiplies and comparisons the splitting knows already. Nothing is lost
-    // by running it this early: the widths it is written for are the widths the machine has, and
-    // the legalisation below never touches one of these anyway, so a check at a width neither pass
-    // is written for is refused by name either way round.
-    expand::overflows(source);
-    // Ahead of the width legalisation and not part of it, because the two go in opposite
-    // directions: an integer of forty bits becomes one of sixty four down there, and one of a
-    // hundred and twenty eight becomes two of sixty four here. Doing this first means a function
-    // holding both is one the pass below still works on, since by the time it runs the only widths
-    // left are ones it has an answer for.
-    wide::halves(source, names, machine.conv);
-    // Before everything, because every pass after it is written about widths the machine has and
-    // an integer of forty bits is not one of them.
-    widths::integers(source);
-    expand::bytes(source);
-    expand::counts(source);
-    // Above the float rewriting rather than part of it, because the two are written about different
-    // machines: every rewrite down there ends at an instruction this one has, and every operation up
-    // here ends at a call because this machine has no instruction at the format at all. Running
-    // first means the pass below never sees a quad, so its rules about what it will not touch above
-    // sixty four bits are about the eighty bit format and nothing else.
-    quad::calls(source, names);
-    expand::floats(source);
-    expand::bulk(source, names, machine.conv.word);
-    expand::rounds(source, machine.conv.stack_align);
-    varargs::lists(source, machine.conv);
+    // Everything the machine has no rule for, rewritten into things it has, as one group rather
+    // than as a dozen lines here. What is in the group and what the order between its members is
+    // for are both in `crate::lowering`, which is where a new lowering is added.
+    let counting = recording.lowerings.wanted();
+    let ran = lowering::group(source, names, machine.conv, counting);
+    if counting {
+        let called = names.resolve(source.name).to_owned();
+        recording.lowerings.record(&called, ran);
+    }
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
-    fired.merge(&lowered.fired);
+    recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
     // Straight after selection, because this is the last moment the machine blocks and the IR
     // blocks still stand one for one, and the pass that reads the numbers is the very last one
@@ -499,7 +477,7 @@ pub fn compile_recording(
 
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called);
-    pressure.record(&called, Cost::of(&allocation));
+    recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers,
@@ -632,6 +610,45 @@ mod tests {
         );
     }
 
+    /// What `-Zlowering` is built out of, and the reason it is worth a test here rather than only
+    /// in `crate::lowering`: the group has to be the thing this pipeline runs. A lowering added to
+    /// a line of this function instead of to `Step::GROUP` would still work and would still be
+    /// untested, and the record coming back with one entry per member is what catches it.
+    #[test]
+    fn every_member_of_the_lowering_group_is_run_by_the_compilation_and_says_what_it_did() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let mut build = Builder::new(&mut source, block);
+        let swapped = build.unary(Opcode::Bswap, args[0], i32);
+        build.ret(&[swapped]);
+
+        let mut lowerings = Lowerings::asked(true);
+        compile_recording(
+            &mut source,
+            &mut names,
+            &Machine::x86_64(&SYSV),
+            &Elsewhere::default(),
+            Flags::default(),
+            &mut Recording {
+                fired: &mut Fired::new(),
+                pressure: &mut Pressure::new(),
+                lowerings: &mut lowerings,
+            },
+        )
+        .expect("every instruction has a rule");
+
+        assert_eq!(lowerings.functions(), 1);
+        let listing = lowerings.listing();
+        assert!(listing.contains("lowering f\n"), "{listing}");
+        for step in lowering::Step::GROUP {
+            assert!(listing.contains(step.name()), "{} did not run: {listing}", step.name());
+        }
+        // The byte reversal went through the group rather than reaching the selector, which has no
+        // rule for one.
+        assert!(listing.contains("bytes"), "{listing}");
+        assert!(!listing.contains("left 1"), "something the group answers for survived: {listing}");
+    }
+
     /// What `-Zrule-coverage` is built out of: the rules a compilation fired, recorded as it went.
     /// The second function adds to the first rather than replacing it, which is what makes one of
     /// these files the answer for a whole command line rather than for whichever function was last.
@@ -651,8 +668,11 @@ mod tests {
             &machine,
             &Elsewhere::default(),
             Flags::default(),
-            &mut fired,
-            &mut Pressure::new(),
+            &mut Recording {
+                fired: &mut fired,
+                pressure: &mut Pressure::new(),
+                lowerings: &mut Lowerings::asked(true),
+            },
         )
         .expect("every instruction has a rule");
         let one = fired.count();
@@ -677,8 +697,11 @@ mod tests {
             &machine,
             &Elsewhere::default(),
             Flags::default(),
-            &mut fired,
-            &mut Pressure::new(),
+            &mut Recording {
+                fired: &mut fired,
+                pressure: &mut Pressure::new(),
+                lowerings: &mut Lowerings::asked(true),
+            },
         )
         .expect("every instruction has a rule");
         assert!(fired.count() > one, "a subtraction is not an addition");

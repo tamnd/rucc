@@ -46,6 +46,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use rucc_codegen::coverage::{self, Fired};
+use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
@@ -1596,6 +1597,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     }
                 };
             }
+            _ if arg.starts_with("-Zlowering=") => {
+                let file = &arg["-Zlowering=".len()..];
+                if file.is_empty() {
+                    return Err(err("-Zlowering= needs a file to write to"));
+                }
+                opts.lowering_dump = Some(file.to_owned());
+            }
             _ if arg.starts_with("-Zregister-pressure=") => {
                 let file = &arg["-Zregister-pressure=".len()..];
                 if file.is_empty() {
@@ -2298,6 +2306,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     failed |= !ok;
     let mut fired = Fired::new();
     let mut pressure = Pressure::new();
+    let mut lowerings = Lowerings::new();
     for job in &plan.jobs {
         if !job.phases.contains(&Phase::Compile) {
             continue;
@@ -2316,6 +2325,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         }
         fired.merge(&result.fired);
         pressure.merge(&result.pressure);
+        lowerings.merge(&result.lowerings);
         failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
         failed |= !remarks.write(&result.remarks, &mut stderr);
         for message in &result.messages {
@@ -2342,6 +2352,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     }
     failed |= !write_coverage(opts, &fired, &mut stderr);
     failed |= !write_pressure(opts, &pressure, &mut stderr);
+    failed |= !write_lowering(opts, &lowerings, &mut stderr);
     i32::from(failed)
 }
 
@@ -2426,6 +2437,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     let mut produced: Vec<String> = Vec::with_capacity(plan.jobs.len());
     let mut fired = Fired::new();
     let mut pressure = Pressure::new();
+    let mut lowerings = Lowerings::new();
     {
         let mut stderr = std::io::stderr().lock();
         let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
@@ -2457,6 +2469,8 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             }
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
+            lowerings.merge(&result.lowerings);
+            lowerings.merge(&result.lowerings);
             failed |= !write_dumps(&job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
             for message in &result.messages {
@@ -2494,6 +2508,8 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         }
         failed |= !write_coverage(opts, &fired, &mut stderr);
         failed |= !write_pressure(opts, &pressure, &mut stderr);
+        failed |= !write_lowering(opts, &lowerings, &mut stderr);
+        failed |= !write_lowering(opts, &lowerings, &mut stderr);
     }
     if failed {
         // Nothing is linked from a compilation that did not finish. A linker run over the objects
@@ -2580,6 +2596,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
     let mut names = job.members.iter();
     let mut fired = Fired::new();
     let mut pressure = Pressure::new();
+    let mut lowerings = Lowerings::new();
     {
         let mut stderr = std::io::stderr().lock();
         let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
@@ -2615,6 +2632,8 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             }
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
+            lowerings.merge(&result.lowerings);
+            lowerings.merge(&result.lowerings);
             failed |= !write_dumps(&plan_job.input, &result.dumps, &mut stderr);
             failed |= !remarks.write(&result.remarks, &mut stderr);
             for message in &result.messages {
@@ -2649,6 +2668,8 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
         }
         failed |= !write_coverage(opts, &fired, &mut stderr);
         failed |= !write_pressure(opts, &pressure, &mut stderr);
+        failed |= !write_lowering(opts, &lowerings, &mut stderr);
+        failed |= !write_lowering(opts, &lowerings, &mut stderr);
     }
     if failed {
         // Nothing is written from a compilation that did not finish, for the reason the link gives:
@@ -2714,6 +2735,22 @@ fn write_coverage(opts: &Options, fired: &Fired, stderr: &mut impl std::io::Writ
 fn write_pressure(opts: &Options, pressure: &Pressure, stderr: &mut impl std::io::Write) -> bool {
     let Some(path) = &opts.register_pressure else { return true };
     match std::fs::write(path, pressure.listing()) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+            false
+        }
+    }
+}
+
+/// Writes what `-Zlowering=FILE` asked for, and says whether it could.
+///
+/// Once for the whole command line, for the reason [`write_coverage`] gives, and a file that could
+/// not be written is a failure for the reason it gives too. A run that reached no back end writes
+/// an empty listing rather than nothing, the way [`write_pressure`] does and for the same reason.
+fn write_lowering(opts: &Options, lowerings: &Lowerings, stderr: &mut impl std::io::Write) -> bool {
+    let Some(path) = &opts.lowering_dump else { return true };
+    match std::fs::write(path, lowerings.listing()) {
         Ok(()) => true,
         Err(e) => {
             let _ = writeln!(stderr, "rucc: error: {path}: {e}");
@@ -3026,6 +3063,18 @@ mod tests {
         assert_eq!(plain.register_pressure, None, "nothing is measured unless it was asked for");
 
         assert!(parse_args(&args(&["-Zregister-pressure=", "a.c"])).is_err(), "no file named");
+    }
+
+    /// The third one, which says what the pre-selection lowering group did.
+    #[test]
+    fn where_the_lowering_dump_goes_is_asked_for_the_same_way() {
+        let (opts, _) = compile(&["-c", "-O2", "-Zlowering=/tmp/lowering.txt", "a.c"]);
+        assert_eq!(opts.lowering_dump.as_deref(), Some("/tmp/lowering.txt"));
+
+        let (plain, _) = compile(&["-c", "a.c"]);
+        assert_eq!(plain.lowering_dump, None, "nothing is dumped unless it was asked for");
+
+        assert!(parse_args(&args(&["-Zlowering=", "a.c"])).is_err(), "no file named");
     }
 
     /// Scheduling, which has the three way answer every optimization flag has: on, off, and
