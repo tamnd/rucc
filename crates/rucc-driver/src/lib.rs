@@ -28,6 +28,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-driver/0.10.50")]
 
+pub mod assemble;
 pub mod cache;
 pub mod compile;
 pub mod deps;
@@ -59,6 +60,7 @@ use rucc_tuple::TargetTuple;
 
 use crate::link::LinkOptions;
 
+pub use crate::assemble::assemble;
 pub use crate::compile::{Artifact, Compiled, Temps, compile, compile_ir};
 pub use crate::phase::{ArchiveJob, Input, InputKind, Job, LinkJob, Output, Phase, Plan, Role};
 pub use crate::preprocess::{OsFileSystem, Preprocessed, preprocess};
@@ -2307,18 +2309,10 @@ fn needs_an_assembler(job: &Job) -> bool {
     job.phases.contains(&Phase::Assemble) && !job.phases.contains(&Phase::Compile)
 }
 
-/// What is said about one, which is the same sentence wherever it is found.
-///
-/// Said and counted as a failure rather than passed over. Exiting zero having written nothing is
-/// the worse of the two ways to be wrong, because every caller that checks the status believes it
-/// worked: GMP's configure assembles three small files to find out how the local assembler spells
-/// a thirty two bit word, reads all three exit statuses as success, finds no object beside any of
-/// them, and concludes that none of the three spellings works.
-fn no_assembler(input: &str) -> String {
-    format!(
-        "rucc: error: {input}: this compiler has no assembler for a file of assembly yet, so \
-         nothing was written for it"
-    )
+/// Whether the preprocessor runs over it on the way in, which is the whole difference between the
+/// two kinds of assembly input.
+fn assembly_wants_cpp(job: &Job) -> bool {
+    job.phases.contains(&Phase::Preprocess)
 }
 
 /// Runs the front end over every input that has a compile phase, and writes what came out.
@@ -2336,19 +2330,17 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let mut pressure = Pressure::new();
     let mut lowerings = Lowerings::new();
     for job in &plan.jobs {
-        if needs_an_assembler(job) {
-            let _ = writeln!(stderr, "{}", no_assembler(&job.input));
-            failed = true;
-            continue;
-        }
-        if !job.phases.contains(&Phase::Compile) {
+        if !job.phases.contains(&Phase::Compile) && !needs_an_assembler(job) {
             continue;
         }
         // An input of IR is read back rather than compiled, since the C it came from is not
-        // here any more. Everything after this is the same, so the two paths meet again at the
-        // messages and the file the result is written to.
+        // here any more. A file of assembly does not go through the front end at all and is
+        // read by the assembler instead. Everything after this is the same for all three, so
+        // the paths meet again at the messages and the file the result is written to.
         let started = std::time::Instant::now();
-        let result = if job.kind == InputKind::Ir {
+        let result = if needs_an_assembler(job) {
+            assemble(opts, &job.input, assembly_wants_cpp(job), &fs)
+        } else if job.kind == InputKind::Ir {
             compile_ir(opts, &job.input, &fs)
         } else {
             compile(opts, &job.input, &fs)
@@ -2488,19 +2480,13 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 Output::Stdout => continue,
             };
             produced.push(out.clone());
-            // Before the linker is handed a path to a file that is never going to be there. What
-            // the linker says about one is that it cannot find a temporary in a directory nobody
-            // named, which is a message about this and does not read like one.
-            if needs_an_assembler(job) {
-                let _ = writeln!(stderr, "{}", no_assembler(&job.input));
-                failed = true;
-                continue;
-            }
-            if !job.phases.contains(&Phase::Compile) {
+            if !job.phases.contains(&Phase::Compile) && !needs_an_assembler(job) {
                 continue;
             }
             let started = std::time::Instant::now();
-            let result = if job.kind == InputKind::Ir {
+            let result = if needs_an_assembler(job) {
+                assemble(opts, &job.input, assembly_wants_cpp(job), &fs)
+            } else if job.kind == InputKind::Ir {
                 compile_ir(opts, &job.input, &fs)
             } else {
                 compile(opts, &job.input, &fs)
@@ -2649,15 +2635,22 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             let Some(member) = names.next() else {
                 return complain("the plan asks the archive for a member nothing produced");
             };
-            if !plan_job.phases.contains(&Phase::Compile) {
-                // Assembly, which enters the pipeline after the compile phase, so there is no
-                // object to put in and an archive quietly missing one is worse than a message.
-                let _ = writeln!(&mut stderr, "{}", no_assembler(&plan_job.input));
+            if !plan_job.phases.contains(&Phase::Compile) && !needs_an_assembler(plan_job) {
+                // Neither something to compile nor something to assemble, so there is nothing to
+                // put in, and an archive quietly missing a member is worse than a message.
+                let _ = writeln!(
+                    &mut stderr,
+                    "rucc: error: {}: this compiler makes an archive out of what it compiles, and \
+                     there is nothing here for it to do",
+                    plan_job.input
+                );
                 failed = true;
                 continue;
             }
             let started = std::time::Instant::now();
-            let result = if plan_job.kind == InputKind::Ir {
+            let result = if needs_an_assembler(plan_job) {
+                assemble(opts, &plan_job.input, assembly_wants_cpp(plan_job), &fs)
+            } else if plan_job.kind == InputKind::Ir {
                 compile_ir(opts, &plan_job.input, &fs)
             } else {
                 compile(opts, &plan_job.input, &fs)

@@ -46,6 +46,14 @@
 //! because a writer cannot depend on the thing that produces its input without the layer graph
 //! going the wrong way round.
 //!
+//! [`assembled`] is the other way in, for an object written from a file of assembly rather than
+//! from a compilation. It takes [`Assembled`], which is a list of sections that each carry their
+//! own name and flags and a flat list of names that point into them at offsets. That is a different
+//! shape from [`Text`] and [`Data`] because a file of assembly says things neither of them can hold:
+//! which section something is in, a name at an offset that no variable covers, and a name that is a
+//! number rather than a place. Both go through the same writer underneath, so there is still one
+//! place that knows how an ELF file is laid out.
+//!
 //! Mach-O and COFF are not written yet. Both wait on the target that needs them.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
@@ -56,12 +64,14 @@
 
 mod elf;
 mod section;
+mod source;
 
 pub use crate::elf::{Error, defines, write};
 pub use crate::section::{
     Alias, Array, Binding, Data, Extent, FUNC_ALIGN, Marker, Object, Output, Patch, Place,
     Property, Reference, Reloc, Sections, Text, Unwind, Visibility,
 };
+pub use crate::source::{Assembled, Held, Name, Part, Shape, Sort, assembled, assembled_defines};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";

@@ -693,7 +693,7 @@ fn add(
 /// `Dynamic` is what every global asks for here, and the visibility is said afterwards by
 /// [`see`] rather than through this, so that nothing about `st_other` depends on reading one of
 /// these four names the way its author meant it.
-fn scope_of(binding: Binding) -> SymbolScope {
+pub(crate) fn scope_of(binding: Binding) -> SymbolScope {
     match binding {
         Binding::Local => SymbolScope::Compilation,
         Binding::Global | Binding::Weak => SymbolScope::Dynamic,
@@ -711,7 +711,7 @@ fn scope_of(binding: Binding) -> SymbolScope {
 /// A local symbol is left alone. Its visibility means nothing, since a name the static link has
 /// already finished with cannot be in a dynamic symbol table whatever `st_other` says, and gcc
 /// writes `STV_DEFAULT` for one, which is what the writer underneath produces on its own.
-fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibility) {
+pub(crate) fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibility) {
     if binding == Binding::Local {
         return;
     }
@@ -736,7 +736,7 @@ fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibil
 /// nobody else defines it. The fourth is a table slot as well and holds an offset into a thread's
 /// own block rather than an address, because a thread-local variable has a copy per thread and no
 /// address at all. The fifth is the address itself, at the two widths this machine writes one at.
-fn r_type(reference: Reference) -> Option<elf::RelocationType> {
+pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
         Reference::Data => elf::R_X86_64_PC32,
