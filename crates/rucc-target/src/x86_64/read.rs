@@ -94,14 +94,38 @@ pub struct Line {
 #[must_use]
 pub fn read(template: &str) -> Option<Vec<Line>> {
     let mut lines = Vec::new();
+    let mut carried = false;
     for text in template.split(['\n', ';']) {
         let text = uncommented(text).trim();
         if text.is_empty() {
             continue;
         }
-        lines.push(instruction(text)?);
+        // A prefix on a line of its own, which is how a template written with semicolons between
+        // its parts arrives here: `rep; nop` is two of these and one instruction. A second prefix
+        // in a row is not something this reads, since the only combination it knows is the one
+        // below and that one takes a single prefix.
+        if is_repeat(text) {
+            if carried {
+                return None;
+            }
+            carried = true;
+            continue;
+        }
+        lines.push(instruction(text, carried)?);
+        carried = false;
     }
-    Some(lines)
+    // A prefix with nothing behind it is half an instruction, and half a template is refused for
+    // the reason the whole of one is.
+    if carried { None } else { Some(lines) }
+}
+
+/// Whether a word is the repeat prefix, in any of the spellings that mean the same thing.
+///
+/// `repne` and `repnz` are not here. They are the other repeat prefix, they mean something
+/// different, and the one instruction this compiler reads a prefix in front of is not one they
+/// are ever written with.
+fn is_repeat(text: &str) -> bool {
+    matches!(text.trim(), "rep" | "repe" | "repz")
 }
 
 /// One line with anything a comment starts taken off the end of it.
@@ -111,8 +135,33 @@ fn uncommented(text: &str) -> &str {
 }
 
 /// One instruction, or nothing for one this cannot place.
-fn instruction(text: &str) -> Option<Line> {
+///
+/// The flag says a repeat prefix was written in front of it, either on a line of its own or as
+/// the first word of this one. Exactly one combination of a prefix and an instruction is read,
+/// and it is `rep nop`: that is the encoding of `pause`, assemblers have always taken it as one,
+/// and it is what a program writes when it wants the hint on a processor whose assembler is older
+/// than the mnemonic. libuv writes it that way and puts `a.k.a. PAUSE` in the comment beside it.
+/// A prefix on anything else is refused, `lock` included, because a prefix that changes what an
+/// instruction does is not something to guess at: dropping the `lock` off a read modify write
+/// would turn a program that is correct into one that is nearly always correct.
+fn instruction(text: &str, prefixed: bool) -> Option<Line> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    // The same prefix written on the same line as what it applies to, which is the other way a
+    // template writes it and is the same instruction.
+    if is_repeat(mnemonic) {
+        if prefixed {
+            return None;
+        }
+        return instruction(rest.trim(), true);
+    }
+    let mnemonic = if prefixed {
+        if mnemonic != "nop" || !rest.trim().is_empty() {
+            return None;
+        }
+        "pause"
+    } else {
+        mnemonic
+    };
     // A label ends in a colon and a directive starts with a dot, and neither is an instruction.
     // Both are caught here rather than being looked for, because a mnemonic is letters and digits
     // and nothing else, so anything carrying punctuation is already not one.
@@ -330,6 +379,32 @@ mod tests {
         let lines = read("pause\n\tpause ; pause").expect("three of them");
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|line| line.opcode == "pause"));
+    }
+
+    /// `rep nop` is `pause`, which is the one prefix and instruction pair this reads. libuv writes
+    /// it with a semicolon between the two, so the prefix arrives on a line of its own, and the
+    /// comment beside it in that source says `a.k.a. PAUSE`.
+    #[test]
+    fn a_repeat_prefix_on_a_nop_is_the_spin_hint() {
+        for template in ["rep; nop", "rep nop", "rep\n\tnop", "repz; nop", "repe nop"] {
+            let lines = read(template).unwrap_or_else(|| panic!("{template} is the spin hint"));
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, "pause", "{template}");
+            assert!(lines[0].operands.is_empty(), "{template}");
+        }
+    }
+
+    /// A prefix in front of anything else, which is refused rather than dropped. Dropping the
+    /// `lock` off a read modify write is the one of these that would turn a correct program into
+    /// one that is correct nearly all of the time, which is the worst answer available.
+    #[test]
+    fn a_prefix_this_does_not_read_is_refused_rather_than_dropped() {
+        assert_eq!(read("lock; incl %0"), None, "a lock prefix");
+        assert_eq!(read("rep; movsb"), None, "a repeat this has no instruction for");
+        assert_eq!(read("rep; pause"), None, "a prefix on an instruction that is already the pair");
+        assert_eq!(read("rep"), None, "a prefix with nothing behind it");
+        assert_eq!(read("rep; rep; nop"), None, "two prefixes");
+        assert_eq!(read("rep nop, %0"), None, "a prefix on an instruction with an argument");
     }
 
     /// Every refusal in the module documentation, held here so that a later change that starts
