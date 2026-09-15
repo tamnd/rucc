@@ -41,7 +41,7 @@ mod timing;
 pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
 };
-pub use crate::x86_64::insts::{ADDRESSES, Address, Form, INSTS, address, form};
+pub use crate::x86_64::insts::{ADDRESSES, ALIGN, Address, Form, INSTS, address, form};
 pub use crate::x86_64::read::{At, Line, Piece, read};
 pub use crate::x86_64::text::{
     Arg, Shape, Width, Written, gpr_letter, gpr_name, gpr_named, machine, operand_width, written,
@@ -423,8 +423,9 @@ pub static FLAGS: FlagInsts = FlagInsts {
 /// constant into a register, a push, a pop, a `setcc` and a `cmovcc` are the instructions Intel's
 /// description of each says nothing about the flags in, and the vector unit's arithmetic writes its
 /// own status word rather than this one. The last two read the state and leave it alone, which is
-/// what puts them in this list and in the one below it both. Everything else writes them, and so
-/// does every name this target does
+/// what puts them in this list and in the one below it both. An alignment is here for a reason none
+/// of the others is: it is not an instruction, so there is nothing for it to have done to the state.
+/// Everything else writes them, and so does every name this target does
 /// not have, which is what keeps a rule set that grows an opcode from quietly growing a wrong
 /// answer here.
 #[must_use]
@@ -445,6 +446,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Jcc
             | Form::Jmp
             | Form::Nop
+            | Form::Align
             | Form::Landing
             | Form::Prefetch
             | Form::RetVal

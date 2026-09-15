@@ -249,6 +249,30 @@ impl Assembler<'_> {
         let data = self.func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        // The one opcode that is not an instruction. Where the listing writes the assembler's own
+        // directive this has to do what the assembler would have done, which is pad up to the
+        // boundary with the byte that does nothing, since the gap is reached by falling into it.
+        //
+        // The section has to be told as well. The padding puts the next instruction at a multiple of
+        // the boundary counted from the front of the section, and what makes that an address the
+        // program sees is the section itself landing on one, so the boundary goes on the section's
+        // alignment the way a function's own does.
+        if opcode == x86_64::ALIGN {
+            let bytes = data.imm.map_or(0, |imm| self.func[imm].0);
+            let boundary = u32::try_from(bytes).ok().filter(|at| at.is_power_of_two());
+            let Some(boundary) = boundary else {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            self.text.align = self.text.align.max(boundary);
+            let step = boundary as usize;
+            while self.text.bytes.len() % step != 0 {
+                self.text.bytes.push(NOP);
+            }
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
         };

@@ -721,6 +721,13 @@ static TEXT: &[(&str, &[Written])] = &[
     // the name is the whole of it.
     ("pause", &[spell("pause", &[])]),
     ("cpuid", &[spell("cpuid", &[])]),
+    // Where the next instruction starts, which is written as no instructions at all for the reason
+    // the `ret_val` family below is: it is a fact the writers act on rather than something the
+    // processor does. What each of them writes for it is a directive in the listing and a run of
+    // padding in the bytes, neither of which is a mnemonic, so there is nothing for this table to
+    // spell. The number is on the instruction rather than here, since two alignments are the same
+    // opcode asking for different boundaries.
+    ("align", &[]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of

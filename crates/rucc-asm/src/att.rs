@@ -311,6 +311,23 @@ impl Writer<'_> {
         let data = func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        // The one opcode that is not an instruction and is still written down. Everything below
+        // spells a mnemonic and its arguments, and this has neither: what it says is where the next
+        // instruction starts, which in a listing is the assembler's own directive. The fill byte is
+        // the one that does nothing, because a gap in the middle of a function is reached by falling
+        // into it rather than by jumping over it.
+        if opcode == x86_64::ALIGN {
+            let bytes = data.imm.map_or(0, |imm| func[imm].0);
+            let boundary = u32::try_from(bytes).ok().filter(|at| at.is_power_of_two());
+            let Some(boundary) = boundary else {
+                return Err(Error::Opcode {
+                    func: func_name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            let _ = writeln!(self.out, "\t.p2align\t{}, 0x90", boundary.trailing_zeros());
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: func_name.to_owned(), opcode: spelled.to_owned() });
         };

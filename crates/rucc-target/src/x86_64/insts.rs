@@ -39,12 +39,12 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmov, Cmp,
-    CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
-    ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, Jcc, Jmp, JmpReg,
-    Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe, Push,
-    PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin, Store,
-    StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    Align, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmov,
+    Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg,
+    Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, Jcc, Jmp,
+    JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe,
+    Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin,
+    Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -358,6 +358,25 @@ pub enum Form {
     /// rule selects one: the only thing that writes one is an `asm` statement that asked for it by
     /// name.
     Spin,
+    /// Where the next instruction starts, which is the one entry here that is not an instruction.
+    ///
+    /// Everything else in this table is a thing the processor does. This is a thing an assembler
+    /// does: it says that whatever comes after it begins at an address that is a multiple of the
+    /// number on it, and it is filled by whatever bytes it takes to get there. So it has no
+    /// operands, reads nothing, writes nothing, and encodes to a run of bytes whose length is not
+    /// known until the function has a place.
+    ///
+    /// It is here rather than somewhere else because the passes between selection and the writers
+    /// have to see it. An alignment that the scheduler is allowed to move an instruction across is
+    /// an alignment of something other than what the program pointed at, and the way a pass is told
+    /// that is the same way it is told about a fence, which is a form in this table with a timing
+    /// entry of [`crate::x86_64::timing::Unit::Fixed`] beside it.
+    ///
+    /// Only an `asm` statement writes one, which is the same reason [`Form::Spin`] is here. zstd
+    /// writes `__asm__(".p2align 5")` in front of the match loop of `ZSTD_compressBlock_lazy_generic`
+    /// with a comment saying it measured a five per cent loss on two compression levels when the
+    /// loop moved across a cache line boundary.
+    Align,
     /// What the processor is asked about itself, which reads two registers and writes four.
     ///
     /// The one form here whose every operand is fixed by the instruction and named by nothing
@@ -804,7 +823,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe | Landing | Nop | Spin | Trap => &LEAVE,
+            Ret | Barrier | Probe | Landing | Nop | Spin | Trap | Align => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -894,6 +913,15 @@ impl Form {
         )
     }
 }
+
+/// The opcode that says where the next instruction starts, named so that the writers can ask for it.
+///
+/// Every other opcode reaches a writer through the tables, which say what it is spelled as and what
+/// bytes it encodes to. This one is spelled as nothing and encodes to a run of padding whose length
+/// depends on where the function landed, so each writer has to recognise it and answer in its own
+/// terms. Naming it here is what keeps the two of them asking about the same opcode, rather than
+/// each carrying its own copy of the string. See [`Form::Align`].
+pub const ALIGN: &str = "align";
 
 /// Every opcode the x86-64 rule set can produce, and the form of each.
 ///
@@ -1338,6 +1366,10 @@ pub static INSTS: &[(&str, Form)] = &[
     // What the processor is asked about itself, which is the second instruction here that only an
     // `asm` statement can reach and the first whose operands are all implicit.
     ("cpuid", CpuId),
+    // Where the next instruction starts, which is the one entry here that is not an instruction at
+    // all. Only an `asm` statement writes one, and what it is written as is a directive in the
+    // listing and a run of padding in the bytes rather than anything the processor does.
+    ("align", Align),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -1580,7 +1612,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 432);
+        assert_eq!(described, 433);
     }
 
     #[test]

@@ -281,7 +281,12 @@ mod tests {
     /// program asks the processor what it can do, which there is no other way to ask, so every
     /// program that takes a faster path on some machines than on others has one of these in it.
     ///
-    const TEMPLATE: &[&str] = &["cpuid", "pause"];
+    /// The alignment is the third, and it is on this list rather than one of its own because it
+    /// meets the claim below outright: an instruction is exempt for this reason exactly when there
+    /// is nothing about it for a rule to name, and an opcode with no operands and no addressing mode
+    /// has nothing. It is not an instruction at all, which is more than the test asks and is the
+    /// reason no rule could have been written for it however the rule language grew.
+    const TEMPLATE: &[&str] = &["cpuid", "pause", "align"];
 
     /// The instructions a template asks for that are right because of the line above them.
     ///
