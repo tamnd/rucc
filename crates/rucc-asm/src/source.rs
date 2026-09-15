@@ -112,6 +112,10 @@ struct Reader {
     sets: Vec<(usize, Sum, usize)>,
     /// `.size`, the same way.
     sizes: Vec<(usize, Sum, usize)>,
+    /// What the file said it was called. Kept apart from the rest because it is not a name anything
+    /// refers to, and a file whose own name is also the name of something in it would otherwise be
+    /// one symbol where it should be two.
+    files: Vec<String>,
     line: usize,
 }
 
@@ -358,11 +362,21 @@ impl Reader {
             }
             "comm" | "lcomm" => self.common(&args, word == "lcomm")?,
 
+            // Two directives under one name. `.file "foo.c"` says what this was assembled from and
+            // becomes a symbol, and `.file 1 "foo.c"` is a line table entry which says the same
+            // thing to a debugger and does not. The number in front is the whole difference.
+            "file" => {
+                let what = args.first().map_or("", |arg| arg.trim());
+                if what.starts_with('"') {
+                    self.files.push(unquoted(what));
+                }
+            }
+
             // Said for a debugger or a reader and holding nothing a link depends on. Passed over
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
-            "file" | "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64"
-            | "att_syntax" | "intel_syntax" | "warning" => {}
+            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
+            | "intel_syntax" | "warning" => {}
             _ if word.starts_with("cfi_") => {}
 
             _ => {
@@ -794,7 +808,19 @@ impl Reader {
                 parts.push(part);
             }
         }
-        let mut names = Vec::with_capacity(self.syms.len());
+        let mut names = Vec::with_capacity(self.syms.len() + self.files.len());
+        // In front, which is where gas puts them and where a reader expects the name of the file to
+        // be before anything that is in it.
+        for file in self.files {
+            names.push(Name {
+                name: file,
+                at: Held::Absolute(0),
+                size: 0,
+                sort: Sort::File,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+            });
+        }
         for sym in self.syms {
             let at = match sym.at {
                 Held::In { part, offset } => Held::In { part: moved[part], offset },

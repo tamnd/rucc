@@ -213,6 +213,12 @@ pub enum Sort {
     Object,
     /// `@tls_object`. A thread-local variable, which a linker checks relocations against.
     Thread,
+    /// `.file`, which names the source this was assembled from rather than anything in it.
+    ///
+    /// Not a thing `.type` can say, and here because it is a symbol and there is nowhere else for
+    /// it. A debugger reads it and so does `nm`, and gas writes one for every file that says its
+    /// own name, which is every file gcc produces.
+    File,
     /// Nothing was said, which is what a plain label gets and is a real answer rather than a
     /// missing one: gas writes `STT_NOTYPE` for a label nobody stated a type for.
     #[default]
@@ -291,6 +297,16 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
             flags: SymbolFlags::None,
         });
         crate::elf::see(&mut obj, id, name.binding, name.visibility);
+        // The writer underneath records a common symbol as `STT_COMMON` and gas records the same
+        // symbol as `STT_OBJECT`. Both are a request for storage and a linker reads either, and the
+        // one gas writes is written here, because an object that says the same thing a different
+        // way is the kind of difference that turns up years later in a tool that only ever saw the
+        // other one. A common symbol is global by definition, so there is no binding to preserve.
+        if matches!(name.at, Held::Common { .. }) {
+            if let SymbolFlags::Elf { st_info, .. } = obj.symbol_flags_mut(id) {
+                *st_info = elf::STB_GLOBAL | elf::STT_OBJECT;
+            }
+        }
         symbols.insert(name.name.clone(), id);
     }
 
@@ -353,6 +369,7 @@ fn sort_of(sort: Sort) -> SymbolKind {
         Sort::Func => SymbolKind::Text,
         Sort::Object => SymbolKind::Data,
         Sort::Thread => SymbolKind::Tls,
+        Sort::File => SymbolKind::File,
         Sort::Untyped => SymbolKind::Label,
     }
 }
