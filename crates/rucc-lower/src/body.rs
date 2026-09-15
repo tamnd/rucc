@@ -4250,8 +4250,8 @@ impl<'u> Body<'_, 'u> {
             // Done at the type sema picked, which holds every value all three written types can,
             // and then narrowed to the one being written to. The answer is a bit, and C says the
             // type of it is `_Bool`.
-            ExprKind::Overflow { op, at, args } => {
-                let bit = self.overflow(op, args, at, span);
+            ExprKind::Overflow { op, at, args, stores } => {
+                let bit = self.overflow(op, args, at, stores, span);
                 let into = self.value_type(ty, span);
                 Some(self.widen(bit, false, into, span))
             }
@@ -5250,10 +5250,19 @@ impl<'u> Body<'_, 'u> {
 
     /// One of the bit counting builtins, as the instruction the IR has for it and a narrowing.
     ///
-    /// Three of the five are one instruction. `__builtin_parity` is the set bit count and its low
+    /// Three of the six are one instruction. `__builtin_parity` is the set bit count and its low
     /// bit, because C says the answer is zero or one rather than the count itself. `__builtin_ffs`
     /// is the one that costs a comparison, because it is the only one in the family defined at
     /// zero, and what it is defined to answer there is zero rather than a width.
+    ///
+    /// `__builtin_clrsb` is the leading zero count of the value folded onto its own sign, less
+    /// one. Exclusive or with the sign spread over every bit turns a negative value into its
+    /// complement and leaves a value that is not negative alone, which in both cases clears the
+    /// top bit and puts one zero above the highest bit that does not repeat the sign. Less one is
+    /// done by shifting that left rather than by subtracting, and the low bit is set on the way,
+    /// because the count is wanted at zero and at minus one as well and both of those fold to a
+    /// word with no bits in it at all, which is the one input the leading zero count says nothing
+    /// about. Five instructions, no branch, and defined at every value.
     ///
     /// Everything is built at the operand's width and narrowed once at the end. Counting at the
     /// width the argument has is the whole question: `__builtin_clz` of a value narrowed to
@@ -5274,6 +5283,16 @@ impl<'u> Body<'_, 'u> {
                 build.binary(Opcode::And, bits, one, Flags::NONE)
             }
             BitCount::FirstSet => self.first_set(value, ty, span),
+            BitCount::RedundantSign => {
+                let mut build = self.build(span);
+                let top = build.iconst(ty, i128::from(ty.bits()) - 1);
+                let sign = build.binary(Opcode::AShr, value, top, Flags::NONE);
+                let folded = build.binary(Opcode::Xor, value, sign, Flags::NONE);
+                let one = build.iconst(ty, 1);
+                let moved = build.binary(Opcode::Shl, folded, one, Flags::NONE);
+                let filled = build.binary(Opcode::Or, moved, one, Flags::NONE);
+                build.unary(Opcode::Ctlz, filled, ty)
+            }
         };
         self.widen(counted, false, into, span)
     }
@@ -5290,6 +5309,10 @@ impl<'u> Body<'_, 'u> {
     /// is either bit being set: the arithmetic itself needed more room than the wide type had, or
     /// the answer did not survive the trip down to the narrow one.
     ///
+    /// The `_p` spellings are the same five steps without the fifth. Nothing is stored and the
+    /// third operand is never evaluated, because what it is there for is its type, so the type
+    /// being written to is the type it has rather than the type it points at.
+    ///
     /// The second test is exact because of what sema picked. A type that represents every value of
     /// the destination also represents every exact answer that is adjacent to what the destination
     /// can hold, so an answer outside the destination is an answer the round trip changes. There
@@ -5298,12 +5321,23 @@ impl<'u> Body<'_, 'u> {
     /// All of which rests on sema having found a type that holds every value of all three, and for
     /// one call it cannot. That call goes to [`Body::overflow_exactly`] instead, which is the same
     /// five steps done without such a type.
-    fn overflow(&mut self, op: OverflowOp, args: ExprList, at: TypeId, span: Span) -> Value {
+    fn overflow(
+        &mut self,
+        op: OverflowOp,
+        args: ExprList,
+        at: TypeId,
+        stores: bool,
+        span: Span,
+    ) -> Value {
         let [lhs, rhs, out] = [self.tast()[args][0], self.tast()[args][1], self.tast()[args][2]];
-        let written = pointee(self.types(), self.tast()[out].ty).unwrap_or(at);
+        let written = if stores {
+            pointee(self.types(), self.tast()[out].ty).unwrap_or(at)
+        } else {
+            self.tast()[out].ty
+        };
         let held = [self.tast()[lhs].ty, self.tast()[rhs].ty, written];
         if held.into_iter().any(|ty| !self.represents(at, ty, span)) {
-            return self.overflow_exactly(op, [lhs, rhs, out], at, written, span);
+            return self.overflow_exactly(op, [lhs, rhs, out], at, written, stores, span);
         }
         let wide = self.value_type(at, span);
         let signed = repr::is_signed(self.types(), self.target(), at);
@@ -5319,7 +5353,7 @@ impl<'u> Body<'_, 'u> {
         };
         let (exact, wrapped) = self.build(span).checked(opcode, left, right);
 
-        let addr = self.value(out);
+        let addr = stores.then(|| self.value(out));
         let narrow = self.value_type(written, span);
         let kept = self.widen(exact, signed, narrow, span);
         let back = {
@@ -5334,7 +5368,9 @@ impl<'u> Body<'_, 'u> {
         } else {
             Some(self.build(span).icmp(IntPred::Ne, back, exact))
         };
-        let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
+        if let Some(addr) = addr {
+            let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
+        }
         match lost {
             Some(lost) => self.build(span).binary(Opcode::Or, wrapped, lost, Flags::NONE),
             None => wrapped,
@@ -5388,20 +5424,22 @@ impl<'u> Body<'_, 'u> {
     /// it works on magnitudes instead and compares the magnitude of the product against the bound
     /// of the destination on the side the sign of the product puts it.
     ///
-    /// The narrowed value is stored whether or not it fit, exactly as on the ordinary path.
+    /// The narrowed value is stored whether or not it fit, exactly as on the ordinary path, and
+    /// the `_p` spellings store nothing here for the same reason they store nothing there.
     fn overflow_exactly(
         &mut self,
         op: OverflowOp,
         args: [ExprId; 3],
         at: TypeId,
         written: TypeId,
+        stores: bool,
         span: Span,
     ) -> Value {
         let [lhs, rhs, out] = args;
         let wide = self.value_type(at, span);
         let left = self.extension(lhs, wide, span);
         let right = self.extension(rhs, wide, span);
-        let addr = self.value(out);
+        let addr = stores.then(|| self.value(out));
         let into = Destination {
             ty: self.value_type(written, span),
             signed: repr::is_signed(self.types(), self.target(), written),
@@ -5410,7 +5448,9 @@ impl<'u> Body<'_, 'u> {
             OverflowOp::Add | OverflowOp::Sub => self.exact_sum(op, left, right, wide, into, span),
             OverflowOp::Mul => self.exact_product(left, right, wide, into, span),
         };
-        let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
+        if let Some(addr) = addr {
+            let _ = self.write(Place::new(Where::Addr(addr), written), kept, span);
+        }
         bit
     }
 

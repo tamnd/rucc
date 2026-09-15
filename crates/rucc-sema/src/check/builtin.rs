@@ -249,6 +249,13 @@ impl Checker<'_> {
             // pointer is what a header would have made `size_t`, and it has to be the one
             // `sizeof` produces or a program that hands one to the other converts for nothing.
             "size_t" => return Some(self.size_type()),
+            // Not a fixed kind either, and for a different reason: `intmax_t` is the widest
+            // standard integer type, which is `long` where that is sixty four bits wide and `long
+            // long` where it is not. `rucc_pp::predef` writes `__INTMAX_TYPE__` out of the same
+            // rule, and a program that reads the macro and a program that calls
+            // `__builtin_imaxabs` have to be working in the same type.
+            "intmax_t" => return Some(self.types.int(self.widest_integer(true))),
+            "uintmax_t" => return Some(self.types.int(self.widest_integer(false))),
             "uint16_t" => return Some(self.exact_unsigned(16)),
             "uint32_t" => return Some(self.exact_unsigned(32)),
             "uint64_t" => return Some(self.exact_unsigned(64)),

@@ -122,6 +122,10 @@ const RMW: &[Param] = &[Param::Object, Param::Value, Param::Order];
 /// Two integers and somewhere to put the result, which is the overflow family.
 const OVERFLOW: &[Param] = &[Param::Integer, Param::Integer, Param::Out];
 
+/// Two integers and a third whose type says where the result would have gone, which is the half
+/// of the overflow family that answers without writing.
+const OVERFLOW_P: &[Param] = &[Param::Integer, Param::Integer, Param::Integer];
+
 /// A pointer and a value of what it points at, which is most of the older `__sync_*` family.
 const SYNC: &[Param] = &[Param::Object, Param::Value];
 
@@ -211,6 +215,9 @@ const GENERIC: &[Generic] = &[
     row("__builtin_add_overflow", OVERFLOW, Answer::Bool),
     row("__builtin_sub_overflow", OVERFLOW, Answer::Bool),
     row("__builtin_mul_overflow", OVERFLOW, Answer::Bool),
+    row("__builtin_add_overflow_p", OVERFLOW_P, Answer::Bool),
+    row("__builtin_sub_overflow_p", OVERFLOW_P, Answer::Bool),
+    row("__builtin_mul_overflow_p", OVERFLOW_P, Answer::Bool),
     row(CONSTANT_P, &[Param::Any], Answer::Int),
     row("__builtin_classify_type", &[Param::Any], Answer::Int),
 ];
@@ -380,8 +387,8 @@ impl Checker<'_> {
         // checked it becomes a node of its own instead of the prototype the rest of the table
         // builds. The rule that decides the type it happens at is in `check/builtin/overflow.rs`,
         // and it needs the argument types as written, which is what it has here.
-        if let Some(op) = super::overflow::operation(&spelled) {
-            return self.overflow_builtin(op, &checked, span);
+        if let Some(asked) = super::overflow::operation(&spelled) {
+            return self.overflow_builtin(asked, &checked, span);
         }
         // The atomic accesses and the barrier are the same: an ordering is something the IR says
         // about an access rather than an argument anything is passed, so a call to one of these

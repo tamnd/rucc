@@ -1,4 +1,4 @@
-//! `abs`, `labs` and `llabs`, which are the magnitude of an integer and not a call.
+//! `abs` and its neighbours, which are the magnitude of an integer and not a call.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5.
 //!
@@ -8,6 +8,25 @@
 //! that knows what that one does may write the four instructions instead of the call. Every C
 //! compiler does, which is why `gcc.c-torture/execute/20021127-1.c` defines `llabs` to abort and
 //! expects the call not to reach it.
+//!
+//! # The unsigned four
+//!
+//! `__builtin_uabs` and the three beside it answer in the unsigned type of the same width as the
+//! argument. That is the one shape of absolute value with no undefined case: the most negative
+//! value of a signed type has no positive counterpart in that type and has one in the unsigned
+//! type beside it. No C library declares `uabs` or any of the other three, so unlike the signed
+//! four there is no plain name to leave alone and nothing to call if the answer is not built.
+//!
+//! What gets built is the same four instructions, because on a two's complement machine the
+//! magnitude and the unsigned magnitude are the same bits. The difference is entirely in the type
+//! of the answer, which is what decides how a comparison against it is done and how it widens.
+//!
+//! # The widest two
+//!
+//! `__builtin_imaxabs` and `__builtin_umaxabs` are the same pair at `intmax_t`, which is not a
+//! fixed kind: it is `long` on a target whose `long` is sixty four bits wide and `long long`
+//! everywhere else. [`Width::Max`] is that, asked of the target rather than written down, and the
+//! signatures in the table say `intmax_t` and `uintmax_t` for the same reason.
 //!
 //! # Why the declaration is looked at and not only the name
 //!
@@ -40,17 +59,38 @@ use rucc_types::IntKind;
 use crate::check::Checker;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 
+/// The width one name of the family works at.
+///
+/// Three of the four are a kind, and the fourth is a question for the target, which is why this is
+/// here rather than an [`IntKind`] in the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Width {
+    /// `abs` and `uabs`.
+    Int,
+    /// `labs` and `ulabs`.
+    Long,
+    /// `llabs` and `ullabs`.
+    LongLong,
+    /// `imaxabs` and `umaxabs`, which work at `intmax_t`. Not a kind, because that type is `long`
+    /// on a target whose `long` is sixty four bits wide and `long long` on one where it is not.
+    Max,
+}
+
 /// One name of the family, and the type the library gives it.
 #[derive(Debug, Clone, Copy)]
 struct Row {
-    /// The plain name, which is the one the library defines and the one a program usually writes.
-    name: &'static str,
+    /// The plain name, where the library defines one. Eight names are here and only four of them
+    /// have a plain spelling: nothing declares `uabs` or any of the other three, so those exist
+    /// under the prefix alone and there is no name of the program's to be careful of.
+    name: Option<&'static str>,
     /// The prefixed spelling, which is a row of `features.toml` and means this whatever the
     /// program has done with the plain name.
     builtin: &'static str,
-    /// The parameter type and the result type, which are the same type. `intmax_t` is not here
-    /// because it is a different type on two targets and `imaxabs` is not a row of the table.
-    at: IntKind,
+    /// The width the argument and the answer are both at.
+    at: Width,
+    /// Whether the answer is the unsigned type of that width rather than the signed one. The
+    /// argument is signed either way, since an unsigned value is its own magnitude.
+    unsigned: bool,
 }
 
 /// Every name in the family.
@@ -58,9 +98,14 @@ struct Row {
 /// The prefixed spellings are rows of `features.toml` carrying the type this checks against, and
 /// the test at the bottom of this file is what keeps the two from drifting apart.
 const FAMILY: &[Row] = &[
-    Row { name: "abs", builtin: "__builtin_abs", at: IntKind::Int },
-    Row { name: "labs", builtin: "__builtin_labs", at: IntKind::Long },
-    Row { name: "llabs", builtin: "__builtin_llabs", at: IntKind::LongLong },
+    Row { name: Some("abs"), builtin: "__builtin_abs", at: Width::Int, unsigned: false },
+    Row { name: Some("labs"), builtin: "__builtin_labs", at: Width::Long, unsigned: false },
+    Row { name: Some("llabs"), builtin: "__builtin_llabs", at: Width::LongLong, unsigned: false },
+    Row { name: Some("imaxabs"), builtin: "__builtin_imaxabs", at: Width::Max, unsigned: false },
+    Row { name: None, builtin: "__builtin_uabs", at: Width::Int, unsigned: true },
+    Row { name: None, builtin: "__builtin_ulabs", at: Width::Long, unsigned: true },
+    Row { name: None, builtin: "__builtin_ullabs", at: Width::LongLong, unsigned: true },
+    Row { name: None, builtin: "__builtin_umaxabs", at: Width::Max, unsigned: true },
 ];
 
 impl Checker<'_> {
@@ -84,17 +129,31 @@ impl Checker<'_> {
         let spelled = self.text(name);
         let row = *FAMILY
             .iter()
-            .find(|row| row.name == spelled || row.builtin == spelled)
+            .find(|row| row.name == Some(spelled) || row.builtin == spelled)
             .filter(|_| self.cx.means_the_library(spelled))?;
-        let ty = self.types.int(row.at);
-        if !self.callee_is_the_library_one(callee, ty, &[ty]) {
+        let takes = self.types.int(self.kind(row.at, false));
+        let answers = self.types.int(self.kind(row.at, row.unsigned));
+        if !self.callee_is_the_library_one(callee, answers, &[takes]) {
             return None;
         }
         let &operand = args.first()?;
         if self.is_poisoned(operand) {
             return Some(self.poison(span));
         }
-        Some(self.tast.expr(Expr::new(ExprKind::Abs { operand }, ty, Category::Rvalue), span))
+        Some(self.tast.expr(Expr::new(ExprKind::Abs { operand }, answers, Category::Rvalue), span))
+    }
+
+    /// The integer kind one row works at, signed or unsigned.
+    fn kind(&self, at: Width, unsigned: bool) -> IntKind {
+        match (at, unsigned) {
+            (Width::Int, false) => IntKind::Int,
+            (Width::Int, true) => IntKind::UInt,
+            (Width::Long, false) => IntKind::Long,
+            (Width::Long, true) => IntKind::ULong,
+            (Width::LongLong, false) => IntKind::LongLong,
+            (Width::LongLong, true) => IntKind::ULongLong,
+            (Width::Max, unsigned) => self.widest_integer(!unsigned),
+        }
     }
 }
 
@@ -113,22 +172,40 @@ mod tests {
                 panic!("{} is answered here and is not in features.toml", row.builtin);
             };
             assert_eq!(feature.status, Status::Implemented, "{}", row.builtin);
-            let written = match row.at {
-                IntKind::Int => "int(int)",
-                IntKind::Long => "long(long)",
-                IntKind::LongLong => "long long(long long)",
-                other => panic!("{other:?} is not one of the three widths this family has"),
+            let takes = match row.at {
+                Width::Int => "int",
+                Width::Long => "long",
+                Width::LongLong => "long long",
+                Width::Max => "intmax_t",
             };
-            assert_eq!(feature.signature, written, "{}", row.builtin);
+            let answers = match (row.at, row.unsigned) {
+                (_, false) => takes.to_owned(),
+                (Width::Max, true) => "uintmax_t".to_owned(),
+                (_, true) => format!("unsigned {takes}"),
+            };
+            assert_eq!(feature.signature, format!("{answers}({takes})"), "{}", row.builtin);
         }
     }
 
-    /// The prefixed spelling of each is the plain one with the prefix on it, which is what makes
-    /// the two spellings one row rather than two.
+    /// The prefixed spelling of each is the plain one with the prefix on it, where there is a
+    /// plain one, which is what makes the two spellings one row rather than two.
     #[test]
     fn the_prefixed_spelling_is_the_plain_name_with_the_prefix_on_it() {
         for row in FAMILY {
-            assert_eq!(row.builtin.strip_prefix("__builtin_"), Some(row.name));
+            let Some(name) = row.name else { continue };
+            assert_eq!(row.builtin.strip_prefix("__builtin_"), Some(name));
+        }
+    }
+
+    /// The four with no plain name are the four the C library has never declared, so there is no
+    /// name of the program's for this to be careful of and no function to call if the answer were
+    /// not built. Getting this backwards would take `uabs` away from a program that defines it.
+    #[test]
+    fn the_unsigned_four_exist_under_the_prefix_alone() {
+        for row in FAMILY {
+            assert_eq!(row.name.is_none(), row.unsigned, "{}", row.builtin);
+            let feature = rucc_gnu::lookup(Kind::Builtin, row.builtin).expect("a row");
+            assert_eq!(feature.library.is_empty(), row.unsigned, "{}", row.builtin);
         }
     }
 }

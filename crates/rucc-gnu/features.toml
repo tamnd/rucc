@@ -2742,3 +2742,104 @@ status = "implemented"
 used_by = []
 tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for", "rucc-driver::a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object"]
 notes = "Giving a lock back, which is a store of a zero at release ordering. The other name that is not a full barrier, for the mirror of the reason above."
+
+[[feature]]
+name = "__builtin_clrsb"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = "int(int)"
+used_by = []
+tests = ["rucc-sema::all_eighteen_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::the_redundant_sign_bit_count_is_instructions_and_not_a_call"]
+notes = "How many bits below the sign bit repeat it, which is the leading zero count of the value folded onto its own sign less one. The only one of the family whose operand is signed for a reason about the question rather than about the C library, since a type with no sign bit has no redundant sign bits."
+
+[[feature]]
+name = "__builtin_clrsbl"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = "int(long)"
+used_by = []
+tests = ["rucc-sema::all_eighteen_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
+
+[[feature]]
+name = "__builtin_clrsbll"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = "int(long long)"
+used_by = []
+tests = ["rucc-sema::all_eighteen_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
+
+[[feature]]
+name = "__builtin_imaxabs"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "intmax_t(intmax_t)"
+library = "imaxabs"
+used_by = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_widest_absolute_value_is_whichever_type_the_target_makes_intmax_t"]
+notes = "The magnitude at `intmax_t`, which is `long` on a target whose `long` is sixty four bits wide and `long long` everywhere else. Answered rather than called, along with the plain name where the program has not taken it, exactly as the three narrower ones are."
+
+[[feature]]
+name = "__builtin_uabs"
+kind = "builtin"
+gcc_version = "15.0"
+status = "implemented"
+signature = "unsigned int(int)"
+used_by = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_unsigned_absolute_value_family_answers_in_the_unsigned_type"]
+notes = "The magnitude of a signed value as the unsigned type of the same width, which is the one shape of absolute value with no undefined case: the most negative value has no positive counterpart in the signed type and has one in the unsigned type. No library declares this name, so there is nothing to call and the answer is always built."
+
+[[feature]]
+name = "__builtin_ulabs"
+kind = "builtin"
+gcc_version = "15.0"
+status = "implemented"
+signature = "unsigned long(long)"
+used_by = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_unsigned_absolute_value_family_answers_in_the_unsigned_type"]
+
+[[feature]]
+name = "__builtin_ullabs"
+kind = "builtin"
+gcc_version = "15.0"
+status = "implemented"
+signature = "unsigned long long(long long)"
+used_by = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_unsigned_absolute_value_family_answers_in_the_unsigned_type"]
+
+[[feature]]
+name = "__builtin_umaxabs"
+kind = "builtin"
+gcc_version = "15.0"
+status = "implemented"
+signature = "uintmax_t(intmax_t)"
+used_by = []
+tests = ["rucc-sema::every_prefixed_spelling_is_a_row_of_the_table_with_the_type_this_expects", "rucc-driver::the_widest_absolute_value_is_whichever_type_the_target_makes_intmax_t"]
+
+[[feature]]
+name = "__builtin_add_overflow_p"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-driver::an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would"]
+notes = "The check without the store, which answers whether the addition would fit in the type of its third argument and writes nothing. The third argument is there to name a type, so it is not evaluated."
+
+[[feature]]
+name = "__builtin_sub_overflow_p"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-driver::an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would"]
+
+[[feature]]
+name = "__builtin_mul_overflow_p"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-driver::an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would"]

@@ -468,6 +468,22 @@ impl<'a> Checker<'a> {
         self.types.int(IntKind::ULongLong)
     }
 
+    /// Which integer kind `intmax_t` is on this target, signed or unsigned.
+    ///
+    /// The widest standard integer type, which is `long` where that is sixty four bits wide and
+    /// `long long` where it is not, so an LP64 target gets `long` and Windows and the thirty two
+    /// bit targets get `long long`. `rucc_pp::predef` writes `__INTMAX_TYPE__` and
+    /// `__UINTMAX_TYPE__` out of the same rule and the two have to agree, or a program that reads
+    /// the macro and a program that calls `__builtin_imaxabs` are working in different types.
+    pub(crate) const fn widest_integer(&self, signed: bool) -> IntKind {
+        match (self.cx.target.long_width == 64, signed) {
+            (true, true) => IntKind::Long,
+            (true, false) => IntKind::ULong,
+            (false, true) => IntKind::LongLong,
+            (false, false) => IntKind::ULongLong,
+        }
+    }
+
     /// Whether a type's size is worked out where it is reached rather than here.
     ///
     /// True for an array whose length is an expression, however deep it is: `int a[n][3]` is one

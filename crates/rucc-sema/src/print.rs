@@ -477,8 +477,9 @@ impl<'a> Printer<'a> {
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
             ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
-            ExprKind::Overflow { op, at, .. } => {
-                format!("overflow {} at {}", op.as_str(), spell(self.types, self.names, at))
+            ExprKind::Overflow { op, at, stores, .. } => {
+                let asked = if stores { "" } else { " asked" };
+                format!("overflow {}{asked} at {}", op.as_str(), spell(self.types, self.names, at))
             }
             ExprKind::Atomic { op, order, .. } => {
                 format!("atomic {} {}", op.as_str(), order.as_str())
