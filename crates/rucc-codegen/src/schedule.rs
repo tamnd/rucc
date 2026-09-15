@@ -18,7 +18,7 @@
 //! eight. Three, four and five are about moving instructions between blocks and about moving them
 //! where they might not have run, and this pass does neither.
 //!
-//! So [`Pick`] is five numbers in that order:
+//! So what this pass chooses by is five numbers in that order:
 //!
 //! 1. The longest path from here to the end of the run, in cycles. This is the criterion, and the
 //!    other four are for when it ties. An instruction on the critical path delays everything behind
@@ -984,6 +984,50 @@ mod tests {
         let done = schedule(&mut func, &names);
         assert_eq!(done, Scheduled::default());
         assert_eq!(shape(&func, &names, block), ["imul_rr_64", "ret"]);
+    }
+
+    /// A shift by a variable amount, which the machine takes out of one particular register and
+    /// this target's description names as an operand with that register fixed. The whole of this
+    /// pass reads operand vectors, so an instruction whose description left a register it touches
+    /// out of one would be reordered around a write of it. This is the check that it does not.
+    #[test]
+    fn a_shift_by_a_variable_amount_stays_behind_the_write_of_the_register_it_counts() {
+        let (mut names, mut func, block) = empty();
+        mov(&mut func, &mut names, block, RCX, R8);
+        let shift = op(&mut names, "shl_rcl_64");
+        func.build(block, shift)
+            .operand(Operand::write(reg(RAX), GPR).with(Constraint::Reuse(1)))
+            .uses(reg(RAX), GPR)
+            .uses(reg(RCX), GPR)
+            .finish();
+        alu(&mut func, &mut names, block, "imul_rr_64", RAX, RDX);
+        bare(&mut func, &mut names, block, "ret");
+
+        let done = schedule(&mut func, &names);
+        assert_eq!(done.moved, 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "shl_rcl_64", "imul_rr_64", "ret"]);
+    }
+
+    /// A divide, which reads and writes two particular registers and names all four of them. It is
+    /// twenty six cycles from the end of this run and the move in front of it is one, so the only
+    /// thing keeping it where it is is that it said it writes the register the move writes.
+    #[test]
+    fn a_divide_names_both_of_the_registers_the_machine_makes_it_use() {
+        let (mut names, mut func, block) = empty();
+        mov(&mut func, &mut names, block, RDX, R8);
+        let divide = op(&mut names, "idiv_quo_64");
+        func.build(block, divide)
+            .operand(Operand::write(reg(RAX), GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::write_early(reg(RDX), GPR).with(Constraint::Fixed(RDX)))
+            .operand(Operand::read(reg(RAX), GPR).with(Constraint::Fixed(RAX)))
+            .uses(reg(RSI), GPR)
+            .finish();
+        bare(&mut func, &mut names, block, "ret");
+
+        assert!(TIMING.of("x64.idiv_quo_64").expect("described").latency > 1);
+        let done = schedule(&mut func, &names);
+        assert_eq!(done.moved, 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "idiv_quo_64", "ret"]);
     }
 
     /// Every unit the model has, reached through an instruction that is on it, since a unit nothing
