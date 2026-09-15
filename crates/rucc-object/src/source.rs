@@ -413,21 +413,29 @@ mod tests {
         }
     }
 
-    /// The raw `st_info` of a symbol, which is where the two halves nothing else exposes live.
+    /// The raw `st_info` and `st_value` of a symbol, as the file holds them.
     ///
-    /// The reader's own `kind()` and `is_global()` are a translation of these, and a translation is
-    /// what a couple of the cases below are about, so they ask the file rather than the reading.
-    fn st_info(bytes: &[u8], want: &str) -> u8 {
+    /// The reader's own `kind()`, `is_global()` and `address()` are a translation of these, and a
+    /// translation is what several of the cases below are about, so they ask the file rather than
+    /// the reading. A common symbol is the clearest of them: `address()` gives zero for one because
+    /// it has no address, and the field an ordinary symbol keeps its address in is where a common
+    /// one states the boundary it has to start on.
+    fn raw(bytes: &[u8], want: &str) -> (u8, u64) {
         let header = elf::FileHeader64::<Endianness>::parse(bytes).expect("a header");
         let endian = header.endian().expect("an endianness");
         let table = header.sections(endian, bytes).expect("the sections");
         let symbols = table.symbols(endian, bytes, elf::SHT_SYMTAB).expect("a symbol table");
         for symbol in symbols.iter() {
             if symbols.symbol_name(endian, symbol).expect("a name") == want.as_bytes() {
-                return symbol.st_info().0;
+                return (symbol.st_info().0, symbol.st_value(endian));
             }
         }
         panic!("there is no symbol called '{want}'");
+    }
+
+    /// The first half of that.
+    fn st_info(bytes: &[u8], want: &str) -> u8 {
+        raw(bytes, want).0
     }
 
     #[test]
@@ -524,7 +532,7 @@ mod tests {
         assert!(shared.is_common(), "the linker has to be asked for the space");
         assert_eq!(shared.size(), 8);
         // Where an ordinary symbol keeps its address, which is why the two cannot both be said.
-        assert_eq!(shared.address(), 8, "the boundary it has to start on");
+        assert_eq!(raw(&bytes, "shared").1, 8, "the boundary it has to start on");
     }
 
     #[test]
