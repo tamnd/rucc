@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- A repeat prefix in an `asm` template is read, which is `rep; nop` and is `pause`. The template a program writes for the spin hint is very often that pair rather than the mnemonic, because the pair has been the encoding since before the mnemonic existed and every assembler has always taken it as one, so a source that wants to build with an old toolchain writes it the old way and never stops. libuv writes exactly that, with `a.k.a. PAUSE` in the comment beside it, and `uv__cpu_relax` in `src/unix/async.c` was where every level of its build stopped. The prefix arrives on a line of its own, since the template separates its parts with semicolons and a semicolon is what `crates/rucc-target/src/x86_64/read.rs` splits on, so the reader carries a prefix across to the instruction behind it and reads the same pair written on one line as the same thing. One pair is read and every other prefix is refused out loud, `lock` first among them: an instruction whose prefix was dropped is not a different instruction, it is the same one that is correct nearly all of the time, and that is the worst answer available. What this does not do is give libuv a build. The wall moved to `accept4` and the transparent union, which is tamnd/rucc#829. Part of tamnd/rucc#349.
+
 ## 0.10.45
 
 ### Changed
