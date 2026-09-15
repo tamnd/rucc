@@ -110,27 +110,30 @@ impl Shape {
     }
 
     /// The flag word ELF holds these in.
-    #[must_use]
-    pub const fn sh_flags(self) -> u64 {
+    ///
+    /// Not public, and neither are the two below it. The fields above are the whole of what a
+    /// caller says about a section, and how ELF spells them is this crate's business: a reader that
+    /// had to name an ELF constant to describe an executable section would be one that could not
+    /// describe one for any other format.
+    pub(crate) fn sh_flags(self) -> elf::SectionFlags {
         let mut flags = 0;
         if self.alloc {
-            flags |= elf::SHF_ALLOC as u64;
+            flags |= elf::SHF_ALLOC.0;
         }
         if self.write {
-            flags |= elf::SHF_WRITE as u64;
+            flags |= elf::SHF_WRITE.0;
         }
         if self.exec {
-            flags |= elf::SHF_EXECINSTR as u64;
+            flags |= elf::SHF_EXECINSTR.0;
         }
         if self.thread {
-            flags |= elf::SHF_TLS as u64;
+            flags |= elf::SHF_TLS.0;
         }
-        flags
+        elf::SectionFlags(flags)
     }
 
     /// The type ELF holds in the header beside those flags.
-    #[must_use]
-    pub const fn sh_type(self) -> u32 {
+    pub(crate) fn sh_type(self) -> elf::SectionType {
         match self.array {
             _ if !self.bits => elf::SHT_NOBITS,
             Some(Array::Init) => elf::SHT_INIT_ARRAY,
@@ -145,8 +148,7 @@ impl Shape {
     /// It is told the flags in full afterwards, so this only has to be close enough that nothing
     /// else the writer decides from the kind comes out wrong, which is the default alignment and
     /// whether it appends bytes or counts them.
-    #[must_use]
-    pub const fn kind(self) -> SectionKind {
+    pub(crate) const fn kind(self) -> SectionKind {
         match self {
             Shape { bits: false, thread: true, .. } => SectionKind::UninitializedTls,
             Shape { bits: false, .. } => SectionKind::UninitializedData,
