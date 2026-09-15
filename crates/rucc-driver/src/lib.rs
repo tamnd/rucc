@@ -32,6 +32,7 @@ pub mod cache;
 pub mod compile;
 pub mod deps;
 pub mod fetch;
+mod glibc;
 pub mod install;
 pub mod library;
 pub mod link;
@@ -119,6 +120,14 @@ pub enum Action {
         jobs: Jobs,
         /// Whether `-v` asked for the plan to be printed while it runs.
         verbose: bool,
+        /// What is worth saying about the command line before anything is compiled, printed as
+        /// warnings and once for the whole run rather than once per file.
+        ///
+        /// These are not diagnostics. A diagnostic is about a piece of source and has a span to
+        /// point at, and these are about the way two flags were combined, so there is nothing to
+        /// point at and nowhere below the driver that knows both halves. `-w` does not reach them
+        /// for the same reason it does not reach a refusal from the parser.
+        notes: Vec<String>,
     },
 }
 
@@ -348,6 +357,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut jobs = Jobs::default();
     let mut nostdinc = false;
     let mut sysroot: Option<PathBuf> = None;
+    // What the command line is worth warning about, filled in after the loop rather than during it,
+    // because every question of this kind is about two flags and the last word on both of them is
+    // the end of the loop.
+    let mut notes: Vec<String> = Vec::new();
     // The whole ten field target, kept beside the three field one because `--target=` can pin a
     // libc version and `Triple` has nowhere to put it. It decides `__GLIBC_MINOR__` and nothing
     // else today, and `None` is a command line that named no target, which is this machine.
@@ -1797,6 +1810,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.search.explain_missing_system(wall.no_headers(&tuple.to_canonical_string()));
             }
         }
+        // And whether the tree somebody named is the release they asked for, which is the one
+        // question left once the directories are settled and the only place both halves of it are
+        // known. Only for a named tree, because that is the case where the release in the target
+        // stops deciding anything, and `crate::glibc` is where the rest of the reasoning is.
+        if sysroot.is_some() {
+            notes.extend(glibc::skew(opts.target, pinned, &system));
+        }
         for dir in system {
             opts.search.push_system(dir);
         }
@@ -1828,6 +1848,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         link: Box::new(link),
         jobs,
         verbose,
+        notes,
     })
 }
 
@@ -2860,9 +2881,15 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Ok(Action::Fetch { what, target, cache }) => fetch_sysroot(what, target, &cache),
-        Ok(Action::Compile { opts, plan, link, jobs, verbose }) => {
+        Ok(Action::Compile { opts, plan, link, jobs, verbose, notes }) => {
             {
                 let mut stderr = std::io::stderr().lock();
+                // Before the plan rather than after it, because a note is about the command line
+                // and the plan is what the command line was read as, so the reader wants the two
+                // in that order.
+                for note in &notes {
+                    let _ = writeln!(stderr, "rucc: warning: {note}");
+                }
                 if verbose {
                     let _ = write!(stderr, "{}", plan.render());
                     let _ = writeln!(stderr, "workers: {}", jobs.count());
@@ -2918,6 +2945,31 @@ mod tests {
             Action::Compile { link, plan, .. } => (link, plan),
             other => panic!("expected a compilation, got {other:?}"),
         }
+    }
+
+    fn notes(s: &[&str]) -> Vec<String> {
+        match parse_args(&args(s)).expect("expected a compilation") {
+            Action::Compile { notes, .. } => notes,
+            other => panic!("expected a compilation, got {other:?}"),
+        }
+    }
+
+    /// The ordinary command line has nothing to say about itself, which is the property that makes
+    /// a note worth reading when there is one.
+    #[test]
+    fn a_command_line_with_nothing_wrong_with_it_carries_no_notes() {
+        assert_eq!(notes(&["-c", "a.c"]), Vec::<String>::new());
+    }
+
+    /// A directory that is not there contributes nothing to the search path, so there is no tree to
+    /// read a release out of and nothing to compare the pin against. Said as a test because this is
+    /// the shape a hermetic machine takes: the probe reads the disk and every other machine has a
+    /// different disk, so what can be asserted here is the silence.
+    #[test]
+    fn a_named_tree_that_is_not_on_the_machine_is_not_a_release_mismatch() {
+        let said =
+            notes(&["--target=x86_64-linux-gnu.2.28", "--sysroot=/nowhere-at-all", "-c", "a.c"]);
+        assert_eq!(said, Vec::<String>::new());
     }
 
     #[test]
