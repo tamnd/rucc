@@ -23,8 +23,12 @@
 //! variable goes is worked out there rather than named by the front end, and what a section is
 //! called is the object format's business.
 //!
-//! The assembler that reads `.s` and `.S`, inline assembly and relaxation are the rest of M3 and
-//! M4 and are not here yet.
+//! [`read`] is the other direction: a file of assembly that somebody else wrote, turned into the
+//! sections and names an object is written from. What it does is the directives and the labels, and
+//! an instruction is refused by name with its line number rather than skipped. That is the half a
+//! configure script needs, since the probes it writes are a `.long` and a label and the answer it
+//! wants is the value of a symbol in the object. Instruction assembly, inline assembly and
+//! relaxation are the rest of M3 and M4 and are not here yet.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -36,12 +40,14 @@ mod att;
 mod bytes;
 mod data;
 mod format;
+mod source;
 mod unwind;
 
 pub use crate::att::print;
 pub use crate::bytes::assemble;
 pub use crate::data::{Globals, Piece, Variable, aliases, globals};
 pub use crate::format::Directives;
+pub use crate::source::{Trouble, read};
 
 use std::fmt;
 
