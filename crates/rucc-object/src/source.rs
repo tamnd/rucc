@@ -59,7 +59,7 @@ pub struct Part {
 /// Held as the separate facts rather than as one of a fixed list of kinds, because the list is not
 /// fixed: a program may write `.section .init.text,"ax",@progbits` and mean a section this compiler
 /// has no name for, and the letters are the whole of what it said about it. The writer underneath
-/// takes a [`SectionKind`], so [`Shape::kind`] is the one place that turns these back into one, and
+/// takes a [`SectionKind`], so `Shape::kind` is the one place that turns these back into one, and
 /// the cases it cannot say are written as flags directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Shape {
@@ -453,8 +453,8 @@ mod tests {
         let SectionFlags::Elf { sh_flags, sh_type } = section.flags() else {
             panic!("this is an ELF file");
         };
-        assert_eq!(sh_flags.0, u64::from(elf::SHF_ALLOC.0 | elf::SHF_EXECINSTR.0));
-        assert_eq!(sh_flags.0 & u64::from(elf::SHF_WRITE.0), 0, "nothing said it was writable");
+        assert_eq!(sh_flags.0, elf::SHF_ALLOC.0 | elf::SHF_EXECINSTR.0);
+        assert_eq!(sh_flags.0 & elf::SHF_WRITE.0, 0, "nothing said it was writable");
         assert_eq!(sh_type, elf::SHT_PROGBITS);
     }
 
