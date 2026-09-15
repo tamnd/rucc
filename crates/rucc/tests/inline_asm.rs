@@ -115,15 +115,48 @@ fn a_template_that_reads_a_segment_is_the_load_it_names() {
 }
 
 #[test]
+fn a_two_address_instruction_is_read_as_the_operand_it_is_told_to_overwrite() {
+    // AT&T writes an addition with two arguments and this machine describes it with three, the
+    // third being the destination before the instruction ran. The tie between them is in the
+    // description, so the template says everything it has to and `"+r"` is what makes the operand
+    // one the statement is willing to have written over.
+    let source =
+        "long f(long x, long y) { asm (\"addq %1, %0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
+    let text = asm("two-address", source);
+    let body = body(&text, "f");
+    assert!(body.contains("addq"), "the template never reached the listing:\n{body}");
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong
-    // thing. A two address instruction is spelled with one of its operands unnamed, so there is
-    // nowhere for this statement's second operand to go that is not a guess.
-    let source = "int f(int x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
-    let (ok, _, said) = run("two-address", source);
-    assert!(!ok, "a template nothing here places was accepted");
-    assert!(said.contains("has instructions in its template"), "{said}");
+    // thing. The same addition as above on an output written `=`, which says the assembly writes
+    // the operand and never reads it, while the instruction reads it before it writes it.
+    let source = "long f(long x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
+    let (ok, _, said) = run("write-only", source);
+    assert!(!ok, "an operand read where the statement said it is only written was accepted");
+    assert!(said.contains("has an operand this cannot place"), "{said}");
+}
+
+#[test]
+fn a_comparison_and_a_conditional_move_keep_a_select_branchless() {
+    // What zstd writes in `ZSTD_selectAddr` so that a bounds check does not become a branch the
+    // processor has to guess at. Neither mnemonic carries its suffix, the pair is two instructions
+    // that have to stay in that order, and the move overwrites the operand written `+`.
+    let source = "\
+char *f(unsigned a, unsigned b, char *p, char *q) {
+  asm (\"cmp %1, %2\\n\\tcmova %3, %0\" : \"+r\" (p) : \"r\" (a), \"r\" (b), \"r\" (q));
+  return p;
+}
+";
+    let text = asm("cmov", source);
+    let body = body(&text, "f");
+    assert!(body.contains("cmpl"), "the comparison was read at the wrong width:\n{body}");
+    assert!(body.contains("cmovaq"), "the move was read at the wrong width:\n{body}");
+    let compare = body.find("cmpl").expect("a comparison");
+    let move_ = body.find("cmovaq").expect("a move");
+    assert!(compare < move_, "the move was put in front of the comparison it reads:\n{body}");
 }
 
 #[test]

@@ -151,6 +151,28 @@ fn on_x87(ty: Type) -> bool {
     ty.is_scalar() && ty.is_float() && ty.bits() == 80
 }
 
+/// Where one operand of an assembly statement is, on each side of the assembly.
+///
+/// Two registers rather than one, because an operand written `+` is a value that arrives and a
+/// value that leaves and those are two values. The machine IR has one definition per register by
+/// construction, so an instruction of the template that reads the operand and writes it has to name
+/// a different register in each place, and what makes the two one register in the end is the
+/// [`Constraint::Reuse`] the instruction's description carries: the allocator reads it, gives both
+/// the same physical register, and copies the incoming value somewhere first when something else is
+/// still using it.
+///
+/// Most operands have one of the two. An input has only a place it is read from and an output
+/// written `=` has only a place it is written to, and asking either of them for the other is an
+/// operand read where the opcode writes or written where it reads, which [`Lowering::placed`]
+/// refuses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Place {
+    /// The register the value arrives in, for an operand something reads.
+    read: Option<mir::Reg>,
+    /// The register the value leaves in, for an operand something writes.
+    write: Option<mir::Reg>,
+}
+
 /// Which of an assembly statement's operands is in that register, for an instruction that reaches
 /// the register without its text saying so.
 ///
@@ -2449,9 +2471,10 @@ impl<'a> Lowering<'a> {
     /// which the paragraph below is about: there the statement said which of its own operands is
     /// in the register, and a name in the middle of a template says no such thing.
     ///
-    /// An output the template writes more than once, and an output that is tied to an input and
-    /// written. Both are one place with two definitions in it, and the machine IR between here and
-    /// the allocator has one definition per register by construction.
+    /// An output the template writes more than once, which is one place with two definitions in it,
+    /// and the machine IR between here and the allocator has one definition per register by
+    /// construction. An output tied to an input and written once is not that: it is two registers
+    /// the description ties together, which is what [`Place`] is about.
     ///
     /// An operand read where the opcode writes, or written where it reads. An output that has not
     /// been written yet is not a value, and an input the assembly writes over is a value something
@@ -2504,19 +2527,32 @@ impl<'a> Lowering<'a> {
         }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
 
-        let template = self.names.resolve(info.template).to_string();
-        let lines = if template.trim().is_empty() {
-            Vec::new()
-        } else {
-            x86_64::read(&template)
-                .ok_or(Unsupported::Assembly { inst, refused: Written::Template })?
-        };
-
         let constraints = self.names.resolve(info.constraints).to_string();
         let results: Vec<Value> = data.results().collect();
         let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
             .ok_or_else(refused)?;
         let list: Vec<AsmOperand> = operands.iter().copied().collect();
+
+        // Read after the constraints and not before them, because a mnemonic whose suffix the
+        // program left off is read at the width of the operands it names, and the operands are
+        // what the constraints are a list of.
+        let widths: Vec<Option<x86_64::Width>> = list
+            .iter()
+            .map(|operand| {
+                let ty = self.source[operand.result.or(operand.value)?].ty;
+                if !ty.is_scalar() {
+                    return None;
+                }
+                x86_64::Width::of_bits(if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() })
+            })
+            .collect();
+        let template = self.names.resolve(info.template).to_string();
+        let lines = if template.trim().is_empty() {
+            Vec::new()
+        } else {
+            x86_64::read(&template, &widths)
+                .ok_or(Unsupported::Assembly { inst, refused: Written::Template })?
+        };
 
         // Which operands the template writes, counted before anything is placed, because the answer
         // decides where each of the three below comes from and one instruction may name an operand
@@ -2546,33 +2582,40 @@ impl<'a> Lowering<'a> {
         // Where every operand is. Worked out in full before the first instruction is written, since
         // reading a value may be what puts it in a register in the first place, and that has to
         // happen in front of the assembly rather than in the middle of it.
-        let mut places: Vec<Option<mir::Reg>> = vec![None; list.len()];
+        let mut places: Vec<Place> = vec![Place::default(); list.len()];
         for (index, operand) in list.iter().copied().enumerate() {
             let Some(result) = operand.result else {
                 // An input, or an output the assembly was handed the address of, and both are a
                 // value that arrives in a register and is read out of it.
-                places[index] = Some(self.reg_of(operand.value.ok_or_else(refused)?)?);
+                places[index].read = Some(self.reg_of(operand.value.ok_or_else(refused)?)?);
                 continue;
             };
             let ty = self.source[result].ty;
             if on_x87(ty) || writes[index] > 1 {
                 return Err(refused());
             }
-            match operands.tied_to(index) {
-                // The place the input arrived in, which the assembly wrote nothing over.
-                Some(from) => {
-                    if writes[index] > 0 || self.class_of(self.source[from].ty) != self.class_of(ty)
-                    {
-                        return Err(refused());
-                    }
-                    let reg = self.reg_of(from)?;
-                    self.regs[result.index()] = Some(reg);
-                    places[index] = Some(reg);
+            let tied = operands.tied_to(index);
+            if let Some(from) = tied {
+                if self.class_of(self.source[from].ty) != self.class_of(ty) {
+                    return Err(refused());
                 }
-                None if writes[index] == 1 => places[index] = Some(self.new_reg(result)),
+                places[index].read = Some(self.reg_of(from)?);
+            }
+            if writes[index] == 1 {
+                places[index].write = Some(self.new_reg(result));
+                continue;
+            }
+            match tied {
+                // The place the input arrived in, which the assembly wrote nothing over. One
+                // register, so this is a rename rather than a move.
+                Some(_) => {
+                    let reg = places[index].read.ok_or_else(refused)?;
+                    self.regs[result.index()] = Some(reg);
+                    places[index].write = Some(reg);
+                }
                 None => {
                     self.undefined(inst, result)?;
-                    places[index] = self.regs[result.index()];
+                    places[index].write = self.regs[result.index()];
                 }
             }
         }
@@ -2620,7 +2663,7 @@ impl<'a> Lowering<'a> {
         &mut self,
         inst: Inst,
         line: &x86_64::Line,
-        places: &[Option<mir::Reg>],
+        places: &[Place],
         list: &[AsmOperand],
         clobbered: &[PhysReg],
     ) -> Result<(), Unsupported> {
@@ -2634,11 +2677,26 @@ impl<'a> Lowering<'a> {
         // vector in the machine IR is every definition and then every use and what counts them
         // reads that order rather than each operand's role.
         let defs = built.iter().take_while(|operand| operand.role.is_def()).count();
+        let mut added = 0usize;
         for &reg in clobbered {
             if form.operands().iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
                 continue;
             }
             built.insert(defs, mir::Operand::write(mir::Reg::physical(reg), self.gpr));
+            added += 1;
+        }
+        // A constraint tying one operand to another names it by its place in this vector, and the
+        // clobbers were put in the middle of the vector, so everything behind them moved. The
+        // description is written against an instruction with no clobbers in it and cannot know
+        // that, which makes this the one place the two numberings have to be reconciled.
+        for operand in &mut built {
+            if let Constraint::Reuse(at) = operand.constraint {
+                if usize::from(at) >= defs {
+                    let moved = usize::from(at) + added;
+                    operand.constraint =
+                        Constraint::Reuse(u8::try_from(moved).map_err(|_| refused())?);
+                }
+            }
         }
         let at = match line.at {
             Some(at) => Some(self.addressed(inst, at, places)?),
@@ -2668,7 +2726,7 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         desc: OperandDesc,
         piece: x86_64::Piece,
-        places: &[Option<mir::Reg>],
+        places: &[Place],
         list: &[AsmOperand],
     ) -> Result<mir::Operand, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -2685,7 +2743,15 @@ impl<'a> Lowering<'a> {
             x86_64::Piece::Reg { .. } => return Err(refused()),
         };
         let operand = list.get(index).copied().ok_or_else(refused)?;
-        let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
+        // The two halves of an operand written `+`, which arrives in one register and leaves in
+        // another with the allocator told to make them the same one. Everything else has one of
+        // the two and asking for the other is the refusal below.
+        let place = places.get(index).copied().ok_or_else(refused)?;
+        let reg = match desc.role {
+            Role::Use => place.read,
+            Role::Def | Role::EarlyDef => place.write,
+        }
+        .ok_or_else(refused)?;
 
         // Read where the opcode reads and written where it writes, which is what the first half of
         // this asks. An output has a result and an input has a value, and an output written `+` has
@@ -2741,13 +2807,15 @@ impl<'a> Lowering<'a> {
         &mut self,
         inst: Inst,
         at: x86_64::At,
-        places: &[Option<mir::Reg>],
+        places: &[Place],
     ) -> Result<mir::Mem, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let base = match at.base {
             None => None,
             Some(x86_64::Piece::Operand { index, .. }) => {
-                let reg = places.get(index).copied().flatten().ok_or_else(refused)?;
+                // The register an address is counted from is read and never written, whatever the
+                // instruction does to what it finds there.
+                let reg = places.get(index).and_then(|place| place.read).ok_or_else(refused)?;
                 Some(mir::Operand::read(reg, self.gpr))
             }
             // An address counted from a register the instruction reaches without being told is

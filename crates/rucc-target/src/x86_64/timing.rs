@@ -98,8 +98,11 @@ fn plain(form: Form) -> Timing {
     let (latency, unit) = match form {
         // A register write of a constant, and every ordinary arithmetic instruction. One cycle on
         // every core of this family, and there are as many units for them as the machine is wide.
+        // The conditional move on its own belongs here rather than with the pair below it: what it
+        // waits for is a comparison somebody else wrote, and once those bits are there it is the
+        // one cycle the pair's second half is.
         LoadImm | AluRr | AluRi | UnaryR | ShiftRi | Move | Lea | Convert | Cmp | CmpRi | Test
-        | Set => (1, Unit::Int),
+        | Set | Cmov => (1, Unit::Int),
         // A shift by a count in a register, which is the one shift that is not one cycle. The
         // machine has to read the count register and the condition state together, and what it
         // does about that has cost a cycle on every core here.

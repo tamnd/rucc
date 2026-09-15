@@ -17,14 +17,12 @@
 //! widths rather than about opcodes: an `add` with a rule at four widths and no rule at the fifth
 //! is not covered, and would be reported here as the missing name rather than as a covered opcode.
 //!
-//! The second is a lowering, which is not a gap. `spec/10-backend.md` names five of them and there
-//! are more now, and they are all the same kind of thing: an opcode whose lowering depends on
+//! The second is [`ELSEWHERE`], which is not a gap. `spec/10-backend.md` names five of them and
+//! there are more now, and they are all the same kind of thing: an opcode whose lowering depends on
 //! something no pattern can see. Where a call's arguments go depends on the signature, where a
 //! local lives depends on the frame, an unconditional jump is an edge and edges live on the block,
 //! and a `memcpy` is a run of moves whose length is a constant the pattern would have to count. A
-//! rule matches one term and can say none of that. Which opcodes those are is
-//! [`crate::capability::lowering`] and is not written down here, because it was written down here
-//! and in the lowering group both and the two could disagree.
+//! rule matches one term and can say none of that.
 //!
 //! The third is [`GAPS`], which is the number `spec/15-testing.md` section 15.8 says we keep. Each
 //! entry names why it is there and the issue that closes it, so that an opcode nobody has written a
@@ -41,11 +39,11 @@
 //! stale entry and the tests below say so by name, which is the same rule the exclusion lists in
 //! the compatibility harness are kept under: a list nothing checks is a list that only grows.
 //!
-//! The direction this cannot check is an opcode moving from [`GAPS`] to a hand written lowering
-//! without [`crate::capability::HAND`] following it, because where an opcode is lowered by name is
-//! a `match` arm and there is nothing to ask about a `match` arm from here. What that costs is one
-//! line of a list going out of date; what it does not cost is a gap going unnoticed, since the
-//! opcode is still on a list and still counted.
+//! The direction this cannot check is an opcode moving from [`GAPS`] to [`ELSEWHERE`] without the
+//! list following it, because where an opcode is lowered by name is a `match` arm and there is
+//! nothing to ask about a `match` arm from here. What that costs is one line of a list going out of
+//! date; what it does not cost is a gap going unnoticed, since the opcode is still on a list and
+//! still counted.
 //!
 //! # The other question
 //!
@@ -63,9 +61,217 @@ use core::fmt::Write as _;
 use rucc_ir::Opcode;
 use rucc_target::Arch;
 
-use crate::capability::{self, pattern_heads};
-use crate::select::Table;
+use crate::select::{Table, Test};
 use crate::term;
+
+/// An opcode no rule is written about, and the place that lowers it instead.
+///
+/// Not one of these is a gap. Each is an opcode whose lowering depends on something a pattern
+/// cannot see, so the answer lives where that something is known.
+pub static ELSEWHERE: &[(Opcode, &str)] = &[
+    // The convention. What a call's operands are is whatever the signature made them, and which
+    // register each one arrives in depends on the classification of every argument before it.
+    (Opcode::Call, "`crate::abi`, which builds a call out of the convention"),
+    (Opcode::CallIndirect, "`crate::abi`, the same instruction with the callee in a register"),
+    // The frame, which is not known until the allocator has finished running out of registers.
+    (Opcode::Alloca, "`crate::lower`, as an address into a frame `crate::frame` lays out later"),
+    // The stack pointer, which is not a value the program computed and so is not a value a rule
+    // could bind. A scope holding a variable length array reads it as it opens and writes it back
+    // as it closes, which is how the bytes are given back.
+    (Opcode::StackSave, "`crate::lower`, as a move out of the stack pointer"),
+    (Opcode::StackRestore, "`crate::lower`, the same move the other way round"),
+    // A relocation, which is right because of what the linker does rather than because of what
+    // any bitvector equals.
+    (Opcode::GlobalAddr, "`crate::lower`, a `lea` off the instruction pointer with a name on it"),
+    // The same instruction against a place in this function rather than a name outside it. What
+    // it addresses is a block, and a block is not a value a pattern can bind.
+    (Opcode::BlockAddr, "`crate::lower`, the same `lea` against a label of this function"),
+    // The one thing on this machine that no ordinary instruction can work out, which is why it
+    // is built here rather than matched: `%fs` is not a register a rule could name.
+    (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
+    // A hint, which is built here for a reason of the same shape and one step stronger: which of
+    // the four instructions it is comes out of a number in the builtin's arguments, and a pattern
+    // matches on an opcode and a type and could not see it.
+    (Opcode::Prefetch, "`crate::lower`, as one of the four `prefetch` instructions"),
+    // Stopping, which is built here because it computes nothing for a rule to have a pattern for
+    // and because what makes it right is the operating system rather than any bitvector.
+    (Opcode::Trap, "`crate::lower`, as the `ud2` the program stops on"),
+    // The two that walk the frames, built here because how long the walk is comes out of a number
+    // beside the instruction and a pattern matches on an opcode and a type. What they start from is
+    // the frame pointer, which is not a register a rule could name either, and asking for one is
+    // part of building them.
+    (Opcode::FrameAddress, "`crate::lower`, as the walk up the saved frame pointers"),
+    (Opcode::ReturnAddress, "`crate::lower`, as the same walk with one load at the end of it"),
+    // No instruction at all. The IR keeps the width the same and the machine has one register
+    // file for both, so the value is already where it needs to be.
+    (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),
+    (Opcode::IntToPtr, "`crate::lower`, the same rename the other way round"),
+    // Memory SSA, which is built at -O2, read by the passes that need it, and taken back off
+    // before selection. Nothing in the back end has ever seen a value of type `mem`.
+    (Opcode::MemEntry, "nothing at all, since memory SSA comes off before the back end runs"),
+    // The edges and the two ways of writing down that control does not arrive.
+    (Opcode::Jump, "`crate::layout`, since an edge is on the block and not in the block"),
+    // The one terminator selection does write, because what it reads is a value. How many arms it
+    // has is not fixed, and a rule says what an instruction reads rather than where a block goes.
+    (Opcode::IndirectBr, "`crate::lower`, as the jump through the register that holds the address"),
+    (Opcode::Unreachable, "nothing at all, which is the answer for a place control does not reach"),
+    (Opcode::UnreachableHint, "nothing at all, for the same reason"),
+    // Rewritten into the opcodes above before selection ever sees them.
+    (Opcode::Switch, "`crate::switch`, into the tests its clusters need"),
+    (Opcode::FConst, "`crate::expand`, into a constant in memory and a load of it"),
+    (Opcode::FNeg, "`crate::expand`, into the sign bit flip it is"),
+    (Opcode::UIToFP, "`crate::expand`, into a signed conversion with a widening or a halving"),
+    (Opcode::FPToUI, "`crate::expand`, into a signed conversion with a narrowing or a correction"),
+    (Opcode::Memcpy, "`crate::expand`, into the moves it stands for"),
+    (Opcode::Memset, "`crate::expand`, into the fills it stands for"),
+    (Opcode::Memmove, "`crate::expand`, into a call, since the two regions may overlap"),
+    (Opcode::Bswap, "`crate::expand`, into the shifts and masks that reverse the bytes"),
+    // The ordered accesses, which this machine already makes ordered. `crate::expand` says what
+    // total store order gives for nothing and what the one ordering it does not give costs.
+    (Opcode::AtomicLoad, "`crate::expand`, into the plain load that is already an acquire"),
+    (Opcode::AtomicStore, "`crate::expand`, into the plain store, and a barrier at the strongest"),
+    // The barrier itself, which is one instruction or none and neither is a rewrite of anything.
+    // The template, which is a string and not a term. A rule set cannot be written over a string,
+    // so the instructions a template names are looked up in the machine description rather than
+    // matched, which is `rucc_target::x86_64::read`.
+    (
+        Opcode::InlineAsm,
+        "`crate::lower`, as the places its operands share and the instructions its template names",
+    ),
+    (
+        Opcode::Fence,
+        "`crate::lower`, as an `mfence` at the strongest ordering and nothing below it",
+    ),
+    // The compare and exchange, which is one instruction and produces two values, and a rule
+    // replaces a term with an instruction producing one.
+    (
+        Opcode::Cmpxchg,
+        "`crate::lower`, as a locked compare and exchange and the byte that reads its answer",
+    ),
+    // The read modify write, which produces one value a rule could have named and whose operation
+    // is carried beside it rather than in the head a rule matches on, so one pattern would be all
+    // thirteen of them.
+    (
+        Opcode::AtomicRmw,
+        "`crate::lower`, as an exchange or a locked add, and `crate::retry` for the eight with no \
+         instruction, with the two on floating values refused",
+    ),
+    (Opcode::Ctpop, "`crate::expand`, into the halving sum that counts the set bits"),
+    (Opcode::Ctlz, "`crate::expand`, into a smear and a set bit count"),
+    (Opcode::Cttz, "`crate::expand`, into a mask of the low zeroes and a set bit count"),
+    (Opcode::UAddOverflow, "`crate::expand`, into an add and a comparison against an operand"),
+    (Opcode::SAddOverflow, "`crate::expand`, into an add and the sign bit of the operands"),
+    (Opcode::USubOverflow, "`crate::expand`, into a subtract and a comparison of the operands"),
+    (Opcode::SSubOverflow, "`crate::expand`, into a subtract and the sign bit of the operands"),
+    (Opcode::UMulOverflow, "`crate::expand`, into a multiply and the high half of the product"),
+    (Opcode::SMulOverflow, "`crate::expand`, into the same, with the high half corrected for sign"),
+    // The variable argument list, which is four opcodes reading a structure the ABI describes.
+    (Opcode::VaStart, "`crate::varargs`, which writes the register save area the ABI describes"),
+    (Opcode::VaArg, "`crate::varargs`, into the walk over that structure"),
+    (Opcode::VaObject, "`crate::varargs`, the same walk for something that arrived in memory"),
+    (Opcode::VaCopy, "`crate::varargs`, into a copy of the structure"),
+    (Opcode::VaEnd, "`crate::varargs`, which removes it, since there is nothing to undo"),
+    // Memory safety. A check is a call to the runtime, and the rewrite happens after the optimizer
+    // has run so that the descriptor table only has rows for checks that survived it.
+    (Opcode::CheckBounds, "`rucc_safety::lower`, into a call carrying the row that describes it"),
+    (Opcode::CheckLive, "`rucc_safety::lower`, the same call over the lifetime plane"),
+    (Opcode::CheckDeriv, "`rucc_safety::lower`, the same call where the pointer is computed"),
+    (Opcode::CheckType, "`rucc_safety::lower`, the same call, carrying the type asked about"),
+    (
+        Opcode::CheckInit,
+        "`rucc_safety::lower`, the same call over the init plane, carrying no type",
+    ),
+    (Opcode::CheckRace, "`rucc_safety::lower`, the same call over the epoch plane"),
+    // The five plane writes the same pass emits, which become calls the same way. A judgement
+    // decides nothing, so none of the calls carries a descriptor row, and neither do the two
+    // edges below them.
+    (Opcode::MetaType, "`rucc_safety::lower`, into the call that records what a store stored"),
+    (Opcode::MetaTypeCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
+    (Opcode::MetaInit, "`rucc_safety::lower`, into the call that says a store wrote a range"),
+    (Opcode::MetaInitCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
+    (Opcode::MetaEpoch, "`rucc_safety::lower`, into the call that says which thread stored"),
+    // The two halves of a synchronization edge, which are the same shape of call and are not a
+    // plane write at all: what they move is a thread's own clock, which lives beside the thread.
+    (
+        Opcode::MetaRelease,
+        "`rucc_safety::lower`, into the call that publishes this thread's clock at an atomic",
+    ),
+    (Opcode::MetaAcquire, "`rucc_safety::lower`, into the call that takes the other end of it"),
+    // The same pair for a fence, which are the same calls with no key, since a fence orders
+    // against every thread rather than against an object.
+    (
+        Opcode::MetaFenceRelease,
+        "`rucc_safety::lower`, into the call that publishes this thread's clock to everyone",
+    ),
+    (
+        Opcode::MetaFenceAcquire,
+        "`rucc_safety::lower`, into the call that takes what any release fence published",
+    ),
+    // The `restrict` contract, which is judgement J8 and is the one check that records as well as
+    // asks. What it records goes in a slot the block owns, and the two markers are what open and
+    // close that slot, so all four are calls to the runtime the same way.
+    (
+        Opcode::CheckRestrictRead,
+        "`rucc_safety::lower`, into the call that asks what the block has already reached",
+    ),
+    (Opcode::CheckRestrictWrite, "`rucc_safety::lower`, the same call, saying it wrote"),
+    (Opcode::RestrictEnter, "`rucc_safety::lower`, into the call that opens the block's record"),
+    (Opcode::RestrictLeave, "`rucc_safety::lower`, into the call that closes it again"),
+    // The two markers, and the only pair on this list that is lowered into nothing. A declared
+    // region is not code, it is the reason some code carries no checks, so by the time the back end
+    // sees it the whole of its effect has already happened. What it costs is the count document 10
+    // section 10.2 asks for, and `rucc_safety::summary` takes that before the back end runs.
+    (Opcode::SafeRegionBegin, "`rucc_safety::lower`, into nothing, once the count has been taken"),
+    (Opcode::SafeRegionEnd, "`rucc_safety::lower`, the same, which is to say nothing"),
+    (Opcode::CapExtent, "`rucc_safety::lower`, into a call that asks rather than one that judges"),
+    (Opcode::CapExtentBack, "`rucc_safety::lower`, the same call about the bytes below an address"),
+    // The capability the checks were reading, which the same pass takes out once they are calls,
+    // because a call to the runtime is handed an address and finds the rest for itself. One that
+    // something does read is a slot, and the only one of those the pass can fill so far is a
+    // capability for a pointer an allocator just returned, which is a load out of that instance's
+    // own header rather than anything worked out from the address.
+    (Opcode::CapOf, "`rucc_safety::slot`, into the header read at an allocation site or the walk"),
+    // The two ends of a capability that something does read. A capability is four words of frame
+    // and the value that stands for one is the slot's address, so the pair below is an `alloca`
+    // with four zero words written into it and a call handed the addresses of two slots.
+    (Opcode::CapNull, "`rucc_safety::slot`, into a frame slot with the bottom capability in it"),
+    (Opcode::CapStore, "`rucc_safety::slot`, into the call that writes one into the aux plane"),
+    // The other end of that write, which is the one capability nothing has to work out, because the
+    // store that put it beside the pointer already did. So this is a call too, and it is the only
+    // instruction the pass rewrites that reads a slot and fills one.
+    (Opcode::CapLoad, "`rucc_safety::slot`, into the call that reads one back out again"),
+    // The sub-object tier's whole mechanism, which is arithmetic on the range a capability holds
+    // and is a call for the same reason the rest are: where the four words sit is the runtime's to
+    // know, and a second place that agreed about it would be a second place that could stop.
+    (Opcode::CapNarrow, "`rucc_safety::slot`, into the call that moves the range in"),
+    // The expensive producer and the only one that always has an answer, which is why it is what a
+    // pointer from outside the instrumented world falls back to. Same two arguments as the fresh
+    // allocation above, since the runtime declares the pair as one shape.
+    (Opcode::CapRecover, "`rucc_safety::slot`, into the call that walks the planes for one"),
+    // The two ends of a call, which is where a capability stops being this function's business.
+    // Neither of them is a capability instruction in the sense the five above are: one copies a
+    // call's worth of them into a frame in thread local storage and publishes it, and the other
+    // says there is no frame at all, which is what a callee nobody can vouch for gets.
+    (Opcode::CapPublish, "`rucc_safety::frame`, into the frame a call hands its callee"),
+    (Opcode::CapClear, "`rucc_safety::frame`, into the call that says there is no frame"),
+    // And the reading end of the first of those two, which is the one of the three that does make a
+    // capability. It is in the callee rather than in the caller and it answers whether or not there
+    // was a frame, because a pointer nobody described is one to be recovered from the planes.
+    (Opcode::CapArg, "`rucc_safety::frame`, into the read of the frame the caller published"),
+    // And the same pair for the pointer a call gives back, which is the one value crossing a call in
+    // the other direction. The writing end is in the callee and is the only thing here that writes
+    // into a frame it did not make, which it may because the frame is the caller's stack and the
+    // caller is waiting for it.
+    (
+        Opcode::CapYield,
+        "`rucc_safety::frame`, into the write of the frame the caller is waiting on",
+    ),
+    (Opcode::CapResult, "`rucc_safety::frame`, into the read of what the callee left behind"),
+    // What `__builtin_expect` said, which the pass writes onto the arms of the branch it was said
+    // about before taking the instruction out, so that a hint and a profile are the same thing to
+    // everything downstream of the optimizer.
+    (Opcode::Expect, "`rucc_opt::expect`, which moves the hint onto the branch and removes it"),
+];
 
 /// An opcode nothing lowers, why it is here, and the issue that closes it.
 ///
@@ -102,7 +308,7 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
-    // back end can be handed that reaches one. The ones the safety pass lowers are on `HAND`,
+    // back end can be handed that reaches one. The ones the safety pass lowers are on `ELSEWHERE`,
     // and the five that make a capability all left this list without anything emitting them, which
     // is the whole of tamnd/rucc#1085's lowering half: each has a lowering waiting for the pass that
     // will write one, because a capability had to be a value the back end could hold before any of
@@ -280,15 +486,11 @@ pub fn report(table: &Table) -> Report {
         .copied()
         .collect();
 
-    let elsewhere: Vec<Opcode> =
-        Opcode::all().filter(|&opcode| capability::lowering(opcode).is_some()).collect();
+    let elsewhere: Vec<Opcode> = ELSEWHERE.iter().map(|&(opcode, _)| opcode).collect();
     let gaps: Vec<Opcode> = GAPS.iter().map(|&(opcode, ..)| opcode).collect();
     let unaccounted: Vec<Opcode> = Opcode::all()
         .filter(|opcode| {
-            !by_rule.contains(opcode)
-                && !elsewhere.contains(opcode)
-                && !gaps.contains(opcode)
-                && !capability::LIBCALLS.iter().any(|&(at, ..)| at == *opcode)
+            !by_rule.contains(opcode) && !elsewhere.contains(opcode) && !gaps.contains(opcode)
         })
         .collect();
 
@@ -304,6 +506,29 @@ pub fn report(table: &Table) -> Report {
         gaps,
         unaccounted,
     }
+}
+
+/// Every name a rule in a table is written about, which is the first test the trie makes.
+///
+/// Node zero is the root of the trie over the patterns and the first thing any walk asks is what
+/// the term in hand is called, so its tests are exactly the set of pattern heads. There is no
+/// wildcard there to worry about: a rule matching any term at all is one nobody has written and
+/// one that would be an error to write, since a lowering has to know what it is lowering.
+fn pattern_heads(table: &Table) -> Vec<&'static str> {
+    let Some(root) = table.nodes.first() else { return Vec::new() };
+    let mut found: Vec<&'static str> = root
+        .tests
+        .iter()
+        .filter_map(|(test, _)| match test {
+            Test::App { head, .. } => Some(*head),
+            // Neither can be at the root. A pattern is a term with a head, so the first step of
+            // every one of them is a head, and there is nothing bound yet to be the same as.
+            Test::Int(_) | Test::Same(_) => None,
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// The rules a target lowers by, or `None` where no back end in this crate covers it.
@@ -447,9 +672,14 @@ mod tests {
         let report = report(&TABLE);
         assert!(
             report.unaccounted.is_empty(),
-            "no rule lowers these, nothing rewrites them before selection, no runtime function \
-             stands for them and `GAPS` does not say why: {:?}",
+            "no rule lowers these, `ELSEWHERE` does not say where they are lowered and `GAPS` \
+             does not say why they are not: {:?}",
             report.unaccounted
+        );
+        assert_eq!(
+            report.by_rule.len() + report.elsewhere.len() + report.gaps.len(),
+            report.opcodes,
+            "the three lists overlap, so an opcode is counted twice"
         );
     }
 
@@ -459,10 +689,10 @@ mod tests {
     #[test]
     fn an_entry_a_rule_now_covers_is_a_stale_entry() {
         let report = report(&TABLE);
-        for &(opcode, where_) in capability::HAND {
+        for &(opcode, where_) in ELSEWHERE {
             assert!(
                 !report.by_rule.contains(&opcode),
-                "`{}` is lowered by a rule now, so the `HAND` entry saying it is lowered by \
+                "`{}` is lowered by a rule now, so the `ELSEWHERE` entry saying it is lowered by \
                  {where_} is stale",
                 opcode.name()
             );

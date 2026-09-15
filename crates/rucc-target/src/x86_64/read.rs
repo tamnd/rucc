@@ -25,14 +25,24 @@
 //! that names the statement. Labels and directives are not read, because a label inside a function
 //! is a place something can jump to and the block layout has already decided where the places are.
 //! The scaled index of an addressing mode is not read. Neither is an instruction whose opcode has
-//! an operand its spelling does not name and the description does not fix to a register, which
-//! [`machine`] explains. An operand the description does fix is read, because there is only one
-//! register it could be, and it comes back as a [`Piece::Implicit`] for the caller to say whether
-//! anything of the program's is in. The rule throughout is that
-//! an instruction this compiler cannot place is refused out loud, since the alternative is a
+//! an operand nothing at all says anything about, which [`machine`] explains. Two things do say.
+//! An operand the description fixes to a register is read, because there is only one register it
+//! could be, and it comes back as a [`Piece::Implicit`] for the caller to say whether anything of
+//! the program's is in. An operand the description ties to another is read as whatever that other
+//! one is, because a tie is the description saying the two are one register: that is what makes
+//! `addq %1, %0` and `cmova %3, %0` instructions rather than half of one. The rule throughout is
+//! that an instruction this compiler cannot place is refused out loud, since the alternative is a
 //! program that assembles into something other than what it says.
+//!
+//! # The suffix a template leaves off
+//!
+//! AT&T puts the width on the mnemonic and an assembler lets a program leave it off when the
+//! arguments say it anyway, so `cmp %1, %2` is `cmpl` when those two operands are `int`. That is
+//! read here too, and the width comes from the caller: the statement's operands have C types, the
+//! caller knows them, and it passes their widths in. Every register argument has to agree on one
+//! width, since two that disagree are an instruction the program will have to spell out itself.
 
-use crate::operand::Constraint;
+use crate::operand::{Constraint, OperandDesc};
 use crate::regs::{PhysReg, Segment};
 use crate::x86_64::insts::form;
 use crate::x86_64::text::{Arg, Shape, Width, gpr_named, machine, written};
@@ -106,8 +116,14 @@ pub struct Line {
 ///
 /// Nothing rather than a partial answer, because half a template is not a smaller program, it is a
 /// different one.
+///
+/// The widths are the statement's operands, in the order the constraints number them, and they are
+/// what a mnemonic written without its suffix is read at. Nothing for an operand whose type is no
+/// width a register here has, which is a `long double` or anything larger than a register, and an
+/// operand like that is one a template has to spell the suffix out for. A statement with no
+/// operands at all passes an empty slice and is in the same position.
 #[must_use]
-pub fn read(template: &str) -> Option<Vec<Line>> {
+pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Line>> {
     let mut lines = Vec::new();
     let mut carried = false;
     for text in template.split(['\n', ';']) {
@@ -126,7 +142,7 @@ pub fn read(template: &str) -> Option<Vec<Line>> {
             carried = true;
             continue;
         }
-        lines.push(instruction(text, carried)?);
+        lines.push(instruction(text, carried, widths)?);
         carried = false;
     }
     // A prefix with nothing behind it is half an instruction, and half a template is refused for
@@ -159,7 +175,7 @@ fn uncommented(text: &str) -> &str {
 /// A prefix on anything else is refused, `lock` included, because a prefix that changes what an
 /// instruction does is not something to guess at: dropping the `lock` off a read modify write
 /// would turn a program that is correct into one that is nearly always correct.
-fn instruction(text: &str, prefixed: bool) -> Option<Line> {
+fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<Line> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     // The same prefix written on the same line as what it applies to, which is the other way a
     // template writes it and is the same instruction.
@@ -167,7 +183,7 @@ fn instruction(text: &str, prefixed: bool) -> Option<Line> {
         if prefixed {
             return None;
         }
-        return instruction(rest.trim(), true);
+        return instruction(rest.trim(), true, widths);
     }
     let mnemonic = if prefixed {
         if mnemonic != "nop" || !rest.trim().is_empty() {
@@ -187,7 +203,10 @@ fn instruction(text: &str, prefixed: bool) -> Option<Line> {
     let given: Vec<Given> =
         arguments(rest).iter().map(|text| given(text)).collect::<Option<_>>()?;
     let shapes: Vec<Shape> = given.iter().map(Given::shape).collect();
-    let opcode = machine(mnemonic, &shapes)?;
+    let opcode = match machine(mnemonic, &shapes) {
+        Some(opcode) => opcode,
+        None => machine(&suffixed(mnemonic, &given, widths)?, &shapes)?,
+    };
     let [only] = written(opcode)? else { return None };
 
     // The opcode's own order, which is not the order the arguments were written in: AT&T puts the
@@ -215,16 +234,72 @@ fn instruction(text: &str, prefixed: bool) -> Option<Line> {
         }
     }
     // An operand the opcode has and its spelling did not name. [`machine`] lets one through when
-    // the description fixes it to a register and refuses it otherwise, so anything still empty
-    // here has one possible answer and this writes it down.
+    // the description says what is in it and refuses it otherwise, so anything still empty here
+    // has one possible answer and these two passes write it down. The fixed ones go first because
+    // the tie in the second pass copies an answer, and an answer has to be there to copy.
     for (slot, desc) in operands.iter_mut().zip(described) {
-        if slot.is_none() {
-            let Constraint::Fixed(reg) = desc.constraint else { return None };
+        if slot.is_some() {
+            continue;
+        }
+        if let Constraint::Fixed(reg) = desc.constraint {
             *slot = Some(Piece::Implicit { reg });
         }
     }
+    for index in 0..operands.len() {
+        if operands[index].is_some() {
+            continue;
+        }
+        let partner = tied(described, index)?;
+        operands[index] = *operands.get(partner)?;
+    }
     let operands: Vec<Piece> = operands.into_iter().collect::<Option<_>>()?;
     Some(Line { opcode, operands, at, imm })
+}
+
+/// The operand that shares a register with the one at that index, when the description says one
+/// does.
+///
+/// Asked in both directions, because a tie is between two operands and either of them may be the
+/// one carrying it. On this machine it is always the destination of a two-address instruction that
+/// carries it and always the first source it points at, but which end the table writes it on is
+/// the table's business rather than something to depend on here.
+fn tied(described: &[OperandDesc], index: usize) -> Option<usize> {
+    if let Constraint::Reuse(other) = described.get(index)?.constraint {
+        return Some(usize::from(other));
+    }
+    described.iter().position(
+        |desc| matches!(desc.constraint, Constraint::Reuse(back) if usize::from(back) == index),
+    )
+}
+
+/// That mnemonic with the width of its arguments written on the end of it.
+///
+/// What an assembler does with a mnemonic a program left the suffix off, and it is the same answer
+/// for the same reason: the arguments say the width, so the suffix would be saying it a second
+/// time. Nothing when they do not say it. An instruction whose arguments are all of them numbers
+/// and addresses has nothing to take a width from, and one whose register arguments disagree about
+/// the width is two instructions at once, and either way the program has to spell it out.
+fn suffixed(mnemonic: &str, given: &[Given], widths: &[Option<Width>]) -> Option<String> {
+    let mut width: Option<Width> = None;
+    for arg in given {
+        let each = match *arg {
+            Given::Reg(_, each) => each,
+            Given::Operand(index) => (*widths.get(index)?)?,
+            // The register an address is counted from is a whole one whatever the instruction
+            // reads, and a number is as wide as it needs to be, so neither says anything here.
+            Given::Imm(_) | Given::Mem(_) => continue,
+        };
+        if width.replace(each).is_some_and(|before| before != each) {
+            return None;
+        }
+    }
+    let suffix = match width? {
+        Width::Byte => 'b',
+        Width::Word => 'w',
+        Width::Long => 'l',
+        Width::Quad => 'q',
+    };
+    Some(format!("{mnemonic}{suffix}"))
 }
 
 /// The arguments of one instruction, split on the commas between them.
@@ -353,7 +428,7 @@ mod tests {
     /// arguments, and an opcode whose operand list is empty.
     #[test]
     fn a_template_that_is_one_mnemonic_is_the_instruction_of_that_name() {
-        let lines = read("pause").expect("pause is an instruction");
+        let lines = read("pause", &[]).expect("pause is an instruction");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "pause");
         assert!(lines[0].operands.is_empty());
@@ -364,7 +439,7 @@ mod tests {
     /// built: a segment, a distance into it, and an output the allocator places.
     #[test]
     fn a_read_through_a_segment_is_the_load_the_machine_already_has() {
-        let lines = read("movq %%fs:0, %0").expect("a load through a segment");
+        let lines = read("movq %%fs:0, %0", &[]).expect("a load through a segment");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "mov_rm_64");
         assert_eq!(lines[0].operands, vec![Piece::Operand { index: 0, width: Width::Quad }]);
@@ -376,7 +451,7 @@ mod tests {
     /// cannot get wrong.
     #[test]
     fn a_copy_puts_its_source_and_destination_where_the_opcode_holds_them() {
-        let lines = read("movq %1, %0").expect("a copy between two operands");
+        let lines = read("movq %1, %0", &[]).expect("a copy between two operands");
         assert_eq!(lines[0].opcode, "mov_rr_64");
         assert_eq!(
             lines[0].operands,
@@ -391,17 +466,17 @@ mod tests {
     /// says has to be the width the instruction uses.
     #[test]
     fn a_register_the_template_named_is_read_at_the_width_its_name_says() {
-        let lines = read("movq %%rax, %0").expect("a copy out of a named register");
+        let lines = read("movq %%rax, %0", &[]).expect("a copy out of a named register");
         let source = Piece::Reg { reg: PhysReg::new(0), width: Width::Quad };
         assert_eq!(lines[0].operands[1], source);
-        assert_eq!(read("movq %%eax, %0"), None, "a narrow name in a wide instruction");
+        assert_eq!(read("movq %%eax, %0", &[]), None, "a narrow name in a wide instruction");
     }
 
     /// Several instructions, written the way a program writes them, which is one string with the
     /// separators inside it.
     #[test]
     fn a_template_with_several_instructions_is_several_instructions() {
-        let lines = read("pause\n\tpause ; pause").expect("three of them");
+        let lines = read("pause\n\tpause ; pause", &[]).expect("three of them");
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|line| line.opcode == "pause"));
     }
@@ -412,7 +487,8 @@ mod tests {
     #[test]
     fn a_repeat_prefix_on_a_nop_is_the_spin_hint() {
         for template in ["rep; nop", "rep nop", "rep\n\tnop", "repz; nop", "repe nop"] {
-            let lines = read(template).unwrap_or_else(|| panic!("{template} is the spin hint"));
+            let lines =
+                read(template, &[]).unwrap_or_else(|| panic!("{template} is the spin hint"));
             assert_eq!(lines.len(), 1, "{template}");
             assert_eq!(lines[0].opcode, "pause", "{template}");
             assert!(lines[0].operands.is_empty(), "{template}");
@@ -423,7 +499,7 @@ mod tests {
     /// whose text names none of its operands and whose description names all of them.
     #[test]
     fn an_instruction_whose_operands_are_all_implicit_is_read_from_the_description() {
-        let lines = read("cpuid").expect("cpuid is an instruction");
+        let lines = read("cpuid", &[]).expect("cpuid is an instruction");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "cpuid");
         let regs: Vec<PhysReg> = lines[0]
@@ -440,12 +516,69 @@ mod tests {
         assert_eq!(regs, expected, "four written and then the two read");
     }
 
-    /// The relaxation above reaches an operand the description fixes and no further. A shift by
-    /// `cl` has one of each: the count is fixed to `rcx` and the value being shifted is tied to the
-    /// destination, and the second of those is still nobody's to fill in.
+    /// The other relaxation, which is an operand tied to one the text did name. AT&T writes a
+    /// two-address instruction with two arguments and this machine describes it with three, and the
+    /// third is the destination before the instruction ran. A template that wrote `addq %1, %0`
+    /// means the operand is both the third and the first, which is what `"+r"` beside it says.
     #[test]
-    fn an_operand_the_description_does_not_fix_is_still_refused_when_nothing_names_it() {
-        assert_eq!(read("shlq %%cl, %0"), None, "the value being shifted is named nowhere");
+    fn an_operand_tied_to_a_named_one_is_read_as_that_one() {
+        let lines = read("addq %1, %0", &[]).expect("an addition onto an operand");
+        assert_eq!(lines[0].opcode, "add_rr_64");
+        let destination = Piece::Operand { index: 0, width: Width::Quad };
+        assert_eq!(
+            lines[0].operands,
+            vec![destination, destination, Piece::Operand { index: 1, width: Width::Quad }],
+            "written, read, and the other source"
+        );
+    }
+
+    /// The same tie on the instruction this was built for, which is a shift by the one register
+    /// this machine will shift by. Its count is fixed to `rcx` and its value is tied, so both
+    /// relaxations are at work on one instruction.
+    #[test]
+    fn a_shift_by_cl_has_one_operand_of_each_kind_filled_in() {
+        let lines = read("shlq %%cl, %0", &[]).expect("a shift by cl");
+        assert_eq!(lines[0].opcode, "shl_rcl_64");
+        let destination = Piece::Operand { index: 0, width: Width::Quad };
+        assert_eq!(lines[0].operands[0], destination);
+        assert_eq!(lines[0].operands[1], destination, "the value being shifted");
+        assert_eq!(
+            lines[0].operands[2],
+            Piece::Reg { reg: gpr_named("cl").expect("cl").0, width: Width::Byte }
+        );
+    }
+
+    /// The pair zstd writes to keep a comparison branchless, which is the whole of why this reads a
+    /// conditional move at all. Neither mnemonic carries its suffix and both are read at the width
+    /// the operands have, the comparison writes the condition state and the move reads it, and the
+    /// move's false arm is the operand it is told to overwrite.
+    #[test]
+    fn a_comparison_and_a_conditional_move_are_the_two_instructions_they_say_they_are() {
+        let widths = [Some(Width::Long); 4];
+        let lines = read("cmp %1, %2\ncmova %3, %0", &widths).expect("the branchless select");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].opcode, "cmp_rr_32");
+        assert_eq!(lines[1].opcode, "cmov_a_32");
+        let kept = Piece::Operand { index: 0, width: Width::Long };
+        assert_eq!(
+            lines[1].operands,
+            vec![kept, kept, Piece::Operand { index: 3, width: Width::Long }],
+            "the destination is also the arm taken when the condition does not hold"
+        );
+    }
+
+    /// The suffix is worked out from the operands and from nothing else, so a template whose
+    /// arguments do not agree about the width, or do not say one at all, is refused.
+    #[test]
+    fn a_mnemonic_with_no_suffix_is_refused_when_the_arguments_do_not_say_the_width() {
+        let mixed = [Some(Width::Long), Some(Width::Quad)];
+        assert_eq!(read("cmp %0, %1", &mixed), None, "two operands of different widths");
+        assert_eq!(read("cmp $1, $2", &[]), None, "nothing that has a width at all");
+        assert_eq!(
+            read("cmp %0, %1", &[Some(Width::Long)]),
+            None,
+            "an operand the statement has not got"
+        );
     }
 
     /// A prefix in front of anything else, which is refused rather than dropped. Dropping the
@@ -453,39 +586,38 @@ mod tests {
     /// one that is correct nearly all of the time, which is the worst answer available.
     #[test]
     fn a_prefix_this_does_not_read_is_refused_rather_than_dropped() {
-        assert_eq!(read("lock; incl %0"), None, "a lock prefix");
-        assert_eq!(read("rep; movsb"), None, "a repeat this has no instruction for");
-        assert_eq!(read("rep; pause"), None, "a prefix on an instruction that is already the pair");
-        assert_eq!(read("rep"), None, "a prefix with nothing behind it");
-        assert_eq!(read("rep; rep; nop"), None, "two prefixes");
-        assert_eq!(read("rep nop, %0"), None, "a prefix on an instruction with an argument");
+        assert_eq!(read("lock; incl %0", &[]), None, "a lock prefix");
+        assert_eq!(read("rep; movsb", &[]), None, "a repeat this has no instruction for");
+        assert_eq!(
+            read("rep; pause", &[]),
+            None,
+            "a prefix on an instruction that is already the pair"
+        );
+        assert_eq!(read("rep", &[]), None, "a prefix with nothing behind it");
+        assert_eq!(read("rep; rep; nop", &[]), None, "two prefixes");
+        assert_eq!(read("rep nop, %0", &[]), None, "a prefix on an instruction with an argument");
     }
 
     /// Every refusal in the module documentation, held here so that a later change that starts
     /// guessing at one of them has to say so.
     #[test]
     fn what_cannot_be_placed_is_refused_rather_than_guessed_at() {
-        assert_eq!(read("hcf"), None, "a mnemonic this machine does not have");
-        assert_eq!(read("movq %0"), None, "an instruction with the wrong number of arguments");
-        assert_eq!(
-            read("addq %1, %0"),
-            None,
-            "an opcode with an operand its spelling does not name"
-        );
-        assert_eq!(read("idivq %0"), None, "an opcode the machine writes as more than one");
-        assert_eq!(read("again:"), None, "a label");
-        assert_eq!(read(".byte 0"), None, "a directive");
-        assert_eq!(read("movq (%%rax,%%rbx,8), %0"), None, "a scaled index");
-        assert_eq!(read("movq %%cs:0, %0"), None, "a segment nothing here reaches");
-        assert_eq!(read("movq %%xmm0, %0"), None, "a register in the other file");
+        assert_eq!(read("hcf", &[]), None, "a mnemonic this machine does not have");
+        assert_eq!(read("movq %0", &[]), None, "an instruction with the wrong number of arguments");
+        assert_eq!(read("idivq %0", &[]), None, "an opcode the machine writes as more than one");
+        assert_eq!(read("again:", &[]), None, "a label");
+        assert_eq!(read(".byte 0", &[]), None, "a directive");
+        assert_eq!(read("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");
+        assert_eq!(read("movq %%cs:0, %0", &[]), None, "a segment nothing here reaches");
+        assert_eq!(read("movq %%xmm0, %0", &[]), None, "a register in the other file");
     }
 
     /// An empty template is no instructions rather than one that could not be read, which is the
     /// case the backend has lowered since before there was a reader.
     #[test]
     fn a_template_with_nothing_in_it_is_no_instructions() {
-        assert_eq!(read(""), Some(Vec::new()));
-        assert_eq!(read("  \n\t # nothing here \n"), Some(Vec::new()));
+        assert_eq!(read("", &[]), Some(Vec::new()));
+        assert_eq!(read("  \n\t # nothing here \n", &[]), Some(Vec::new()));
     }
 
     /// The two spellings of a number and the sign in front of one, since a displacement is as
@@ -495,7 +627,7 @@ mod tests {
         let cases = [("-8(%%rbp)", -8), ("0x10(%%rbp)", 16), ("+4(%%rbp)", 4)];
         for (written, disp) in cases {
             let text = format!("movq {written}, %0");
-            let lines = read(&text).unwrap_or_else(|| panic!("{text} is a load"));
+            let lines = read(&text, &[]).unwrap_or_else(|| panic!("{text} is a load"));
             assert_eq!(lines[0].at.expect("an address").disp, disp, "{text}");
         }
     }
