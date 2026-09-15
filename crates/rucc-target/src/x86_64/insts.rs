@@ -370,7 +370,7 @@ pub enum Form {
     /// have to see it. An alignment that the scheduler is allowed to move an instruction across is
     /// an alignment of something other than what the program pointed at, and the way a pass is told
     /// that is the same way it is told about a fence, which is a form in this table with a timing
-    /// entry of [`crate::x86_64::timing::Unit::Fixed`] beside it.
+    /// entry of [`crate::timing::Unit::Fixed`] beside it.
     ///
     /// Only an `asm` statement writes one, which is the same reason [`Form::Spin`] is here. zstd
     /// writes `__asm__(".p2align 5")` in front of the match loop of `ZSTD_compressBlock_lazy_generic`

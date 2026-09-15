@@ -513,7 +513,7 @@ mod tests {
             let block = func.create_block();
             let add = Opcode::new(names.intern("x64.add_rr_32"));
             let align = Opcode::new(names.intern("x64.align"));
-            let mut two = |func: &mut Func| {
+            let two = |func: &mut Func| {
                 func.build(block, add)
                     .operand(Operand::write(Reg::physical(RAX), GPR))
                     .operand(Operand::read(Reg::physical(RAX), GPR))
