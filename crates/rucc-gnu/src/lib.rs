@@ -20,7 +20,7 @@
 //!
 //! assert_eq!(rucc_gnu::has_feature("__has_include"), 1);
 //! assert_eq!(rucc_gnu::has_attribute("cleanup"), 1);
-//! assert_eq!(rucc_gnu::has_attribute("transparent_union"), 0, "recognised and not done");
+//! assert_eq!(rucc_gnu::has_attribute("transparent_union"), 1);
 //! assert_eq!(rucc_gnu::has_attribute("no_such_attribute"), 0);
 //!
 //! // The armoured spelling is the same question.

@@ -63,6 +63,14 @@ pub struct RecordInfo {
     /// One entry per member the program wrote, in that order, so a caller that kept the
     /// declarations can index the two together.
     pub fields: Vec<Field>,
+    /// Whether `__attribute__((transparent_union))` was written on it and held up.
+    ///
+    /// Only ever true of a union, and only of one whose first member is the size and the
+    /// alignment of the whole of it, which is what makes passing the union and passing that
+    /// member the same thing at a call. What it buys is two rules: a parameter of this type is
+    /// compatible with a parameter of any member's type, and a value assigned to it is put into
+    /// whichever member it fits. Both are in `spec/13-gnu-compat.md`.
+    pub transparent: bool,
 }
 
 /// What is known about one `enum` declaration.
@@ -310,8 +318,29 @@ impl Types {
     /// Panics past four billion record declarations in one translation unit.
     pub fn declare_record(&mut self, kind: RecordKind, tag: Option<Symbol>) -> RecordId {
         let id = RecordId(u32::try_from(self.records.len()).expect("too many types"));
-        self.records.push(RecordInfo { kind, tag, layout: None, fields: Vec::new() });
+        self.records.push(RecordInfo {
+            kind,
+            tag,
+            layout: None,
+            fields: Vec::new(),
+            transparent: false,
+        });
         id
+    }
+
+    /// Records that a union was declared transparent, which is a decision made elsewhere.
+    ///
+    /// Whether the attribute holds up is a question about the members and their layout, so it is
+    /// answered where the members are read rather than here, and this only writes the answer down.
+    /// It is a fact about the declaration and not about one spelling of it, which is why the whole
+    /// record is marked rather than a variant of the type: every name for the union is the same
+    /// union and a parameter written with any of them takes the same values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    pub fn make_transparent(&mut self, id: RecordId) {
+        self.records[id.0 as usize].transparent = true;
     }
 
     /// The type of a declared record.

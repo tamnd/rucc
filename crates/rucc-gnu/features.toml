@@ -366,10 +366,10 @@ tests = []
 name = "transparent_union"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["tests/golden/transparent-union.c", "tests/accept/a-transparent-union-that-is-a-struct.c"]
+notes = "On a union, in both places gcc takes it: after the closing brace and on the declarator of the typedef, which is where glibc writes it. A parameter of the union type is compatible with a parameter of any member's type, and a value assigned to one goes into whichever member it fits, which is the same object a cast to a union builds. Dropped with a warning on anything that is not a union and on a union that is not the size and the alignment of its first member, which is gcc's own rule and its own answer to breaking it."
 
 [[feature]]
 name = "noreturn"

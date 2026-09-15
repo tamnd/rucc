@@ -688,6 +688,22 @@ impl Checker<'_> {
         // is the alignment the type has rather than a floor on it, so unlike the attribute on a
         // declaration it may lower one, and `typedef int L __attribute__((aligned(2)))` is an
         // `int` at a multiple of two.
+        // glibc writes `transparent_union` here rather than after the closing brace, as
+        // `typedef union { ... } __SOCKADDR_ARG __attribute__((__transparent_union__));`, and gcc
+        // takes a type attribute in this position as being about the type. The union the typedef
+        // names is the one marked, since a typedef is a second name for a type and not a type of
+        // its own, and the union in every program that writes this is declared right here.
+        if let Some(at) = self.transparent_union(item.attrs) {
+            match self.types.kind(self.types.canonical(ty)) {
+                TypeKind::Record(id) => self.make_transparent(id, at),
+                _ => {
+                    let what = "'transparent_union' attribute ignored";
+                    let note = "only a union is passed the way one of its members is";
+                    let warned = Diagnostic::warning(what, at).with_code("E0708");
+                    self.report(warned.note(note, at));
+                }
+            }
+        }
         let asked = self.packing(specs.attrs).align.or(self.packing(item.attrs).align);
         let ty = match asked.and_then(NonZeroU32::new) {
             Some(align) => self.types.aligned_typedef(name, ty, align),

@@ -1452,6 +1452,80 @@ decl #0 x : int object external static defined
         ));
     }
 
+    /// The attribute that changes what a call means rather than what a record lays out.
+    ///
+    /// Both halves are here. A call hands a value to a parameter of the union type and the value
+    /// goes into the member that takes it, which is a compound literal of the union and is the
+    /// same object the GNU cast to a union builds. And a declaration written with a member's type
+    /// declares the same function as one written with the union, which is what lets a pointer to
+    /// either be assigned from the other, and is what gnulib's signature checks do.
+    ///
+    /// The `void *` member is last on purpose: the search takes a member whose type the value
+    /// already has wherever it sits, and falls back to a pointer member that would take the value
+    /// silently only when there is no such member, so `char *` reaches the catch-all past two
+    /// members that are not it.
+    #[test]
+    fn a_transparent_union_takes_the_member_a_value_fits_and_is_declared_either_way() {
+        let text = tast(concat!(
+            "struct one { int x; };\n",
+            "struct two { long y; };\n",
+            "typedef union { struct one *a; struct two *b; void *any; }\n",
+            "  __attribute__((__transparent_union__)) arg;\n",
+            "int takes(arg v);\n",
+            "int f(struct one *p, struct two *q, char *c) {\n",
+            "  return takes(p) + takes(q) + takes(c) + takes(0);\n",
+            "}\n",
+            // The other half, which is about declarations and not about values.
+            "int takes(struct one *p);\n",
+            "int (*as_a_member)(struct one *) = takes;\n",
+            "int (*as_the_union)(arg) = takes;\n",
+        ));
+        assert!(text.contains("compound-literal"), "{text}");
+    }
+
+    /// The other place glibc writes it, which is the one that matters.
+    ///
+    /// `sys/socket.h` puts the attribute on the declarator of the typedef rather than after the
+    /// closing brace, so a compiler that reads only the second position reads nothing at all of
+    /// the eleven pointer union that `bind` and `connect` and five others take.
+    #[test]
+    fn the_attribute_on_the_declarator_of_a_typedef_is_the_one_glibc_writes() {
+        let text = tast(concat!(
+            "struct sockaddr { int family; };\n",
+            "struct sockaddr_in { int family; int addr; };\n",
+            "typedef union { struct sockaddr *plain; struct sockaddr_in *inet; }\n",
+            "  addr_arg __attribute__((__transparent_union__));\n",
+            "int bind_to(int fd, addr_arg where);\n",
+            "int f(struct sockaddr_in *where) { return bind_to(0, where); }\n",
+        ));
+        assert!(text.contains("compound-literal"), "{text}");
+    }
+
+    /// What the attribute promises has to be a promise this can keep, and is checked rather than
+    /// believed.
+    ///
+    /// A union wider than its first member is not passed the way that member is, and a structure
+    /// has no members that are alternatives to each other at all. gcc drops the attribute in both
+    /// cases with a warning and compiles the program, because the type is still a perfectly good
+    /// type and only the extra rule is gone.
+    #[test]
+    fn a_transparent_union_that_cannot_keep_the_promise_is_dropped_with_a_word_about_it() {
+        let result = run(
+            &options(),
+            concat!(
+                "union wider { int small; double large; } __attribute__((transparent_union));\n",
+                "struct plain { int x; } __attribute__((transparent_union));\n",
+            ),
+        );
+        assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
+        assert!(!result.failed(), "{:?}", result.messages);
+        for message in &result.messages {
+            assert!(message.contains("'transparent_union' attribute ignored"), "{message}");
+        }
+        assert!(result.messages[0].contains("first member"), "{:?}", result.messages);
+        assert!(result.messages[1].contains("only a union"), "{:?}", result.messages);
+    }
+
     /// What an access to a packed member is allowed to assume about where it starts.
     ///
     /// C 6.2.8 gives an object of type `int` four byte alignment and `packed` takes it away: the
