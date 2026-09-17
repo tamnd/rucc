@@ -200,7 +200,11 @@ impl Checker<'_> {
             if rucc_types::is_void(&self.types, ty) {
                 continue;
             }
-            types.push(ty);
+            // The same adjustment a declaration gets, because this is a declaration: a parameter
+            // of array type is a pointer to its first element. Nothing in the table needed it
+            // until `__builtin_va_list` arrived, which is an array of one on x86-64, and a
+            // prototype that kept the array would be one no argument could ever match.
+            types.push(rucc_types::adjust_parameter(&mut self.types, ty));
         }
         Some(self.types.function(FunctionType { ret, params: types, variadic, prototyped: true }))
     }
@@ -260,6 +264,11 @@ impl Checker<'_> {
             "uint16_t" => return Some(self.exact_unsigned(16)),
             "uint32_t" => return Some(self.exact_unsigned(32)),
             "uint64_t" => return Some(self.exact_unsigned(64)),
+            // The one word here that names a type the target chooses the shape of rather than
+            // the width of. It is what the `v` spellings of the `_chk` family take, and writing
+            // `void *` instead would be right on the one target whose list is an array of one
+            // and wrong on every other.
+            "__builtin_va_list" => return Some(self.va_list_type()),
             "char" => IntKind::Char,
             "signed char" => IntKind::SChar,
             "unsigned char" => IntKind::UChar,
@@ -514,6 +523,32 @@ mod tests {
         }
         assert!(c.declare_builtin(trap, Span::DUMMY).is_some(), "in the table");
         assert_eq!(library_name("__builtin_trap"), None, "nothing in the library is called that");
+    }
+
+    /// The `_chk` family is the one where the two names look least alike, and the rule about them
+    /// is the same rule as for the rest of the library builtins.
+    ///
+    /// `__builtin___memcpy_chk` with `__builtin_` taken off is `__memcpy_chk`, which is what glibc
+    /// defines, and the three underscores in the middle are two of the builtin's prefix and one of
+    /// the library's. It is worth a test because it reads like an exception and is not one, and
+    /// because a row that lost an underscore either way would be a call to a name no object file
+    /// has, which is the failure this whole mechanism exists to prevent.
+    #[test]
+    fn every_chk_builtin_calls_the_checking_function_the_library_defines() {
+        let family: Vec<_> = rucc_gnu::features()
+            .iter()
+            .filter(|feature| feature.name.starts_with("__builtin___"))
+            .collect();
+        assert_eq!(family.len(), 16, "the table lost part of the family");
+        for feature in family {
+            let name = feature.name;
+            assert!(name.ends_with("_chk"), "{name} is not one of the checking builtins");
+            let plain = name.strip_prefix("__builtin_").expect("the prefix");
+            assert_eq!(feature.library, plain, "{name}");
+            assert_eq!(library_name(name), Some(feature.library), "{name}");
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert!(!feature.signature.is_empty(), "{name} is called, so it has to be declared");
+        }
     }
 
     /// The question is asked of every name the walk to the IR is about to write down, so the
