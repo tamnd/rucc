@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::iter;
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
+use rucc_base::Symbol;
 use rucc_base::float::{Float as Real, Format};
 use rucc_diag::Span;
 use rucc_ir::{
@@ -40,7 +41,8 @@ use rucc_sema::{
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
-    ArrayLen, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId, pointee,
+    ArrayLen, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId, integer_info,
+    pointee,
 };
 
 use crate::abi::{self, Plan, Travel};
@@ -3770,7 +3772,7 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// The address of a global.
-    fn global_addr(&mut self, symbol: rucc_base::Symbol, span: Span) -> Value {
+    fn global_addr(&mut self, symbol: Symbol, span: Span) -> Value {
         self.build(span).value(
             InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) },
             Type::PTR,
@@ -6827,7 +6829,15 @@ impl<'u> Body<'_, 'u> {
 
         let direct = self.direct(callee, &plan, &actual, span);
         let inst = match direct {
-            Some((symbol, settled)) => {
+            Some((mut symbol, mut settled)) => {
+                // The one call this rewrites rather than builds. A checking function handed an
+                // object size that says nothing is known is the function it guards with an
+                // argument nobody reads, so the argument goes and the plain name takes its place.
+                if let Some(plain) = self.unchecked_call(callee, args, &values, &settled) {
+                    values.pop();
+                    settled.signature.params.pop();
+                    symbol = plain;
+                }
                 let sig = self.func.add_signature(settled.signature);
                 self.build(span).call_varargs(symbol, sig, &values, &settled.varargs)
             }
@@ -6899,7 +6909,7 @@ impl<'u> Body<'_, 'u> {
         plan: &Plan,
         actual: &[TypeId],
         span: Span,
-    ) -> Option<(rucc_base::Symbol, Plan)> {
+    ) -> Option<(Symbol, Plan)> {
         let tast = self.tast();
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
@@ -6925,6 +6935,67 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         Some((self.unit.symbol_of(decl), settled))
+    }
+
+    /// The library function a `_chk` call means when the object size it carries says nothing is
+    /// known, and nothing for every other call.
+    ///
+    /// A fortified header writes `__builtin___memcpy_chk(d, s, n, __builtin_object_size(d, 0))`,
+    /// and where the destination's object is not in sight that fourth argument folds to the all
+    /// ones value the checking function reads as do not check. So the call is `memcpy` with one
+    /// argument nobody reads on the end of it, and gcc drops the argument and calls the plain
+    /// function. This is the same rewrite, which is why it is here rather than in the front end:
+    /// the name of the function to call is the one thing this walk decides and the checker cannot,
+    /// since interning a name it did not see needs a table it only borrows.
+    ///
+    /// The value that decides it is the target's, since the width of a `size_t` is, so it is
+    /// worked out here from the type the argument has rather than being a number in a list.
+    /// [`rucc_sema::unchecked_name`] holds the other half, which is which names this is about,
+    /// and it is ten of the sixteen rather than all of them.
+    ///
+    /// Nothing is rewritten unless the shape of the call is the plain one: every argument travels
+    /// in a register of its own, the last of them is the size, and there is no return slot in
+    /// front. That is what all ten of these signatures are, and a call that is not one of them is
+    /// a call to something else wearing the name.
+    fn unchecked_call(
+        &mut self,
+        callee: ExprId,
+        args: ExprList,
+        values: &[Value],
+        settled: &Plan,
+    ) -> Option<Symbol> {
+        let tast = self.tast();
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
+        else {
+            return None;
+        };
+        let ExprKind::Decl(decl) = tast[operand].kind else { return None };
+        // A program that wrote its own function with the name gets the function it wrote, which is
+        // the rule every builtin here follows even though the prefix is reserved.
+        if tast[decl].body.is_some() {
+            return None;
+        }
+        let name = tast[decl].name?;
+        let plain = rucc_sema::unchecked_name(self.unit.names.resolve(name))?;
+        let count = tast[args].len();
+        if settled.signature.variadic
+            || settled.returns_through_memory()
+            || values.len() != count
+            || settled.signature.params.len() != count
+        {
+            return None;
+        }
+        let size = tast[args][count - 1];
+        let all_ones = integer_info(self.types(), tast[size].ty, self.target())?.wrap(-1);
+        let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
+        let folded = eval.constant(size);
+        if eval.addressed() || !eval.finish().is_empty() {
+            return None;
+        }
+        if folded != Ok(Const::Int(all_ones)) {
+            return None;
+        }
+        Some(self.unit.names.intern(plain))
     }
 
     /// Whether this call goes to a builtin nothing here builds anything for, having reported it.
