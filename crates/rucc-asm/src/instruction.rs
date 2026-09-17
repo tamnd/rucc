@@ -131,6 +131,10 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
 /// program wrote is tried first, because a mnemonic that is already complete must not have a
 /// letter glued onto it, and because two of them end in a letter that is also a width: `seta` is
 /// not `set` at some width and neither is `cmovb`.
+///
+/// The letter is worked out last of all, after the spellings that do not need one, because a
+/// mnemonic that already carries its width is allowed to name two widths of register at once and
+/// `movzbl %cl, %edx` is exactly that. Asking the operands how wide they are would refuse it.
 fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String, String> {
     let kinds: Vec<_> = values.iter().map(|value| value.kind()).collect();
     let imm = values
@@ -140,8 +144,11 @@ fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String,
             _ => None,
         })
         .unwrap_or(0);
-    if encoding(word, &kinds, imm).is_some() {
-        return Ok(word.to_owned());
+    let names = [Some(word.to_owned()), aliased(word)];
+    for name in names.iter().flatten() {
+        if encoding(name, &kinds, imm).is_some() {
+            return Ok(name.clone());
+        }
     }
     if let Some(width) = stated(operands)? {
         let letter = match width {
@@ -150,17 +157,63 @@ fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String,
             Width::Long => 'l',
             Width::Quad => 'q',
         };
-        let spelled = format!("{word}{letter}");
-        if encoding(&spelled, &kinds, imm).is_some() {
-            return Ok(spelled);
+        for name in names.iter().flatten() {
+            let spelled = format!("{name}{letter}");
+            if encoding(&spelled, &kinds, imm).is_some() {
+                return Ok(spelled);
+            }
         }
     }
-    // Said in terms of what the program wrote rather than in terms of the letter this went looking
-    // for, because the letter is this file's business and the line is theirs.
+    // Said in terms of what the program wrote rather than in terms of the letter or the other
+    // spelling this went looking for, because those are this file's business and the line is
+    // theirs.
     Err(format!(
         "'{word}' with {} of those operands is not an instruction this compiler writes yet",
         kinds.len()
     ))
+}
+
+/// The two names of each condition a program can branch on, the other one first.
+///
+/// The machine has sixteen conditions and the assembly language has about thirty names for them,
+/// because most of them are worth saying two ways round: the bit a subtraction leaves is the carry
+/// when you are doing arithmetic and it is below when you are comparing, and `jc` and `jb` are one
+/// instruction under two names because those are one question under two readings. gas takes every
+/// name and so does every file written by hand, which is where `jnz` and `setc` come from.
+const CONDITIONS: &[(&str, &str)] = &[
+    ("z", "e"),
+    ("nz", "ne"),
+    ("c", "b"),
+    ("nc", "ae"),
+    ("nae", "b"),
+    ("nb", "ae"),
+    ("na", "be"),
+    ("nbe", "a"),
+    ("ng", "le"),
+    ("nge", "l"),
+    ("nl", "ge"),
+    ("nle", "g"),
+    ("pe", "p"),
+    ("po", "np"),
+];
+
+/// The same instruction under the name the encoder knows the condition by, when there is one.
+///
+/// Three kinds of instruction read a condition and all three spell it the same way, so the name is
+/// a prefix and a condition and, for a conditional move, a width letter behind it. Both readings of
+/// the tail are tried because `jnb` ends in a letter that is also a width and is not one.
+fn aliased(word: &str) -> Option<String> {
+    let (prefix, rest) = ["cmov", "set", "j"]
+        .iter()
+        .find_map(|prefix| word.strip_prefix(prefix).map(|rest| (*prefix, rest)))?;
+    let mut tails = vec![(rest, "")];
+    if rest.len() > 1 && matches!(&rest[rest.len() - 1..], "b" | "w" | "l" | "q") {
+        tails.push((&rest[..rest.len() - 1], &rest[rest.len() - 1..]));
+    }
+    tails.into_iter().find_map(|(condition, tail)| {
+        let (_, known) = CONDITIONS.iter().find(|(written, _)| *written == condition)?;
+        Some(format!("{prefix}{known}{tail}"))
+    })
 }
 
 /// How wide the operands say the instruction is, when they say.
@@ -420,6 +473,15 @@ mod tests {
     }
 
     #[test]
+    fn the_other_name_of_a_condition_is_the_same_instruction() {
+        // One question under two readings, which is why both names exist. Every hand written file
+        // uses some of them and GMP's uses two.
+        assert_eq!(bytes("setc %al"), bytes("setb %al"));
+        assert_eq!(bytes("cmovz %rdx, %rax"), bytes("cmove %rdx, %rax"));
+        assert_eq!(bytes("cmovnzq %rdx, %rax"), bytes("cmovneq %rdx, %rax"));
+    }
+
+    #[test]
     fn a_mnemonic_that_ends_in_a_letter_that_is_also_a_width() {
         // `seta` is not `set` at some width and `cmovb` is not `cmov` at byte width, which is why
         // what the program wrote is looked up before anything is glued onto it.
@@ -485,7 +547,7 @@ mod tests {
 
     #[test]
     fn somewhere_to_go_is_a_hole_whatever_kind_of_branch_it_is() {
-        for line in ["jmp there", "je there", "call there"] {
+        for line in ["jmp there", "je there", "jnz there", "call there"] {
             let (word, rest) = line.split_once(' ').expect("two words");
             let written = one(word, &[rest.to_owned()]).expect("read");
             assert_eq!(written.holes.len(), 1, "{line}");
