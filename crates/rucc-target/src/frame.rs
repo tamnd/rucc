@@ -121,6 +121,20 @@ pub struct FrameInsts {
     /// compared are the canary the prologue wrote and the one the runtime still holds, and neither
     /// of them is a value the program named.
     pub differ: &'static str,
+    /// Compares two general purpose registers as unsigned numbers and writes whether the first is
+    /// above the second into a third.
+    ///
+    /// Here for the same reason [`Self::differ`] is, and asked for by the one loop that walks a
+    /// distance nothing knew when it was written, which is the pages a variable length array takes.
+    /// A prologue knows how many pages its own frame is and can stop when the stack pointer reaches
+    /// an address worked out in advance, so equality is enough for it. A declaration in the body
+    /// does not: the bytes arrive in a register, the last step down is a whole page whatever is
+    /// left, and the stack pointer lands at or past where it was going rather than on it.
+    ///
+    /// Unsigned because both registers hold addresses. A stack that has grown past the middle of
+    /// the address space is one where a signed comparison of two stack pointers says the wrong
+    /// thing, and nothing about a guard page cares which half of the space it is in.
+    pub above: &'static str,
     /// Calls the name it is given and reads no register.
     ///
     /// Here for the same reason, and used for the one call an epilogue can make, which is the one

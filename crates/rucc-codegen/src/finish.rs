@@ -21,6 +21,12 @@
 //! the displacement of each of those is filled in here, out of the same [`Frame`] everything else
 //! here reads, and off the same stack pointer every other offset in it is from.
 //!
+//! There is a fifth thing on a command line that asked for the stack to be touched a page at a
+//! time, and it is the only one of them that is written into the middle of a block rather than at
+//! one end of the function. A variable length array moves the stack pointer by a number that is not
+//! known until the declaration runs, so walking it a page at a time is a loop written around the one
+//! instruction the lowering left, and that turns the block the declaration was in into four.
+//!
 //! The loads that read the arguments the caller passed on the stack are waiting on the same number
 //! and on one more. Those bytes are the caller's rather than this function's, and a frame that had
 //! to force its own alignment cannot say how far away the caller's stack pointer was, so it reaches
@@ -89,11 +95,16 @@ pub struct Protect<'a> {
     pub scratch: [PhysReg; 2],
 }
 
-/// What a prologue that takes its frame a page at a time needs beyond the frame.
+/// What a function that takes its stack a page at a time needs beyond the frame.
 ///
 /// What `-fstack-clash-protection` asks for, and the same three kinds of thing [`Protect`] is:
 /// one fact about the platform, one about the machine, and two registers that are neither. See
 /// [`rucc_target::Probe`] for what the sequence is defending against.
+///
+/// Read in two places, because a function has two ways of moving its stack pointer and the flag is
+/// about both of them. The prologue takes the frame the layout worked out, and a variable length
+/// array takes however many bytes its declaration asked for while the function runs. The same three
+/// things answer both.
 #[derive(Debug, Clone, Copy)]
 pub struct Probing<'a> {
     /// What touches a page and how far apart the pages are.
@@ -228,7 +239,6 @@ pub fn finish(
 ) -> Moves {
     let Convention { regs: conv, insts, protect, probe, landing, trace, pad } = convention;
     let entry = func.entry().expect("a function with a block in it");
-    let returns: Vec<Block> = func.blocks().filter(|&block| func[block].succs.is_empty()).collect();
 
     // Before anything is written, because these are instructions the lowering already put in the
     // function and every one of them is somewhere the prologue is about to go in front of, which
@@ -286,10 +296,22 @@ pub fn finish(
         moves.record(inst, *edit);
     }
 
+    // Before the epilogues, because this is what turns one block into four and the last of the four
+    // is the one the function goes on to return from. A block that went nowhere before a variable
+    // length array was walked in the middle of it is not the block that goes nowhere afterwards, and
+    // an epilogue written into the wrong one of them gives the frame back before the body has run.
+    if let Some(probing) = probe {
+        for &took in &stack.grown {
+            writer.walk(took, probing);
+        }
+    }
+
     let prologue = writer.prologue(frame, protect, probe, landing, trace, pad);
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
+    let returns: Vec<Block> =
+        writer.func.blocks().filter(|&block| writer.func[block].succs.is_empty()).collect();
     for block in returns {
         // The check goes in front of the epilogue and takes the return with it. What is left in
         // the block the function used to return from is the check, and the block the epilogue then
@@ -675,6 +697,113 @@ impl Writer<'_> {
         self.ahead = Some([head, body]);
     }
 
+    /// Walks the pages a variable length array takes, at the declaration that takes them.
+    ///
+    /// The prologue's own pages are counted when it is written, so it can step down to an address
+    /// it worked out in advance and stop when it gets there. A declaration in the body cannot: how
+    /// many bytes it asked for arrives in a register, so where it is going is arithmetic rather than
+    /// a constant, and how many pages that is is a number nothing has. What is written instead is a
+    /// loop that steps a page and asks whether it has arrived yet, which is the same walk with the
+    /// count taken out of it.
+    ///
+    /// The one instruction the lowering wrote becomes four blocks:
+    ///
+    /// ```text
+    ///   what the block was          everything it did before the declaration, and then where the
+    ///                               stack pointer is going, worked out before it starts moving
+    ///   the step                    one page, and whether the stack pointer is still above there
+    ///   the page it stepped onto    the touch, and round again
+    ///   the rest of the block       the stack pointer put where it was going, and then the body
+    /// ```
+    ///
+    /// The touch is behind the question rather than in front of it, so the only page ever written
+    /// is one the array reaches. The last step down is a whole page whatever is left, which puts the
+    /// stack pointer at or past the end of the array, and the block that follows puts it back on the
+    /// end. Nothing is touched there and nothing has to be: that is a move of less than a page from
+    /// a page this loop has already been to, which is the whole of what a guard page asks.
+    ///
+    /// Nothing is described to the unwinder for any of it. A function with a variable length array
+    /// in it keeps a frame pointer, because its own stack pointer is not a fixed distance from
+    /// anything, and by here the frame is already counted from that register rather than from the
+    /// stack pointer. So the rule that was true before the walk is still true after it.
+    fn walk(&mut self, took: Inst, probing: Probing<'_>) {
+        let class = self.conv.int_class;
+        let sp = self.conv.stack_pointer;
+        let span = self.func.span(took);
+        let block = self.func.block_of(took).expect("an instruction the lowering put in a block");
+
+        // Which register the bytes arrived in, and which two the walk may use. The bytes may be in
+        // one of the two, because a reload the rewriter wrote is written into one of them, and a
+        // value that arrived that way is read by the one instruction it was written in front of and
+        // is dead after it. So the limit goes in whichever of the pair the bytes are not in, and the
+        // other one is free from the moment the limit has been worked out.
+        let operands = self.func[took].operands;
+        let bytes = self.func[operands][2].reg.phys().expect("a register the allocator settled");
+        let [first, second] = probing.scratch;
+        let (limit, flag) = if bytes == first { (second, first) } else { (first, second) };
+
+        let tail: Vec<Inst> = {
+            let mut rest = self.func.insts(block).skip_while(|&inst| inst != took);
+            rest.next();
+            rest.collect()
+        };
+        let step = self.func.create_block();
+        let onto = self.func.create_block();
+        let done = self.func.create_block();
+
+        let mov = self.opcode(self.insts.moves(class).expect("a class the target can move").mov);
+        let inst = self.two(mov, sp, limit);
+        self.func.append_inst(done, inst);
+        for inst in tail {
+            self.func.remove_inst(inst);
+            self.func.append_inst(done, inst);
+        }
+        let succs = std::mem::take(self.func.succs_mut(block));
+        *self.func.succs_mut(done) = succs;
+
+        // The subtraction the lowering wrote is what the loop is instead of, so it goes. What is
+        // left in the block it was in is where the stack pointer is walking down to.
+        self.func.remove_inst(took);
+        let inst = self.two(mov, limit, sp);
+        self.func.append_inst(block, inst);
+        let grow = self.opcode(self.insts.grow);
+        let inst = self
+            .func
+            .build_loose(grow)
+            .at(span)
+            .def(Reg::physical(limit), class)
+            .uses(Reg::physical(limit), class)
+            .uses(Reg::physical(bytes), class)
+            .finish();
+        self.func.append_inst(block, inst);
+        *self.func.succs_mut(block) = vec![BlockCall::to(step)];
+
+        let inst = self.sub(probing.probe.interval);
+        self.func.append_inst(step, inst);
+        let above = self.opcode(self.insts.above);
+        let inst = self
+            .func
+            .build_loose(above)
+            .def(Reg::physical(flag), class)
+            .uses(Reg::physical(sp), class)
+            .uses(Reg::physical(limit), class)
+            .finish();
+        self.func.append_inst(step, inst);
+        let cond = Opcode::new(
+            self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
+        );
+        let inst = self.func.build_loose(cond).uses(Reg::physical(flag), class).finish();
+        self.func.append_inst(step, inst);
+        // The first arm is the one taken when the condition held, and the condition is that the
+        // stack pointer is still above where the array ends, so the first arm is the page it has
+        // just stepped onto being written and another time round.
+        *self.func.succs_mut(step) = vec![BlockCall::to(onto), BlockCall::to(done)];
+
+        let touch = self.touch(probing.probe);
+        self.func.append_inst(onto, touch);
+        *self.func.succs_mut(onto) = vec![BlockCall::to(step)];
+    }
+
     /// Writes the page the stack pointer is on without changing what is there.
     fn touch(&mut self, probe: &Probe) -> Inst {
         let opcode = self.opcode(probe.inst);
@@ -998,7 +1127,9 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, print_func};
     use rucc_regalloc::assign::Env;
-    use rucc_target::x86_64::{BRANCH, FRAME, GPR, PROBE, R10, R11, REGS, SYSV, WIN64, XMM, xmm};
+    use rucc_target::x86_64::{
+        BRANCH, FRAME, GPR, PROBE, R10, R11, RAX, REGS, SYSV, WIN64, XMM, xmm,
+    };
 
     use super::*;
     use crate::frame::{Layout, Local};
@@ -1047,7 +1178,7 @@ mod tests {
         names: &mut Interner,
     ) -> Vec<String> {
         let convention = Convention { protect, ..Convention::new(layout.conv, &FRAME) };
-        under(func, allocation, layout, convention, names)
+        under(func, allocation, layout, &Stack::default(), convention, names)
     }
 
     /// The same, for a function whose frame the caller has decided is taken a page at a time.
@@ -1059,7 +1190,27 @@ mod tests {
         names: &mut Interner,
     ) -> Vec<String> {
         let convention = Convention { probe, ..Convention::new(layout.conv, &FRAME) };
-        under(func, allocation, layout, convention, names)
+        under(func, allocation, layout, &Stack::default(), convention, names)
+    }
+
+    /// A function whose one block takes a run of bytes off the stack pointer, which is what the
+    /// lowering writes for a variable length array, with the count already in the register given.
+    fn growing(count: PhysReg) -> (Func, Allocation, Interner, Stack) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let sp = Reg::physical(SYSV.stack_pointer);
+        let grow = Opcode::new(names.intern("x64.sub_rr_64"));
+        let took = func
+            .build(block, grow)
+            .def(sp, GPR)
+            .uses(sp, GPR)
+            .uses(Reg::physical(count), GPR)
+            .finish();
+        let nop = Opcode::new(names.intern("x64.nop"));
+        func.build(block, nop).finish();
+        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test");
+        (func, allocation, names, Stack { grown: vec![took], ..Stack::default() })
     }
 
     /// The function with its frame written into it under that convention.
@@ -1067,11 +1218,12 @@ mod tests {
         func: &mut Func,
         allocation: &Allocation,
         layout: &Layout<'_>,
+        stack: &Stack,
         convention: Convention<'_>,
         names: &mut Interner,
     ) -> Vec<String> {
         let frame = Frame::of(func, allocation, layout);
-        finish(func, allocation, &frame, &Stack::default(), convention, names);
+        finish(func, allocation, &frame, stack, convention, names);
         print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.is_empty())
@@ -1356,6 +1508,76 @@ mod tests {
                 "x64.ret",
             ]
         );
+    }
+
+    #[test]
+    fn a_variable_length_array_walks_its_pages_where_the_declaration_stands() {
+        let (mut func, allocation, mut names, stack) = growing(RAX);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, grows: true, ..base };
+        let probing = Probing { probe: &PROBE, branch: &BRANCH, scratch: [R10, R11] };
+        let convention = Convention { probe: Some(probing), ..Convention::new(&SYSV, &FRAME) };
+        let lines = under(&mut func, &allocation, &layout, &stack, convention, &mut names);
+
+        // The whole listing, because what the walk is cannot be read off the instructions alone.
+        // The one subtraction the lowering wrote is gone and four blocks stand where its block was:
+        // where the stack pointer is going, the step, the page the step landed on, and the rest of
+        // what the block was doing with the stack pointer put back where it was going.
+        assert_eq!(
+            lines,
+            [
+                "mfunc @f {",
+                "block0:",
+                "x64.push_64 $rbp",
+                "$rbp = x64.mov_rr_64 $rsp",
+                "$r10 = x64.mov_rr_64 $rsp",
+                "$r10 = x64.sub_rr_64 $r10, $rax, block1",
+                "block1:",
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
+                "$r11 = x64.cmp_set_a_64 $rsp, $r10",
+                "x64.br_cond_8 $r11, block2, block3",
+                "block2:",
+                "x64.or_mi_8 [$rsp], 0, block1",
+                "block3:",
+                "$rsp = x64.mov_rr_64 $r10",
+                "x64.nop",
+                "$rsp = x64.mov_rr_64 $rbp",
+                "$rbp = x64.pop_64",
+                "x64.ret",
+                "}",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_walk_keeps_the_register_the_count_arrived_in() {
+        let (mut func, allocation, mut names, stack) = growing(R10);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, grows: true, ..base };
+        let probing = Probing { probe: &PROBE, branch: &BRANCH, scratch: [R10, R11] };
+        let convention = Convention { probe: Some(probing), ..Convention::new(&SYSV, &FRAME) };
+        let lines = under(&mut func, &allocation, &layout, &stack, convention, &mut names);
+
+        // The count is in the first of the two registers the walk was given, which is where a
+        // reload the rewriter wrote would have put it, so the limit goes in the other one and the
+        // comparison writes the first one back only once the count has been read for the last time.
+        let added = added(&lines);
+        assert!(added.contains(&"$r11 = x64.mov_rr_64 $rsp"), "{added:?}");
+        assert!(added.contains(&"$r11 = x64.sub_rr_64 $r11, $r10, block1"), "{added:?}");
+        assert!(added.contains(&"$r10 = x64.cmp_set_a_64 $rsp, $r11"), "{added:?}");
+    }
+
+    #[test]
+    fn a_variable_length_array_takes_its_bytes_in_one_subtraction_when_nothing_asked() {
+        let (mut func, allocation, mut names, stack) = growing(RAX);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, grows: true, ..base };
+        let convention = Convention::new(&SYSV, &FRAME);
+        let lines = under(&mut func, &allocation, &layout, &stack, convention, &mut names);
+
+        // The instruction the lowering wrote, where it wrote it, and one block still.
+        assert!(lines.contains(&"$rsp = x64.sub_rr_64 $rsp, $rax".to_owned()), "{lines:?}");
+        assert_eq!(lines.iter().filter(|line| line.starts_with("block")).count(), 1, "{lines:?}");
     }
 
     #[test]

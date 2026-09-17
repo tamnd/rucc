@@ -358,17 +358,9 @@ pub fn compile_recording(
     if flags.reorder {
         weights::carry(source, &blocks, &mut func);
     }
-    // Two things a frame that grows while it runs cannot be asked for at the same time, both of
-    // them refusals rather than wrong code.
+    // The one thing a frame that grows while it runs cannot be asked for, which is a refusal rather
+    // than wrong code.
     if let Some(inst) = stack.grown_at {
-        // What `-fstack-clash-protection` buys is that no frame ever steps over a guard page
-        // without touching it, and a frame that grows while it runs steps by however much the
-        // declaration asked for. The prologue's own pages are touched below, and the ones a
-        // variable length array takes are not, so a function with both is refused rather than
-        // compiled to something that keeps the flag's name and not its promise.
-        if flags.stack_clash {
-            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Probed });
-        }
         // The lowering refuses a variable length array that asks for more alignment than a call
         // leaves the stack pointer on. A fixed local asking for it in the same function is the same
         // refusal arrived at from the other side: the prologue would force the alignment, and

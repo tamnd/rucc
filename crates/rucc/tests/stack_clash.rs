@@ -33,6 +33,19 @@ void twopage(void) { char b[9000]; use(b); }
 void many(void) { char b[100000]; use(b); }
 ";
 
+/// A frame that grows while it runs, which is the case the prologue cannot answer.
+///
+/// How many bytes the declaration takes is in a register by the time anything writes the walk, so
+/// there is no count to unroll and no address to work out at compile time. The second function
+/// declares two of them, which is what says the walk is written around the declaration rather than
+/// once per function.
+const GROWING: &str = "\
+void use(void *);
+void one(int n) { char b[n]; use(b); }
+void two(int n) { char b[n]; use(b); { char c[n]; use(c); } }
+long keep(int n) { char b[n]; use(b); return n; }
+";
+
 /// The fixture, under a directory of its own so that two of these running at once do not write the
 /// same file.
 fn fixture(what: &str, source: &str) -> PathBuf {
@@ -181,6 +194,67 @@ fn a_frame_is_taken_in_one_subtraction_until_the_flag_asks_otherwise() {
         assert!(!text.contains("orb"), "{flags:?}: {text}");
         assert!(insts(&text, "many").contains(&"subq\t$100008, %rsp"), "{flags:?}: {text}");
     }
+}
+
+/// A variable length array walks its pages too, which the prologue cannot do for it.
+///
+/// The bytes are in a register, so where the stack pointer is going is worked out from it before
+/// the stack pointer moves, and then the walk steps a page and asks whether it has arrived. The
+/// touch is behind the question, so the only page written is one the array reaches, and the step
+/// that overshoots is put back at the end.
+#[test]
+fn a_variable_length_array_walks_the_pages_it_takes() {
+    let text = asm("growing", &["-fstack-clash-protection"], GROWING);
+    let lines = insts(&text, "one");
+    let at = |what: &str| {
+        lines.iter().position(|line| line.starts_with(what)).unwrap_or_else(|| panic!("{lines:?}"))
+    };
+    // Where it is going, worked out from the bytes rather than from a constant.
+    let limit = at("subq\t%r");
+    assert!(lines[limit].ends_with(", %r10") || lines[limit].ends_with(", %r11"), "{lines:?}");
+    // One page, the question, and the touch on the arm that says there is more to come.
+    assert_eq!(lines[limit + 1], "subq\t$4096, %rsp", "{lines:?}");
+    assert!(lines[limit + 2].starts_with("cmpq\t%r"), "{lines:?}");
+    assert!(lines.contains(&"orb\t$0, (%rsp)"), "{lines:?}");
+
+    // The prologue of this function touches nothing, because its own frame is small. Every touch
+    // in it belongs to the walk.
+    assert_eq!(lines.iter().filter(|line| line.starts_with("orb")).count(), 1, "{lines:?}");
+
+    // One walk per declaration rather than one per function.
+    let lines = insts(&text, "two");
+    assert_eq!(lines.iter().filter(|line| line.starts_with("orb")).count(), 2, "{lines:?}");
+}
+
+/// The register the bytes arrived in still holds them after the walk, when the program wants them.
+///
+/// The walk has two registers of its own and the bytes may be in one of them, because a reload is
+/// written into one of them and read by the instruction it was written in front of. So which one
+/// holds the limit depends on where the bytes are, and a function that uses the count afterwards is
+/// what says the choice was made rather than assumed.
+#[test]
+fn the_walk_does_not_write_over_the_register_the_bytes_came_in() {
+    let text = asm("keep", &["-fstack-clash-protection"], GROWING);
+    let lines = insts(&text, "keep");
+    let at = |what: &str| {
+        lines.iter().position(|line| line.starts_with(what)).unwrap_or_else(|| panic!("{lines:?}"))
+    };
+    // The limit is worked out by subtracting the bytes from a copy of the stack pointer, so the
+    // register written there is not the register read there.
+    let limit = at("subq\t%r");
+    let (from, to) =
+        lines[limit]["subq\t".len()..].split_once(", ").expect("a subtraction of two registers");
+    assert_ne!(from, to, "{lines:?}");
+    assert!(lines.contains(&"orb\t$0, (%rsp)"), "{lines:?}");
+}
+
+/// Nothing changes about a variable length array when nothing asked.
+#[test]
+fn a_variable_length_array_takes_its_bytes_in_one_subtraction_until_the_flag_asks_otherwise() {
+    let text = asm("plain", &[], GROWING);
+    assert!(!text.contains("orb"), "{text}");
+    let lines = insts(&text, "one");
+    assert_eq!(lines.iter().filter(|line| line.starts_with("subq\t%r")).count(), 1, "{lines:?}");
 }
 
 /// The two hardening flags are about two different things and compose.
