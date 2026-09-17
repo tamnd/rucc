@@ -320,12 +320,6 @@ pub enum Growing {
     /// somewhere no constant reaches the rest of the frame from, so a frame like this needs a
     /// second base register held for the whole of the function. Nothing here holds one.
     Aligned,
-    /// A variable length array in a function whose frame is meant to be touched a page at a time.
-    ///
-    /// The pages a prologue takes are touched by the prologue, which knows how many there are when
-    /// it is written. The pages a variable length array takes are not known until the declaration
-    /// runs, so touching them is a loop next to the declaration, and there is no loop here yet.
-    Probed,
 }
 
 impl Growing {
@@ -337,9 +331,6 @@ impl Growing {
             Growing::Aligned => {
                 "wants more alignment than the stack pointer is left on, which needs a base \
                  register nothing here keeps"
-            }
-            Growing::Probed => {
-                "grows the stack, and nothing here touches the pages it takes a page at a time"
             }
         }
     }
@@ -452,6 +443,15 @@ pub struct Stack {
     /// they start is however much of the bottom of the frame belongs to the arguments of a call,
     /// and that is not known until the frame is.
     pub dynamic: Vec<mir::Inst>,
+    /// Which instruction takes those bytes off the stack pointer, one for every one of them, in the
+    /// order the walk reached them.
+    ///
+    /// Read by [`crate::finish`] on a command line that asked for the stack to be touched a page at
+    /// a time, which is the one thing that has to find these again: the bytes are in a register by
+    /// then, so the walk down to them is a loop, and a loop is written around an instruction rather
+    /// than in front of a block. Nothing else looks at them, because everything else about a frame
+    /// that grows is answered by the address the instruction below this one computes.
+    pub grown: Vec<mir::Inst>,
     /// Where the function first moves the stack pointer while it runs, if it does at all.
     ///
     /// Two things are read off this. One is whether at all, which is what [`crate::frame::Layout`]
@@ -1209,6 +1209,11 @@ impl<'a> Lowering<'a> {
     /// because [`crate::expand::rounds`] rounded them up in the IR, so nothing here has to mask the
     /// stack pointer afterwards and the stack pointer stays somewhere a call can be made from.
     ///
+    /// Two instructions here and not always two in the finished function. On a command line that
+    /// asked for the stack to be touched a page at a time, the subtraction becomes a loop that
+    /// walks the same distance a page at a time, which [`crate::finish`] writes. That is why the
+    /// instruction is written down in [`Stack::grown`] as well as left where it is.
+    ///
     /// Refused for an array wanting more alignment than the convention leaves the stack pointer
     /// with. Forcing that would be a second rounding of a register the frame already rounded, and
     /// after it no constant reaches the rest of the frame from anywhere. See `Growing` in
@@ -1227,13 +1232,15 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         let stack = mir::Reg::physical(self.conv.stack_pointer);
         let grow = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.grow)));
-        self.out
+        let took = self
+            .out
             .build(block, grow)
             .at(span)
             .operand(mir::Operand::write(stack, self.gpr))
             .operand(mir::Operand::read(stack, self.gpr))
             .operand(mir::Operand::read(bytes, self.gpr))
             .finish();
+        self.stack.grown.push(took);
 
         let reg = self.new_reg(result);
         let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
