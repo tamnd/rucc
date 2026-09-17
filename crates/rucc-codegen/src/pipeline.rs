@@ -841,8 +841,11 @@ mod tests {
         // The second is in the loop body. A division writes both a quotient and a remainder, and
         // only the remainder is wanted here, so the quotient is a value nothing reads. It used to
         // be given the same register as the remainder, because a value written early was live at
-        // one point and that point is in front of where the remainder is written. The copy that
-        // takes the quotient nowhere then landed on top of the remainder.
+        // one point and that point was in front of where the remainder was written. The copy that
+        // takes the quotient nowhere then landed on top of the remainder. The remainder is written
+        // early as well now, which is a separate thing the target has to say and is why both
+        // answers read `early` here: `rdx` is filled by the sign extension before the division
+        // reads its divisor, so nothing else may be sitting in it at that point either.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\n\
@@ -855,7 +858,7 @@ mod tests {
              x64.jcc_e block3, block2\n\
              \nblock2:\n    \
              $rax = x64.mov_rr_64 $rcx\n    \
-             $rdx($rdx), early $rax($rax) = x64.idiv_rem_32 $rax($rax), $rsi\n    \
+             early $rdx($rdx), early $rax($rax) = x64.idiv_rem_32 $rax($rax), $rsi\n    \
              $rdi = x64.mov_rr_64 $rax\n    \
              $rcx = x64.mov_rr_64 $rsi\n    \
              $rsi = x64.mov_rr_64 $rdx\n    \
