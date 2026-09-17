@@ -238,7 +238,7 @@ use rucc_ir::{
 use crate::canon;
 use crate::cfg::Cfg;
 use crate::copy;
-use crate::discharge::{Question, constant, operand_of, yes};
+use crate::discharge::{Question, constant, named_by, operand_of, yes};
 use crate::dom::Dominators;
 use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
@@ -857,7 +857,7 @@ fn walked(
         (_, &[capability, pointer]) => (capability, None, pointer),
         _ => return Err(NOT_A_SWEEP),
     };
-    let Some(named) = operand_of(func, capability, Opcode::CapOf, 0) else {
+    let Some(named) = named_by(func, capability) else {
         return Err(NOT_A_SWEEP);
     };
     // Which object the check is about, when that is not the address it names. A derivation check

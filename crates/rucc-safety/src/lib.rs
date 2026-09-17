@@ -201,6 +201,21 @@ pub struct Counts {
     /// answer different questions and a build with a great many of one and none of the other is a
     /// build somebody should be able to see.
     pub edged: usize,
+    /// Stores of a pointer that wrote the pointer's capability into the slot beside it.
+    ///
+    /// A subset of `wrote`, and on ordinary code a small one, since most of what a program stores is
+    /// not a pointer. Counted apart from `stamped`, which is the other thing only a pointer store
+    /// does, because the two are paid for by different builds: that one is zero without
+    /// `-fsafety-races` and this one is not optional, being where the capability of everything read
+    /// back out of memory comes from.
+    pub saved: usize,
+    /// Reads of a pointer that took its capability out of the slot beside it.
+    ///
+    /// The one count here that is a saving rather than a cost. Every one of these is a `cap_of` that
+    /// did not go in, and a `cap_of` over a pointer nothing else produced is a walk of the lifetime
+    /// plane. What it becomes instead is a slot read, or the same walk when the word turns out to
+    /// have no slot, which is every local and every global today.
+    pub recalled: usize,
     /// Blocks that opened a scope, which is one per `restrict` clique that has an access in it.
     ///
     /// Kept apart from `promised` because it is the part of the cost that is paid per call rather
@@ -223,6 +238,8 @@ impl Counts {
         self.filled += other.filled;
         self.moved += other.moved;
         self.stamped += other.stamped;
+        self.saved += other.saved;
+        self.recalled += other.recalled;
         self.watched += other.watched;
         self.edged += other.edged;
         self.promised += other.promised;
@@ -326,6 +343,15 @@ pub fn insert(
                         if races.records() && raced(func, inst, pointer, capability, width) {
                             counts.watched += 1;
                         }
+                        // First of everything that goes after the store, so it ends up furthest
+                        // from it. It is the only one of these that is not a plane write: the rest
+                        // record something about the bytes, keyed on the address, and this writes
+                        // the slot that sits beside the word. Nothing here reads what anything else
+                        // here wrote, so the order is a matter of what reads well rather than of
+                        // what is correct.
+                        if saved(func, &mut origins, inst, pointer, capability) {
+                            counts.saved += 1;
+                        }
                         // The init plane's write goes in first so that the type plane's ends up in
                         // front of it, since both are inserted after the store and the one that
                         // goes in second is the one that lands nearer to it.
@@ -357,6 +383,12 @@ pub fn insert(
                         // The other one watches what a store does and leaves a load alone.
                         if races.reads() && raced(func, inst, pointer, capability, width) {
                             counts.watched += 1;
+                        }
+                        // After the read, since what it is about is the value the read produced.
+                        // The only one of these that puts something in behind the access rather
+                        // than in front of it, and the only one that answers rather than asks.
+                        if recalled(func, &mut origins, inst, pointer, capability) {
+                            counts.recalled += 1;
                         }
                     }
                 }
@@ -832,6 +864,92 @@ fn stamped(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
     true
 }
 
+/// Puts a `cap_store` immediately after one store of a pointer, so the capability goes with it.
+///
+/// The writing half of `spec/safe-memory/06-instrumentation.md` section 6.2.2, and the half that
+/// makes [`recalled`] able to answer. A pointer in a register has its capability in another register
+/// and a pointer in memory has nowhere to keep one, so the aux slot beside the word is where it
+/// goes, and this is the instruction that puts it there.
+///
+/// It is the expensive half, which is worth saying plainly. Nothing discharges an aux write today,
+/// so this is a call at every store of a pointer, and the capability it writes is one the stored
+/// pointer may not have had, in which case asking for it here is what makes it exist. What buys that
+/// back is on the other side: a pointer read out of memory stops being a walk of the lifetime plane
+/// and becomes a slot read, and a program that keeps its pointers in structures reads them far more
+/// often than it stores them.
+///
+/// Four operands, and the shape is the call's, which tamnd/rucc#1080 is where that was decided. The
+/// container's capability comes first because finding the slot starts from the object the word is
+/// in, then the address of the word, then the pointer that was written, then that pointer's own
+/// capability, which is the thing being written down.
+///
+/// A store whose value is not a pointer has nothing to write and no slot to write it in. A store the
+/// access could not be given a capability for is left alone as well, since the container is where
+/// the slot is found and there is no second way to find it.
+fn saved(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    store: Inst,
+    pointer: Value,
+    container: Option<Value>,
+) -> bool {
+    let Some(container) = container else { return false };
+    if !pointer_valued(func, store) {
+        return false;
+    }
+    let Some(&value) = func[func[store].args].first() else { return false };
+
+    let held = origins.of(func, value, store);
+    let span = func.span(store);
+    let args = func.push_values(&[container, pointer, value, held]);
+    let data = InstData { args, ..InstData::new(Opcode::CapStore) };
+    let made = func.create_inst(data, &[], span);
+    func.insert_after(made, store);
+    true
+}
+
+/// Puts a `cap_load` immediately after one read of a pointer, and makes that the pointer's own.
+///
+/// The reading half of section 6.2.2. Without it a pointer read out of memory has no producer but
+/// `cap_of`, which lowers to a walk of the lifetime plane linear in the size of the object, and a
+/// C program of any size keeps its pointers in structures and reads them back. That walk is the cost
+/// tamnd/rucc#1241 is about and this is the second of the three producers that take it away.
+///
+/// It answers a question the walk cannot, which matters more than the speed. Recovering from an
+/// address says which instance owns those bytes now. The slot says which instance the pointer was
+/// written for. A pointer stored in a structure, freed, and the storage handed to somebody else has
+/// those two disagree, and the version in the slot is what makes `check_live` refuse at the first
+/// access through it rather than pass because the address landed inside a live object.
+///
+/// Three operands rather than four: the container, the word, and the value that came out of it, with
+/// the capability being what comes back instead of what goes in.
+///
+/// [`origin::Origins::seed`] is what stops a second producer being made for the same value. The load
+/// is the definition of the pointer, so this sits exactly where [`mod@origin`] would have put a
+/// `cap_of`, and everything downstream that asks for the pointer's capability gets this one.
+fn recalled(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    load: Inst,
+    pointer: Value,
+    container: Option<Value>,
+) -> bool {
+    let Some(container) = container else { return false };
+    let Some(value) = func[load].results().next() else { return false };
+    if !func[value].ty.is_ptr() {
+        return false;
+    }
+
+    let span = func.span(load);
+    let args = func.push_values(&[container, pointer, value]);
+    let data = InstData { args, ..InstData::new(Opcode::CapLoad) };
+    let made = func.create_inst(data, &[Type::CAP], span);
+    func.insert_after(made, load);
+    let Some(held) = func[made].results().next() else { return false };
+    origins.seed(value, held);
+    true
+}
+
 /// Whether what an access carries is a pointer, which is the one thing the epoch plane watches.
 ///
 /// A `store` carries it as its first operand, the value being written coming before the place it
@@ -1257,6 +1375,56 @@ mod tests {
         func
     }
 
+    /// A function that writes one of its pointer parameters through the other.
+    fn one_pointer_write(names: &mut Interner) -> Func {
+        let mut func =
+            Func::new(names.intern("keep"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let value = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        // The value first and the place second, which is the order the opcode is written in.
+        let args = b.func().push_values(&[value, at]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    /// The same function writing a number, which is the one thing that differs from a pointer.
+    fn one_number_write(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("set"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let value = func.append_param(entry, i32_);
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[value, at]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
     /// The same function reading a number, so the two answers differ in one thing.
     fn one_number_read(names: &mut Interner) -> Func {
         let i32_ = Type::int(32);
@@ -1293,12 +1461,40 @@ mod tests {
         let (module, plane) = planed(&mut names, "deref.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { checked: 1, live: 1, filled: 1, ..Counts::default() }
+            Counts { checked: 1, live: 1, filled: 1, recalled: 1, ..Counts::default() }
         );
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("check_bounds %1, %0, size 8, align 8\n"), "{printed}");
         assert!(printed.contains("check_init %1, %0, size 8, align 8\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_of_a_pointer_writes_its_capability_into_the_slot_beside_it() {
+        // The other end of the aux pair. Four operands, and the order is the call's: the capability
+        // of the object the word is in, the address of the word, the pointer written there, and
+        // that pointer's own capability, which is the thing being written down. It comes last of
+        // what goes in behind the store because it went in first, which is what puts it furthest.
+        let mut names = Interner::new();
+        let mut func = one_pointer_write(&mut names);
+        let (module, plane) = planed(&mut names, "keep.c");
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.saved, 1);
+        assert_eq!(counts.recalled, 0);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("cap_store %3, %0, %1, %2\n    return\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_of_something_that_is_not_a_pointer_writes_no_capability() {
+        // There is nothing to write down and no slot for it. The aux is beside a pointer sized word
+        // holding a pointer, and a number stored there is what makes the slot say so instead.
+        let mut names = Interner::new();
+        let mut func = one_number_write(&mut names);
+        let (_module, plane) = planed(&mut names, "keep.c");
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.saved, 0);
     }
 
     #[test]
@@ -2283,10 +2479,15 @@ mod tests {
 
     #[test]
     fn a_pointer_read_out_of_memory_takes_its_capability_at_the_read() {
-        // Which is where the answer is going to come from once the rest of tamnd/rucc#1241 lands,
-        // since a pointer that lives in memory has its capability in the aux slot beside it and
-        // reading the two is one event. Putting the fallback in the same place means the placement
-        // stops changing when the producer does.
+        // Out of the slot beside the word it came from, which is a `cap_load` and not a `cap_of`.
+        // Reading the pointer and reading its capability is one event, so the producer sits behind
+        // the load the way the fallback used to, and what changed is which producer it is rather
+        // than where it goes.
+        //
+        // The container's capability is the first operand, because the slot is found from the
+        // object the word lives in, and the one the outer access already took is the one used. So
+        // this function asks the plane once, for the parameter, and the pointer it reads through
+        // that parameter costs a slot read instead of a second walk.
         let mut names = Interner::new();
         let i32_ = Type::int(32);
         let mut func = Func::new(
@@ -2318,8 +2519,12 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
 
         let printed = print_func(&module, &func, &names);
-        assert!(printed.contains("%2 = load %0, align 8\n    %3 = cap_of %2\n"), "{printed}");
+        assert!(
+            printed.contains("%2 = load %0, align 8\n    %3 = cap_load %1, %0, %2\n"),
+            "{printed}"
+        );
         assert!(printed.contains("check_bounds %3, %2, size 4, align 4\n"), "{printed}");
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
     }
 
     #[test]

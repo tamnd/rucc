@@ -113,7 +113,7 @@
 use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
-use crate::discharge::{Question, operand_of, yes};
+use crate::discharge::{Question, named_by, yes};
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
@@ -404,7 +404,7 @@ fn planned(
     let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
         return Err(NOT_A_SWEEP);
     };
-    let Some(named) = operand_of(func, capability, Opcode::CapOf, 0) else {
+    let Some(named) = named_by(func, capability) else {
         return Err(NOT_A_SWEEP);
     };
     let Extra::Mem(held) = func[check].extra else { return Err(NOT_A_SWEEP) };
