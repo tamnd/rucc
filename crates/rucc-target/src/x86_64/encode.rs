@@ -213,6 +213,12 @@ pub enum ImmSize {
     /// Four bytes of signed distance from the end of the instruction, which is what a jump and a
     /// call carry and is filled in once the place it goes to is known.
     Cd,
+    /// One byte of the same thing, which reaches a hundred and twenty seven bytes either way and
+    /// is the only distance the one instruction that carries it has. Nothing this compiler emits
+    /// uses it, because choosing the short form of a jump that also has a long one is a pass over
+    /// a whole section rather than an encoding question, and a whole section is not what an
+    /// encoder is given.
+    Cb,
 }
 
 /// Which immediates a row is for.
@@ -356,6 +362,14 @@ static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
 /// from more than one opcode is written once, where it is first reached, which is why the
 /// conversions hold the widening a division needs and the arithmetic holds the clearing.
 ///
+/// There are rows here the listing never names, and they are not a mistake. The assembler reads
+/// files this compiler did not write, and what those files contain is what the person who wrote
+/// them meant rather than what a C expression compiles to: a carry carried from one instruction to
+/// the next, a rotate, a bit test, a count of a loop that leaves the flags alone. A row with no
+/// opcode behind it in the listing costs a lookup nothing, and the alternative is refusing a file
+/// gas assembles, so the claim the tests hold is one way round: everything the listing names is
+/// here, and not everything here is named by the listing.
+///
 /// A row for a small immediate comes in front of the general row for the same instruction,
 /// because a lookup takes the first row that fits and the narrower one is the one wanted.
 static ENCODINGS: &[Encoding] = &[
@@ -371,6 +385,10 @@ static ENCODINGS: &[Encoding] = &[
     takes("movl", &IR, Fits::Long, Long, &[0xB8], plus(1), ImmSize::Id),
     takes("movq", &IR, Signed32, Quad, &[0xC7], ext(1, 0), ImmSize::Id),
     bytes("movq", &IR, Quad, &[0xB8], plus(1), ImmSize::Io),
+    // The name a file gives the long form when it wants that form whatever the number is. It is the
+    // row above and nothing else, and it is a row of its own rather than a spelling because a
+    // lookup here is by mnemonic and a program that writes this has asked for ten bytes.
+    bytes("movabsq", &IR, Quad, &[0xB8], plus(1), ImmSize::Io),
     // Arithmetic, register with register. The source is written first and is the register beside
     // the addressing byte, and the destination is the one the byte addresses.
     bytes("addb", &RR, Byte, &[0x00], pair(1, 0), NO_IMM),
@@ -393,6 +411,18 @@ static ENCODINGS: &[Encoding] = &[
     bytes("xorw", &RR, Word, &[0x31], pair(1, 0), NO_IMM),
     bytes("xorl", &RR, Long, &[0x31], pair(1, 0), NO_IMM),
     bytes("xorq", &RR, Quad, &[0x31], pair(1, 0), NO_IMM),
+    // The two of the eight that carry the flag from the instruction before them, which nothing this
+    // compiler generates uses and every hand written addition of a number wider than a register is
+    // made of. They sit in the same column as the rest, two opcodes above the addition and two
+    // above the subtraction, and read exactly the same way round.
+    bytes("adcb", &RR, Byte, &[0x10], pair(1, 0), NO_IMM),
+    bytes("adcw", &RR, Word, &[0x11], pair(1, 0), NO_IMM),
+    bytes("adcl", &RR, Long, &[0x11], pair(1, 0), NO_IMM),
+    bytes("adcq", &RR, Quad, &[0x11], pair(1, 0), NO_IMM),
+    bytes("sbbb", &RR, Byte, &[0x18], pair(1, 0), NO_IMM),
+    bytes("sbbw", &RR, Word, &[0x19], pair(1, 0), NO_IMM),
+    bytes("sbbl", &RR, Long, &[0x19], pair(1, 0), NO_IMM),
+    bytes("sbbq", &RR, Quad, &[0x19], pair(1, 0), NO_IMM),
     // The multiply is the other way round from the rest of them: it is not one of the eight that
     // share an opcode column, and the register beside the addressing byte is its destination.
     bytes("imulw", &RR, Word, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
@@ -424,6 +454,14 @@ static ENCODINGS: &[Encoding] = &[
     bytes("xorw", &MR, Word, &[0x33], pair(0, 1), NO_IMM),
     bytes("xorl", &MR, Long, &[0x33], pair(0, 1), NO_IMM),
     bytes("xorq", &MR, Quad, &[0x33], pair(0, 1), NO_IMM),
+    bytes("adcb", &MR, Byte, &[0x12], pair(0, 1), NO_IMM),
+    bytes("adcw", &MR, Word, &[0x13], pair(0, 1), NO_IMM),
+    bytes("adcl", &MR, Long, &[0x13], pair(0, 1), NO_IMM),
+    bytes("adcq", &MR, Quad, &[0x13], pair(0, 1), NO_IMM),
+    bytes("sbbb", &MR, Byte, &[0x1A], pair(0, 1), NO_IMM),
+    bytes("sbbw", &MR, Word, &[0x1B], pair(0, 1), NO_IMM),
+    bytes("sbbl", &MR, Long, &[0x1B], pair(0, 1), NO_IMM),
+    bytes("sbbq", &MR, Quad, &[0x1B], pair(0, 1), NO_IMM),
     bytes("imulw", &MR, Word, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imull", &MR, Long, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imulq", &MR, Quad, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
@@ -465,6 +503,20 @@ static ENCODINGS: &[Encoding] = &[
     takes("xorl", &IR, Fits::Long, Long, &[0x81], ext(1, 6), ImmSize::Id),
     takes("xorq", &IR, Signed8, Quad, &[0x83], ext(1, 6), ImmSize::Ib),
     takes("xorq", &IR, Signed32, Quad, &[0x81], ext(1, 6), ImmSize::Id),
+    takes("adcb", &IR, Fits::Byte, Byte, &[0x80], ext(1, 2), ImmSize::Ib),
+    takes("adcw", &IR, Signed8, Word, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcw", &IR, Fits::Word, Word, &[0x81], ext(1, 2), ImmSize::Iw),
+    takes("adcl", &IR, Signed8, Long, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcl", &IR, Fits::Long, Long, &[0x81], ext(1, 2), ImmSize::Id),
+    takes("adcq", &IR, Signed8, Quad, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcq", &IR, Signed32, Quad, &[0x81], ext(1, 2), ImmSize::Id),
+    takes("sbbb", &IR, Fits::Byte, Byte, &[0x80], ext(1, 3), ImmSize::Ib),
+    takes("sbbw", &IR, Signed8, Word, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbw", &IR, Fits::Word, Word, &[0x81], ext(1, 3), ImmSize::Iw),
+    takes("sbbl", &IR, Signed8, Long, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbl", &IR, Fits::Long, Long, &[0x81], ext(1, 3), ImmSize::Id),
+    takes("sbbq", &IR, Signed8, Quad, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbq", &IR, Signed32, Quad, &[0x81], ext(1, 3), ImmSize::Id),
     takes("cmpb", &IR, Fits::Byte, Byte, &[0x80], ext(1, 7), ImmSize::Ib),
     takes("cmpw", &IR, Signed8, Word, &[0x83], ext(1, 7), ImmSize::Ib),
     takes("cmpw", &IR, Fits::Word, Word, &[0x81], ext(1, 7), ImmSize::Iw),
@@ -494,6 +546,19 @@ static ENCODINGS: &[Encoding] = &[
     bytes("notw", &R, Word, &[0xF7], ext(0, 2), NO_IMM),
     bytes("notl", &R, Long, &[0xF7], ext(0, 2), NO_IMM),
     bytes("notq", &R, Quad, &[0xF7], ext(0, 2), NO_IMM),
+    // Adding one and taking one away, which are two of the eight that share `0xFF` and are not what
+    // this compiler writes for `++`: an addition of one sets the carry flag and these leave it
+    // alone, so the two are different instructions and the addition is the one a C program means.
+    // Hand written assembly counts loops with these precisely because they leave the flag alone,
+    // which is the whole reason a carry can be carried across an iteration at all.
+    bytes("incb", &R, Byte, &[0xFE], ext(0, 0), NO_IMM),
+    bytes("incw", &R, Word, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("incl", &R, Long, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("incq", &R, Quad, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("decb", &R, Byte, &[0xFE], ext(0, 1), NO_IMM),
+    bytes("decw", &R, Word, &[0xFF], ext(0, 1), NO_IMM),
+    bytes("decl", &R, Long, &[0xFF], ext(0, 1), NO_IMM),
+    bytes("decq", &R, Quad, &[0xFF], ext(0, 1), NO_IMM),
     // The four widenings a division needs, each of which is one byte and a prefix. They read one
     // fixed register and write another and name neither, which is why they have no arguments.
     bytes("cbtw", &NO_ARGS, Word, &[0x98], NO_MODRM, NO_IMM),
@@ -509,6 +574,20 @@ static ENCODINGS: &[Encoding] = &[
     bytes("divw", &R, Word, &[0xF7], ext(0, 6), NO_IMM),
     bytes("divl", &R, Long, &[0xF7], ext(0, 6), NO_IMM),
     bytes("divq", &R, Quad, &[0xF7], ext(0, 6), NO_IMM),
+    // The multiply that writes both halves of its answer, which is the fifth of the eight and is
+    // not `imul` above: this one is unsigned and puts the top half in a second register the
+    // instruction does not name, which is what a program doing arithmetic wider than a register
+    // wants and what nothing a C expression compiles to ever needs.
+    bytes("mulb", &R, Byte, &[0xF6], ext(0, 4), NO_IMM),
+    bytes("mulw", &R, Word, &[0xF7], ext(0, 4), NO_IMM),
+    bytes("mull", &R, Long, &[0xF7], ext(0, 4), NO_IMM),
+    bytes("mulq", &R, Quad, &[0xF7], ext(0, 4), NO_IMM),
+    // The signed one beside it, which is the same instruction in the same column and is a different
+    // row from the two operand `imul` above because it takes one operand and writes two registers.
+    bytes("imulb", &R, Byte, &[0xF6], ext(0, 5), NO_IMM),
+    bytes("imulw", &R, Word, &[0xF7], ext(0, 5), NO_IMM),
+    bytes("imull", &R, Long, &[0xF7], ext(0, 5), NO_IMM),
+    bytes("imulq", &R, Quad, &[0xF7], ext(0, 5), NO_IMM),
     // Shifts by a constant, which carry one byte of count however wide the thing shifted is,
     // because nothing shifts a register by more than sixty three places.
     takes("shlb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 4), ImmSize::Ib),
@@ -523,6 +602,18 @@ static ENCODINGS: &[Encoding] = &[
     takes("sarw", &IR, Fits::Byte, Word, &[0xC1], ext(1, 7), ImmSize::Ib),
     takes("sarl", &IR, Fits::Byte, Long, &[0xC1], ext(1, 7), ImmSize::Ib),
     takes("sarq", &IR, Fits::Byte, Quad, &[0xC1], ext(1, 7), ImmSize::Ib),
+    // The rotates, which are the first two of the eight the shifts are the last four of. A C
+    // program has no way to write one, which is why this compiler never emits one and why every
+    // library that wants one writes it in assembly or in a builtin, but they are the same opcode
+    // and the same two shapes as the shifts beside them.
+    takes("rolb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 0), ImmSize::Ib),
+    takes("rolw", &IR, Fits::Byte, Word, &[0xC1], ext(1, 0), ImmSize::Ib),
+    takes("roll", &IR, Fits::Byte, Long, &[0xC1], ext(1, 0), ImmSize::Ib),
+    takes("rolq", &IR, Fits::Byte, Quad, &[0xC1], ext(1, 0), ImmSize::Ib),
+    takes("rorb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 1), ImmSize::Ib),
+    takes("rorw", &IR, Fits::Byte, Word, &[0xC1], ext(1, 1), ImmSize::Ib),
+    takes("rorl", &IR, Fits::Byte, Long, &[0xC1], ext(1, 1), ImmSize::Ib),
+    takes("rorq", &IR, Fits::Byte, Quad, &[0xC1], ext(1, 1), ImmSize::Ib),
     // Shifts by a count, which is written and not encoded: the machine reads it from `cl` and
     // there is nowhere in the instruction to say so. The count is the argument at zero, and every
     // row here addresses the argument at one.
@@ -538,6 +629,14 @@ static ENCODINGS: &[Encoding] = &[
     bytes("sarw", &RR, Word, &[0xD3], ext(1, 7), NO_IMM),
     bytes("sarl", &RR, Long, &[0xD3], ext(1, 7), NO_IMM),
     bytes("sarq", &RR, Quad, &[0xD3], ext(1, 7), NO_IMM),
+    bytes("rolb", &RR, Byte, &[0xD2], ext(1, 0), NO_IMM),
+    bytes("rolw", &RR, Word, &[0xD3], ext(1, 0), NO_IMM),
+    bytes("roll", &RR, Long, &[0xD3], ext(1, 0), NO_IMM),
+    bytes("rolq", &RR, Quad, &[0xD3], ext(1, 0), NO_IMM),
+    bytes("rorb", &RR, Byte, &[0xD2], ext(1, 1), NO_IMM),
+    bytes("rorw", &RR, Word, &[0xD3], ext(1, 1), NO_IMM),
+    bytes("rorl", &RR, Long, &[0xD3], ext(1, 1), NO_IMM),
+    bytes("rorq", &RR, Quad, &[0xD3], ext(1, 1), NO_IMM),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
@@ -613,6 +712,66 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movswl", &RR, Long, &[0x0F, 0xBF], pair(0, 1), NO_IMM),
     bytes("movswq", &RR, Quad, &[0x0F, 0xBF], pair(0, 1), NO_IMM),
     bytes("movslq", &RR, Quad, &[0x63], pair(0, 1), NO_IMM),
+    // The same widenings reading memory instead of a register, which is the same opcode with an
+    // address where the source register was. `movzbl` has had its row since `_Bool` was read this
+    // way and the other ten are here because a file somebody else wrote reaches memory as readily
+    // as it reaches a register, where what this compiler emits has always loaded first.
+    bytes("movzbw", &MR, Word, &[0x0F, 0xB6], pair(0, 1), NO_IMM),
+    bytes("movzbq", &MR, Quad, &[0x0F, 0xB6], pair(0, 1), NO_IMM),
+    bytes("movzwl", &MR, Long, &[0x0F, 0xB7], pair(0, 1), NO_IMM),
+    bytes("movzwq", &MR, Quad, &[0x0F, 0xB7], pair(0, 1), NO_IMM),
+    bytes("movsbw", &MR, Word, &[0x0F, 0xBE], pair(0, 1), NO_IMM),
+    bytes("movsbl", &MR, Long, &[0x0F, 0xBE], pair(0, 1), NO_IMM),
+    bytes("movsbq", &MR, Quad, &[0x0F, 0xBE], pair(0, 1), NO_IMM),
+    bytes("movswl", &MR, Long, &[0x0F, 0xBF], pair(0, 1), NO_IMM),
+    bytes("movswq", &MR, Quad, &[0x0F, 0xBF], pair(0, 1), NO_IMM),
+    bytes("movslq", &MR, Quad, &[0x63], pair(0, 1), NO_IMM),
+    // Asking about one bit and, for the three behind the first, changing it. The immediate form is
+    // one opcode told apart by the three spare bits the way the eight above are, and the register
+    // form is four opcodes of its own. There is no byte form of either, because the bit is counted
+    // off a whole operand and the narrowest operand the instruction has is a word.
+    //
+    // The register form is written the way the arithmetic is and not the way the conversions are:
+    // the bit number is the register beside the addressing byte and the thing it is counted in is
+    // what the byte addresses, so the source is first in both the text and the encoding.
+    takes("btw", &IR, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
+    takes("btl", &IR, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
+    takes("btq", &IR, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
+    takes("btsw", &IR, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btsl", &IR, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btsq", &IR, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btrw", &IR, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btrl", &IR, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btrq", &IR, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btcw", &IR, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    takes("btcl", &IR, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    takes("btcq", &IR, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    bytes("btw", &RR, Word, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
+    bytes("btl", &RR, Long, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
+    bytes("btq", &RR, Quad, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
+    bytes("btsw", &RR, Word, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btsl", &RR, Long, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btsq", &RR, Quad, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btrw", &RR, Word, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btrl", &RR, Long, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btrq", &RR, Quad, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btcw", &RR, Word, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    bytes("btcl", &RR, Long, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    bytes("btcq", &RR, Quad, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    // Finding the lowest or the highest bit that is set, which read one operand and write another,
+    // so they go the way the conversions above do and not the way the bit tests beside them do.
+    bytes("bsfw", &RR, Word, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsfl", &RR, Long, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsfq", &RR, Quad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsrw", &RR, Word, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("bsrl", &RR, Long, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("bsrq", &RR, Quad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("bsfw", &MR, Word, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsfl", &MR, Long, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsfq", &MR, Quad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("bsrw", &MR, Word, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("bsrl", &MR, Long, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("bsrq", &MR, Quad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
     // A copy between registers, which is a store to a register rather than a load from one, so it
     // is written the same way round as the arithmetic above and not as the conversions.
     bytes("movb", &RR, Byte, &[0x88], pair(1, 0), NO_IMM),
@@ -622,6 +781,10 @@ static ENCODINGS: &[Encoding] = &[
     // The address computation, which is the one instruction that is given an address and does not
     // read it.
     bytes("leaq", &MR, Quad, &[0x8D], pair(0, 1), NO_IMM),
+    // The same instruction keeping only the low thirty two bits of what it worked out, which this
+    // compiler has no use for because a pointer here is sixty four bits wide and which hand written
+    // code uses as an addition that does not touch the flags.
+    bytes("leal", &MR, Long, &[0x8D], pair(0, 1), NO_IMM),
     // Reading and writing memory, which are one opcode apart and are the same instruction with
     // the two ends swapped.
     bytes("movb", &MR, Byte, &[0x8A], pair(0, 1), NO_IMM),
@@ -669,6 +832,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("ja", &D, Long, &[0x0F, 0x87], NO_MODRM, ImmSize::Cd),
     bytes("jae", &D, Long, &[0x0F, 0x83], NO_MODRM, ImmSize::Cd),
     bytes("jmp", &D, Long, &[0xE9], NO_MODRM, ImmSize::Cd),
+    // The jump on a register being zero, which is the one branch on this machine that has no long
+    // form at all: a hundred and twenty seven bytes either way is the whole of its reach, and a
+    // program that needs further writes a test and one of the jumps above. It reads `rcx` and names
+    // it in the mnemonic rather than in an operand, so there is nothing here but a destination.
+    bytes("jrcxz", &D, Long, &[0xE3], NO_MODRM, ImmSize::Cb),
     // The same mnemonic through a register, which is a different row for the reason the call above
     // has two: what a row is looked up by is the arguments as well as the name. It is another of
     // the eight that share `0xFF` and sits one place along from the call, and it is sixty four bits
@@ -678,6 +846,12 @@ static ENCODINGS: &[Encoding] = &[
     // being told to, so neither carries the prefix that would say so.
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),
     bytes("popq", &R, Long, &[0x58], plus(0), NO_IMM),
+    // The same two moving eight bytes to and from memory rather than a register, which are not the
+    // short forms above at all: the push is another of the eight that share `0xFF` and the pop has
+    // an opcode nothing else uses. Eight bytes without a prefix saying so, the way the short forms
+    // are, and this compiler writes neither because a spill it made has a register in hand.
+    bytes("pushq", &M, Long, &[0xFF], ext(0, 6), NO_IMM),
+    bytes("popq", &M, Long, &[0x8F], ext(0, 0), NO_IMM),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
     // The barrier. Three bytes with no operands, so the last of them is written as part of the
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
@@ -739,6 +913,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("xchgw", &RM, Word, &[0x87], pair(1, 0), NO_IMM),
     bytes("xchgl", &RM, Long, &[0x87], pair(1, 0), NO_IMM),
     bytes("xchgq", &RM, Quad, &[0x87], pair(1, 0), NO_IMM),
+    // The exchange between two registers, which is the same opcode with a register where the
+    // address was. It is not atomic and needs no lock prefix, since nothing else can see either end
+    // of it, which is why this compiler only ever reaches for the form above.
+    bytes("xchgb", &RR, Byte, &[0x86], pair(1, 0), NO_IMM),
+    bytes("xchgw", &RR, Word, &[0x87], pair(1, 0), NO_IMM),
+    bytes("xchgl", &RR, Long, &[0x87], pair(1, 0), NO_IMM),
+    bytes("xchgq", &RR, Quad, &[0x87], pair(1, 0), NO_IMM),
     bytes("xaddb", &RM, Byte, &[0x0F, 0xC0], pair(1, 0), NO_IMM),
     bytes("xaddw", &RM, Word, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
     bytes("xaddl", &RM, Long, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
@@ -755,6 +936,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movsd", &MV, Double, &[0x0F, 0x10], pair(0, 1), NO_IMM),
     bytes("movss", &VM, Single, &[0x0F, 0x11], pair(1, 0), NO_IMM),
     bytes("movsd", &VM, Double, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    // The same move between two vector registers, which takes the load opcode because the load is
+    // the one whose destination is the register beside the addressing byte. This compiler writes
+    // `movaps` for a copy instead, since it moves the whole register and has no prefix to carry,
+    // but a file somebody else wrote is entitled to say what it means.
+    bytes("movss", &VV, Single, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movsd", &VV, Double, &[0x0F, 0x10], pair(0, 1), NO_IMM),
     // Scalar arithmetic. The four opcodes are consecutive, which is worth reading as a group: add
     // is `0x58`, multiply `0x59`, subtract `0x5C` and divide `0x5E`, and the `float` and the
     // `double` of each are the same byte behind a different prefix. The destination is the
@@ -1156,6 +1343,10 @@ impl Writer<'_> {
                 holes.dest = Some(out.len());
                 out.extend_from_slice(&0i32.to_le_bytes());
             }
+            ImmSize::Cb => {
+                holes.dest = Some(out.len());
+                out.push(0);
+            }
         }
         Ok(holes)
     }
@@ -1310,7 +1501,7 @@ impl Writer<'_> {
 mod tests {
     use super::*;
     use crate::x86_64::text::written;
-    use crate::x86_64::{INSTS, R8, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP};
+    use crate::x86_64::{INSTS, R8, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP, xmm};
 
     /// The bytes of that instruction, as a string a person can compare with a disassembler's.
     fn hex(mnemonic: &str, values: &[Value]) -> String {
@@ -1786,6 +1977,97 @@ mod tests {
         assert_eq!(hex("movsbq", &[byte(RAX), quad(RCX)]), "48 0f be c8");
         assert_eq!(hex("movslq", &[long(RSI), quad(RAX)]), "48 63 c6");
         assert_eq!(hex("movzwl", &[Value::Reg(RSI, Width::Word), long(RAX)]), "0f b7 c6");
+    }
+
+    /// The rows the listing never names, whose bytes are what gas writes for the same lines.
+    ///
+    /// Every other group here is checked against the manual because the compiler emits it and a
+    /// mistake would show up as a program that runs wrong. These are only ever reached by reading
+    /// somebody else's file, so the thing worth pinning is that this compiler and gas agree about
+    /// what the line means, and the way to get that is to assemble the same lines with gas and
+    /// write down what came out. That is what these strings are.
+    ///
+    /// The accumulator and the shift by one have shorter forms that gas picks and this does not,
+    /// so the cases below are written around them: `adcb $200, %cl` rather than `%al`, `rorl $5`
+    /// rather than `$1`. Choosing a shorter encoding of the same instruction is a separate job
+    /// from having the instruction at all, and it belongs with branch relaxation.
+    #[test]
+    fn the_instructions_a_hand_written_file_uses_and_a_compiler_never_emits() {
+        // The two of the eight that carry the flag, in all three shapes the other six have.
+        assert_eq!(hex("adcb", &[byte(RCX), byte(RAX)]), "10 c8");
+        assert_eq!(hex("adcw", &[word(RCX), word(RAX)]), "66 11 c8");
+        assert_eq!(hex("adcl", &[long(RCX), long(RAX)]), "11 c8");
+        assert_eq!(hex("adcq", &[quad(RCX), quad(RAX)]), "48 11 c8");
+        assert_eq!(hex("sbbq", &[quad(RCX), quad(RAX)]), "48 19 c8");
+        let at = Addr { base: Some(RDX), ..Addr::default() };
+        assert_eq!(hex("adcq", &[Value::Mem(at), quad(R8)]), "4c 13 02");
+        assert_eq!(hex("sbbb", &[Value::Mem(at), byte(RAX)]), "1a 02");
+        assert_eq!(hex("adcq", &[Value::Imm(1), quad(RAX)]), "48 83 d0 01");
+        assert_eq!(hex("adcl", &[Value::Imm(1000), long(RCX)]), "81 d1 e8 03 00 00");
+        assert_eq!(hex("sbbq", &[Value::Imm(-1), quad(R8)]), "49 83 d8 ff");
+        assert_eq!(hex("adcb", &[Value::Imm(200), byte(RCX)]), "80 d1 c8");
+        // Adding one and taking one away, which are not an addition of one.
+        assert_eq!(hex("incl", &[long(RAX)]), "ff c0");
+        assert_eq!(hex("incq", &[quad(RCX)]), "48 ff c1");
+        assert_eq!(hex("incw", &[word(RAX)]), "66 ff c0");
+        assert_eq!(hex("incb", &[byte(RSI)]), "40 fe c6");
+        assert_eq!(hex("decq", &[quad(RCX)]), "48 ff c9");
+        // The one operand multiplies, which write two registers and name one.
+        assert_eq!(hex("mulq", &[quad(RDX)]), "48 f7 e2");
+        assert_eq!(hex("mulb", &[byte(RCX)]), "f6 e1");
+        assert_eq!(hex("imulq", &[quad(RDX)]), "48 f7 ea");
+        // The rotates, in both shapes the shifts beside them have.
+        assert_eq!(hex("rolq", &[Value::Imm(3), quad(RAX)]), "48 c1 c0 03");
+        assert_eq!(hex("rorl", &[Value::Imm(5), long(RCX)]), "c1 c9 05");
+        assert_eq!(hex("rolb", &[byte(RCX), byte(RDX)]), "d2 c2");
+        assert_eq!(hex("rorq", &[byte(RCX), quad(RAX)]), "48 d3 c8");
+        // The bit tests, whose immediate form is one opcode and four extensions and whose register
+        // form is four opcodes, written the way the arithmetic is.
+        assert_eq!(hex("btq", &[Value::Imm(0), quad(R8)]), "49 0f ba e0 00");
+        assert_eq!(hex("btsq", &[Value::Imm(63), quad(RAX)]), "48 0f ba e8 3f");
+        assert_eq!(hex("btrl", &[Value::Imm(2), long(RCX)]), "0f ba f1 02");
+        assert_eq!(hex("btcw", &[Value::Imm(1), word(RDX)]), "66 0f ba fa 01");
+        assert_eq!(hex("btq", &[quad(RDX), quad(RAX)]), "48 0f a3 d0");
+        assert_eq!(hex("btsl", &[long(RCX), long(RAX)]), "0f ab c8");
+        // The bit scans, written the way the conversions are.
+        assert_eq!(hex("bsfq", &[quad(RAX), quad(RDX)]), "48 0f bc d0");
+        assert_eq!(hex("bsrl", &[long(RAX), long(RCX)]), "0f bd c8");
+        // The widenings reading memory, which is the shape only `movzbl` had.
+        let from = Addr { base: Some(RSI), ..Addr::default() };
+        assert_eq!(hex("movzbq", &[Value::Mem(from), quad(RAX)]), "48 0f b6 06");
+        assert_eq!(hex("movzwl", &[Value::Mem(from), long(RAX)]), "0f b7 06");
+        assert_eq!(hex("movsbl", &[Value::Mem(from), long(RAX)]), "0f be 06");
+        assert_eq!(hex("movslq", &[Value::Mem(from), quad(RAX)]), "48 63 06");
+        let along = Addr { base: Some(RSI), disp: 4, ..Addr::default() };
+        assert_eq!(hex("movswq", &[Value::Mem(along), quad(RDX)]), "48 0f bf 56 04");
+        // The address computation that keeps thirty two bits, which is an addition that leaves the
+        // flags alone and is why a hand written file reaches for it.
+        let sum = Addr { base: Some(RSI), index: Some(RDX), scale: 2, ..Addr::default() };
+        assert_eq!(hex("leal", &[Value::Mem(sum), long(RAX)]), "8d 04 56");
+        // The long move under the name a file gives it when it wants the long one.
+        assert_eq!(hex("movabsq", &[Value::Imm(-1), quad(RAX)]), "48 b8 ff ff ff ff ff ff ff ff");
+        // A push and a pop of memory, which are not the short forms above them.
+        let deep = Addr { base: Some(RAX), ..Addr::default() };
+        assert_eq!(hex("pushq", &[Value::Mem(deep)]), "ff 30");
+        assert_eq!(hex("popq", &[Value::Mem(deep)]), "8f 00");
+        // The exchange between two registers, which needs no lock.
+        assert_eq!(hex("xchgl", &[long(RCX), long(RDX)]), "87 ca");
+        // The scalar move between two vector registers, which this compiler writes as `movaps`.
+        assert_eq!(hex("movss", &[Value::Xmm(xmm(0)), Value::Xmm(xmm(1))]), "f3 0f 10 c8");
+        assert_eq!(hex("movsd", &[Value::Xmm(xmm(2)), Value::Xmm(xmm(3))]), "f2 0f 10 da");
+    }
+
+    #[test]
+    fn the_one_branch_with_nowhere_but_a_byte_to_say_where_it_goes() {
+        // `jrcxz` has no long form, so the byte it leaves is the whole of its reach and a caller
+        // that assumed four would write over the instruction behind it. The hole says where, and
+        // how wide it is is the row's business rather than the caller's.
+        let mut out = Vec::new();
+        let holes = encode("jrcxz", &[Value::Dest], &mut out).expect("a jump on a register");
+        assert_eq!(out, vec![0xE3, 0x00], "the opcode and the room for the distance");
+        assert_eq!(holes.dest, Some(1), "the distance goes in the byte behind the opcode");
+        let row = encoding("jrcxz", &[Kind::Dest], 0).expect("the row it was encoded from");
+        assert_eq!(row.imm, ImmSize::Cb, "the row is what says how much room there is");
     }
 
     #[test]

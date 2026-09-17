@@ -960,11 +960,28 @@ impl Reader {
             let bad = |why: String| Trouble { line, why };
             let (symbol, kind, addend) = match residue.left.as_slice() {
                 [] => {
+                    // A distance a branch carries is signed and nothing else, so a byte of it
+                    // reaches a hundred and twenty seven forwards and a hundred and twenty eight
+                    // back. A number a directive writes down is counted both ways, because a byte
+                    // holds two hundred and fifty five as well as minus one and a file writing
+                    // either means it. Either way what does not fit is refused: a branch out of
+                    // reach cut down to its low byte goes somewhere nobody wrote, and so does a
+                    // table of offsets whose entries were quietly truncated.
+                    let width = fixup.width as usize;
+                    let room = 8 * width as u32;
+                    let low = -(1i64 << (room - 1));
+                    let high =
+                        if fixup.branch { (1i64 << (room - 1)) - 1 } else { (1i64 << room) - 1 };
+                    if width < 8 && (residue.constant < low || residue.constant > high) {
+                        return Err(bad(format!(
+                            "{} written into {width} bytes, which does not reach it",
+                            residue.constant
+                        )));
+                    }
                     let bytes = residue.constant.to_le_bytes();
                     let at = fixup.at as usize;
                     let part = &mut self.parts[fixup.part];
-                    part.bytes[at..at + fixup.width as usize]
-                        .copy_from_slice(&bytes[..fixup.width as usize]);
+                    part.bytes[at..at + width].copy_from_slice(&bytes[..width]);
                     continue;
                 }
                 // The address of something, which is the whole of what a table of pointers holds.
@@ -1934,6 +1951,36 @@ mod tests {
         // Three bytes of opcode and addressing in front of the four, and nothing after them.
         assert_eq!(reloc.at, 3);
         assert_eq!(reloc.addend, -4);
+    }
+
+    #[test]
+    fn a_branch_with_one_byte_of_reach_is_filled_in_at_one_byte() {
+        // `jrcxz` has no longer form, so what goes in is a byte and the byte is all there is. A
+        // fixup that assumed four would write over the two instructions behind this one.
+        let out = assembled("\t.text\nagain:\n\tdec %rcx\n\tjrcxz again\n\tret\n");
+        assert_eq!(bytes(&out, ".text"), vec![0x48, 0xff, 0xc9, 0xe3, 0xfb, 0xc3]);
+    }
+
+    #[test]
+    fn a_branch_to_somewhere_the_bytes_it_has_cannot_reach_is_refused() {
+        // The other half of the same thing. There is no relaxing a `jrcxz` into something longer,
+        // so a destination out of its reach is a mistake in the file, and quietly keeping the low
+        // byte of the distance would send the program somewhere nobody wrote.
+        let why = refused("\t.text\n\tjrcxz away\n\t.zero 200\naway:\n\tret\n");
+        assert_eq!(why.line, 2);
+        assert!(why.why.contains("does not reach"), "{why}");
+    }
+
+    #[test]
+    fn a_number_too_big_for_the_bytes_it_is_written_into_is_refused() {
+        // Not about instructions at all, and found on the way to the two above: a distance between
+        // two labels written into a `.byte` was being cut down to its low eight bits. Counted both
+        // ways, so a byte takes anything from minus a hundred and twenty eight to two hundred and
+        // fifty five and refuses what is outside that.
+        let out = assembled("\t.data\nhere:\n\t.zero 200\nthere:\n\t.byte there - here\n");
+        assert_eq!(bytes(&out, ".data")[200], 200);
+        let why = refused("\t.data\nhere:\n\t.zero 300\nthere:\n\t.byte there - here\n");
+        assert!(why.why.contains("does not reach"), "{why}");
     }
 
     #[test]

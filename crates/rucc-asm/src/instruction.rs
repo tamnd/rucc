@@ -32,7 +32,7 @@
 //! is not read, nor a symbol as the displacement of an address that names a register, because both
 //! want a relocation this does not write yet and a wrong guess about either is silent.
 
-use rucc_target::x86_64::{Addr, Value, Width, encode, encoding, gpr_named};
+use rucc_target::x86_64::{Addr, Encoding, ImmSize, Value, Width, encode, encoding, gpr_named};
 use rucc_target::{PhysReg, Segment};
 
 /// Four bytes of an instruction whose value is not known while the instruction is being written.
@@ -97,7 +97,7 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
     let operands: Vec<Operand> =
         args.iter().map(|arg| operand(arg.trim())).collect::<Result<_, _>>()?;
     let values: Vec<Value> = operands.iter().map(value).collect();
-    let mnemonic = spelled(word, &operands, &values)?;
+    let (mnemonic, row) = spelled(word, &operands, &values)?;
 
     let mut bytes = Vec::with_capacity(16);
     let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
@@ -108,7 +108,14 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         else {
             return Err(format!("'{word}' left room for somewhere to go and was given nowhere"));
         };
-        wanted.push(Hole { at, width: 4, name: name.clone(), sort: Sort::Branch });
+        // How much room the instruction left, which is four for every branch but one. `jrcxz` has
+        // a single byte and no longer form, so a destination further away than that is a mistake
+        // in the file rather than something to relax, and the caller is the one that can tell.
+        let width = match row.imm {
+            ImmSize::Cb => 1,
+            _ => 4,
+        };
+        wanted.push(Hole { at, width, name: name.clone(), sort: Sort::Branch });
     }
     if let Some(at) = holes.rip {
         // Only when the source put a name there. `8(%rip)` is a number the machine counts from the
@@ -135,7 +142,11 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
 /// The letter is worked out last of all, after the spellings that do not need one, because a
 /// mnemonic that already carries its width is allowed to name two widths of register at once and
 /// `movzbl %cl, %edx` is exactly that. Asking the operands how wide they are would refuse it.
-fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String, String> {
+fn spelled(
+    word: &str,
+    operands: &[Operand],
+    values: &[Value],
+) -> Result<(String, &'static Encoding), String> {
     let kinds: Vec<_> = values.iter().map(|value| value.kind()).collect();
     let imm = values
         .iter()
@@ -146,8 +157,8 @@ fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String,
         .unwrap_or(0);
     let names = [Some(word.to_owned()), aliased(word)];
     for name in names.iter().flatten() {
-        if encoding(name, &kinds, imm).is_some() {
-            return Ok(name.clone());
+        if let Some(row) = encoding(name, &kinds, imm) {
+            return Ok((name.clone(), row));
         }
     }
     if let Some(width) = stated(operands)? {
@@ -159,8 +170,8 @@ fn spelled(word: &str, operands: &[Operand], values: &[Value]) -> Result<String,
         };
         for name in names.iter().flatten() {
             let spelled = format!("{name}{letter}");
-            if encoding(&spelled, &kinds, imm).is_some() {
-                return Ok(spelled);
+            if let Some(row) = encoding(&spelled, &kinds, imm) {
+                return Ok((spelled, row));
             }
         }
     }
@@ -553,8 +564,38 @@ mod tests {
             assert_eq!(written.holes.len(), 1, "{line}");
             assert_eq!(written.holes[0].name, "there", "{line}");
             assert_eq!(written.holes[0].sort, Sort::Branch, "{line}");
+            assert_eq!(written.holes[0].width, 4, "{line}");
             assert_eq!(written.holes[0].at, written.bytes.len() - 4, "{line}");
         }
+    }
+
+    #[test]
+    fn the_one_branch_that_leaves_a_byte_says_a_byte() {
+        // `jrcxz` has no form with four bytes of distance in it, so the hole is one byte wide and
+        // says so. A caller that took four from every branch would write over whatever the file
+        // put behind this instruction, which is a corruption nothing downstream could notice.
+        let written = one("jrcxz", &["there".to_owned()]).expect("read");
+        assert_eq!(written.bytes, vec![0xe3, 0x00]);
+        assert_eq!(written.holes.len(), 1);
+        assert_eq!(written.holes[0].width, 1);
+        assert_eq!(written.holes[0].sort, Sort::Branch);
+        assert_eq!(written.holes[0].at, 1);
+    }
+
+    #[test]
+    fn the_instructions_a_hand_written_file_writes_without_a_width_letter() {
+        // The rows added for somebody else's assembly, reached the way that assembly spells them,
+        // which is with the width left off wherever the operands say it. What is being checked
+        // here is the reading rather than the bytes, which `rucc-target` pins against gas.
+        assert_eq!(bytes("adc (%rdx), %r8"), vec![0x4c, 0x13, 0x02]);
+        assert_eq!(bytes("adc %eax, %eax"), vec![0x11, 0xc0]);
+        assert_eq!(bytes("bt $0, %r8"), vec![0x49, 0x0f, 0xba, 0xe0, 0x00]);
+        assert_eq!(bytes("dec %rcx"), vec![0x48, 0xff, 0xc9]);
+        assert_eq!(bytes("inc %eax"), vec![0xff, 0xc0]);
+        assert_eq!(bytes("lea 32(%rsi), %rsi"), vec![0x48, 0x8d, 0x76, 0x20]);
+        // `setc` is `setb` under its other name, which the conditions table already handled and
+        // which the file this was all for uses on the line after the additions.
+        assert_eq!(bytes("setc %al"), vec![0x0f, 0x92, 0xc0]);
     }
 
     #[test]
