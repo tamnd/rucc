@@ -63,7 +63,7 @@ pub use crate::frame::{ClassMoves, FrameInsts, Probe};
 pub use crate::machine::MachineInsts;
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
-    CallRegs, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
+    CallRegs, Chkstk, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
 };
 pub use crate::timing::{Timing, TimingInsts, Unit};
 
@@ -746,10 +746,16 @@ impl TargetInfo {
             tuple::Arch::X86_64 => &x86_64::REGS,
             _ => &RegFile::EMPTY,
         };
-        let call_regs = match (target.arch(), target.os()) {
-            (tuple::Arch::X86_64, tuple::Os::Windows) => Some(&x86_64::WIN64),
+        let call_regs = match (target.arch(), target.os(), target.env()) {
+            // The environment, and this is the one question it decides about a convention. What the
+            // two Windows runtimes disagree about is the name of the routine a large frame reaches
+            // its pages by calling, which is in the runtime rather than in the compiler, so a build
+            // against mingw-w64 and a build against Microsoft's runtime want different names for the
+            // same routine.
+            (tuple::Arch::X86_64, tuple::Os::Windows, tuple::Env::Gnu) => Some(&x86_64::MINGW64),
+            (tuple::Arch::X86_64, tuple::Os::Windows, _) => Some(&x86_64::WIN64),
             // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
-            (tuple::Arch::X86_64, _) => Some(&x86_64::SYSV),
+            (tuple::Arch::X86_64, _, _) => Some(&x86_64::SYSV),
             _ => None,
         };
         // The same rule as the register file. A model is a measurement of a processor, and there

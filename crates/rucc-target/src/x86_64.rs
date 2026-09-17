@@ -54,7 +54,7 @@ use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
+use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -199,6 +199,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     sub: "sub_ri_64",
     grow: "sub_rr_64",
     align: "and_ri_64",
+    imm: "mov_ri_64",
     lea: "lea_64",
     ret: "ret",
     differ: "cmp_set_ne_64",
@@ -830,6 +831,12 @@ pub static SYSV: CallRegs = CallRegs {
     // every kernel needs. `mcount` is the older one and it reads the frame pointer, so a function
     // that calls it is given one whatever the rest of the command line said.
     trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: true }),
+    // None, and it is the platform saying so rather than a gap. A stack on this platform grows by
+    // faulting: a write anywhere below the stack pointer is a page the kernel maps on the spot, in
+    // any order, so a frame taken in one step is a frame that works. The one page that is not like
+    // that is the guard the kernel leaves below every stack, which is what
+    // `-fstack-clash-protection` is about, and that is a flag rather than the convention.
+    chkstk: None,
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -847,40 +854,63 @@ static WIN64_INT_ORDER: [PhysReg; 14] =
     [RAX, RCX, RDX, R8, R9, R10, R11, RBX, RSI, RDI, R12, R13, R14, R15];
 
 /// Where a Windows x64 call puts things, per `spec/12-abi-and-runtime.md` section 12.4.
-pub static WIN64: CallRegs = CallRegs {
-    int_class: GPR,
-    sse_class: XMM,
-    int_args: &WIN64_INT_ARGS,
-    sse_args: &WIN64_SSE_ARGS,
-    shared_positions: true,
-    int_returns: &WIN64_INT_RETURNS,
-    sse_returns: &WIN64_SSE_RETURNS,
-    x87_returns: &WIN64_X87_RETURNS,
-    int_saved: &WIN64_INT_SAVED,
-    sse_saved: &WIN64_SSE_SAVED,
-    int_order: &WIN64_INT_ORDER,
-    sse_order: &SSE_ORDER,
-    stack_pointer: RSP,
-    frame_pointer: RBP,
-    vector_count: None,
-    red_zone: 0,
-    shadow: 32,
-    stack_align: 16,
-    return_address: 8,
-    word: 8,
-    dwarf: &X86_64_DWARF,
-    dwarf_return_address: DWARF_RETURN_ADDRESS,
-    // None, and not because the platform has no protector. Windows has one and it is a different
-    // mechanism: the cookie is a global the loader writes, the value stored in the frame is that
-    // global exclusive-ored with the frame pointer, and the check is a call to
-    // `__security_check_cookie` rather than a comparison the compiler writes. Writing `None` here
-    // is what makes `-fstack-protector` on a Windows target an error that says so.
-    guard: None,
-    // None for the same shape of reason. Windows profiles a build by having the compiler call
-    // `_penter`, which is asked for by a switch of its own and takes its argument in a register
-    // rather than off the stack, so it is not the hook named here under another name.
-    trace: None,
-};
+///
+/// Two of these rather than one, and the only thing they disagree about is what the routine in the
+/// paragraph below is called. Everything else on this platform is the same under either runtime,
+/// which is the whole point of a calling convention.
+pub static WIN64: CallRegs = win64(Chkstk { name: "__chkstk", size: RAX });
+
+/// The same convention where the GNU runtime provides the routine rather than Microsoft's.
+///
+/// mingw-w64 has its own spelling of it, and the extra underscore is not a typing mistake: a C name
+/// on this target carries no leading underscore at all, so the three in the assembly are three in
+/// the symbol. Both routines do the same thing and both leave the stack pointer where they found
+/// it, which is why nothing but the name changes here.
+pub static MINGW64: CallRegs = win64(Chkstk { name: "___chkstk_ms", size: RAX });
+
+/// The Windows convention, given the routine the runtime in question provides.
+const fn win64(chkstk: Chkstk) -> CallRegs {
+    CallRegs {
+        int_class: GPR,
+        sse_class: XMM,
+        int_args: &WIN64_INT_ARGS,
+        sse_args: &WIN64_SSE_ARGS,
+        shared_positions: true,
+        int_returns: &WIN64_INT_RETURNS,
+        sse_returns: &WIN64_SSE_RETURNS,
+        x87_returns: &WIN64_X87_RETURNS,
+        int_saved: &WIN64_INT_SAVED,
+        sse_saved: &WIN64_SSE_SAVED,
+        int_order: &WIN64_INT_ORDER,
+        sse_order: &SSE_ORDER,
+        stack_pointer: RSP,
+        frame_pointer: RBP,
+        vector_count: None,
+        red_zone: 0,
+        shadow: 32,
+        stack_align: 16,
+        return_address: 8,
+        word: 8,
+        dwarf: &X86_64_DWARF,
+        dwarf_return_address: DWARF_RETURN_ADDRESS,
+        // None, and not because the platform has no protector. Windows has one and it is a
+        // different mechanism: the cookie is a global the loader writes, the value stored in the
+        // frame is that global exclusive-ored with the frame pointer, and the check is a call to
+        // `__security_check_cookie` rather than a comparison the compiler writes. Writing `None`
+        // here is what makes `-fstack-protector` on a Windows target an error that says so.
+        guard: None,
+        // None for the same shape of reason. Windows profiles a build by having the compiler call
+        // `_penter`, which is asked for by a switch of its own and takes its argument in a register
+        // rather than off the stack, so it is not the hook named here under another name.
+        trace: None,
+        // `rax` whichever runtime provides the routine, because the routine is the same routine:
+        // it reads the size out of that register, touches each page from the one the stack pointer
+        // is on down to the one that many bytes below it, and comes back with both registers as it
+        // found them. So the caller takes the frame afterwards, and takes it with a subtraction of
+        // that same register rather than of the constant written a second time.
+        chkstk: Some(chkstk),
+    }
+}
 
 #[cfg(test)]
 mod tests {

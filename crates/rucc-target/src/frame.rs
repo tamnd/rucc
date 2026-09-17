@@ -108,6 +108,15 @@ pub struct FrameInsts {
     /// Clears the low bits of the stack pointer, which is how a prologue forces an alignment
     /// nothing else can give it.
     pub align: &'static str,
+    /// Writes a constant into a general purpose register.
+    ///
+    /// The one thing a prologue has to do that is not about the stack pointer, and it is here for
+    /// a platform that hands the size of the frame to a routine rather than reaching the pages
+    /// itself. See [`crate::Chkstk`]. A rule file selects this same opcode for a constant the
+    /// program wrote, for the reason the header of a target's table gives: a prologue writing a
+    /// number into a register is the same instruction as an assignment, and the encoder should
+    /// not have two answers for it.
+    pub imm: &'static str,
     /// Writes a register with an address rather than with what is at it, which is how an
     /// epilogue puts the stack pointer back when the frame pointer is the only record of where
     /// it was.
