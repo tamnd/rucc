@@ -572,8 +572,19 @@ pub enum Opcode {
     /// The stack pointer, restored after one.
     StackRestore,
     /// The marker a `setjmp` leaves, which pins everything live across it.
+    ///
+    /// One operand, the buffer, and one result, which is the `int` the save answers with: zero
+    /// where control went past it and one where control came back to it. That is the one
+    /// instruction here whose value depends on how control reached it, and it is one instruction
+    /// rather than a branch and a block because the edge a `longjmp` travels is not in this
+    /// function's control flow graph. It is written into the buffer and taken at run time, so a
+    /// pass that walked the edges would find a block nothing reaches and take it away.
     SetjmpMarker,
     /// The marker a `longjmp` leaves.
+    ///
+    /// One operand, the buffer, and no result, and not a terminator either, for the reason above:
+    /// where control goes is not a block of this function. What follows it is written and never
+    /// reached.
     LongjmpMarker,
     /// A target-specific intrinsic, named rather than enumerated, for the vector builtins.
     TargetIntrinsic,
@@ -954,7 +965,6 @@ impl Opcode {
             | Self::StackRestore
             | Self::UnreachableHint
             | Self::Trap
-            | Self::SetjmpMarker
             | Self::LongjmpMarker
             | Self::CapStore
             | Self::CapPublish

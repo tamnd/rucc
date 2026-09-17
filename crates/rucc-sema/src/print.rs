@@ -51,7 +51,7 @@ use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
 use crate::decl::{DeclId, DeclKind, Definition, Linkage, Priority, StorageDuration, Visibility};
-use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk};
+use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk, JumpAsk};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
 
@@ -500,6 +500,10 @@ impl<'a> Printer<'a> {
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
             ExprKind::Alloca { .. } => "alloca".to_owned(),
+            ExprKind::Jump { ask, .. } => match ask {
+                JumpAsk::Save => "setjmp".to_owned(),
+                JumpAsk::Restore => "longjmp".to_owned(),
+            },
         }
     }
 
@@ -521,6 +525,7 @@ impl<'a> Printer<'a> {
             ExprKind::StmtExpr(body) => self.stmt(body),
             ExprKind::Member { base, .. }
             | ExprKind::Alloca { size: base }
+            | ExprKind::Jump { buffer: base, .. }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }
             | ExprKind::VaStart { list: base }

@@ -1509,13 +1509,22 @@ impl<'a> Verifier<'a> {
                 }
             }
 
-            // What is left says nothing about its operands here: the two markers are placed by
-            // the front end around code the optimizer must not move, inline assembly is
-            // whatever its constraints say, and a target intrinsic is the target's own rule.
-            Opcode::SetjmpMarker
-            | Opcode::LongjmpMarker
-            | Opcode::InlineAsm
-            | Opcode::TargetIntrinsic => {}
+            // The pair a `__builtin_setjmp` and a `__builtin_longjmp` become. One operand each,
+            // the buffer, and the save answers the `int` that says how control reached it. Neither
+            // is a terminator, because the edge between them is not an edge of this function: it
+            // is written into the buffer and taken at run time.
+            Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 {
+                    self.produces(opcode, res(0), Type::int(32));
+                }
+            }
+
+            // What is left says nothing about its operands here: inline assembly is whatever its
+            // constraints say, and a target intrinsic is the target's own rule.
+            Opcode::InlineAsm | Opcode::TargetIntrinsic => {}
 
             // Capabilities. The rule that makes these worth checking is that a capability and
             // the pointer it describes are two operands and never one, so an instruction that

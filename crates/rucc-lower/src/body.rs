@@ -37,7 +37,8 @@ use rucc_ir::{
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, DeclId, Eval, ExprId, ExprKind, ExprList,
-    FrameAsk, InitEntry, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
+    FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration,
+    Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
@@ -4296,6 +4297,29 @@ impl<'u> Body<'_, 'u> {
                 self.pin();
                 Some(self.grow(size, ALLOCA_ALIGN, span))
             }
+            // The pair that saves a place in this function and comes back to it. One instruction
+            // each and neither of them a terminator, because the edge a `__builtin_longjmp`
+            // travels is not an edge of this function: it is written into the buffer and taken at
+            // run time, so a block standing where control comes back would be a block nothing in
+            // the graph reaches and the first pass to walk the edges would take it away. What the
+            // save answers is the one value here that depends on how control got to it, zero
+            // going past and one coming back, and the back end is what makes that true.
+            ExprKind::Jump { ask, buffer } => {
+                let buffer = self.value(buffer);
+                let mut build = self.build(span);
+                let args = build.func().push_values(&[buffer]);
+                match ask {
+                    JumpAsk::Save => {
+                        let data = InstData { args, ..InstData::new(Opcode::SetjmpMarker) };
+                        Some(build.value(data, Type::int(32)))
+                    }
+                    JumpAsk::Restore => {
+                        let data = InstData { args, ..InstData::new(Opcode::LongjmpMarker) };
+                        build.inst(data, &[]);
+                        None
+                    }
+                }
+            }
             // A fact about the machine rather than about the program, so there is nothing under it
             // to lower first and the whole of it is the one instruction the back end writes.
             ExprKind::ThreadPointer => {
@@ -7216,7 +7240,9 @@ impl Scan<'_> {
                     self.taken.push(label);
                 }
             }
-            ExprKind::Member { base, .. } | ExprKind::Prefetch { address: base, .. } => {
+            ExprKind::Member { base, .. }
+            | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::Jump { buffer: base, .. } => {
                 self.expr(base);
             }
             ExprKind::Subscript { base, index } => {

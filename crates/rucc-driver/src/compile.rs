@@ -4972,6 +4972,43 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         }
     }
 
+    /// The pair that saves a place in a function and comes back to it, which is not a call.
+    ///
+    /// What the IR has to show is one instruction each and no call to anything: there is no
+    /// function of either name for a call to reach, and a program that got one would fail to link.
+    /// The save answers an `int`, which is the value that says how control got there.
+    #[test]
+    fn the_pair_that_saves_a_place_lowers_to_the_two_markers() {
+        let text = ir(concat!(
+            "void *buf[5];\n",
+            "int f(void) {\n",
+            "  if (__builtin_setjmp(buf)) return 2;\n",
+            "  return 1;\n",
+            "}\n",
+            "void g(void) { __builtin_longjmp(buf, 1); }\n",
+        ));
+        assert!(text.contains("= setjmp_marker.i32 %0\n"), "the save answers a value: {text}");
+        assert!(text.contains("    longjmp_marker %0\n"), "the restore answers nothing: {text}");
+        assert!(!text.contains("call @"), "neither of them is a call: {text}");
+    }
+
+    /// The second argument of the restore has one allowed value, which gcc 16.2.0 also insists on.
+    ///
+    /// This pair does not carry a value back the way the library's `longjmp` does, because what
+    /// the matching save answers is decided by which way control reached it. So the argument is a
+    /// place-holder, and a program that wrote anything else meant the library's function.
+    #[test]
+    fn a_longjmp_whose_second_argument_is_not_one_is_turned_down() {
+        for source in [
+            "void *buf[5];\nvoid f(void) { __builtin_longjmp(buf, 0); }\n",
+            "void *buf[5];\nextern int v;\nvoid f(void) { __builtin_longjmp(buf, v); }\n",
+        ] {
+            let messages = errors(source);
+            let named = messages.iter().any(|m| m.contains("E0710"));
+            assert!(named, "expected a complaint about the value in {messages:?}");
+        }
+    }
+
     /// A `static` function nothing refers to is not emitted, and one that is refered to is.
     ///
     /// The pair is written as one program so that the two answers come out of one walk. What

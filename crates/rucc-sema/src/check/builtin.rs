@@ -66,6 +66,7 @@ mod count;
 mod expect;
 mod frame;
 mod generic;
+mod jump;
 mod math;
 mod overflow;
 mod prefetch;
