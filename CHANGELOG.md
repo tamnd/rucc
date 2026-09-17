@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- The instructions of a file of assembly, which were refused by name until now. The directives and the labels went in last release and the mnemonics are the other half, so a `.s` or a `.S` next to the C is a file this compiler can assemble rather than a file it can only take apart. Nothing in `rucc-asm` describes the machine a second time and nothing is going to: the bytes come from the one encoder in `rucc-target` that the compiler's own output already goes through, which is what keeps a file this assembles and a file this compiles from ever disagreeing about what an instruction is. What the new module holds is the operand syntax, which is a register with its sigil, a number in any of the three bases a file writes one in, an address with a segment and a base and an index and a scale in it, `sym(%rip)`, a bare name to jump to, and a star for a jump through a register. The width letter is worked out when the text leaves it off, so `mov %rdi, %rax` is the `movq` gas would have written, and the other name of a condition is taken too, so `jnz` is `jne` and `setc` is `setb`, which is what a file written by hand uses. A jump or a call or a rip-relative address leaves four bytes, and each of those becomes the same kind of fixup `.long foo - .` already made, written as the name minus the end of the instruction, so a target in this section comes out as a number in the bytes and one that does not comes out as a relocation, with `R_X86_64_PLT32` for a branch and `R_X86_64_PC32` for a datum. Checked against gas rather than against an opinion: for a fixture with a frame, an indexed address, a thread-local read through `%fs`, a conditional move, a call, a `lock` prefix and a table of floating point instructions in it, the instructions gcc 16.2.0 assembles and the instructions rucc assembles disassemble identically, and the relocations are the same type against the same symbol with the same addend. Branch relaxation is not written, so a jump is four bytes of distance whether it needs them or not, which is correct and is why the two objects are not the same length. Refs tamnd/rucc#1284.
+
+### Fixed
+
+- The addend of a distance counted from somewhere that is not the relocated bytes themselves. A linker writes the symbol plus the addend minus where the bytes are, so the addend is how far the bytes sit past the place the distance is counted from, and the subtraction was the other way round. Nothing caught it because the only shape anybody writes by hand is `.long foo - .`, where the two are the same number and the sign cannot show. It shows on `.long foo - start` with a label in front of it, and it would have shown on every call in every file of assembly, which is how it was found.
+
 ## 0.10.51
 
 ### Added

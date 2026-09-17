@@ -4,10 +4,10 @@
 //!
 //! A `.s` or a `.S` next to the C is ordinary in a project with a hot loop in it, and until there
 //! was an assembler what this file checked was that the compiler said so rather than exiting zero
-//! having written nothing. Now there is one for the directives and the labels, so what is checked
-//! is the other side of the same question: a file of directives produces a real object, a file with
-//! an instruction in it is still refused by name and by line, and neither of them exits zero with
-//! nothing beside it.
+//! having written nothing. Now there is one, so what is checked is the other side of the same
+//! question: a file of directives produces a real object, a function written in assembly links and
+//! gives the right answer when it runs, a mnemonic this compiler has no bytes for is still refused
+//! by name and by line, and none of them exits zero with nothing beside it.
 //!
 //! GMP is the project that showed it, and it is the case in `gmp_thirty_two_bit_word_probe` below.
 //! Its configure assembles a file with no instruction in it to find out how the local assembler
@@ -113,16 +113,32 @@ fn assembly_that_wants_the_preprocessor_first_goes_through_it() {
 }
 
 #[test]
-fn an_instruction_is_refused_by_name_and_by_line() {
-    // The half that is not written. Refusing it is the whole design of the reader: an assembler
-    // that skipped what it did not recognise would write an object that links, and what would be
-    // wrong with it is a run of missing bytes in the middle of a function, which nothing finds
-    // until the program runs.
+fn a_function_written_in_assembly_is_compiled_and_called() {
+    // The other half, end to end and run rather than inspected, because an object whose bytes are
+    // wrong links exactly as well as one whose bytes are right. The function is the one every
+    // hand written file starts with, and the answer it gives is the one thing that says the bytes
+    // came out as the instructions and not as something that merely had the right length.
     let dir = dir("instruction");
-    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\tmovq %rdi, %rax\n\tret\n");
+    let hot = "\t.text\n\t.globl triple\n\t.type triple, @function\ntriple:\n\tmovl %edi, \
+               %eax\n\taddl %edi, %eax\n\taddl %edi, %eax\n\tret\n\t.size triple, .-triple\n";
+    write(&dir, "hot.s", hot);
+    write(&dir, "main.c", "extern int triple(int);\nint main(void) { return triple(14); }\n");
+    let (ok, said) = run(&dir, &["main.c", "hot.s", "-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
+}
+
+#[test]
+fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line() {
+    // Refusing it is the whole design of the reader: an assembler that skipped what it did not
+    // recognise would write an object that links, and what would be wrong with it is a run of
+    // missing bytes in the middle of a function, which nothing finds until the program runs.
+    let dir = dir("unwritten");
+    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\tbswap %rax\n\tret\n");
     let (ok, said) = run(&dir, &["-c", "hot.s"]);
-    assert!(!ok, "an instruction was accepted:\n{said}");
-    assert!(said.contains("movq"), "the message does not name the instruction:\n{said}");
+    assert!(!ok, "an instruction with no bytes behind it was accepted:\n{said}");
+    assert!(said.contains("bswap"), "the message does not name the instruction:\n{said}");
     assert!(said.contains("hot.s:4"), "the message does not carry the line:\n{said}");
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }

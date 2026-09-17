@@ -24,11 +24,13 @@
 //! called is the object format's business.
 //!
 //! [`read`] is the other direction: a file of assembly that somebody else wrote, turned into the
-//! sections and names an object is written from. What it does is the directives and the labels, and
-//! an instruction is refused by name with its line number rather than skipped. That is the half a
-//! configure script needs, since the probes it writes are a `.long` and a label and the answer it
-//! wants is the value of a symbol in the object. Instruction assembly, inline assembly and
-//! relaxation are the rest of M3 and M4 and are not here yet.
+//! sections and names an object is written from. The directives and the labels are one half of it
+//! and the instructions are the other, and a mnemonic with no bytes behind it is refused by name
+//! with its line number rather than skipped. Nothing there describes the machine a second time:
+//! the bytes of an instruction come from the one encoder in `rucc-target` that the compiler's own
+//! output goes through, so a file this assembles and a file this compiles cannot disagree about
+//! what an instruction is. Branch relaxation is not here yet, so a jump is four bytes of distance
+//! whether it needs them or not, which is correct and longer than gas would have written.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -40,6 +42,7 @@ mod att;
 mod bytes;
 mod data;
 mod format;
+mod instruction;
 mod source;
 mod unwind;
 

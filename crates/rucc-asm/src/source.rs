@@ -5,17 +5,17 @@
 //!
 //! # What is here and what is not
 //!
-//! The directives and the labels, and no instruction. That is a smaller thing than an assembler and
-//! it is the half that a great many files need and that nothing else in this compiler can do. The
-//! probes a configure script writes are almost all of this kind: GMP writes four lines with a
-//! `.long` and a label in them to find out how the local assembler spells a thirty two bit word,
-//! and the answer it is looking for is the value of a symbol in the object, so nothing but a real
-//! object will do and there is no instruction anywhere in it.
+//! The directives, the labels and the expressions. The instructions are [`crate::instruction`],
+//! which this hands each line that is one and which hands back the bytes of it and the places in
+//! those bytes that name something. The names are the reason the split falls there: what an
+//! instruction is is a question about one line, and what it refers to is a question about the
+//! whole file, because the label a jump goes to is usually further down than the jump is.
 //!
-//! An instruction is refused by name with its line number. Guessing at one is the failure mode that
-//! matters here: an assembler that skipped what it did not recognise would write an object that
-//! links, and what would be wrong with it is a run of missing bytes in the middle of a function,
-//! which nothing finds until the program runs. Instruction assembly is the rest of the issue.
+//! A mnemonic with no bytes behind it is refused by name with its line number, and so is an
+//! operand this cannot read. Guessing at either is the failure mode that matters here: an
+//! assembler that skipped what it did not recognise would write an object that links, and what
+//! would be wrong with it is a run of missing bytes in the middle of a function, which nothing
+//! finds until the program runs.
 //!
 //! # Why expressions are worth this much of the file
 //!
@@ -56,9 +56,9 @@ impl std::error::Error for Trouble {}
 ///
 /// # Errors
 ///
-/// [`Trouble`] for a directive this does not know, an instruction, an expression that does not
-/// reduce to something a relocation can say, or a file that is malformed. Every one of them carries
-/// the line it was on.
+/// [`Trouble`] for a directive this does not know, an instruction it has no bytes for, an operand
+/// it cannot read, an expression that does not reduce to something a relocation can say, or a file
+/// that is malformed. Every one of them carries the line it was on.
 pub fn read(text: &str) -> Result<Assembled, Trouble> {
     let mut reader = Reader::default();
     reader.run(text)?;
@@ -87,6 +87,9 @@ struct Fixup {
     at: u64,
     width: u8,
     sum: Sum,
+    /// Whether these are the four bytes a jump or a call goes by, which a linker is allowed to
+    /// satisfy with a stub and a load of a datum is not.
+    branch: bool,
     line: usize,
 }
 
@@ -220,10 +223,51 @@ impl Reader {
         if let Some(directive) = word.strip_prefix('.') {
             return self.directive(directive, rest);
         }
-        Err(self.bad(&format!(
-            "'{word}' is an instruction, and this compiler assembles the directives of a file of \
-             assembly and not yet its instructions"
-        )))
+        self.instruction(word, rest)
+    }
+
+    /// One instruction, as the bytes of it.
+    ///
+    /// What an instruction is is [`crate::instruction`]'s business and what it refers to is this
+    /// one's, which is the same division as everywhere else in this file: the bytes come back with
+    /// the places in them that name something, and a name is the whole file's question because the
+    /// label a jump goes to is usually further down than the jump is.
+    ///
+    /// Each of those places becomes the same kind of fixup `.long foo - .` makes, written as the
+    /// name minus where the instruction ends, since that is what the machine counts a branch and a
+    /// rip-relative address from. Then the arithmetic already here does the rest: a target in this
+    /// section cancels down to a number and is written into the bytes, and one that does not is a
+    /// relocation with the right addend on it. A branch says so, because a call to a name another
+    /// object defines is allowed to go through a stub and a load of a datum is not.
+    fn instruction(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
+        let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
+        let written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
+        let part = self.here;
+        let at = self.at();
+        self.put(&written.bytes)?;
+        let end = at + written.bytes.len() as u64;
+        for hole in written.holes {
+            let branch = hole.sort == crate::instruction::Sort::Branch;
+            // Written down as a name the file mentions, which is what a call to something in
+            // another object is and the only way it gets into the symbol table at all.
+            self.sym(&hole.name);
+            let sum = Sum {
+                constant: 0,
+                terms: vec![
+                    Term { coeff: 1, what: What::Symbol(hole.name) },
+                    Term { coeff: -1, what: What::Here { part, at: end as i64 } },
+                ],
+            };
+            self.fixups.push(Fixup {
+                part,
+                at: at + hole.at as u64,
+                width: hole.width,
+                sum,
+                branch,
+                line: self.line,
+            });
+        }
+        Ok(())
     }
 
     /// A name defined here, at wherever the current section has got to.
@@ -513,7 +557,7 @@ impl Reader {
                 return Err(self.bad(&what));
             }
             self.put(&vec![0u8; width as usize])?;
-            self.fixups.push(Fixup { part, at, width, sum, line: self.line });
+            self.fixups.push(Fixup { part, at, width, sum, branch: false, line: self.line });
         }
         Ok(())
     }
@@ -953,8 +997,15 @@ impl Reader {
                             fixup.width
                         )));
                     }
-                    let addend = residue.constant + offset - fixup.at as i64;
-                    (name.clone(), Reference::Data, addend)
+                    // A linker writes `symbol + addend - here`, and what was asked for is
+                    // `symbol + constant - there`, so the addend is the constant plus however far
+                    // these bytes are past the place the distance is counted from. That is zero
+                    // for `.long foo - .`, which is why the two are easy to write down the wrong
+                    // way round, and it is minus four for a call, whose four bytes are counted
+                    // from the end of the instruction they are the last of.
+                    let addend = residue.constant + fixup.at as i64 - offset;
+                    let kind = if fixup.branch { Reference::Call } else { Reference::Data };
+                    (name.clone(), kind, addend)
                 }
                 [Left { coeff: 1, what: What::Here { .. }, .. }] => {
                     return Err(bad(
@@ -1529,7 +1580,7 @@ fn unquoted(text: &str) -> String {
 ///
 /// The brackets matter as much as the quotes: `.long (1 + 2), 3` is two operands and splitting on
 /// every comma would be right here and wrong the moment one turns up inside brackets.
-fn split(text: &str, on: char) -> Vec<String> {
+pub(crate) fn split(text: &str, on: char) -> Vec<String> {
     let mut out = Vec::new();
     let mut piece = String::new();
     let mut depth = 0i32;
@@ -1761,6 +1812,19 @@ mod tests {
     }
 
     #[test]
+    fn a_distance_counted_from_somewhere_that_is_not_here_carries_the_difference() {
+        // The case that says which way round the addend goes, which `message - .` cannot because
+        // both halves of it are the same number. A linker writes `symbol + addend - here`, and
+        // what was asked for is `symbol - start`, so the addend is how far these bytes are past
+        // the label rather than how far the label is behind them.
+        let out = assembled("\t.data\nstart:\n\t.quad 0\n\t.long message - start\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!(reloc.at, 8);
+        assert_eq!(reloc.kind, Reference::Data);
+        assert_eq!(reloc.addend, 8);
+    }
+
+    #[test]
     fn a_number_added_to_a_name_rides_along_in_the_addend() {
         let out = assembled("\t.data\n\t.quad message + 16\n");
         assert_eq!(out.parts[0].relocs[0].addend, 16);
@@ -1808,14 +1872,74 @@ mod tests {
     }
 
     #[test]
-    fn an_instruction_is_refused_by_name_and_by_line() {
+    fn an_instruction_this_has_no_bytes_for_is_refused_by_name_and_by_line() {
         // The failure this crate is written to prevent. An assembler that skipped what it did not
         // recognise would write an object that links, and what would be wrong with it is a run of
         // missing bytes in the middle of a function.
-        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tret\n");
-        assert_eq!(why.line, 3);
-        assert!(why.why.contains("movq"), "{why}");
-        assert!(why.why.contains("instruction"), "{why}");
+        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tbswap %rax\n\tret\n");
+        assert_eq!(why.line, 4);
+        assert!(why.why.contains("bswap"), "{why}");
+    }
+
+    #[test]
+    fn a_function_of_instructions_is_its_bytes_and_its_size() {
+        // The whole of what a hand written file is, end to end: a section, a name, three
+        // instructions and a size counted back to the label.
+        let out = assembled(
+            "\t.text\n\t.globl id\n\t.type id, @function\nid:\n\tmovq %rdi, %rax\n\tret\n\t.size \
+             id, .-id\n",
+        );
+        assert_eq!(bytes(&out, ".text"), vec![0x48, 0x89, 0xf8, 0xc3]);
+        assert_eq!(name(&out, "id").size, 4);
+        assert_eq!(name(&out, "id").at, Held::In { part: 0, offset: 0 });
+    }
+
+    #[test]
+    fn a_jump_to_a_label_in_this_section_is_a_number_and_not_a_relocation() {
+        // Because both ends are here, so there is nothing for a linker to work out. The distance
+        // is counted from the end of the jump, which is why jumping over nothing is zero and not
+        // minus five.
+        let out = assembled("\t.text\n\tjmp over\nover:\n\tret\n");
+        assert_eq!(bytes(&out, ".text"), vec![0xe9, 0, 0, 0, 0, 0xc3]);
+        assert!(out.parts[0].relocs.is_empty(), "{:?}", out.parts[0].relocs);
+    }
+
+    #[test]
+    fn a_jump_backwards_is_the_negative_distance_to_it() {
+        let out = assembled("\t.text\nagain:\n\tjmp again\n");
+        assert_eq!(bytes(&out, ".text"), vec![0xe9, 0xfb, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn a_call_to_a_name_this_file_does_not_define_may_go_through_a_stub() {
+        // Which is the whole difference between this and the test below it. A call is allowed to
+        // reach further than four bytes by way of something the linker writes, and a load of a
+        // datum is not, so they are two relocations and the shape of the instruction is what says
+        // which. The addend is minus four because the four bytes are the last of the instruction
+        // and the machine counts them from the end of it.
+        let out = assembled("\t.text\n\tcall puts\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!(reloc.at, 1);
+        assert_eq!(reloc.symbol, "puts");
+        assert_eq!(reloc.kind, Reference::Call);
+        assert_eq!(reloc.addend, -4);
+    }
+
+    #[test]
+    fn a_datum_reached_from_the_instruction_pointer_is_a_relocation_that_may_not() {
+        let out = assembled("\t.text\n\tmovq message(%rip), %rax\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!(reloc.symbol, "message");
+        assert_eq!(reloc.kind, Reference::Data);
+        // Three bytes of opcode and addressing in front of the four, and nothing after them.
+        assert_eq!(reloc.at, 3);
+        assert_eq!(reloc.addend, -4);
+    }
+
+    #[test]
+    fn an_instruction_in_a_section_that_holds_no_bytes_is_refused() {
+        let why = refused("\t.bss\n\tret\n");
+        assert!(why.why.contains("holds no bytes"), "{why}");
     }
 
     #[test]
