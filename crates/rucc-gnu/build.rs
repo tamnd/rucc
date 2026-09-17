@@ -236,6 +236,7 @@ const WORDS: &[&str] = &[
     "uint16_t",
     "uint32_t",
     "uint64_t",
+    "__builtin_va_list",
     "...",
 ];
 

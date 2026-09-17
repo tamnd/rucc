@@ -1139,9 +1139,10 @@ tests = ["rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_an
 #
 # What each of these needs is a declaration and a name to put on the call, both of which are on
 # this row, so the rows below carry a `library` and are implemented. The ones that are not here
-# are the ones that need more than that: the `_chk` variants want the object size, the
-# classification family wants a comparison rather than a call, and the stdio functions that take
-# a `FILE *` cannot have their type written in the words a signature is made of.
+# are the ones that need more than that: the classification family wants a comparison rather than
+# a call, and the stdio functions that take a `FILE *` cannot have their type written in the words
+# a signature is made of. The `_chk` variants follow the same rule and have a section of their own
+# below only because what they mean takes a paragraph of its own to say.
 
 [[feature]]
 name = "__builtin_abort"
@@ -1648,6 +1649,188 @@ status = "implemented"
 signature = "int(long long)"
 used_by = ["linux"]
 tests = ["rucc-driver::the_first_set_bit_is_one_based_and_zero_for_a_zero"]
+
+# The `_chk` builtins, which are what a fortified glibc header turns every copy into. Under
+# `_FORTIFY_SOURCE` the `memcpy` a program writes becomes `__builtin___memcpy_chk` with
+# `__builtin_object_size` of the destination behind it, and a program that includes `string.h` on a
+# distribution's compiler reaches these whether its author has heard of them or not.
+#
+# Each is a library builtin whose library name is the checking function, so a call to one is a call
+# to `__memcpy_chk` and the size argument goes with it. That is the answer that is always right:
+# the checking function takes `(size_t) -1` to mean nothing is known and does no check, which is
+# what the fortified header passes when the object size is not known, so the meaning of the program
+# is the same whatever the compiler could work out. What it costs is a call gcc would have folded
+# away, which is an optimization on top of a call that was already correct rather than a difference
+# in what the program does, and it is tamnd/rucc#225's second half.
+#
+# The rule about the name is the same one the rows above follow, which is easy to misread here and
+# worth saying: `__builtin___memcpy_chk` with `__builtin_` taken off is `__memcpy_chk`, and the
+# three underscores in the middle are two of the builtin's prefix and one of the library's.
+#
+# The three `v` spellings are the first rows in the table whose signature names `__builtin_va_list`,
+# which is a type the target chooses the shape of rather than the width of, and which is why a
+# parameter in a signature is adjusted the way a parameter in a declaration is.
+
+[[feature]]
+name = "__builtin___memcpy_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "void *(void *, const void *, size_t, size_t)"
+library = "__memcpy_chk"
+used_by = ["glibc", "linux", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___memmove_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "void *(void *, const void *, size_t, size_t)"
+library = "__memmove_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___mempcpy_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "void *(void *, const void *, size_t, size_t)"
+library = "__mempcpy_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___memset_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "void *(void *, int, size_t, size_t)"
+library = "__memset_chk"
+used_by = ["glibc", "linux", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___strcpy_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "__strcpy_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___stpcpy_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "__stpcpy_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___strcat_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t)"
+library = "__strcat_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___strncpy_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t, size_t)"
+library = "__strncpy_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___stpncpy_chk"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = "char *(char *, const char *, size_t, size_t)"
+library = "__stpncpy_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___strncat_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "char *(char *, const char *, size_t, size_t)"
+library = "__strncat_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___sprintf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(char *, int, size_t, const char *, ...)"
+library = "__sprintf_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+notes = "The second argument is the flag that says whether a `%n` in a writable format is refused, which is why the printing half of the family never walks back to the plain function."
+
+[[feature]]
+name = "__builtin___snprintf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(char *, size_t, int, size_t, const char *, ...)"
+library = "__snprintf_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___vsprintf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(char *, int, size_t, const char *, __builtin_va_list)"
+library = "__vsprintf_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
+
+[[feature]]
+name = "__builtin___vsnprintf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(char *, size_t, int, size_t, const char *, __builtin_va_list)"
+library = "__vsnprintf_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
+
+[[feature]]
+name = "__builtin___printf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(int, const char *, ...)"
+library = "__printf_chk"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+
+[[feature]]
+name = "__builtin___vprintf_chk"
+kind = "builtin"
+gcc_version = "4.0"
+status = "implemented"
+signature = "int(int, const char *, __builtin_va_list)"
+library = "__vprintf_chk"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
 
 # The two builtins whose answer is the sign bit of an operand. These have no signature because
 # they are answered in the front end rather than called: both are in the math library rather than

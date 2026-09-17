@@ -3722,6 +3722,58 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
+    /// A `_chk` builtin reaches the checking function in the library with the object size still
+    /// on the end of it.
+    ///
+    /// This is what a fortified `string.h` turns every copy into, so it is what a program built
+    /// the way a distribution builds one is full of, and the whole of what makes the call right
+    /// is that the size goes with it. The checking function takes `(size_t) -1` to mean nothing
+    /// is known and does no check, which is what the header passes when the destination's object
+    /// is not in sight, so the unconditional call means the same thing in both cases and costs a
+    /// call gcc would have folded away in the second.
+    ///
+    /// The name is the one place this family reads like an exception and is not one:
+    /// `__builtin___memcpy_chk` with `__builtin_` taken off is `__memcpy_chk`.
+    #[test]
+    fn a_chk_builtin_reaches_the_checking_function_and_keeps_the_size() {
+        let text = ir(concat!(
+            "char d[8];\n",
+            "void f(const char *s, unsigned long n) {\n",
+            "  __builtin___memcpy_chk(d, s, n, __builtin_object_size(d, 0));\n",
+            "  __builtin___strcpy_chk(d, s, __builtin_object_size(d, 1));\n",
+            "  __builtin___memset_chk(d, 0, n, 8);\n",
+            "}\n",
+        ));
+        assert!(text.contains("call @__memcpy_chk("), "{text}");
+        assert!(text.contains("call @__strcpy_chk("), "{text}");
+        assert!(text.contains("call @__memset_chk("), "{text}");
+        assert!(text.contains("iconst.i64 8"), "the object size reaches the call: {text}");
+        assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
+    }
+
+    /// The `v` spellings take a `__builtin_va_list`, which is the first type in the table the
+    /// target chooses the shape of rather than the width of.
+    ///
+    /// On x86-64 it is an array of one, so what the prototype has to say is the pointer that
+    /// array decays to, which is the same adjustment C makes to any parameter written as an array
+    /// and is what a `va_list` parameter already holds. A prototype that kept the array would be
+    /// one no argument could ever match.
+    #[test]
+    fn the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds() {
+        let text = ir(concat!(
+            "char d[64];\n",
+            "int f(const char *fmt, ...) {\n",
+            "  __builtin_va_list ap;\n",
+            "  __builtin_va_start(ap, fmt);\n",
+            "  int n = __builtin___vsprintf_chk(d, 1, __builtin_object_size(d, 0), fmt, ap);\n",
+            "  __builtin_va_end(ap);\n",
+            "  return n;\n",
+            "}\n",
+        ));
+        assert!(text.contains("call @__vsprintf_chk("), "{text}");
+        assert!(text.contains("iconst.i64 64"), "the object size reaches the call: {text}");
+    }
+
     /// The absolute value family is four instructions and not a call, whoever declared the name.
     ///
     /// `abs`, `labs` and `llabs` are reserved to the implementation, so a program that writes one
