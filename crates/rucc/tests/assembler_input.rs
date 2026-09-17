@@ -130,6 +130,42 @@ fn a_function_written_in_assembly_is_compiled_and_called() {
 }
 
 #[test]
+fn a_loop_written_the_way_a_hand_written_library_writes_one_gives_the_right_answer() {
+    // The instructions a C expression never compiles to, run rather than inspected. This is the
+    // shape of GMP's `mpn_add_n` reduced to what fits in a test: a carry carried from one addition
+    // to the next by `adc`, a counter stepped by `dec` because `dec` leaves the carry alone where
+    // an addition of one would destroy it, and `jrcxz` deciding whether there is anything to do.
+    // Every one of those was refused until the encoder had rows for them, and the reason they are
+    // worth running is that each of them encodes to something on its own: a wrong row here is a
+    // real instruction doing the wrong arithmetic, which links and which nothing but the answer
+    // catches.
+    //
+    // The exclusive or at the top is there to clear the carry as well as the answer, which is the
+    // idiom the real thing uses, and `lea` is here because it is the addition that does not touch
+    // the flags and so is the only way to walk three pointers between two `adc` instructions.
+    let dir = dir("carry");
+    let hot = "\t.text\n\t.globl addn\n\t.type addn, @function\naddn:\n\txorl %eax, \
+               %eax\n\tjrcxz done\nover:\n\tmovq (%rsi), %r8\n\tadcq (%rdx), %r8\n\tmovq %r8, \
+               (%rdi)\n\tleaq 8(%rsi), %rsi\n\tleaq 8(%rdx), %rdx\n\tleaq 8(%rdi), \
+               %rdi\n\tdecq %rcx\n\tjnz over\n\tsetc %al\ndone:\n\tret\n\t.size addn, .-addn\n";
+    write(&dir, "hot.s", hot);
+    // Two limbs of all ones on top of one each, so the carry comes out of the first addition, goes
+    // into the second, comes out of that one too and lands in the third. A missing carry gives a
+    // different answer in every limb but the first.
+    let main = "#include <stdint.h>\nextern int addn(uint64_t *r, const uint64_t *a, const \
+                uint64_t *b, unsigned long n);\nint main(void) {\n  uint64_t a[3] = \
+                {0xffffffffffffffffUL, 0xffffffffffffffffUL, 1};\n  uint64_t b[3] = {1, 1, 1};\n  \
+                uint64_t r[3] = {9, 9, 9};\n  int carry = addn(r, a, b, 3);\n  if (r[0] != 0) \
+                return 1;\n  if (r[1] != 1) return 2;\n  if (r[2] != 3) return 3;\n  if (carry != \
+                0) return 4;\n  if (addn(r, a, b, 0) != 0) return 5;\n  return 42;\n}\n";
+    write(&dir, "main.c", main);
+    let (ok, said) = run(&dir, &["main.c", "hot.s", "-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    assert_eq!(out.status.code(), Some(42), "the assembly did not add the way it says");
+}
+
+#[test]
 fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line() {
     // Refusing it is the whole design of the reader: an assembler that skipped what it did not
     // recognise would write an object that links, and what would be wrong with it is a run of
