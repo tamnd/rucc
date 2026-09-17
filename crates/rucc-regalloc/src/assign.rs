@@ -346,7 +346,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
         // The reuse comes first, because a two address instruction that has to copy its left
         // operand in pays for the copy whatever the hint says, and taking the hint here would buy
         // one move at the cost of another.
-        let hinted = hints[index(interval.reg)].filter(|&at| {
+        let hinted = hints[index(interval.reg)].iter().copied().find(|&at| {
             env.order(interval.class).contains(&at)
                 && available(&active, &blocked, interval, at, None, Want::Clear)
         });
@@ -564,7 +564,7 @@ fn blocked(func: &Func, order: &Order) -> Blocks {
             }
             for &(class, at) in &claimed {
                 // Both points, whether or not an operand is at them. A register an instruction
-                // reads and does not write is destroyed by the time the instruction is done as far
+                // reads and does not write is still gone by the time the instruction is done as far
                 // as anything here knows, which is what stops the value a call is passed in `rdi`
                 // from staying in `rdi` over the call.
                 for (point, role) in [(order.early(inst), Role::Use), (order.late(inst), Role::Def)]
@@ -579,7 +579,25 @@ fn blocked(func: &Func, order: &Order) -> Blocks {
                         let by = operand.reg.is_virtual().then_some(operand.reg);
                         blocked.push(Blocked { class, at, point, by });
                     }
-                    if !named {
+                    // A register no operand names where the operands are read is one the
+                    // instruction writes and does not read, which is what a clobber is, and the
+                    // seven registers a call destroys are the whole of why that case is worth
+                    // separating. Such a register is free right up to the point it is written, so a
+                    // value whose last read is this instruction may sit in one: it is read before
+                    // the instruction writes anything, the way any other operand is. Blocking it
+                    // where the operands are read as well would take every caller saved register
+                    // away from the value a call is passed, which is a value that dies at the call
+                    // and pays for a callee saved register it holds for two instructions. Anything
+                    // living past the instruction is still refused, by the block below.
+                    //
+                    // This is where a target's early definitions are paid for. An instruction that
+                    // fills a register before it has finished reading has to say so, because that
+                    // is the one thing a plain definition here no longer covers: a division on
+                    // x86-64 is a sign extension and then the division itself, so `rdx` is gone
+                    // before the divisor is read, and a divisor that went there would be read as
+                    // the dividend's own sign bits. `rucc_target::x86_64` writes both of them down
+                    // as early definitions for exactly that reason.
+                    if !named && role == Role::Def {
                         blocked.push(Blocked { class, at, point, by: None });
                     }
                 }
@@ -604,22 +622,26 @@ fn insisted(operand: &Operand) -> Option<PhysReg> {
     }
 }
 
-/// The register each value would rather be in, which is the one an operand naming it insists on.
+/// The registers each value would rather be in, which are the ones the operands naming it insist on.
 ///
-/// A value with two of them keeps the first the function writes down, which is the definition when
-/// there is one, since a value written into a fixed register and then moved somewhere else pays
-/// for the move at the top of its life rather than at the bottom. Two different fixed registers on
-/// one value is rare enough that the second is not worth carrying a list for.
-fn hints(func: &Func) -> Vec<Option<PhysReg>> {
-    let mut hints = vec![None; func.vregs()];
+/// In the order the function writes them down, so the definition comes first where there is one,
+/// since a value written into a fixed register and then moved somewhere else pays for the move at
+/// the top of its life rather than at the bottom. The ones after it are worth keeping for the same
+/// reason the first one is, and the value a call is passed is where that shows: its definition may
+/// insist on the register a parameter arrived in, which the call it is handed to has usually taken
+/// back for an argument of its own by then, and behind that is the register the convention passes
+/// it in, which is free and is exactly where the value wants to end up.
+fn hints(func: &Func) -> Vec<Vec<PhysReg>> {
+    let mut hints = vec![Vec::new(); func.vregs()];
     for block in func.blocks() {
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
                 let Constraint::Fixed(at) = operand.constraint else { continue };
                 let number = operand.reg.number().and_then(|number| usize::try_from(number).ok());
                 let Some(number) = number else { continue };
-                if func.class_of(operand.reg) == Some(operand.class) && hints[number].is_none() {
-                    hints[number] = Some(at);
+                let wanted: &mut Vec<PhysReg> = &mut hints[number];
+                if func.class_of(operand.reg) == Some(operand.class) && !wanted.contains(&at) {
+                    wanted.push(at);
                 }
             }
         }
@@ -813,6 +835,41 @@ mod tests {
         // dividend and the quotient share `rax` because the first is read where the second is
         // written, which is what a division does.
         assert_eq!(places(&func, &env()), ["rcx", "rax", "rax", "rdx"]);
+    }
+
+    /// A value read by an instruction that fills a register before it reads is kept out of that
+    /// register, even though the read is the last thing the value is wanted for.
+    ///
+    /// The divisor of a division is the case. What the machine runs is `cltd` and then `idivl`, so
+    /// `rdx` holds the top half of the dividend by the time the divisor is read, and a divisor
+    /// sitting in `rdx` is read as the dividend's own sign bits. An early definition is how the
+    /// target says a register goes before the operands are read, and this is where the allocator
+    /// has to hear it, since a value dying at an instruction is otherwise free to sit in a
+    /// register that instruction writes. tamnd/rucc#1232.
+    #[test]
+    fn a_value_that_dies_at_an_instruction_stays_out_of_what_it_fills_first() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let across = func.new_vreg(GPR);
+        let dividend = func.new_vreg(GPR);
+        let divisor = func.new_vreg(GPR);
+        let remainder = func.new_vreg(GPR);
+        func.build(block, opcode).def(across, GPR).finish();
+        func.build(block, opcode).def(dividend, GPR).finish();
+        func.build(block, opcode).def(divisor, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write_early(remainder, GPR).with(Constraint::Fixed(RDX)))
+            .operand(Operand::read(dividend, GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::read(divisor, GPR))
+            .finish();
+        func.build(block, opcode).uses(across, GPR).uses(remainder, GPR).finish();
+
+        // Four registers for four values, and the divisor takes the fourth. `rdx` is free
+        // everywhere in this function except at the instruction that is about to fill it, which is
+        // the one instruction the divisor is wanted at.
+        assert_eq!(places(&func, &narrow(4)), ["rcx", "rax", "rsi", "rdx"]);
     }
 
     #[test]
@@ -1047,6 +1104,51 @@ mod tests {
         // now arrive at the read either way, so the clobber is on a path they are live over and the
         // one register left has to do for both of them.
         assert_eq!(places(&func, &narrow(2)), ["rcx", "slot 0"]);
+    }
+
+    /// A value and the instruction that destroys a register, written one after the other, with the
+    /// value read by that instruction or by the one after it.
+    fn dies_at_the_clobber(here: bool) -> Func {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(entry, opcode).def(value, GPR).finish();
+        let call = func.build(entry, opcode).operand(Operand::write(Reg::physical(RAX), GPR));
+        if here {
+            call.uses(value, GPR).finish();
+        } else {
+            call.finish();
+            func.build(entry, opcode).uses(value, GPR).finish();
+        }
+        func
+    }
+
+    /// A value whose last read is the instruction that destroys a register may be in that register,
+    /// because the instruction reads what it is handed before it writes anything.
+    ///
+    /// The call is what this is about, and the value a call is passed is the case: seven registers
+    /// on this machine are destroyed by one, every argument dies at the call that reads it, and
+    /// refusing all seven to those values left them taking a callee saved register for a life two
+    /// instructions long and paying for it in the prologue and the epilogue. tamnd/rucc#1232.
+    #[test]
+    fn a_value_that_dies_where_a_register_is_destroyed_may_be_in_that_register() {
+        let func = dies_at_the_clobber(true);
+        assert_eq!(places(&func, &narrow(1)), ["rax"]);
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &narrow(1));
+        assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
+    }
+
+    /// And one read later than that is one the instruction really does destroy, which is the same
+    /// function with the read moved down by one instruction.
+    #[test]
+    fn a_value_read_after_the_instruction_that_destroys_a_register_is_not_in_it() {
+        let func = dies_at_the_clobber(false);
+        assert_eq!(places(&func, &narrow(1)), ["slot 0"]);
     }
 
     #[test]
