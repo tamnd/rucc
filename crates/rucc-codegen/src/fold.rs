@@ -134,6 +134,10 @@ impl Pending<'_> {
     /// for is handed to all of them, and each of those now carries a displacement of its own that
     /// the frame layout has still to be added to.
     ///
+    /// No readers at all takes the entry off the list, which is what a caller that joined a run
+    /// into one instruction wants when the instruction it kept is already waiting on the same
+    /// entry. Handing it the same offset twice would put the local at twice its distance.
+    ///
     /// An address on any of the lists reads the stack pointer and nothing else, so it never reads a
     /// register another one of them wrote, which is what makes it impossible for a reader to end up
     /// on a list twice and be given two offsets.
@@ -143,6 +147,23 @@ impl Pending<'_> {
         if let Some(at) = self.dynamic.iter().position(|&inst| inst == from) {
             self.dynamic.splice(at..=at, into.iter().copied());
         }
+    }
+
+    /// Whether these two instructions are waiting on the same thing.
+    ///
+    /// Asked by a pass that has found two addressing modes that read alike and is about to treat
+    /// them as the same place. Reading alike is not enough on its own once the frame is involved:
+    /// the address of a local is a displacement this list has still to add an offset to, and two
+    /// locals whose displacements are both zero so far are the same three registers and the same
+    /// number and are two different places. What tells them apart is which entry each instruction
+    /// is waiting on, which is this.
+    pub(crate) fn alike(&self, one: mir::Inst, other: mir::Inst) -> bool {
+        let address = |inst| self.addresses.iter().find(|&&(at, _)| at == inst).map(|&(_, of)| of);
+        let argument = |inst| self.arguments.iter().find(|&&(at, _)| at == inst).map(|&(_, of)| of);
+        let dynamic = |inst| self.dynamic.contains(&inst);
+        address(one) == address(other)
+            && argument(one) == argument(other)
+            && dynamic(one) == dynamic(other)
     }
 
     /// Whether this instruction is on one of the lists, which is how many readers it may go to.

@@ -356,6 +356,30 @@ static TEXT: &[(&str, &[Written])] = &[
     ("imul_rm_16", &[spell("imulw", &[Mem, Reg(0, Word)])]),
     ("imul_rm_32", &[spell("imull", &[Mem, Reg(0, Long)])]),
     ("imul_rm_64", &[spell("imulq", &[Mem, Reg(0, Quad)])]),
+    // The same mnemonic once more with the two arguments the other way round, which is what says
+    // the answer stays where the memory operand points. The register is the source here and the
+    // address is the destination, so it is written first, the way a source is written first
+    // everywhere else in this file.
+    ("add_mr_8", &[spell("addb", &[Reg(0, Byte), Mem])]),
+    ("add_mr_16", &[spell("addw", &[Reg(0, Word), Mem])]),
+    ("add_mr_32", &[spell("addl", &[Reg(0, Long), Mem])]),
+    ("add_mr_64", &[spell("addq", &[Reg(0, Quad), Mem])]),
+    ("sub_mr_8", &[spell("subb", &[Reg(0, Byte), Mem])]),
+    ("sub_mr_16", &[spell("subw", &[Reg(0, Word), Mem])]),
+    ("sub_mr_32", &[spell("subl", &[Reg(0, Long), Mem])]),
+    ("sub_mr_64", &[spell("subq", &[Reg(0, Quad), Mem])]),
+    ("and_mr_8", &[spell("andb", &[Reg(0, Byte), Mem])]),
+    ("and_mr_16", &[spell("andw", &[Reg(0, Word), Mem])]),
+    ("and_mr_32", &[spell("andl", &[Reg(0, Long), Mem])]),
+    ("and_mr_64", &[spell("andq", &[Reg(0, Quad), Mem])]),
+    ("or_mr_8", &[spell("orb", &[Reg(0, Byte), Mem])]),
+    ("or_mr_16", &[spell("orw", &[Reg(0, Word), Mem])]),
+    ("or_mr_32", &[spell("orl", &[Reg(0, Long), Mem])]),
+    ("or_mr_64", &[spell("orq", &[Reg(0, Quad), Mem])]),
+    ("xor_mr_8", &[spell("xorb", &[Reg(0, Byte), Mem])]),
+    ("xor_mr_16", &[spell("xorw", &[Reg(0, Word), Mem])]),
+    ("xor_mr_32", &[spell("xorl", &[Reg(0, Long), Mem])]),
+    ("xor_mr_64", &[spell("xorq", &[Reg(0, Quad), Mem])]),
     // Arithmetic, register with immediate.
     ("add_ri_8", &[spell("addb", &[Imm, Reg(0, Byte)])]),
     ("add_ri_16", &[spell("addw", &[Imm, Reg(0, Word)])]),

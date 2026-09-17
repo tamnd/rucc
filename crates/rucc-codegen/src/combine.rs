@@ -14,10 +14,10 @@
 //! into the later one, and ask the machine description whether what came out is an instruction this
 //! target has. That is [`crate::changes`] and this pass does not repeat any of it.
 //!
-//! # The run it puts together
+//! # The runs it puts together
 //!
-//! A value read out of memory and then used once, by arithmetic that this machine could have read
-//! it out of memory itself:
+//! Two of them. A value read out of memory and then used once, by arithmetic that this machine
+//! could have read it out of memory itself, which is [`loads`]:
 //!
 //! ```text
 //!   movq 16(%rax), %rcx
@@ -33,6 +33,22 @@
 //! long way is a move into arithmetic, and an addition at eight bytes is the largest single entry
 //! in it. What the pass gets over that corpus is 865 of these at `-O2` and 845 fewer instructions
 //! once the allocator has had its say, with the difference between the two explained below.
+//!
+//! And the same value written back where it came from, which is [`stores`]:
+//!
+//! ```text
+//!   movq 16(%rax), %rcx
+//!   addq %rdx, %rcx        ->    addq %rdx, 16(%rax)
+//!   movq %rcx, 16(%rax)
+//! ```
+//!
+//! Three instructions become one, and this is what a C program writes as `*p += x`. The register in
+//! the middle goes the way the load's register goes above, and so does the second addressing mode,
+//! which was the same address written down twice.
+//!
+//! [`stores`] runs first. Its run is three instructions as the selector wrote them, and folding the
+//! load into the middle one first would leave the same run written a second way that the walk would
+//! then have to know about. Whatever it does not take is still a pair for [`loads`].
 //!
 //! # Why no rule does it
 //!
@@ -103,6 +119,39 @@
 //! computes as long as the operation commutes. Five of the six here do and subtraction does not,
 //! which is what [`Fold::commutes`] says.
 //!
+//! # What a `volatile` access gets
+//!
+//! The same thing an ordinary one does, and that is worth writing down rather than leaving to be
+//! noticed. `volatile int *p; *p += x;` comes out of here as one instruction that reads the place
+//! and writes it back, where GCC writes the load, the arithmetic and the store. Both do one read
+//! and one write of that address, which is what the abstract machine says has to happen, so the
+//! program is the program either way. What they differ on is whether the two are one instruction,
+//! and a machine whose memory does something when it is read cares about that.
+//!
+//! The reason it happens is the one this module already gives twice: the machine IR does not carry
+//! the flag. `rucc_ir::Flags::VOLATILE` says an access happens exactly once and is never moved or
+//! merged, every pass above selection reads it, and the instruction that reaches this pass is the
+//! same instruction whether it was set or not. [`loads`] has the same hole and has had it since it
+//! landed: a `volatile` load folds into the arithmetic that reads it, which is still one read and
+//! is still not what GCC writes. Carrying the flag down is what closes both, and it is
+//! tamnd/rucc#1302 rather than something this pass can decide on its own.
+//!
+//! # What makes the three one
+//!
+//! The same three questions as the pair, and one more. The word the load read is read by the
+//! arithmetic and by nothing else, the answer the arithmetic wrote is read by the store and by
+//! nothing else, and nothing between the load and the store touches memory or writes a register the
+//! instruction that is left still reads. The run collapses onto the store, so the read of memory
+//! moves down the block to where the write already was, which is the move the memory rule is about.
+//!
+//! The one more is that the two addressing modes have to name the same place. The same registers,
+//! the same scale, the same displacement and the same symbol is most of it, and the frame is the
+//! rest: the displacement of a local is a number [`crate::finish`] has still to add the frame's own
+//! offset to, so two locals can be the same three registers and the same zero here and be two
+//! different places. The list itself is what tells those apart, and the entry the load was
+//! waiting on comes off the list when the run is joined, since the store is already waiting on the
+//! same one.
+//!
 //! # The window
 //!
 //! A load is carried forward at most [`WINDOW`] instructions and then dropped. The bound is what
@@ -145,17 +194,17 @@
 //! behind it, so the memory form is a third instruction rather than a second and the target has to
 //! describe it before this can write it.
 //!
-//! A store the arithmetic feeds. `addq %rax, 16(%rcx)` is the same saving again on the other side
-//! and this machine has the instruction, as [`rucc_target::x86_64::Form::Rmw`] already. What it
-//! needs is the reverse of the walk below, a store looking back at what wrote the value it is
-//! storing, and that is a second entry in the list rather than a second pass.
+//! Arithmetic against a constant, in either run. `addq $1, 16(%rcx)` is `*p += 1`, which is at
+//! least as common as `*p += x`, and the target has no form that carries an addressing mode and an
+//! immediate together. That is a third instruction description rather than a rule, the way the
+//! comparison above is.
 //!
-//! Anything that is not a pair. Section 37.3 says GCC goes to four instructions, and the run this
-//! finds is two. What makes three worth having is a rule set that has something to say about
-//! three, and the rule set here grows one measured entry at a time.
+//! Anything longer than the two runs above. Section 37.3 says GCC goes to four instructions, and
+//! the longer of the two here is three. What makes a fourth worth having is a rule set that has
+//! something to say about four, and the rule set here grows one measured entry at a time.
 
 use rucc_base::Interner;
-use rucc_mir::{Func, Inst, Opcode, Reg};
+use rucc_mir::{Amode, Func, Inst, Opcode, Operand, Reg};
 use rucc_target::MachineInsts;
 
 use crate::changes::{Changes, Plan, Reads};
@@ -227,6 +276,179 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "imul_rr_16", into: "imul_rm_16", load: "mov_rm_16", commutes: true },
     Fold { from: "imul_rr_32", into: "imul_rm_32", load: "mov_rm_32", commutes: true },
     Fold { from: "imul_rr_64", into: "imul_rm_64", load: "mov_rm_64", commutes: true },
+];
+
+/// One arithmetic instruction that could work on memory rather than on a register, and the load
+/// and the store that would be the rest of the run.
+///
+/// A table for the reason [`Fold`] is one, and four names in a row rather than three because the
+/// run is three instructions rather than two. The widths of all four have to agree, and writing
+/// them out is what makes a row that got one wrong something a reader can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Update {
+    /// The arithmetic as the selector wrote it, on two registers.
+    pub from: &'static str,
+    /// The same arithmetic reading one source out of memory and leaving its answer there.
+    pub into: &'static str,
+    /// The load that put the memory's word in a register.
+    pub load: &'static str,
+    /// The store that put the answer back.
+    pub store: &'static str,
+    /// Whether the two sources may be swapped, which is what lets the load feed either of them.
+    pub commutes: bool,
+}
+
+/// The arithmetic that can work on memory in place on this machine.
+///
+/// The five operations that share an opcode column, at every width. The multiply is not one of
+/// them: `imul` writes a register and there is no encoding of it that leaves the product where it
+/// read one of its sources, so there is no instruction for a row to name.
+///
+/// Subtraction is here and does not commute, and the two facts are related. `subq %rax, (%rcx)`
+/// takes the register away from the memory, so the run it matches is the one where the load feeds
+/// the left source, which is the one arrangement [`FOLDS`] cannot use. The other four take either
+/// source, because the answer does not depend on which of the two came out of memory.
+pub static UPDATES: &[Update] = &[
+    Update {
+        from: "add_rr_8",
+        into: "add_mr_8",
+        load: "mov_rm_8",
+        store: "mov_mr_8",
+        commutes: true,
+    },
+    Update {
+        from: "add_rr_16",
+        into: "add_mr_16",
+        load: "mov_rm_16",
+        store: "mov_mr_16",
+        commutes: true,
+    },
+    Update {
+        from: "add_rr_32",
+        into: "add_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: true,
+    },
+    Update {
+        from: "add_rr_64",
+        into: "add_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: true,
+    },
+    Update {
+        from: "sub_rr_8",
+        into: "sub_mr_8",
+        load: "mov_rm_8",
+        store: "mov_mr_8",
+        commutes: false,
+    },
+    Update {
+        from: "sub_rr_16",
+        into: "sub_mr_16",
+        load: "mov_rm_16",
+        store: "mov_mr_16",
+        commutes: false,
+    },
+    Update {
+        from: "sub_rr_32",
+        into: "sub_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: false,
+    },
+    Update {
+        from: "sub_rr_64",
+        into: "sub_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: false,
+    },
+    Update {
+        from: "and_rr_8",
+        into: "and_mr_8",
+        load: "mov_rm_8",
+        store: "mov_mr_8",
+        commutes: true,
+    },
+    Update {
+        from: "and_rr_16",
+        into: "and_mr_16",
+        load: "mov_rm_16",
+        store: "mov_mr_16",
+        commutes: true,
+    },
+    Update {
+        from: "and_rr_32",
+        into: "and_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: true,
+    },
+    Update {
+        from: "and_rr_64",
+        into: "and_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: true,
+    },
+    Update {
+        from: "or_rr_8",
+        into: "or_mr_8",
+        load: "mov_rm_8",
+        store: "mov_mr_8",
+        commutes: true,
+    },
+    Update {
+        from: "or_rr_16",
+        into: "or_mr_16",
+        load: "mov_rm_16",
+        store: "mov_mr_16",
+        commutes: true,
+    },
+    Update {
+        from: "or_rr_32",
+        into: "or_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: true,
+    },
+    Update {
+        from: "or_rr_64",
+        into: "or_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: true,
+    },
+    Update {
+        from: "xor_rr_8",
+        into: "xor_mr_8",
+        load: "mov_rm_8",
+        store: "mov_mr_8",
+        commutes: true,
+    },
+    Update {
+        from: "xor_rr_16",
+        into: "xor_mr_16",
+        load: "mov_rm_16",
+        store: "mov_mr_16",
+        commutes: true,
+    },
+    Update {
+        from: "xor_rr_32",
+        into: "xor_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: true,
+    },
+    Update {
+        from: "xor_rr_64",
+        into: "xor_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: true,
+    },
 ];
 
 /// The load this block has passed that could still end up inside something.
@@ -303,6 +525,204 @@ pub fn loads(
         }
     }
     done
+}
+
+/// The three instructions that read a place, compute on what was there and write it back.
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    /// The load that read the place.
+    load: Inst,
+    /// The arithmetic that read what the load put in a register.
+    alu: Inst,
+    /// The store that put the answer back where the load got it.
+    store: Inst,
+    /// Which row of [`UPDATES`] the run is.
+    update: &'static Update,
+    /// The source the arithmetic is left reading, which is the one the memory is not.
+    kept: Operand,
+}
+
+/// Puts every run that reads a place, computes on it and writes it back into the one instruction
+/// this machine has for all three, and gives back how many.
+///
+/// `pending` is the addresses [`crate::finish`] has still to write a displacement into. The store
+/// is the instruction that survives and it is already waiting on the entry the load was waiting on,
+/// since the two name the same place, so the load's entry is taken off rather than moved.
+///
+/// Run before [`loads`] rather than after it. The run this looks for is three instructions the
+/// selector wrote, and folding the load into the arithmetic first would leave two instructions that
+/// are the same thing written differently, so the walk would have to know both spellings. Whatever
+/// this does not take is still there for [`loads`] to take the load out of.
+pub fn stores(
+    func: &mut Func,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+) -> usize {
+    let mut reads = Reads::of(func);
+    let mut done = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for at in 0..insts.len() {
+            let Some(found) = run(func, &reads, machine, names, &insts, at) else { continue };
+            if !pending.alike(found.load, found.store) {
+                continue;
+            }
+            let plan = updated(func, machine, names, &found);
+            let mut set = Changes::new();
+            set.rewrite(found.store, plan);
+            set.remove(found.alu);
+            set.remove(found.load);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                pending.moved(found.load, &[]);
+                done += 1;
+            }
+        }
+    }
+    done
+}
+
+/// The run ending in the instruction at that position, or `None`.
+///
+/// Walked backwards from the store, because the store is the end of the run and is the instruction
+/// that is left when the run is joined. Everything the walk needs is behind it: which register it
+/// is storing says which arithmetic to look for, and which source that arithmetic reads says which
+/// load.
+///
+/// An instruction an earlier fold took out is still in `insts` and is read here as though it were
+/// where it was. That costs a fold and never takes one: a removed instruction is one more thing in
+/// the way, and it cannot be the arithmetic or the load this is looking for, because each of those
+/// is the one writer of a register something still reads.
+fn run(
+    func: &Func,
+    reads: &Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    insts: &[Inst],
+    at: usize,
+) -> Option<Run> {
+    let store = insts[at];
+    let stored = machine.bare(names.resolve(func[store].opcode.name())).to_owned();
+    let value = *func[func[store].operands].first()?;
+    if value.role.is_def() || reads.count(value.reg) != 1 {
+        return None;
+    }
+    // One bound over the whole run rather than one per pair, so that what the window means is how
+    // far apart the first and the last of the three may be.
+    let earliest = at.saturating_sub(WINDOW);
+    let alu = (earliest..at).rev().find(|&k| writes(func, insts[k], value.reg))?;
+    let bare = machine.bare(names.resolve(func[insts[alu]].opcode.name())).to_owned();
+    let update = UPDATES.iter().find(|row| row.from == bare && row.store == stored)?;
+    let operands = func[func[insts[alu]].operands].to_vec();
+    let [_, first, second] = operands[..] else { return None };
+    // The left source is the one the memory takes the place of, because the answer is left where
+    // the memory operand points and the answer is tied to the left source. Where the load feeds the
+    // right one instead and the operation commutes, the two swap, which leaves the instruction
+    // computing what it computed.
+    let both = [(first, second), (second, first)];
+    let tried = if update.commutes { &both[..] } else { &both[..1] };
+    for &(source, kept) in tried {
+        if reads.count(source.reg) != 1 {
+            continue;
+        }
+        let Some(from) = (earliest..alu).rev().find(|&k| writes(func, insts[k], source.reg)) else {
+            continue;
+        };
+        let load = insts[from];
+        if machine.bare(names.resolve(func[load].opcode.name())) != update.load {
+            continue;
+        }
+        if !same_place(func, load, store) {
+            continue;
+        }
+        // The registers the one instruction left is reading, which are the ones nothing between the
+        // load and the store may write. The arithmetic itself passes this without being left out of
+        // it: what it writes is the value the store is storing, and that register is not one of
+        // these.
+        let mut wanted: Vec<Reg> =
+            func[func[store].operands][1..].iter().map(|operand| operand.reg).collect();
+        wanted.push(kept.reg);
+        if !clear(func, machine, names, insts, (from, at), &wanted) {
+            continue;
+        }
+        return Some(Run { load, alu: insts[alu], store, update, kept });
+    }
+    None
+}
+
+/// Whether this instruction writes that register.
+fn writes(func: &Func, inst: Inst, reg: Reg) -> bool {
+    func[func[inst].operands].iter().any(|operand| operand.role.is_def() && operand.reg == reg)
+}
+
+/// Whether the two instructions name the same place in memory.
+///
+/// The same addressing mode, the same symbol, and the same registers where the mode holds operand
+/// positions. Both instructions here write their value down first and their address behind it, so
+/// the positions line up, and the registers are compared anyway rather than the positions, because
+/// what makes two addresses one place is which registers they read.
+fn same_place(func: &Func, one: Inst, other: Inst) -> bool {
+    let (Some(here), Some(there)) = (func[one].mem, func[other].mem) else { return false };
+    let (here, there) = (func[here], func[there]);
+    if func[one].symbol != func[other].symbol {
+        return false;
+    }
+    let bare = |amode: Amode| Amode { base: None, index: None, ..amode };
+    if bare(here) != bare(there) {
+        return false;
+    }
+    let same = |left: Option<u8>, right: Option<u8>| match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            func[func[one].operands][usize::from(left)].reg
+                == func[func[other].operands][usize::from(right)].reg
+        }
+        _ => false,
+    };
+    same(here.base, there.base) && same(here.index, there.index)
+}
+
+/// Whether everything between the two positions may be passed.
+///
+/// The run becomes one instruction where the store is, so the read of memory the load was doing
+/// moves down the block to there. Nothing that touches memory may be passed, for the reason the
+/// module documentation gives about [`loads`], and nothing may write a register the instruction
+/// that is left still reads.
+fn clear(
+    func: &Func,
+    machine: &MachineInsts,
+    names: &Interner,
+    insts: &[Inst],
+    span: (usize, usize),
+    wanted: &[Reg],
+) -> bool {
+    let (from, to) = span;
+    insts[from + 1..to].iter().all(|&inst| {
+        let name = names.resolve(func[inst].opcode.name());
+        if machine.calls(name) || !machine.has(name) || machine.touches_mem(name) {
+            return false;
+        }
+        !func[func[inst].operands]
+            .iter()
+            .any(|operand| operand.role.is_def() && wanted.contains(&operand.reg))
+    })
+}
+
+/// What the store becomes with the rest of the run inside it.
+///
+/// The store's own addressing mode and the source the arithmetic kept, which is the whole of it.
+/// The mode is left exactly as it was, because the operand it was written against is the value the
+/// store was storing and what takes that operand's place is one operand as well.
+fn updated(func: &Func, machine: &MachineInsts, names: &mut Interner, run: &Run) -> Plan {
+    let operands = func[func[run.store].operands].to_vec();
+    let into = names.intern(&format!("{}{}", machine.prefix, run.update.into));
+    Plan {
+        opcode: Opcode::new(into),
+        operands: [run.kept].into_iter().chain(operands[1..].iter().copied()).collect(),
+        imm: None,
+        amode: func[run.store].mem.map(|mem| func[mem]),
+        symbol: func[run.store].symbol,
+    }
 }
 
 /// Whether this instruction writes a register the carried load needs left alone.
@@ -429,6 +849,300 @@ mod tests {
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
         loads(func, &MACHINE, names, &mut pending)
+    }
+
+    /// A store of that register to sixteen off that base, which is the address `load` reads.
+    fn store(func: &mut Func, names: &mut Interner, block: mir::Block, base: Reg, value: Reg) {
+        let mov = op(names, "mov_mr_64");
+        func.build(block, mov)
+            .uses(value, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+    }
+
+    /// The other walk, with lists nothing is on.
+    fn update(func: &mut Func, names: &mut Interner) -> usize {
+        let mut addresses = Vec::new();
+        let mut arguments = Vec::new();
+        let mut dynamic = Vec::new();
+        let mut pending =
+            Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
+        stores(func, &MACHINE, names, &mut pending)
+    }
+
+    /// The shape the second walk is for, which is what `*p += x` is.
+    #[test]
+    fn a_word_read_changed_and_written_back_becomes_one_instruction() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.add_mr_64"]);
+        let inst = func.insts(block).next().expect("the addition");
+        let mem = func[inst].mem.expect("it writes memory");
+        assert_eq!(func[mem].disp, 16, "the address came from the store");
+        assert_eq!(func[mem].base, Some(1), "and names the operand behind the source");
+        assert_eq!(func[func[inst].operands].len(), 2, "one source and the base of the address");
+        assert_eq!(func[func[inst].operands][0].reg, other, "the source it kept");
+        assert_eq!(func[func[inst].operands][1].reg, base, "the address");
+    }
+
+    /// The same run with the load feeding the right source instead, which an addition does not
+    /// mind. What `subq %rax, (%rcx)` computes is memory minus register, so the subtraction below
+    /// is the one that has to care.
+    #[test]
+    fn a_word_read_into_the_right_source_of_an_addition_is_still_one_instruction() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", other, word);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.add_mr_64"]);
+        assert_eq!(func[func[func.insts(block).next().expect("it")].operands][0].reg, other);
+    }
+
+    /// A subtraction with the memory on the left, which is `*p -= x` and is what the machine
+    /// instruction computes.
+    #[test]
+    fn a_subtraction_taking_a_register_away_from_memory_becomes_one_instruction() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let left = alu(&mut func, &mut names, block, "sub_rr_64", word, other);
+        store(&mut func, &mut names, block, base, left);
+
+        assert_eq!(update(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.sub_mr_64"]);
+    }
+
+    /// And the same subtraction the other way round, which is `*p = x - *p`. The machine
+    /// instruction would compute the other answer, so the run stays three instructions.
+    #[test]
+    fn a_subtraction_taking_memory_away_from_a_register_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let left = alu(&mut func, &mut names, block, "sub_rr_64", other, word);
+        store(&mut func, &mut names, block, base, left);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+        assert_eq!(
+            shape(&func, &names, block),
+            ["x64.mov_rm_64", "x64.sub_rr_64", "x64.mov_mr_64"]
+        );
+    }
+
+    /// A store to somewhere else. The answer is not going back where it came from, so what is left
+    /// is a load and an arithmetic and a store of three different addresses.
+    #[test]
+    fn a_store_to_another_address_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let elsewhere = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, elsewhere, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The same address at a different displacement, which is the near miss the comparison has to
+    /// catch rather than the obvious one above.
+    #[test]
+    fn a_store_at_another_displacement_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        let mov = op(&mut names, "mov_mr_64");
+        func.build(block, mov)
+            .uses(sum, GPR)
+            .mem(Mem { disp: 24, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The word read again by something else. The load has to stay for the second reader, so the
+    /// run is not a run.
+    #[test]
+    fn a_word_two_instructions_read_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        alu(&mut func, &mut names, block, "xor_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The answer read by something else as well as by the store, which is `x = *p += 1` and
+    /// leaves the answer wanted in a register the joined instruction never writes.
+    #[test]
+    fn an_answer_something_else_reads_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+        alu(&mut func, &mut names, block, "xor_rr_64", sum, other);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// Another access to memory in the middle. The read the run does moves down the block to where
+    /// the write was, so it would be moving past this one.
+    #[test]
+    fn a_run_with_another_access_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        load(&mut func, &mut names, block, other);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// Something writing the address register in the middle. A physical register is the only one
+    /// this can happen to before the allocator runs, and the frame is addressed through two.
+    #[test]
+    fn a_run_whose_address_register_is_written_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = Reg::physical(rucc_target::x86_64::RSP);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sub = op(&mut names, "sub_ri_64");
+        func.build(block, sub)
+            .operand(Operand::write(base, GPR).with(Constraint::Reuse(1)))
+            .uses(base, GPR)
+            .imm(32)
+            .finish();
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// Two locals whose displacements are both nothing so far. They are the same registers and the
+    /// same number here and are two different places, and what says so is the list the frame layout
+    /// has still to write an offset into.
+    #[test]
+    fn two_locals_the_layout_has_not_placed_yet_are_not_the_same_place() {
+        let (mut names, mut func, block) = empty();
+        let base = Reg::physical(rucc_target::x86_64::RSP);
+        let other = func.new_vreg(GPR);
+        let mov = op(&mut names, "mov_rm_64");
+        let word = func.new_vreg(GPR);
+        func.build(block, mov).def(word, GPR).mem(Mem::at(Operand::read(base, GPR))).finish();
+        let read = func.insts(block).next().expect("the load");
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        let put = op(&mut names, "mov_mr_64");
+        func.build(block, put).uses(sum, GPR).mem(Mem::at(Operand::read(base, GPR))).finish();
+        let written = func.insts(block).nth(2).expect("the store");
+
+        let mut addresses = vec![(read, 3usize), (written, 4usize)];
+        let mut arguments = Vec::new();
+        let mut dynamic = Vec::new();
+        let mut pending =
+            Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
+        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 0);
+    }
+
+    /// The one local, which is the same place twice and folds. The entry the load was waiting on
+    /// comes off the list, because the store is already waiting on the same one and adding the
+    /// frame's offset twice would put the local at twice its distance.
+    #[test]
+    fn the_frame_entry_of_a_load_that_goes_comes_off_the_list() {
+        let (mut names, mut func, block) = empty();
+        let base = Reg::physical(rucc_target::x86_64::RSP);
+        let other = func.new_vreg(GPR);
+        let mov = op(&mut names, "mov_rm_64");
+        let word = func.new_vreg(GPR);
+        func.build(block, mov).def(word, GPR).mem(Mem::at(Operand::read(base, GPR))).finish();
+        let read = func.insts(block).next().expect("the load");
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        let put = op(&mut names, "mov_mr_64");
+        func.build(block, put).uses(sum, GPR).mem(Mem::at(Operand::read(base, GPR))).finish();
+        let written = func.insts(block).nth(2).expect("the store");
+
+        let mut addresses = vec![(read, 3usize), (written, 3usize)];
+        let mut arguments = Vec::new();
+        let mut dynamic = Vec::new();
+        let mut pending =
+            Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
+        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 1);
+
+        let inst = func.insts(block).next().expect("the addition");
+        assert_eq!(addresses, [(inst, 3usize)], "one entry, on the instruction that is left");
+    }
+
+    /// A run of the wrong width, which is a load of four bytes under an addition of eight.
+    #[test]
+    fn a_run_whose_widths_disagree_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let narrow = op(&mut names, "mov_rm_32");
+        func.build(block, narrow)
+            .def(into, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", into, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// Every row of the table names four instructions this target has, all of one width.
+    #[test]
+    fn every_row_of_the_update_table_is_four_instructions_this_target_has() {
+        for update in UPDATES {
+            for name in [update.from, update.into, update.load, update.store] {
+                assert!(MACHINE.has(name), "{name} is not an instruction");
+            }
+            let width = |name: &str| name.rsplit_once('_').map(|(_, width)| width.to_owned());
+            assert_eq!(width(update.from), width(update.into), "{} changes width", update.from);
+            assert_eq!(
+                width(update.from),
+                width(update.load),
+                "{} loads another width",
+                update.from
+            );
+            assert_eq!(
+                width(update.from),
+                width(update.store),
+                "{} stores another width",
+                update.from
+            );
+            assert!((MACHINE.takes_mem)(update.into), "{} reaches no memory", update.into);
+            assert!(!(MACHINE.takes_mem)(update.from), "{} already reaches memory", update.from);
+        }
+    }
+
+    /// One row per arithmetic instruction this machine can do in place, for the reason the count
+    /// over the fold table is there.
+    #[test]
+    fn the_update_table_covers_the_arithmetic_this_target_can_do_in_place() {
+        assert_eq!(UPDATES.len(), 20, "five operations at four widths, and no multiply");
+        let commuting = UPDATES.iter().filter(|update| update.commutes).count();
+        assert_eq!(commuting, 16, "everything but the four subtractions");
     }
 
     /// The shape the whole pass is for.

@@ -39,12 +39,12 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    Align, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, Cmov,
-    Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg,
-    Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, Jcc, Jmp,
-    JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87, Prefetch, Probe,
-    Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl, ShiftRi, Spin,
-    Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    Align, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call,
+    Cmov, Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
+    CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem,
+    Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87,
+    Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl,
+    ShiftRi, Spin, Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -70,6 +70,23 @@ pub enum Form {
     /// is a load and an arithmetic term put together, which is [`crate::MachineInsts`]'s customer
     /// `rucc_codegen::combine`.
     AluRm,
+    /// The same instruction as [`Form::AluRr`] working on memory rather than on a register.
+    ///
+    /// The other side of [`Form::AluRm`]. That one reads a source out of memory and writes its
+    /// answer into a register, and this one reads a source out of a register and leaves its answer
+    /// where it read the other one from, so it reads memory and writes it back in one instruction.
+    /// One register read, no register written, and an addressing mode, which is the operand shape a
+    /// store has and is why the two share a description.
+    ///
+    /// No lowering rule produces one, for the reason no rule produces a [`Form::AluRm`] and one
+    /// more besides. A rule replaces a term with a term and this is three terms, a load and an
+    /// arithmetic and a store, and the third of them is not a value at all. `rucc_codegen::combine`
+    /// is what writes one, out of a run it found.
+    ///
+    /// The multiply has no member here. `imul` on this machine writes a register and nothing else,
+    /// so there is no sixteen, thirty two or sixty four bit form of it that leaves its answer in
+    /// memory, and the five operations that do are the ones with rows.
+    AluMr,
     /// Two-address arithmetic on one register, which is negation and complement.
     UnaryR,
     /// A two-address shift by a constant.
@@ -670,7 +687,9 @@ static ADDRESS: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static LOAD: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // A store writes nothing. It is the first instruction here that produces no value, which is
 // what having an effect means, and the allocator needs no more than that: an instruction with
-// no definition keeps nothing alive past it.
+// no definition keeps nothing alive past it. Arithmetic that leaves its answer in memory is the
+// same shape and shares the description: one register read, an addressing mode, and nothing the
+// allocator has to find a place for.
 static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // An integer comes back in `rax` on every convention this machine has, which is why the register
 // is written here rather than read out of the convention the session was given. A test checks it
@@ -814,7 +833,7 @@ impl Form {
             DivRem => &DIV_REM,
             Lea => &ADDRESS,
             Load => &LOAD,
-            Store => &STORE,
+            AluMr | Store => &STORE,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
@@ -863,6 +882,7 @@ impl Form {
             self,
             Lea | Load
                 | AluRm
+                | AluMr
                 | Store
                 | LoadVec
                 | StoreVec
@@ -901,6 +921,7 @@ impl Form {
         matches!(
             self,
             Load | AluRm
+                | AluMr
                 | Store
                 | LoadVec
                 | StoreVec
@@ -991,6 +1012,29 @@ pub static INSTS: &[(&str, Form)] = &[
     ("imul_rm_16", AluRm),
     ("imul_rm_32", AluRm),
     ("imul_rm_64", AluRm),
+    // The same arithmetic again with the answer left in memory, which is the five operations that
+    // have a form like that. The multiply does not: `imul` on this machine writes a register and
+    // reads the other side wherever it is, so there is no row for one here.
+    ("add_mr_8", AluMr),
+    ("add_mr_16", AluMr),
+    ("add_mr_32", AluMr),
+    ("add_mr_64", AluMr),
+    ("sub_mr_8", AluMr),
+    ("sub_mr_16", AluMr),
+    ("sub_mr_32", AluMr),
+    ("sub_mr_64", AluMr),
+    ("and_mr_8", AluMr),
+    ("and_mr_16", AluMr),
+    ("and_mr_32", AluMr),
+    ("and_mr_64", AluMr),
+    ("or_mr_8", AluMr),
+    ("or_mr_16", AluMr),
+    ("or_mr_32", AluMr),
+    ("or_mr_64", AluMr),
+    ("xor_mr_8", AluMr),
+    ("xor_mr_16", AluMr),
+    ("xor_mr_32", AluMr),
+    ("xor_mr_64", AluMr),
     // Arithmetic, register with immediate.
     ("add_ri_8", AluRi),
     ("add_ri_16", AluRi),
@@ -1617,7 +1661,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 433);
+        assert_eq!(described, 453);
     }
 
     #[test]
@@ -1635,7 +1679,9 @@ mod tests {
             // layout writes can read it, a test and a comparison set the flags, a jump goes
             // somewhere, a push
             // puts a register on the stack and leaving leaves, and a barrier is nothing but the
-            // order it puts the accesses around it in. Everything else here computes something,
+            // order it puts the accesses around it in. Arithmetic that leaves its answer in
+            // memory is a store as far as this is concerned: what it produces is out there rather
+            // than in a register. Everything else here computes something,
             // and an opcode that computes nothing and does nothing either would be an opcode
             // nothing has any reason to select.
             //
@@ -1654,6 +1700,7 @@ mod tests {
                     || matches!(
                         form,
                         Store
+                            | AluMr
                             | RetVal
                             | RetVal2
                             | RetValVec
