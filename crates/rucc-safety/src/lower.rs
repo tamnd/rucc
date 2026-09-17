@@ -238,6 +238,34 @@ pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> V
     func[made].results().next().expect("a cast created with one result has one")
 }
 
+/// Whether an instruction that reads a capability is still reading one after this pass has run.
+///
+/// One check of the five, which is [`live`], and that is a statement about how far tamnd/rucc#1241
+/// has got rather than about the design. The other four still become a call that takes an address,
+/// so a capability whose only reader is one of them is dead the moment the rewrite happens and
+/// [`crate::slot`]'s prune takes it out. Box 6 of tamnd/rucc#1241 is what makes `check_bounds` take
+/// one, and this gains a name on the day it lands.
+///
+/// It is a predicate somebody outside can ask rather than something left implied by the arm it
+/// belongs to, and [`crate::origin::existing`] is the somebody, on behalf of [`crate::handover`].
+/// What that pass hands to a callee has to be a capability the caller is paying for anyway, and a
+/// producer about to be pruned is not one: handing it over is a reader, a reader keeps it alive, and
+/// what it keeps alive is a walk of the lifetime plane nobody was doing. On the SQLite amalgamation
+/// that is nine hundred walks and eight per cent of the text, bought for nothing.
+///
+/// The three that are not checks are here because they read a capability, come through this pass
+/// untouched, and are not producers themselves, so nothing else decides whether they count. A
+/// producer that reads one is a `cap_narrow`, and whether that keeps its operand alive depends on
+/// whether anything keeps the narrow alive, which is a fixpoint rather than an answer this can give.
+///
+/// A whitelist and not a blacklist, because the two ways of being wrong are not the same size.
+/// Leaving something out means a capability that could have travelled does not, which is a handover
+/// missed. Putting something in wrongly means a dead producer resurrected, which is the regression
+/// this exists to prevent.
+pub(crate) fn keeps(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::CheckLive | Opcode::CapStore | Opcode::CapYield | Opcode::CapPublish)
+}
+
 /// `check_live` becomes `__rucc_check_live(capability, pointer, descriptor)`.
 ///
 /// The first operand is the one this used to throw away, and handing it over is the whole of what

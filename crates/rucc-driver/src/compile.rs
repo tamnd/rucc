@@ -811,6 +811,13 @@ fn generate(
         // Safe to run twice and safe to run late, because it only ever sets the flag and never
         // clears one, so a build that had it already gets the same module back.
         rucc_opt::heap::annotate(module, names);
+        // Which calls hand their capabilities to the callee and which say there are none. Here and
+        // not beside the insertion, because the rule is what each function still has left to check
+        // and the optimizer is what makes that small: running before it would give every callee a
+        // frame for checks that are about to be discharged. `rucc_safety::handover` is the rule and
+        // the pass both, and the census in `--emit=safety-summary` reads the same rule, so the
+        // buckets it prints describe the code that was actually built.
+        rucc_safety::handover::arrange(module);
         rucc_safety::lower(module, names);
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors

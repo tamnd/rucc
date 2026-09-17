@@ -85,8 +85,9 @@
 //! needs no frame, one that still checks something needs the capabilities, and a callee outside the
 //! unit or reached through a pointer is one nothing here can ask. That is a whole-unit question and
 //! this module is a lowering, so it lives there, where the census that has been counting those
-//! buckets since before anything emitted a frame reads it as well. The pass that puts the
-//! instructions in is a later box on tamnd/rucc#1085.
+//! buckets since before anything emitted a frame reads it as well. `handover::arrange` is the pass
+//! that puts the instructions in, and it runs after the optimizer, since what the rule asks is what
+//! each function still has left to check.
 //!
 //! # The one thing this does not handle
 //!
