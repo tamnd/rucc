@@ -255,6 +255,32 @@ pub struct Trace {
     pub fentry: bool,
 }
 
+/// What a platform calls the routine that reaches the pages of a frame before the frame is taken.
+///
+/// Windows is the platform this is about. A thread there is given a stack of which only a little is
+/// committed, and one page below what is committed is a guard page whose whole job is to be touched:
+/// the fault it raises is what tells the kernel to commit another page and move the guard down. So a
+/// frame larger than a page has to be reached a page at a time or the guard is stepped over, and the
+/// program gets an access violation on an address that was never going to be mapped. That is the
+/// calling convention rather than a hardening flag, which is what makes this a field here and not
+/// something `-fstack-clash-protection` turns on.
+///
+/// Every Windows toolchain calls a routine for it rather than writing the walk out, and the routine
+/// is in the C runtime, so the name is the platform's. It reads the size in one register, touches
+/// each page down to there, and comes back having moved nothing, which is why the caller still has
+/// to take the frame afterwards.
+///
+/// A convention that answers `None` is one where reaching the pages is not the convention's
+/// business. That is every System V target, where a stack grows by faulting anywhere below it and
+/// the pages between are filled in by the kernel without being asked in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chkstk {
+    /// What the routine is called.
+    pub name: &'static str,
+    /// The register the size goes in, which is also the register it comes back in.
+    pub size: PhysReg,
+}
+
 /// Which registers a calling convention gives which job.
 ///
 /// This is the second half of a target description and it is separate from [`RegFile`] because
@@ -373,6 +399,15 @@ pub struct CallRegs {
     /// machine's, and the two x86-64 conventions write the same call instruction and disagree about
     /// what goes in it.
     pub trace: Option<Trace>,
+    /// What this platform calls the routine a prologue reaches the pages of a large frame with, on
+    /// one where reaching them is the convention.
+    ///
+    /// Here for the same reason the two above are, and it is the clearest case of the three: the
+    /// walk itself is written out of the machine's own instructions and both x86-64 conventions
+    /// have them, and what the two disagree about is whether a frame may be taken in one step at
+    /// all. A prologue that leaves this out on Windows writes a function that faults on its own
+    /// locals.
+    pub chkstk: Option<Chkstk>,
 }
 
 impl CallRegs {
@@ -637,6 +672,7 @@ mod tests {
             dwarf_return_address: 16,
             guard: None,
             trace: None,
+            chkstk: None,
         }
     }
 

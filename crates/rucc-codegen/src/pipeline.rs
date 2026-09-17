@@ -489,8 +489,13 @@ pub fn compile_recording(
     // A target with no instruction that touches a page without changing it does nothing about the
     // flag, which is the same answer the protector gives on a target with nowhere to keep its word.
     // Every target this crate has a back end for has one.
-    let probe = flags
-        .stack_clash
+    //
+    // Or where the platform reaches the pages of every frame whatever the command line said, which
+    // is Windows. The prologue there calls a routine rather than walking, but a frame that grows
+    // while it runs is walked in the body either way: the routine takes its size in a register the
+    // allocator hands out and destroys two more, which is answerable in a prologue and not in the
+    // middle of a function, and the walk needs nothing but the two registers already held back.
+    let probe = (flags.stack_clash || machine.conv.chkstk.is_some())
         .then_some(machine.insts.probe.as_ref())
         .flatten()
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });

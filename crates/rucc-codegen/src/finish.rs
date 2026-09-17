@@ -73,7 +73,7 @@ use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch,
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
-use rucc_target::{BranchInsts, CallRegs, FrameInsts, Guard, PhysReg, Probe, RegClass};
+use rucc_target::{BranchInsts, CallRegs, Chkstk, FrameInsts, Guard, PhysReg, Probe, RegClass};
 
 use crate::frame::Frame;
 use crate::lower::Stack;
@@ -563,6 +563,18 @@ impl Writer<'_> {
         from_sp: bool,
         probe: Option<Probing<'_>>,
     ) {
+        // In front of everything else, because a platform with a routine for this has it for every
+        // frame rather than for the ones a flag was passed about, and because the routine does the
+        // whole of what the walk below would have done. See [`rucc_target::Chkstk`].
+        let page = self.insts.probe.map_or(u32::MAX, |probe| probe.interval);
+        if let Some(chkstk) = self.conv.chkstk.filter(|_| size > page) {
+            let inst = self.reach(out, chkstk, size);
+            *below += offset(size);
+            if from_sp {
+                self.row(inst, CfiOp::DefCfaOffset(*below));
+            }
+            return;
+        }
         let Some(probing) = probe.filter(|probing| size > probing.probe.interval) else {
             let inst = self.sub(size);
             out.push(inst);
@@ -618,6 +630,51 @@ impl Writer<'_> {
             };
             self.row(inst, op);
         }
+    }
+
+    /// Reaches the pages of a frame by calling the routine this platform has for it, and then takes
+    /// the frame.
+    ///
+    /// Three instructions, and the third is the one that moves anything:
+    ///
+    /// ```text
+    ///   the size into a register    which register is the platform's answer rather than ours
+    ///   the call                    touches every page from here down to that many bytes below
+    ///   the subtraction             takes the frame, of the register the size is still in
+    /// ```
+    ///
+    /// The routine comes back having moved nothing, which is what makes the third instruction
+    /// necessary and is also what makes it a subtraction of a register rather than of the constant
+    /// written again. Writing the constant twice would be the same number of bytes of code and one
+    /// more place for the two to disagree.
+    ///
+    /// Nothing is described to the unwinder for the first two. The call pushes a return address and
+    /// the routine pops it, so the frame is the same on both sides of it, which is the same argument
+    /// the profiler's hook makes a few lines above. The row goes behind the subtraction, where the
+    /// stack pointer has actually moved.
+    ///
+    /// No register here has to be asked about. The size goes in one the convention passes no
+    /// argument in, which is what lets the platform name it at all, and the routine destroys two
+    /// that are exactly the two the allocator was told to hold back. A prologue is also the one
+    /// place in a function where the only live values are the ones that arrived in the convention's
+    /// own registers.
+    fn reach(&mut self, out: &mut Vec<Inst>, chkstk: Chkstk, size: u32) -> Inst {
+        let class = self.conv.int_class;
+        let sp = Reg::physical(self.conv.stack_pointer);
+        let count = Reg::physical(chkstk.size);
+
+        let imm = self.opcode(self.insts.imm);
+        let inst = self.func.build_loose(imm).def(count, class).imm(i64::from(size)).finish();
+        out.push(inst);
+        let call = self.opcode(self.insts.call);
+        let symbol = self.names.intern(chkstk.name);
+        let inst = self.func.build_loose(call).symbol(symbol).finish();
+        out.push(inst);
+        let grow = self.opcode(self.insts.grow);
+        let inst =
+            self.func.build_loose(grow).def(sp, class).uses(sp, class).uses(count, class).finish();
+        out.push(inst);
+        inst
     }
 
     /// The loop that takes a frame too large for the touches to be written one after another.
@@ -1616,6 +1673,46 @@ mod tests {
                 "}",
             ]
         );
+    }
+
+    #[test]
+    fn a_large_frame_on_a_platform_with_a_routine_for_its_pages_calls_the_routine() {
+        let (mut func, allocation, mut names) = pressure(&WIN64, 2, 4);
+        let locals = [Local { size: 100_000, align: 16 }];
+        let base = Layout::new(&WIN64, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+
+        // Nothing asked for this on the command line, which is the point: Windows commits a stack
+        // by having the pages touched in order, so a frame this size has to reach them whatever the
+        // flags said. The size goes in the register the platform names, the routine touches every
+        // page down to there, and the frame is taken afterwards, because the routine comes back
+        // having moved nothing. What the epilogue gives back is what the register was given, which
+        // is the one thing worth tying together here.
+        let added = added(&lines);
+        assert_eq!(added.len(), 5, "{added:?}");
+        let size = added[0].strip_prefix("$rax = x64.mov_ri_64 ").expect("a size in a register");
+        assert_eq!(added[1], "x64.call @__chkstk");
+        assert_eq!(added[2], "$rsp = x64.sub_rr_64 $rsp, $rax");
+        assert_eq!(added[3], format!("$rsp = x64.add_ri_64 $rsp, {size}"));
+        assert_eq!(added[4], "x64.ret");
+    }
+
+    #[test]
+    fn a_frame_of_one_page_calls_nothing_on_that_platform_either() {
+        let (mut func, allocation, mut names) = pressure(&WIN64, 2, 4);
+        let locals = [Local { size: 4000, align: 16 }];
+        let base = Layout::new(&WIN64, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+
+        // The same reason a frame of one page is taken in one subtraction under the flag. The far
+        // end of such a frame is inside the page below the stack pointer, and touching that page is
+        // what the function does on its way to using the frame at all, so there is nothing for a
+        // routine to do and a call to it would be a call in every function that declares an array.
+        let added = added(&lines);
+        assert!(added.iter().all(|line| !line.contains("chkstk")), "{added:?}");
+        assert_eq!(added.len(), 3, "{added:?}");
     }
 
     #[test]
