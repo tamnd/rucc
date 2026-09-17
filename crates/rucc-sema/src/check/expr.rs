@@ -729,6 +729,12 @@ impl Checker<'_> {
         if let Some(value) = self.lock_free_builtin_value(function, &args, span) {
             return value;
         }
+        // The two that ask how many bytes are behind an address, which a fortified header puts
+        // into every copy it forwards. In `check/builtin/size.rs`, with the four kinds and with
+        // where the walk gives up.
+        if let Some(value) = self.object_size_builtin(function, &args, span) {
+            return value;
+        }
         let args = self.tast.add_expr_refs(&args);
         let ty = signature.ret;
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)

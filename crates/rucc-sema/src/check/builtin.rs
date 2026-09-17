@@ -70,6 +70,7 @@ mod math;
 mod overflow;
 mod prefetch;
 mod sign;
+mod size;
 mod thread;
 mod trap;
 mod unreachable;

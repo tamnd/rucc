@@ -4695,45 +4695,171 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
     /// A builtin nothing lowers is refused where it is written, rather than at the link.
     ///
-    /// The names are two with a prototype and one whose type comes from the call it was written in,
-    /// which is also the one whose prefix is not `__builtin_`. The two with a prototype are what is
-    /// left of the builtins that have one, and the third is the last of the atomic family that is
-    /// refused, whose older half has nothing left in it at all. What the
-    /// message has to carry is the name, because the whole complaint about the link error this
-    /// replaces is that the name in it was one the compiler chose.
+    /// One name is left, which is the last of the atomic family that is refused and is also the
+    /// one whose prefix is not `__builtin_`; its older half has nothing left in it at all, and so
+    /// does the half of the family that carries a prototype. What the message has to carry is the
+    /// name, because the whole complaint about the link error this replaces is that the name in it
+    /// was one the compiler chose.
     #[test]
     fn a_builtin_nothing_lowers_is_refused_by_name() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        for (builtin, call) in [
-            ("__builtin_object_size", "(int)__builtin_object_size(&counter, 0)"),
-            ("__builtin_dynamic_object_size", "(int)__builtin_dynamic_object_size(&counter, 0)"),
-            ("__atomic_signal_fence", "(__atomic_signal_fence(5), 0)"),
+        let builtin = "__atomic_signal_fence";
+        let source = format!("int counter;\nint f(void) {{ return ({builtin}(5), 0); }}\n");
+        let messages = run(&opts, &source).messages;
+        let named = messages.iter().any(|m| m.contains(builtin) && m.contains("E0686"));
+        assert!(named, "expected {builtin} to be refused by name in {messages:?}");
+    }
+
+    /// The refusal is about a call and not about the name, so a program that defines the name
+    /// itself gets the function it wrote.
+    ///
+    /// That is not the reason the refusal exists, but a definition in front of us is a definition
+    /// and the call to it links. It works here because the name is one with no prototype and no
+    /// meaning the front end knows, which is what is left once the rest of the family is
+    /// implemented: a `__builtin_` name the front end does answer is answered whatever the program
+    /// declares, the way gcc answers one.
+    #[test]
+    fn what_is_refused_is_the_call_and_not_the_name() {
+        let text = ir(concat!(
+            "void __atomic_signal_fence(int order) { (void)order; }\n",
+            "void f(void) { __atomic_signal_fence(5); }\n",
+        ));
+        assert!(text.contains("call @__atomic_signal_fence"), "{text}");
+    }
+
+    /// How many bytes are behind an address is read off the layout, for every shape the walk
+    /// covers.
+    ///
+    /// This is what `_FORTIFY_SOURCE` runs on, so the numbers matter one at a time rather than in
+    /// aggregate: a size too small turns a correct copy into an abort, and a size too large turns
+    /// a checked copy back into an unchecked one. Every answer here was measured against gcc
+    /// 16.2.0 first. They are written as initializers so that each one is a constant in the
+    /// output and the test reads as the table it is.
+    #[test]
+    fn the_object_size_of_an_address_is_what_the_layout_leaves_in_front_of_it() {
+        let text = ir(concat!(
+            "struct S { char a[8]; int n; char b[12]; };\n",
+            "char g[32];\n",
+            "struct S gs;\n",
+            "unsigned long whole = __builtin_object_size(g, 0);\n",
+            "unsigned long moved = __builtin_object_size(g + 4, 0);\n",
+            "unsigned long back = __builtin_object_size(g + 30 - 2, 0);\n",
+            "unsigned long outer = __builtin_object_size(gs.a, 0);\n",
+            "unsigned long inner = __builtin_object_size(gs.a, 1);\n",
+            "unsigned long scalar = __builtin_object_size(&gs.n, 1);\n",
+            "unsigned long after = __builtin_object_size(&gs.n, 0);\n",
+            "unsigned long into = __builtin_object_size(&gs.b[2], 1);\n",
+            "unsigned long text = __builtin_object_size(\"hello\", 0);\n",
+            "unsigned long dyn = __builtin_dynamic_object_size(gs.b, 1);\n",
+        ));
+        for (name, size) in [
+            ("whole", 32),
+            ("moved", 28),
+            ("back", 4),
+            ("outer", 24),
+            ("inner", 8),
+            ("scalar", 4),
+            ("after", 16),
+            ("into", 10),
+            ("text", 6),
+            ("dyn", 12),
         ] {
-            let source = format!("int counter;\nint f(void) {{ return {call}; }}\n");
-            let messages = run(&opts, &source).messages;
-            let named = messages.iter().any(|m| m.contains(builtin) && m.contains("E0686"));
-            assert!(named, "expected {builtin} to be refused by name in {messages:?}");
+            let said = format!("global @{name} : i64 = {size},");
+            assert!(text.contains(&said), "expected `{said}` in:\n{text}");
         }
     }
 
-    /// The refusal is about a call and not about the name, so the rest of what C does with one
-    /// still works.
+    /// A local is as knowable as a global, which is the whole point of asking on the way into a
+    /// copy.
     ///
-    /// `sizeof` does not evaluate its operand, so nothing is called and there is nothing to
-    /// refuse; the type of the call is what it asks for and that comes from the front end. A
-    /// program that defines the name itself gets the function it wrote, which is not what this
-    /// is for but is what a definition in front of us means.
+    /// A fortified header expands around the destination the caller wrote, and the destination a
+    /// program most wants checked is the buffer on its own stack. Nothing in the answer depends on
+    /// storage duration, unlike in a constant expression, where the address of a local is exactly
+    /// what is not allowed.
     #[test]
-    fn what_is_refused_is_the_call_and_not_the_name() {
-        let text = ir("unsigned long n = sizeof(__builtin_object_size(0, 0));\n");
-        assert!(text.contains("global @n : i64 = 8,"), "{text}");
-
-        let text = ir(concat!(
-            "unsigned long __builtin_object_size(const void *p, int kind) { return 0; }\n",
-            "unsigned long f(void) { return __builtin_object_size(0, 0); }\n",
+    fn the_object_behind_an_address_can_be_one_with_automatic_storage() {
+        let text = body(concat!(
+            "struct S { char a[8]; int n; char b[12]; };\n",
+            "unsigned long f(void) {\n",
+            "  char loc[20];\n",
+            "  struct S ls;\n",
+            "  return __builtin_object_size(loc + 3, 0) + __builtin_object_size(ls.b + 2, 1);\n",
+            "}\n",
         ));
-        assert!(text.contains("call @__builtin_object_size"), "{text}");
+        assert!(text.contains("iconst.i64 17"), "twenty bytes with three used: {text}");
+        assert!(text.contains("iconst.i64 10"), "twelve bytes with two used: {text}");
+    }
+
+    /// An address whose object the walk cannot see answers at whichever end of the range the kind
+    /// asks for.
+    ///
+    /// The two bits are a question and the answer has to fit it. A kind wanting the largest object
+    /// the address could be in has to name a size nothing is bigger than, and a kind wanting the
+    /// smallest has to name a size nothing is smaller than, so the unknown answers are all ones
+    /// and zero. That pair is what a fortified header compares against to decide whether to check
+    /// at all, and getting either of them the wrong way round turns every unknown copy into an
+    /// abort.
+    #[test]
+    fn an_address_with_no_object_in_sight_answers_at_the_end_of_the_range_its_kind_asks_for() {
+        let text = ir(concat!(
+            "struct T { int n; char f[]; };\n",
+            "extern char *p;\n",
+            "extern struct T *t;\n",
+            "unsigned long largest = __builtin_object_size(p, 0);\n",
+            "unsigned long nearest = __builtin_object_size(p, 1);\n",
+            "unsigned long least = __builtin_object_size(p, 2);\n",
+            "unsigned long tight = __builtin_object_size(p, 3);\n",
+            "unsigned long flex = __builtin_object_size(t->f, 1);\n",
+            "int says = __builtin_object_size(p, 0) == (unsigned long)-1;\n",
+        ));
+        for name in ["largest", "nearest", "flex"] {
+            // All ones, printed as the signed rendering of the sixty four bits it is held in.
+            // `says` is what pins the pattern itself, since it is the comparison a fortified
+            // header writes and it folds only if every bit is set.
+            let said = format!("global @{name} : i64 = -1,");
+            assert!(text.contains(&said), "expected `{said}` in:\n{text}");
+        }
+        for name in ["least", "tight"] {
+            let said = format!("global @{name} : i64 = 0,");
+            assert!(text.contains(&said), "expected `{said}` in:\n{text}");
+        }
+        assert!(text.contains("global @says : i32 = 1,"), "{text}");
+    }
+
+    /// The address is not evaluated, which is the rule `sizeof` follows and for the same reason.
+    ///
+    /// What the builtin reads is the shape of the expression rather than the value it would
+    /// produce, so there is nothing to run. It matters because a fortified header writes the
+    /// destination twice, once into the copy and once into the size, and a program whose
+    /// destination is `*next()` would advance twice if this evaluated.
+    #[test]
+    fn the_address_an_object_size_is_asked_about_is_not_evaluated() {
+        let text = body(concat!(
+            "extern char *side(void);\n",
+            "unsigned long f(void) { return __builtin_object_size(side(), 0); }\n",
+        ));
+        assert!(!text.contains("call"), "nothing is called: {text}");
+    }
+
+    /// The kind has to be a constant in range, because it says which of four questions was asked.
+    ///
+    /// A number that is not known until the program runs decides nothing, and one outside the two
+    /// bits names no question at all. gcc refuses both in one sentence and so does this.
+    #[test]
+    fn a_kind_that_is_not_one_of_the_four_is_refused() {
+        for source in [
+            "extern char *p;\nextern int k;\nunsigned long f(void) ".to_owned()
+                + "{ return __builtin_object_size(p, k); }\n",
+            "extern char *p;\nunsigned long f(void) { return __builtin_object_size(p, 4); }\n"
+                .to_owned(),
+            "extern char *p;\nunsigned long f(void) ".to_owned()
+                + "{ return __builtin_dynamic_object_size(p, -1); }\n",
+        ] {
+            let messages = errors(&source);
+            let named = messages.iter().any(|m| m.contains("E0709") && m.contains("0 to 3"));
+            assert!(named, "expected a complaint about the kind in {messages:?}");
+        }
     }
 
     /// A `static` function nothing refers to is not emitted, and one that is refered to is.
