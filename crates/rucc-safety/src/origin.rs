@@ -101,6 +101,23 @@ impl Origins {
         }
         cap
     }
+
+    /// Says that `pointer` already has `cap`, so nothing later makes it a second one.
+    ///
+    /// For a producer the walk puts in itself rather than one [`of`](Self::of) would have made. A
+    /// pointer read out of memory is the case: its capability comes out of the aux slot beside the
+    /// word it was read from, which is a `cap_load` the load's own arm emits, and that is both
+    /// cheaper than the `cap_of` this would otherwise put there and the answer to a question
+    /// `cap_of` cannot ask. Recovering from an address says which object holds it now, and the slot
+    /// says which object it was written for, and the two differ exactly when a pointer outlived the
+    /// thing it pointed at.
+    ///
+    /// Keyed on the pointer itself and not on [`root`], because the pointer a load produces is its
+    /// own base. Nothing here follows a derivation chain for the same reason: the load is where the
+    /// value comes from and there is nothing behind it to walk to.
+    pub(crate) fn seed(&mut self, pointer: Value, cap: Value) {
+        self.held.insert(pointer, cap);
+    }
 }
 
 /// The capability each pointer in a function already has, without making a single new one.
@@ -161,7 +178,7 @@ fn kept(func: &Func) -> HashSet<Value> {
     let mut alive: HashSet<Value> = HashSet::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
-            if !reader(func[inst].opcode) {
+            if !crate::lower::keeps(func[inst].opcode) {
                 continue;
             }
             let read = func[func[inst].args].iter().copied();
@@ -189,24 +206,6 @@ fn kept(func: &Func) -> HashSet<Value> {
             return alive;
         }
     }
-}
-
-/// Whether an instruction of this opcode reads a capability and will still be reading one later.
-///
-/// The seed of [`kept`], and it is three questions rather than one. A check is the interesting case
-/// and `crate::lower::keeps` is the answer for it, since most classes throw the capability away when
-/// they become calls. The three that follow read one, come through the rewrite untouched, and are
-/// not producers, so nothing else is going to decide for them. A `cap_narrow` is a producer that
-/// reads one, and whether it keeps its operand alive depends on whether anything keeps the narrow
-/// alive, which is the fixpoint above rather than an answer this can give.
-///
-/// A whitelist and not a blacklist, because the two ways of being wrong are not the same size.
-/// Leaving something out means a capability that could have travelled to a callee does not, which is
-/// one handover missed. Putting something in wrongly means a dead producer resurrected, which is the
-/// regression the whole test exists to prevent.
-fn reader(opcode: Opcode) -> bool {
-    crate::lower::keeps(opcode)
-        || matches!(opcode, Opcode::CapStore | Opcode::CapYield | Opcode::CapPublish)
 }
 
 /// What [`existing`] found for `pointer`, if it found anything.

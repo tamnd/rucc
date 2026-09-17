@@ -1014,6 +1014,36 @@ impl Opcode {
         )
     }
 
+    /// Which operand of a capability producer names the pointer the capability is about.
+    ///
+    /// Four of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
+    /// the capability describes the object that pointer is in. Where they differ is only in how the
+    /// answer was arrived at, which is a walk of the lifetime plane for `cap_recover`, a read of the
+    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, and whatever
+    /// the back end has at hand for `cap_of`.
+    ///
+    /// That is worth stating as one question because the optimizer asks it. A rule that discharges a
+    /// check by knowing which pointer the check's capability is about has no business caring which
+    /// producer supplied it, and while `cap_of` was the only one anything emitted, asking for the
+    /// opcode by name and taking operand zero was the same question. It stopped being the same
+    /// question when tamnd/rucc#1241 started emitting the cheap producers, and a rule that still
+    /// asked by name would quietly discharge less the better the code got.
+    ///
+    /// The three that answer nothing are the three that are not about a pointer at all. A
+    /// `cap_narrow` is about another capability, a `cap_null` is about nothing by construction, and
+    /// a `cap_result` is about a pointer the callee returned, which is a value this function has
+    /// only as the call's own result and not as an operand.
+    #[must_use]
+    pub const fn capability_names(self) -> Option<usize> {
+        match self {
+            Self::CapOf | Self::CapRecover | Self::CapArg => Some(0),
+            // The third, because the first two are the container's capability and the address of
+            // the word, and the pointer this one is about is the value that came out of the word.
+            Self::CapLoad => Some(2),
+            _ => None,
+        }
+    }
+
     /// Which payload an instruction with this opcode carries.
     ///
     /// The printer reads the payload it finds and does not need this. The parser has only the
@@ -1665,6 +1695,27 @@ mod tests {
         for opcode in makers {
             assert_eq!(opcode.results(), Some(1), "{}", opcode.name());
         }
+    }
+
+    #[test]
+    fn a_producer_says_which_of_its_operands_is_the_pointer_it_is_about() {
+        // Four of the seven, and the one that is not operand zero is the one whose first two
+        // operands are the container and the word rather than the value that came out of it.
+        assert_eq!(Opcode::CapOf.capability_names(), Some(0));
+        assert_eq!(Opcode::CapRecover.capability_names(), Some(0));
+        assert_eq!(Opcode::CapArg.capability_names(), Some(0));
+        assert_eq!(Opcode::CapLoad.capability_names(), Some(2));
+
+        // The three that are about something other than a pointer this function has an operand for.
+        assert_eq!(Opcode::CapNarrow.capability_names(), None);
+        assert_eq!(Opcode::CapNull.capability_names(), None);
+        assert_eq!(Opcode::CapResult.capability_names(), None);
+
+        // Nothing that is not a producer answers, since the question is what a capability describes
+        // and those have no capability to describe anything with.
+        assert_eq!(Opcode::CapStore.capability_names(), None);
+        assert_eq!(Opcode::Load.capability_names(), None);
+        assert_eq!(Opcode::CheckLive.capability_names(), None);
     }
 
     #[test]

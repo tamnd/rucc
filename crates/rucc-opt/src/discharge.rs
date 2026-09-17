@@ -935,7 +935,7 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128, bool)> {
     let &capability = args.first()?;
     let &pointer = args.get(1)?;
     let (base, offset) = normal(func, pointer);
-    let named = operand_of(func, capability, Opcode::CapOf, 0)?;
+    let named = named_by(func, capability)?;
     its_own(named, pointer, base).map(|whole| (base, offset, whole))
 }
 
@@ -999,7 +999,7 @@ pub(crate) fn derives(func: &Func, check: Inst) -> Option<(Fact, Fact)> {
     let &from = args.get(1)?;
     let &to = args.get(2)?;
     let (base, start) = normal(func, from);
-    let named = operand_of(func, capability, Opcode::CapOf, 0)?;
+    let named = named_by(func, capability)?;
     let whole = its_own(named, from, base)?;
     let (walked, end) = normal(func, to);
     if base != walked {
@@ -1328,7 +1328,7 @@ fn unreadable(func: &Func, ranges: Option<&mut Ranges<'_>>, check: Inst) -> &'st
     else {
         return NO_EXTENT_OTHER;
     };
-    if operand_of(func, capability, Opcode::CapOf, 0) != Some(from) {
+    if named_by(func, capability) != Some(from) {
         return NOT_ITS_CAPABILITY_DERIV;
     }
     // No ranges is a function with no walk in it that steps by a value, so every step here was a
@@ -1386,7 +1386,7 @@ fn spread(
     let &capability = args.first()?;
     let &from = args.get(1)?;
     let &to = args.get(2)?;
-    if operand_of(func, capability, Opcode::CapOf, 0) != Some(from) {
+    if named_by(func, capability) != Some(from) {
         return None;
     }
     let (base, offset) = normal(func, from);
@@ -1475,6 +1475,20 @@ pub(crate) fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize
         return None;
     }
     func[func[inst].args].get(index).copied()
+}
+
+/// The pointer a capability is about, whichever producer made it.
+///
+/// [`Opcode::capability_names`] is the fact and this is the lookup over a value. Asked instead of
+/// `operand_of(func, capability, Opcode::CapOf, 0)`, which was the same question while `cap_of` was
+/// the only producer `rucc-safety` emitted and became a narrower one when tamnd/rucc#1241 started
+/// emitting the cheap ones. A rule here cares which pointer a capability describes and not how the
+/// capability was arrived at, so asking for the opcode by name would have meant a check through a
+/// pointer read out of memory quietly stopped being dischargeable on the day that read got cheaper.
+pub(crate) fn named_by(func: &Func, capability: Value) -> Option<Value> {
+    let Def::Result { inst, .. } = func[capability].def else { return None };
+    let at = func[inst].opcode.capability_names()?;
+    func[func[inst].args].get(at).copied()
 }
 
 /// The value of an integer constant, read with its own sign.
