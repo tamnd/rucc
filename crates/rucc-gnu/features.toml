@@ -1010,20 +1010,21 @@ tests = ["rucc-driver::the_byte_swaps_reverse_at_the_width_their_name_says"]
 name = "__builtin_object_size"
 kind = "builtin"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 signature = "size_t(const void *, int)"
 used_by = ["glibc", "linux"]
-tests = []
+tests = ["rucc-driver::the_object_size_of_an_address_is_what_the_layout_leaves_in_front_of_it", "rucc-driver::an_address_with_no_object_in_sight_answers_at_the_end_of_the_range_its_kind_asks_for"]
 notes = "_FORTIFY_SOURCE is built on it, so glibc's headers stop working correctly without it."
 
 [[feature]]
 name = "__builtin_dynamic_object_size"
 kind = "builtin"
 gcc_version = "12.0"
-status = "unimplemented"
+status = "implemented"
 signature = "size_t(const void *, int)"
 used_by = ["glibc", "linux"]
-tests = []
+tests = ["rucc-driver::the_object_size_of_an_address_is_what_the_layout_leaves_in_front_of_it", "rucc-driver::a_kind_that_is_not_one_of_the_four_is_refused"]
+notes = "A constant answer satisfies it, so it is answered where the plain spelling is."
 
 [[feature]]
 name = "__builtin_assume_aligned"
