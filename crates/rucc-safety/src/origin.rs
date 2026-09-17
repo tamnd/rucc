@@ -52,7 +52,7 @@
 //! recomputed each time round arrives as a parameter of the loop header, and there is no way to
 //! build a cycle out of instruction results in a body that is in SSA form.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_ir::{Def, Func, Inst, InstData, Opcode, Type, Value};
 
@@ -101,6 +101,123 @@ impl Origins {
         }
         cap
     }
+}
+
+/// The capability each pointer in a function already has, without making a single new one.
+///
+/// [`Origins`] is the table the insertion pass builds while it is putting checks in, and it is gone
+/// by the time anything downstream runs. A pass after the optimizer that wants a capability is in a
+/// different position from that one: it cannot ask for a pointer it has nothing for, because making
+/// one there would be a `cap_recover` nobody asked for, which is the walk of the lifetime plane this
+/// whole line of work exists to stop paying. So it reads what is there instead, and takes the answer
+/// or takes nothing.
+///
+/// Keyed on the base, since [`root`] is what a derived pointer's answer comes through, and pointed
+/// at the first producer found in layout order so that two producers over one base give a stable
+/// answer rather than whichever the walk saw last.
+///
+/// Only the ones that are still going to be there, which is what makes taking one free. A capability
+/// standing in the function now is not the same thing as a capability the build pays for: the
+/// optimizer discharges checks and leaves producers behind with nobody reading them, and the check
+/// lowering drops the capability of every class but `check_live`, so most of what is standing here
+/// is about to be pruned. Handing one of those to a callee is a reader, a reader keeps the producer
+/// alive, and the producer is the plane walk this whole line of work exists to stop paying for. That
+/// is not a small effect: on the SQLite amalgamation it is nine hundred walks nobody was doing and
+/// eight per cent of the text. [`kept`] is the test, and `crate::lower::keeps` is where the part of
+/// it that will change lives.
+pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
+    let alive = kept(func);
+    let mut held = HashMap::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            // The two that name the pointer they are about. A `cap_narrow` is a capability as well
+            // but it names another capability rather than a pointer, so there is no pointer here to
+            // key it on, and a `cap_null` is the absence of one spelled out.
+            if !matches!(func[inst].opcode, Opcode::CapOf | Opcode::CapArg) {
+                continue;
+            }
+            let Some(&pointer) = func[func[inst].args].first() else { continue };
+            let Some(cap) = func[inst].results().next() else { continue };
+            if !alive.contains(&cap) {
+                continue;
+            }
+            held.entry(root(func, pointer)).or_insert(cap);
+        }
+    }
+    held
+}
+
+/// Which capabilities in a function are still read once every check has become a call.
+///
+/// Backwards from the checks that keep theirs, and to a fixpoint rather than one sweep, because a
+/// `cap_narrow` of a `cap_of` is what a member access looks like and the base is kept by the narrow
+/// being kept rather than by anything reading it directly.
+///
+/// This is `crate::slot`'s prune asked in advance and asked in the other direction. The prune runs
+/// after the rewrite, when what is dead is simply what nothing reads, and it can afford to look
+/// forwards. Anything running before the rewrite has to predict which readers survive it, and the
+/// one thing it has to know is which checks keep a capability, which is `crate::lower::keeps`.
+fn kept(func: &Func) -> HashSet<Value> {
+    let mut alive: HashSet<Value> = HashSet::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if !reader(func[inst].opcode) {
+                continue;
+            }
+            let read = func[func[inst].args].iter().copied();
+            alive.extend(read.filter(|&value| func[value].ty.is_cap()));
+        }
+    }
+    loop {
+        let mut again = false;
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if !func[inst].opcode.makes_capability() {
+                    continue;
+                }
+                if !func[inst].results().any(|value| alive.contains(&value)) {
+                    continue;
+                }
+                for &value in func[func[inst].args].iter() {
+                    if func[value].ty.is_cap() && alive.insert(value) {
+                        again = true;
+                    }
+                }
+            }
+        }
+        if !again {
+            return alive;
+        }
+    }
+}
+
+/// Whether an instruction of this opcode reads a capability and will still be reading one later.
+///
+/// The seed of [`kept`], and it is three questions rather than one. A check is the interesting case
+/// and `crate::lower::keeps` is the answer for it, since most classes throw the capability away when
+/// they become calls. The three that follow read one, come through the rewrite untouched, and are
+/// not producers, so nothing else is going to decide for them. A `cap_narrow` is a producer that
+/// reads one, and whether it keeps its operand alive depends on whether anything keeps the narrow
+/// alive, which is the fixpoint above rather than an answer this can give.
+///
+/// A whitelist and not a blacklist, because the two ways of being wrong are not the same size.
+/// Leaving something out means a capability that could have travelled to a callee does not, which is
+/// one handover missed. Putting something in wrongly means a dead producer resurrected, which is the
+/// regression the whole test exists to prevent.
+fn reader(opcode: Opcode) -> bool {
+    crate::lower::keeps(opcode)
+        || matches!(opcode, Opcode::CapStore | Opcode::CapYield | Opcode::CapPublish)
+}
+
+/// What [`existing`] found for `pointer`, if it found anything.
+///
+/// The base's answer, for the reason [`Origins::of`] gives: a capability is about an object and a
+/// pointer derived inside one is in the same object. That is also why this is the right thing to
+/// hand to a callee rather than a weaker capability made at the call. A pointer that has walked off
+/// the end of its object carries its object's capability here and the callee refuses through it,
+/// where a capability worked out from the address would be whatever object the address landed in.
+pub(crate) fn already(func: &Func, held: &HashMap<Value, Value>, pointer: Value) -> Option<Value> {
+    held.get(&root(func, pointer)).copied()
 }
 
 /// The pointer a derivation was computed from, following a chain of them to the end.
