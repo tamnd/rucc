@@ -98,6 +98,36 @@ pub fn library_name(spelled: &str) -> Option<&'static str> {
     (!feature.library.is_empty()).then_some(feature.library)
 }
 
+/// The library function a `_chk` builtin means when the size it was handed says nothing is known,
+/// and nothing for every other name.
+///
+/// A checking function takes `(size_t) -1` to mean the object size is unknown and does no check,
+/// so a call handed that value is a call to the function it guards with a fourth argument nobody
+/// reads. gcc drops the argument and calls the plain function, at `-O0` and at every level above
+/// it, and this is the same rule for the same ten names.
+///
+/// Ten and not sixteen. The six formatted spellings never fold, however constant the size is,
+/// because the flag argument is a second thing the checking function is being asked to do: a `%n`
+/// in a format the program can write to is refused whether or not the destination's size is known,
+/// and `printf` will not refuse it. That was measured on gcc 16.2.0 rather than read off a manual.
+///
+/// Asked of the spelling for the reason [`library_name`] is: the answer is a fact about the name.
+/// The value that fold turns on is not, since the width of a `size_t` is the target's to say, so
+/// the caller holds that half of the question.
+#[must_use]
+pub fn unchecked_name(spelled: &str) -> Option<&'static str> {
+    // Every name this can answer for starts with the longer prefix, and every call in the program
+    // is asked, so the test that costs nothing goes first.
+    let plain = spelled.strip_prefix("__builtin___")?.strip_suffix("_chk")?;
+    // The checking function's own name is the library's, so a row that has one is a row that is
+    // called, and the family is the rows whose guarded function copies rather than formats.
+    const COPIES: &[&str] = &[
+        "memcpy", "memmove", "mempcpy", "memset", "strcpy", "stpcpy", "strcat", "strncpy",
+        "stpncpy", "strncat",
+    ];
+    COPIES.iter().copied().find(|&copy| copy == plain)
+}
+
 /// Whether this is a builtin that nothing implements and that nothing in the C library would
 /// answer for either, which is the set that has to be refused rather than called.
 ///
@@ -549,6 +579,38 @@ mod tests {
             assert_eq!(feature.status, Status::Implemented, "{name}");
             assert!(!feature.signature.is_empty(), "{name} is called, so it has to be declared");
         }
+    }
+
+    /// Ten of the sixteen fold, and the plain function each of them folds to is a row of its own.
+    ///
+    /// The ten being rows matters rather than being a nicety: the fold puts the plain name on a
+    /// call, so a name the table does not carry would be one nothing here knows the meaning of and
+    /// nothing would fold a `strlen` of its answer either. The six that do not fold are the
+    /// formatted ones, and they are listed here by name rather than by counting, because getting
+    /// one of them into the folding set would turn a refused `%n` into an accepted one.
+    #[test]
+    fn ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not() {
+        let folding: Vec<_> = rucc_gnu::features()
+            .iter()
+            .filter(|feature| feature.name.starts_with("__builtin___"))
+            .filter(|feature| unchecked_name(feature.name).is_some())
+            .collect();
+        assert_eq!(folding.len(), 10, "the folding half of the family is ten names");
+        for feature in folding {
+            let plain = unchecked_name(feature.name).expect("just filtered on it");
+            assert_eq!(feature.library, format!("__{plain}_chk"), "{}", feature.name);
+            let prefixed = format!("__builtin_{plain}");
+            let row = rucc_gnu::lookup(Kind::Builtin, &prefixed).expect(&prefixed);
+            assert_eq!(library_name(&prefixed), Some(row.library), "{prefixed}");
+            assert_eq!(row.library, plain, "{prefixed}");
+        }
+        for formatted in ["sprintf", "snprintf", "vsprintf", "vsnprintf", "printf", "vprintf"] {
+            let name = format!("__builtin___{formatted}_chk");
+            assert_eq!(unchecked_name(&name), None, "{name} refuses a %n whatever the size is");
+        }
+        assert_eq!(unchecked_name("__builtin_memcpy"), None, "not a checking call at all");
+        assert_eq!(unchecked_name("memcpy"), None);
+        assert_eq!(unchecked_name("__builtin___nonesuch_chk"), None, "the shape is not a promise");
     }
 
     /// The question is asked of every name the walk to the IR is about to write down, so the

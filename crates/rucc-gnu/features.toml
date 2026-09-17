@@ -1679,7 +1679,7 @@ status = "implemented"
 signature = "void *(void *, const void *, size_t, size_t)"
 library = "__memcpy_chk"
 used_by = ["glibc", "linux", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size", "rucc-driver::a_checking_call_whose_size_says_nothing_is_known_is_the_plain_library_call"]
 
 [[feature]]
 name = "__builtin___memmove_chk"
@@ -1689,7 +1689,7 @@ status = "implemented"
 signature = "void *(void *, const void *, size_t, size_t)"
 library = "__memmove_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___mempcpy_chk"
@@ -1699,7 +1699,7 @@ status = "implemented"
 signature = "void *(void *, const void *, size_t, size_t)"
 library = "__mempcpy_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___memset_chk"
@@ -1709,7 +1709,7 @@ status = "implemented"
 signature = "void *(void *, int, size_t, size_t)"
 library = "__memset_chk"
 used_by = ["glibc", "linux", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___strcpy_chk"
@@ -1719,7 +1719,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t)"
 library = "__strcpy_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size", "rucc-driver::a_checking_call_whose_size_says_nothing_is_known_is_the_plain_library_call"]
 
 [[feature]]
 name = "__builtin___stpcpy_chk"
@@ -1729,7 +1729,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t)"
 library = "__stpcpy_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___strcat_chk"
@@ -1739,7 +1739,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t)"
 library = "__strcat_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___strncpy_chk"
@@ -1749,7 +1749,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t, size_t)"
 library = "__strncpy_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___stpncpy_chk"
@@ -1759,7 +1759,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t, size_t)"
 library = "__stpncpy_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size", "rucc-driver::a_checking_call_whose_size_says_nothing_is_known_is_the_plain_library_call"]
 
 [[feature]]
 name = "__builtin___strncat_chk"
@@ -1769,7 +1769,7 @@ status = "implemented"
 signature = "char *(char *, const char *, size_t, size_t)"
 library = "__strncat_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___sprintf_chk"
@@ -1779,7 +1779,7 @@ status = "implemented"
 signature = "int(char *, int, size_t, const char *, ...)"
 library = "__sprintf_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size", "rucc-driver::a_checking_call_whose_size_says_nothing_is_known_is_the_plain_library_call"]
 notes = "The second argument is the flag that says whether a `%n` in a writable format is refused, which is why the printing half of the family never walks back to the plain function."
 
 [[feature]]
@@ -1790,7 +1790,7 @@ status = "implemented"
 signature = "int(char *, size_t, int, size_t, const char *, ...)"
 library = "__snprintf_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___vsprintf_chk"
@@ -1800,7 +1800,7 @@ status = "implemented"
 signature = "int(char *, int, size_t, const char *, __builtin_va_list)"
 library = "__vsprintf_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
 
 [[feature]]
 name = "__builtin___vsnprintf_chk"
@@ -1810,7 +1810,7 @@ status = "implemented"
 signature = "int(char *, size_t, int, size_t, const char *, __builtin_va_list)"
 library = "__vsnprintf_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
 
 [[feature]]
 name = "__builtin___printf_chk"
@@ -1820,7 +1820,7 @@ status = "implemented"
 signature = "int(int, const char *, ...)"
 library = "__printf_chk"
 used_by = ["glibc", "systemd"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::a_chk_builtin_reaches_the_checking_function_and_keeps_the_size"]
 
 [[feature]]
 name = "__builtin___vprintf_chk"
@@ -1830,7 +1830,7 @@ status = "implemented"
 signature = "int(int, const char *, __builtin_va_list)"
 library = "__vprintf_chk"
 used_by = ["glibc"]
-tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
+tests = ["rucc-sema::every_chk_builtin_calls_the_checking_function_the_library_defines", "rucc-sema::ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not", "rucc-driver::the_v_spellings_of_the_chk_family_take_the_list_a_va_list_parameter_holds"]
 
 # The two builtins whose answer is the sign bit of an operand. These have no signature because
 # they are answered in the front end rather than called: both are in the math library rather than

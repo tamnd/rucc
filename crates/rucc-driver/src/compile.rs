@@ -3751,6 +3751,54 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
+    /// A checking call whose object size says nothing is known is the plain library call.
+    ///
+    /// That is the whole of the folding half of the family. The checking function reads the all
+    /// ones value as do not check, so the call it was going to make is the function it guards with
+    /// an argument nobody reads on the end of it, and gcc drops the argument and calls the plain
+    /// function at every level including `-O0`. Where the size is a real number the checking call
+    /// stands, because the check is the point.
+    #[test]
+    fn a_checking_call_whose_size_says_nothing_is_known_is_the_plain_library_call() {
+        let text = ir(concat!(
+            "extern char *p;\n",
+            "char d[8];\n",
+            "void f(const char *s, unsigned long n) {\n",
+            "  __builtin___memcpy_chk(d, s, n, __builtin_object_size(d, 0));\n",
+            "  __builtin___memcpy_chk(p, s, n, __builtin_object_size(p, 0));\n",
+            "  __builtin___strcpy_chk(p, s, __builtin_object_size(p, 0));\n",
+            "  __builtin___stpncpy_chk(p, s, n, __builtin_object_size(p, 0));\n",
+            "  __builtin___sprintf_chk(p, 1, __builtin_object_size(p, 0), s);\n",
+            "}\n",
+        ));
+
+        // The destination whose object is in sight keeps its check, size and all.
+        assert!(
+            text.contains("call @__memcpy_chk(%2, %0, %1, %3) : (ptr, ptr, i64, i64)"),
+            "{text}"
+        );
+
+        // The three whose object is not lose the argument and the name along with it. The type of
+        // the call goes with them, which is what says the argument is gone rather than ignored.
+        assert!(text.contains("call @memcpy(%6, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
+        assert!(text.contains("call @strcpy(%10, %0) : (ptr, ptr) -> ptr"), "{text}");
+        assert!(text.contains("call @stpncpy(%14, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
+
+        // The formatted one never folds, whatever the size says, because refusing a `%n` in a
+        // writable format is the other half of what it was asked to do.
+        assert!(text.contains("call @__sprintf_chk("), "{text}");
+
+        // Nothing is left behind in the instructions either. The size the folded calls no longer
+        // take is a constant nobody reads, and no instruction is written for one.
+        let asm = asm(concat!(
+            "void f(char *p, const char *s, unsigned long n) {\n",
+            "  __builtin___memcpy_chk(p, s, n, __builtin_object_size(p, 0));\n",
+            "}\n",
+        ));
+        assert!(asm.contains("call\tmemcpy"), "{asm}");
+        assert!(!asm.contains("$-1"), "the size that went away leaves no instruction:\n{asm}");
+    }
+
     /// The `v` spellings take a `__builtin_va_list`, which is the first type in the table the
     /// target chooses the shape of rather than the width of.
     ///
