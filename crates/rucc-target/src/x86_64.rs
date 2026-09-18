@@ -42,7 +42,7 @@ pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
 };
 pub use crate::x86_64::insts::{ADDRESSES, ALIGN, Address, Form, INSTS, address, form};
-pub use crate::x86_64::read::{At, Line, Piece, read};
+pub use crate::x86_64::read::{At, Disp, Line, Piece, read};
 pub use crate::x86_64::text::{
     Arg, Shape, Width, Written, gpr_letter, gpr_name, gpr_named, machine, operand_width, written,
 };

@@ -183,6 +183,21 @@ fn an_operand_written_by_more_of_the_register_than_its_type_fills_is_the_low_par
 }
 
 #[test]
+fn a_distance_taken_from_a_constant_operand_is_written_into_the_instruction() {
+    // The step libgmp walks a limb at a time, out of `MPN_INCR_U` in `gmp-impl.h`. The size of a
+    // limb is the third operand rather than a number in the line, because the same line is read on
+    // the target where a limb is four bytes, and `%c` is how a template says that the operand is a
+    // constant and goes where a distance goes rather than where an immediate goes.
+    let source = "long *f(long *p) { long *q; \
+                  asm (\"lea %c2(%1), %0\" : \"=r\" (q) : \"r\" (p), \"n\" (sizeof(long))); \
+                  return q; }\n";
+    let body = body(&asm("displacement-operand", source), "f");
+    assert!(body.contains("leaq"), "the template never reached the listing:\n{body}");
+    assert!(body.contains("8("), "the distance never reached the address:\n{body}");
+    assert!(!body.contains("$8"), "the constant was put in a register as well:\n{body}");
+}
+
+#[test]
 fn a_repeat_prefix_in_front_of_a_bit_search_is_the_count_and_not_the_search() {
     // The other two templates `longlong.h` writes, which are how libgmp counts the zeroes at either
     // end of a limb. The prefix is not a decoration here and the library's own comment beside the

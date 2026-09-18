@@ -3001,9 +3001,19 @@ impl<'a> Lowering<'a> {
 
         // Which operands the template writes, counted before anything is placed, because the answer
         // decides where each of the three below comes from and one instruction may name an operand
-        // that a later one writes.
+        // that a later one writes. Which of them any instruction puts in a register at all is
+        // counted in the same walk, since an operand no instruction reaches that way is one nothing
+        // has to put anywhere: a constant a template names only as the distance into an address is
+        // written into the instruction, and a register holding a copy of it would be one nobody
+        // reads. An operand the address is counted from is reached that way and is counted here for
+        // that reason, because the walk below it is over the opcode's operands and an address is
+        // not one of those.
         let mut writes = vec![0usize; list.len()];
+        let mut held = vec![false; list.len()];
         for line in &lines {
+            if let Some(x86_64::Piece::Operand { index, .. }) = line.at.and_then(|at| at.base) {
+                *held.get_mut(index).ok_or_else(refused)? = true;
+            }
             let form = x86_64::form(line.opcode).ok_or_else(refused)?;
             for (desc, piece) in form.operands().iter().zip(&line.operands) {
                 // An operand the instruction reaches without its text saying so is the statement's
@@ -3018,6 +3028,7 @@ impl<'a> Lowering<'a> {
                     },
                     x86_64::Piece::Reg { .. } => continue,
                 };
+                *held.get_mut(index).ok_or_else(refused)? = true;
                 if matches!(desc.role, Role::Def | Role::EarlyDef) {
                     *writes.get_mut(index).ok_or_else(refused)? += 1;
                 }
@@ -3031,8 +3042,12 @@ impl<'a> Lowering<'a> {
         for (index, operand) in list.iter().copied().enumerate() {
             let Some(result) = operand.result else {
                 // An input, or an output the assembly was handed the address of, and both are a
-                // value that arrives in a register and is read out of it.
-                places[index].read = Some(self.reg_of(operand.value.ok_or_else(refused)?)?);
+                // value that arrives in a register and is read out of it, unless no instruction of
+                // the template reads it out of one.
+                let value = operand.value.ok_or_else(refused)?;
+                if held[index] {
+                    places[index].read = Some(self.reg_of(value)?);
+                }
                 continue;
             };
             let ty = self.source[result].ty;
@@ -3144,7 +3159,7 @@ impl<'a> Lowering<'a> {
             }
         }
         let at = match line.at {
-            Some(at) => Some(self.addressed(inst, at, places)?),
+            Some(at) => Some(self.addressed(inst, at, places, list)?),
             None => None,
         };
 
@@ -3270,6 +3285,7 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         at: x86_64::At,
         places: &[Place],
+        list: &[AsmOperand],
     ) -> Result<mir::Mem, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let base = match at.base {
@@ -3287,7 +3303,42 @@ impl<'a> Lowering<'a> {
                 return Err(refused());
             }
         };
-        Ok(mir::Mem { base, scale: 1, disp: at.disp, segment: at.segment, ..mir::Mem::default() })
+        // A distance the template wrote, or the one in an operand the template pointed at, which is
+        // the same distance said by something that knows how big a thing is. It has to be a number
+        // the compiler can read at translation time, since it goes in the instruction rather than
+        // in a register, and an operand holding anything else is refused rather than put somewhere.
+        let disp = match at.disp {
+            x86_64::Disp::Number(disp) => disp,
+            x86_64::Disp::Operand(index) => {
+                let value =
+                    list.get(index).and_then(|operand| operand.value).ok_or_else(refused)?;
+                let number = self.number(value).ok_or_else(refused)?;
+                i32::try_from(number).map_err(|_| refused())?
+            }
+        };
+        Ok(mir::Mem { base, scale: 1, disp, segment: at.segment, ..mir::Mem::default() })
+    }
+
+    /// The number in that value, for one an `iconst` defined, read at the width of its own type.
+    ///
+    /// Signed, because the two things a template asks this for are a distance into an address and
+    /// the number on an instruction, and both of those are signed wherever they land. A constant
+    /// whose type is unsigned and whose top bit is set therefore reads as a negative number here,
+    /// which is the same number and is the reading that fits in the thirty two bits an addressing
+    /// mode has room for.
+    fn number(&self, value: Value) -> Option<i128> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        if self.source[inst].opcode != Opcode::IConst {
+            return None;
+        }
+        let Extra::Imm(imm) = self.source[inst].extra else { return None };
+        let bits = self.source[imm].bits();
+        let width = self.source[value].ty.bits();
+        if width == 0 || width > 128 {
+            return None;
+        }
+        let spare = 128 - width;
+        Some(((bits << spare) as i128) >> spare)
     }
 
     /// A register holding a value the program has no claim on, written as a zero.

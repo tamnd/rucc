@@ -20,6 +20,9 @@
 //! One instruction per line, separated by newlines or semicolons, in AT&T syntax. An argument is a
 //! register the template named, an operand of the statement written `%0` or `%q0`, a number
 //! written `$5`, or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
+//! The distance into an address is a number the template wrote or, written `%c3(%rbp)`, the number
+//! in one of the statement's operands, which is how a program spells a step whose size something
+//! else worked out. See [`Disp`].
 //!
 //! Everything else is nothing at all rather than a guess, and the caller turns that into a refusal
 //! that names the statement. Labels are not read, because a label inside a function is a place
@@ -152,6 +155,25 @@ pub enum Piece {
     },
 }
 
+/// How far into its storage an address counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disp {
+    /// A number the template wrote, which is `8(%rax)` and is almost all of them.
+    Number(i32),
+    /// The number in one of the statement's operands, which is `%c3(%rax)`.
+    ///
+    /// The `c` is gcc's way of saying that the operand is a constant and is to be written the way a
+    /// distance is written rather than the way an immediate is, which is to say without the sigil
+    /// in front of it. A program writes one where the distance is a size something worked out
+    /// rather than a number anybody typed. gmp walks a limb at a time and spells the step `%c3(%0)`
+    /// with `sizeof(mp_limb_t)` tied to that operand, so the one line is right on the target where
+    /// a limb is eight bytes and on the one where it is four.
+    ///
+    /// Which operand, by the number the constraint list gives it. What is in it is not this file's
+    /// business, the way the register an operand is in is not: the caller has the values.
+    Operand(usize),
+}
+
 /// An address an instruction in a template reads or writes.
 ///
 /// No scaled index. See the module documentation.
@@ -160,7 +182,7 @@ pub struct At {
     /// Which storage it is counted from, when it is not the flat one.
     pub segment: Option<Segment>,
     /// How far into it.
-    pub disp: i32,
+    pub disp: Disp,
     /// The register the distance is from, when there is one. An address with none is a number.
     pub base: Option<Piece>,
 }
@@ -516,6 +538,14 @@ fn given(text: &str) -> Option<Given> {
     if after.starts_with(|letter: char| letter.is_ascii_digit()) {
         return after.parse().ok().map(|index| Given::Operand(index, None));
     }
+    // An address whose distance is in an operand, which is `%c3(%0)` and reaches here rather than
+    // the line above because it begins with a sigil and what follows the sigil is a letter, the way
+    // a register's name does. The bracket is what tells the two apart and is what is asked for
+    // here, since a `%c3` with nothing after it is a constant a template wants printed rather than
+    // an instruction, and printing is not what this reads.
+    if after.starts_with('c') && text.contains('(') {
+        return address(text, None).map(Given::Mem);
+    }
     // Before the register names, because `%b0` and `%bl` both begin with the same letter and only
     // one of them is a register. What tells them apart is what comes after the letter, so the
     // modifier is tried first and falls through to the names when the rest of it is not a number.
@@ -569,12 +599,20 @@ fn address(text: &str, segment: Option<Segment>) -> Option<At> {
         Some((front, rest)) => (front.trim(), Some(rest.strip_suffix(')')?.trim())),
         None => (text.trim(), None),
     };
-    let disp = if front.is_empty() { 0 } else { i32::try_from(number(front)?).ok()? };
+    let disp = if front.is_empty() { Disp::Number(0) } else { displacement(front)? };
     let base = match inside {
         Some(inside) => Some(base(inside)?),
         None => None,
     };
     Some(At { segment, disp, base })
+}
+
+/// How far in, which is a number or the number in an operand. See [`Disp`].
+fn displacement(text: &str) -> Option<Disp> {
+    if let Some(after) = text.strip_prefix("%c") {
+        return after.parse().ok().map(Disp::Operand);
+    }
+    i32::try_from(number(text)?).ok().map(Disp::Number)
 }
 
 /// The register an address is counted from, which is a whole one whatever the instruction reads.
@@ -630,7 +668,8 @@ mod tests {
         assert_eq!(lines[0].opcode, "mov_rm_64");
         let out = Piece::Operand { index: 0, width: Width::Quad, stated: false };
         assert_eq!(lines[0].operands, vec![out]);
-        assert_eq!(lines[0].at, Some(At { segment: Some(Segment::Fs), disp: 0, base: None }));
+        let at = At { segment: Some(Segment::Fs), disp: Disp::Number(0), base: None };
+        assert_eq!(lines[0].at, Some(at));
     }
 
     /// The arguments come back in the opcode's order and not the order they were written in, which
@@ -943,15 +982,26 @@ mod tests {
     }
 
     /// The two spellings of a number and the sign in front of one, since a displacement is as
-    /// often negative as not.
+    /// often negative as not, and the fourth spelling, which is not a number at all.
+    ///
+    /// `%c1` is the constant in an operand written the way a distance is written rather than the
+    /// way an immediate is. What is in that operand is not known here, so what comes back is which
+    /// operand it is and the caller reads it. gmp writes one wherever it steps a limb at a time.
     #[test]
     fn a_displacement_is_read_in_both_spellings_and_both_signs() {
-        let cases = [("-8(%%rbp)", -8), ("0x10(%%rbp)", 16), ("+4(%%rbp)", 4)];
+        let cases = [
+            ("-8(%%rbp)", Disp::Number(-8)),
+            ("0x10(%%rbp)", Disp::Number(16)),
+            ("+4(%%rbp)", Disp::Number(4)),
+            ("(%%rbp)", Disp::Number(0)),
+            ("%c1(%%rbp)", Disp::Operand(1)),
+        ];
         for (written, disp) in cases {
             let text = format!("movq {written}, %0");
             let lines = read(&text, &[]).unwrap_or_else(|| panic!("{text} is a load"));
             assert_eq!(lines[0].at.expect("an address").disp, disp, "{text}");
         }
+        assert_eq!(read("movq %c(%%rbp), %0", &[]), None, "a modifier with no operand");
     }
 
     /// The three spellings of a boundary, all of which mean the same thing and two of which say it
