@@ -35,7 +35,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::Func;
-use crate::inst::{BlockCall, Mem, Opcode, Operand, Param, Reach, Reg};
+use crate::inst::{BlockCall, Flags, Mem, Opcode, Operand, Param, Reach, Reg};
 
 /// Why a text could not be read.
 ///
@@ -117,6 +117,7 @@ struct PendingInst {
     mem: Option<PendingMem>,
     imm: Option<i64>,
     symbol: Option<Symbol>,
+    flags: Flags,
     succs: Vec<PendingCall>,
     line: u32,
 }
@@ -213,6 +214,10 @@ impl<'a> Parser<'a, '_> {
             self.expect("=")?;
         }
         let opcode = self.opcode()?;
+        // Read here rather than in the list, because that is where the printer writes it and for
+        // the reason the printer writes it there: a word in the list would be a word this has to
+        // tell apart from the operands of an opcode it knows nothing about.
+        let flags = if self.eat_word("volatile") { Flags::VOLATILE } else { Flags::NONE };
 
         let mut inst = PendingInst {
             opcode,
@@ -220,6 +225,7 @@ impl<'a> Parser<'a, '_> {
             mem: None,
             imm: None,
             symbol: None,
+            flags,
             succs: Vec::new(),
             line,
         };
@@ -552,7 +558,7 @@ impl<'a> Parser<'a, '_> {
                 if let Some(value) = inst.imm {
                     builder = builder.imm(value);
                 }
-                builder.finish();
+                builder.flags(inst.flags).finish();
             }
             let Some(terminator) = read.insts.last() else { continue };
             self.line = terminator.line;
@@ -835,6 +841,24 @@ mod tests {
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [got @away]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_access_the_program_insisted_on_round_trips() {
+        // The one fact an instruction carries that is not an operand, so it is the one thing on
+        // the line that a reader cannot work out from what follows it. In front of the list
+        // rather than in it, which is what keeps the list readable by something that does not
+        // know what the opcode is.
+        round_trip(
+            "\
+mfunc @tick {
+block0(%0:gpr):
+    %1:gpr = x64.mov_rm volatile [%0]
+    x64.mov_mr volatile %1, [%0]
     x64.ret
 }
 ",

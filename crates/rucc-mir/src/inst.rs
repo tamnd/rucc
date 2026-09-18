@@ -2,10 +2,11 @@
 //!
 //! Design: `spec/10-backend.md` section 10.1.
 //!
-//! An instruction is an opcode, a run of operands, and the three things an opcode may carry
-//! besides its operands: an immediate, a memory addressing mode, and a symbol. Twenty-four
-//! bytes, all of it either a small number or an index into a table the function owns, so
-//! walking a function is walking one dense array and nothing in it is separately freed.
+//! An instruction is an opcode, a run of operands, the three things an opcode may carry besides
+//! its operands, which are an immediate, a memory addressing mode and a symbol, and one set of
+//! flags. Twenty-eight bytes, all of it either a small number or an index into a table the
+//! function owns, so walking a function is walking one dense array and nothing in it is
+//! separately freed.
 //!
 //! An operand is a register, the class it is drawn from, whether the instruction reads or
 //! writes it, and any constraint on where it may live. That is what the allocator reads and it
@@ -28,6 +29,8 @@
 //! The source location is a parallel array in the function, reached by [`crate::Func::span`],
 //! for the same reason `rucc-ir` puts it there: it is read when a diagnostic is being made and
 //! at no other time, so it does not belong on the row that every pass walks.
+
+use std::fmt;
 
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_target::{Constraint, PhysReg, RegClass, Role, Segment};
@@ -488,6 +491,65 @@ pub struct Param {
     pub class: RegClass,
 }
 
+/// What is true of an instruction besides what its operands say.
+///
+/// One flag, and a set rather than a `bool` because the thing it is the first of is a class: a
+/// fact the front end knew about an access, which selection has to carry down because no pass
+/// below can work it out again. A second `bool` on the row every pass walks is how a struct
+/// turns into a bag, and a second bit here is free.
+///
+/// Empty on every instruction the machine writes for itself, which is most of them. A prologue,
+/// a spill, a jump and the move the allocator writes to put a value where the machine wants it
+/// were all asked for by this compiler rather than by the program, so there is nothing the
+/// program said about them to carry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Flags(u8);
+
+impl Flags {
+    /// Nothing besides what the operands say.
+    pub const NONE: Self = Self(0);
+
+    /// The access happens exactly once, and is never moved or merged with another.
+    ///
+    /// `rucc_ir::Flags::VOLATILE` on the load or the store this instruction was selected from.
+    /// Every pass above selection reads that flag, and until it was carried down here the
+    /// instruction that reached the machine level passes was the same instruction whether the
+    /// program had written `volatile` or not, so a pass that merges two accesses merged these
+    /// as well. See [`InstData::flags`] and tamnd/rucc#1302.
+    pub const VOLATILE: Self = Self(1);
+
+    /// Both of them at once.
+    #[must_use]
+    pub const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every flag in the other one is in this one. True of [`Self::NONE`] always, since
+    /// there is nothing in it to be missing.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether nothing is set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl fmt::Display for Flags {
+    /// Each flag with a space in front of it, so that it reads as written after the opcode and
+    /// prints as nothing at all when there is nothing set. The same arrangement `rucc_ir` uses
+    /// for the flags an IR instruction carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.contains(Self::VOLATILE) {
+            f.write_str(" volatile")?;
+        }
+        Ok(())
+    }
+}
+
 /// One instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstData {
@@ -504,13 +566,22 @@ pub struct InstData {
     /// The symbol it names, which is the callee of a direct call and the target of a direct
     /// jump to another function.
     pub symbol: Option<Symbol>,
+    /// What the program said about it that its operands do not. See [`Flags`].
+    pub flags: Flags,
 }
 
 impl InstData {
     /// An instruction with that opcode and nothing else.
     #[must_use]
     pub const fn new(opcode: Opcode) -> Self {
-        Self { opcode, operands: OperandList::EMPTY, imm: None, mem: None, symbol: None }
+        Self {
+            opcode,
+            operands: OperandList::EMPTY,
+            imm: None,
+            mem: None,
+            symbol: None,
+            flags: Flags::NONE,
+        }
     }
 }
 
@@ -543,7 +614,7 @@ mod tests {
 
     #[test]
     fn an_instruction_is_the_size_the_design_says() {
-        assert_eq!(size_of::<InstData>(), 24);
+        assert_eq!(size_of::<InstData>(), 28);
         assert_eq!(size_of::<Operand>(), 8);
     }
 

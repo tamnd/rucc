@@ -8,7 +8,9 @@ The machine IR is a second representation: still a CFG of blocks, still in SSA f
 
 Keeping MIR in SSA until allocation is what lets the register allocator do live-range splitting, and it is the design regalloc2 assumes. After allocation, MIR is no longer SSA: block parameters have become physical registers, and the moves implementing the parameter passing have been materialized on the edges.
 
-An MIR instruction is: an opcode from the target's opcode enum, a small operand vector where each operand carries its register class and a use/def/early-def role and any fixed-register constraint, an optional immediate, an optional memory addressing mode, and a source location. Twenty-four bytes, arena allocated, per document 03.
+An MIR instruction is: an opcode from the target's opcode enum, a small operand vector where each operand carries its register class and a use/def/early-def role and any fixed-register constraint, an optional immediate, an optional memory addressing mode, a set of flags, and a source location. Twenty-eight bytes, arena allocated, per document 03.
+
+The flags are what the program said about the instruction that its operands do not. There is one of them, `volatile`, carried down from the IR flag of the same name by instruction selection, and it is there because no pass below selection can work it out again: a `volatile` load and an ordinary one are the same opcode over the same address, so a pass that merges two accesses would merge these too. `spec/optimizer/09-memory-ssa.md` section 9.5 asks for a separate bit checked before anything else, and this is that bit at the machine level.
 
 `--emit=mir` and `--emit=mir-final` print before and after allocation, both round-tripping.
 

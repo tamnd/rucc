@@ -84,13 +84,12 @@
 //! rest of it, since what a call does to memory is not in the instruction at all.
 //!
 //! A read is the half that is easy to argue away and is the one that matters. Moving a read past a
-//! read changes the order two accesses happen in, and the machine IR does not say which accesses
-//! the program insisted on: a `volatile` read and an ordinary one are the same instruction with the
-//! same operands here, as [`crate::copies`] says at more length about the same problem. So
+//! read changes the order two accesses happen in, and the program may have said what that order is.
 //! `volatile int a, b; return b - a;` is two loads and a subtract, and folding the first of them
-//! into the subtract would read `b` before `a` when the program said otherwise. Stopping at any
-//! access at all is what rules that out, and it costs almost nothing: the load that the arithmetic
-//! reads is nearly always the last access before it, so it is still the one that folds.
+//! into the subtract would read `b` before `a` when the program said otherwise. The flag that says
+//! so reaches here now, so the walk could ask about each access one at a time, and it does not:
+//! stopping at every access rules the same thing out and costs almost nothing, since the load the
+//! arithmetic reads is nearly always the last access before it and so is still the one that folds.
 //!
 //! What follows from that is the shape of the walk. There is one load in hand rather than a list of
 //! them, and it is always the last memory access there was.
@@ -157,20 +156,31 @@
 //!
 //! # What a `volatile` access gets
 //!
-//! The same thing an ordinary one does, and that is worth writing down rather than leaving to be
-//! noticed. `volatile int *p; *p += x;` comes out of here as one instruction that reads the place
-//! and writes it back, where GCC writes the load, the arithmetic and the store. Both do one read
-//! and one write of that address, which is what the abstract machine says has to happen, so the
-//! program is the program either way. What they differ on is whether the two are one instruction,
-//! and a machine whose memory does something when it is read cares about that.
+//! Nothing. Both walks stop at one, so `volatile int *p; *p += x;` comes out as the load, the
+//! arithmetic and the store, and `volatile int *p; return *p + x;` keeps its load.
 //!
-//! The reason it happens is the one this module already gives twice: the machine IR does not carry
-//! the flag. `rucc_ir::Flags::VOLATILE` says an access happens exactly once and is never moved or
-//! merged, every pass above selection reads it, and the instruction that reaches this pass is the
-//! same instruction whether it was set or not. [`loads`] has the same hole and has had it since it
-//! landed: a `volatile` load folds into the arithmetic that reads it, which is still one read and
-//! is still not what GCC writes. Carrying the flag down is what closes both, and it is
-//! tamnd/rucc#1302 rather than something this pass can decide on its own.
+//! What the flag says is that the access happens exactly once and is never moved or merged with
+//! another, and the first two of those were already true here: the walk in [`loads`] stops at any
+//! instruction that touches memory, so nothing ever passes an access, and no fold in this module
+//! turns one access into two or none. Merging is the one that was not. Reading a place, adding to
+//! it and putting it back is one read and one write of the address whether it is three
+//! instructions or one, so the counts the standard talks about are the same either way, and what
+//! the two differ on is whether the reading and the writing are one instruction. A device register
+//! whose memory does something when it is touched is where that difference is the whole point.
+//!
+//! This is a place where the answer is the spec's rather than the reference compiler's.
+//! `spec/optimizer/09-memory-ssa.md` section 9.5 says a `volatile` access is never moved, never
+//! eliminated, never duplicated and never merged, and that last word is this. GCC 16 writes
+//! `addl %esi, (%rdi)` for the read modify write and `cmpl $7, (%rdi)` for a `volatile` compare,
+//! and GCC 13 writes three instructions and two for the same programs, so the merge is something
+//! GCC started doing rather than something it has always done. Both are conforming and neither
+//! changes how many times the address is touched. Taking the spec's side costs an instruction on
+//! code that asked to be watched, which is the trade that document says to make.
+//!
+//! The flag is on the machine instruction because [`rucc_mir::Flags`] carries it now and selection
+//! sets it from the load or the store it matched. Before that it could not be read here at all:
+//! a `volatile` access and an ordinary one were the same opcode over the same address, so there
+//! was nothing to stop at. That was tamnd/rucc#1302.
 //!
 //! # What makes the three one
 //!
@@ -240,7 +250,7 @@
 //! something to say about four, and the rule set here grows one measured entry at a time.
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Func, Inst, Opcode, Operand, Reg};
+use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg};
 use rucc_target::MachineInsts;
 
 use crate::changes::{Changes, Plan, Reads};
@@ -912,6 +922,14 @@ pub fn loads(
                     waiting = None;
                 }
             }
+            // A load the program insisted on is never carried forward, so there is never one in
+            // hand for the fold below to take. Refused where the load is picked up rather than
+            // where it is joined, because what is wrong with it is what it is and not what it
+            // meets: a load nothing may fold has no business being waited on for sixteen
+            // instructions either.
+            if insisted(func, inst) {
+                continue;
+            }
             if let Some(load) = FOLDS.iter().find(|fold| fold.load == bare).map(|fold| fold.load) {
                 let operands = &func[func[inst].operands];
                 if let Some(first) = operands.first().filter(|operand| operand.role.is_def()) {
@@ -1032,6 +1050,9 @@ fn run(
     at: usize,
 ) -> Option<Run> {
     let store = insts[at];
+    if insisted(func, store) {
+        return None;
+    }
     let stored = machine.bare(names.resolve(func[store].opcode.name())).to_owned();
     let value = *func[func[store].operands].first()?;
     if value.role.is_def() || reads.count(value.reg) != 1 {
@@ -1059,6 +1080,9 @@ fn run(
             continue;
         };
         let load = insts[from];
+        if insisted(func, load) {
+            continue;
+        }
         if machine.bare(names.resolve(func[load].opcode.name())) != update.load {
             continue;
         }
@@ -1102,6 +1126,9 @@ fn constant(
     at: usize,
 ) -> Option<Bumped> {
     let store = insts[at];
+    if insisted(func, store) {
+        return None;
+    }
     let stored = machine.bare(names.resolve(func[store].opcode.name())).to_owned();
     let value = *func[func[store].operands].first()?;
     if value.role.is_def() || reads.count(value.reg) != 1 {
@@ -1123,6 +1150,9 @@ fn constant(
     }
     let from = (earliest..alu).rev().find(|&k| writes(func, insts[k], source.reg))?;
     let load = insts[from];
+    if insisted(func, load) {
+        return None;
+    }
     if machine.bare(names.resolve(func[load].opcode.name())) != bump.load {
         return None;
     }
@@ -1137,6 +1167,14 @@ fn constant(
         return None;
     }
     Some(Bumped { load, alu: insts[alu], store, bump, imm })
+}
+
+/// Whether the program insisted on this access happening exactly as it is written.
+///
+/// Which is `volatile`, and is the one question in this module that is not about what the
+/// instructions do to each other. See the section above on what such an access gets.
+fn insisted(func: &Func, inst: Inst) -> bool {
+    func[inst].flags.contains(Flags::VOLATILE)
 }
 
 /// Whether this instruction writes that register.
@@ -1343,6 +1381,18 @@ mod tests {
         into
     }
 
+    /// The same load, of a place the program said to read exactly where it is written.
+    fn insisted_load(func: &mut Func, names: &mut Interner, block: mir::Block, base: Reg) -> Reg {
+        let into = func.new_vreg(GPR);
+        let mov = op(names, "mov_rm_64");
+        func.build(block, mov)
+            .def(into, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .flags(Flags::VOLATILE)
+            .finish();
+        into
+    }
+
     /// Two-address arithmetic of that name on those two registers, in that order.
     fn alu(
         func: &mut Func,
@@ -1399,6 +1449,22 @@ mod tests {
         func.build(block, mov)
             .uses(value, GPR)
             .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+    }
+
+    /// The same store, of a place the program said to write exactly where it is written.
+    fn insisted_store(
+        func: &mut Func,
+        names: &mut Interner,
+        block: mir::Block,
+        base: Reg,
+        value: Reg,
+    ) {
+        let mov = op(names, "mov_mr_64");
+        func.build(block, mov)
+            .uses(value, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .flags(Flags::VOLATILE)
             .finish();
     }
 
@@ -2394,5 +2460,94 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 40, "ten conditions at four widths");
+    }
+
+    /// A load the program insisted on, which is `volatile int *p; return *p + x;`.
+    ///
+    /// The fold would leave one instruction that reads the place, which is still one read of it,
+    /// and the program would still do what it says. What it would not be is the load the program
+    /// wrote, and a machine whose memory does something when it is read is a machine where the
+    /// difference between one instruction and two is the reason the word was written.
+    #[test]
+    fn a_load_the_program_insisted_on_is_left_where_it_stands() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = insisted_load(&mut func, &mut names, block, base);
+        alu(&mut func, &mut names, block, "add_rr_64", word, other);
+
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64", "x64.add_rr_64"]);
+    }
+
+    /// The same load with the arithmetic that reads it and the store that puts it back, which is
+    /// `volatile int *p; *p += x;`. Three instructions in and three out, which is what GCC 13
+    /// writes for it and what the spec asks for.
+    #[test]
+    fn a_run_whose_load_the_program_insisted_on_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = insisted_load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The other end of the run, which is the half the load's own flag does not cover. A place
+    /// read plainly and written back to a volatile address is a program that asked for the write
+    /// to be its own instruction, and both ends are asked about because either one of them says
+    /// so on its own.
+    #[test]
+    fn a_run_whose_store_the_program_insisted_on_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        insisted_store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The run against a constant, which is `volatile int *p; *p += 1;` and is the commoner of
+    /// the two. It is a separate walk over a separate table, so it is asked separately.
+    #[test]
+    fn a_constant_run_the_program_insisted_on_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let word = insisted_load(&mut func, &mut names, block, base);
+        let sum = alu_imm(&mut func, &mut names, block, "add_ri_64", word, 1);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The same run with the flag on the store instead of on the load.
+    #[test]
+    fn a_constant_run_whose_store_the_program_insisted_on_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu_imm(&mut func, &mut names, block, "add_ri_64", word, 1);
+        insisted_store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// A plain load of the same shape, so that the five above are read as the flag doing the
+    /// work rather than as the runs being built wrongly.
+    #[test]
+    fn the_same_runs_without_the_flag_are_the_ones_the_pass_takes() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.add_mr_64"]);
     }
 }
