@@ -380,6 +380,29 @@ static TEXT: &[(&str, &[Written])] = &[
     ("xor_mr_16", &[spell("xorw", &[Reg(0, Word), Mem])]),
     ("xor_mr_32", &[spell("xorl", &[Reg(0, Long), Mem])]),
     ("xor_mr_64", &[spell("xorq", &[Reg(0, Quad), Mem])]),
+    // The same five with the other source a constant. The immediate comes first for the reason the
+    // register does above, which is that this syntax writes the source first, and the eight bit
+    // inclusive or is also what a probing prologue writes to touch a page without changing it.
+    ("add_mi_8", &[spell("addb", &[Imm, Mem])]),
+    ("add_mi_16", &[spell("addw", &[Imm, Mem])]),
+    ("add_mi_32", &[spell("addl", &[Imm, Mem])]),
+    ("add_mi_64", &[spell("addq", &[Imm, Mem])]),
+    ("sub_mi_8", &[spell("subb", &[Imm, Mem])]),
+    ("sub_mi_16", &[spell("subw", &[Imm, Mem])]),
+    ("sub_mi_32", &[spell("subl", &[Imm, Mem])]),
+    ("sub_mi_64", &[spell("subq", &[Imm, Mem])]),
+    ("and_mi_8", &[spell("andb", &[Imm, Mem])]),
+    ("and_mi_16", &[spell("andw", &[Imm, Mem])]),
+    ("and_mi_32", &[spell("andl", &[Imm, Mem])]),
+    ("and_mi_64", &[spell("andq", &[Imm, Mem])]),
+    ("or_mi_8", &[spell("orb", &[Imm, Mem])]),
+    ("or_mi_16", &[spell("orw", &[Imm, Mem])]),
+    ("or_mi_32", &[spell("orl", &[Imm, Mem])]),
+    ("or_mi_64", &[spell("orq", &[Imm, Mem])]),
+    ("xor_mi_8", &[spell("xorb", &[Imm, Mem])]),
+    ("xor_mi_16", &[spell("xorw", &[Imm, Mem])]),
+    ("xor_mi_32", &[spell("xorl", &[Imm, Mem])]),
+    ("xor_mi_64", &[spell("xorq", &[Imm, Mem])]),
     // Arithmetic, register with immediate.
     ("add_ri_8", &[spell("addb", &[Imm, Reg(0, Byte)])]),
     ("add_ri_16", &[spell("addw", &[Imm, Reg(0, Word)])]),
@@ -601,10 +624,6 @@ static TEXT: &[(&str, &[Written])] = &[
     // machine writes.
     ("mov_rm_bit", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
     ("mov_mr_bit", &[spell("movb", &[Reg(0, Byte), Mem])]),
-    // The one instruction here that writes an immediate to memory, and it writes what was already
-    // there: an inclusive or with zero. A prologue that probes is the only thing that produces it
-    // and what it wants is the write rather than the value.
-    ("or_mi_8", &[spell("orb", &[Imm, Mem])]),
     // The three that are not instructions. A return value, an argument and the condition a block
     // leaves on are each one register and one claim about it, and the claim is for the allocator.
     ("ret_val_8", &[]),
