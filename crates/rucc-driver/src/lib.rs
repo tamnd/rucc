@@ -3016,6 +3016,18 @@ mod tests {
         s.iter().map(|x| (*x).to_owned()).collect()
     }
 
+    /// A target to write down where the host would otherwise decide, for the tests whose answer
+    /// would be a different one on a different machine.
+    ///
+    /// Most of the tests here never name a target, which is right, because most of what the driver
+    /// does with a command line is the same wherever it runs and a test that pinned one would be
+    /// saying so in every case for the sake of the two that need it. The two that need it are the
+    /// ones whose answer comes off the target rather than off the command line: the name an object
+    /// gets, which is `a.o` here and `a.obj` on Windows, and whether Microsoft's reading of a
+    /// nameless member is on, which is off here and on there. Both are the compiler being right, and
+    /// a test that leaves the target to the host is asking a question with two correct answers.
+    const LINUX: &str = "--target=x86_64-unknown-linux-gnu";
+
     #[test]
     fn help_and_version_win_over_everything_else() {
         assert_eq!(parse_args(&args(&["-c", "--help", "x.c"])).unwrap(), Action::Help);
@@ -3285,9 +3297,16 @@ mod tests {
     }
 
     /// The same wall on the compile side of an MSVC target, where the way past it is a tuple.
+    ///
+    /// Not run on Windows, for the same reason the one above is not run on a mac: the wall stands in
+    /// front of an SDK this machine does not have, and a Windows machine is the kind that does. The
+    /// driver asks `vswhere` where Visual Studio is and takes the newest kit under it, so on a box
+    /// with the build tools installed there are headers, no wall and nothing here to be about.
+    /// `INCLUDE` is the other way a machine has one and is the other half of the guard, since a
+    /// person can set that anywhere while Visual Studio is only found on the platform it runs on.
     #[test]
     fn an_msvc_target_with_no_sdk_named_says_which_environment_needs_nothing_installed() {
-        if std::env::var_os("INCLUDE").is_some() {
+        if cfg!(target_os = "windows") || std::env::var_os("INCLUDE").is_some() {
             return;
         }
         let (opts, _) = compile(&["--target=x86_64-windows-msvc", "-c", "a.c"]);
@@ -4727,7 +4746,9 @@ mod tests {
     /// compiler that platform ships would read it.
     #[test]
     fn the_microsoft_reading_of_a_member_follows_the_target_until_it_is_asked_for() {
-        let (opts, _) = compile(&["-c", "a.c"]);
+        // Named rather than left to the host, since the answer this asks for is the one a target
+        // that is not Windows gives and on a Windows machine the host is not one of those.
+        let (opts, _) = compile(&[LINUX, "-c", "a.c"]);
         assert!(!Session::new(*opts).ms_extensions());
 
         let (opts, _) = compile(&["-c", "--target=x86_64-pc-windows-gnu", "a.c"]);
@@ -4777,7 +4798,10 @@ mod tests {
 
     #[test]
     fn a_comma_in_dash_wl_separates_two_arguments() {
-        let (_, plan) = linking(&["-Wl,-rpath,/opt/lib", "-Xlinker", "--as-needed", "a.c"]);
+        // The target is written down because the name of the object is derived from it, and `a.o`
+        // on a Linux host is `a.obj` on a Windows one. What is under test is the splitting of the
+        // argument, which has nothing to do with either.
+        let (_, plan) = linking(&[LINUX, "-Wl,-rpath,/opt/lib", "-Xlinker", "--as-needed", "a.c"]);
         let link = plan.link.expect("expected a link step");
         assert_eq!(
             link.inputs,
