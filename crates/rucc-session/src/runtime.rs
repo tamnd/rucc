@@ -50,6 +50,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("stddef.h", include_str!("../runtime/include/stddef.h")),
     ("stdint.h", include_str!("../runtime/include/stdint.h")),
     ("stdnoreturn.h", include_str!("../runtime/include/stdnoreturn.h")),
+    ("x86intrin.h", include_str!("../runtime/include/x86intrin.h")),
     ("xmmintrin.h", include_str!("../runtime/include/xmmintrin.h")),
 ];
 
