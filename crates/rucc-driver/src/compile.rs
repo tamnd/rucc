@@ -212,6 +212,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             let mut cx =
                 rucc_pp::Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
             cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+            cx.pedantic = opts.pedantic;
             if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
                 return failure(format!(
                     "{name}: the source map has no room for the built in macros"

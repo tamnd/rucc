@@ -91,6 +91,7 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
     let predef = Predef::for_options(opts);
     let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
     cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+    cx.pedantic = opts.pedantic;
     if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
         return failure(format!("{name}: the source map has no room left for the built in macros"));
     }
