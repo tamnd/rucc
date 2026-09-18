@@ -269,7 +269,19 @@ pub fn addresses(
                     // is holding a plan for an instruction that is not there any more. That is a
                     // chain whose middle went first, and the outer address waits for the next run
                     // of the pass rather than being written into a gap.
-                    open.retain(|_, held| held.folds.iter().all(|fold| fold.into != ready.from));
+                    //
+                    // An address that has just taken another one into itself is the same problem
+                    // read from the other end. It is still there, but it is not the address it was:
+                    // the registers it names have changed, and so have the two things that decided
+                    // what its own set was allowed to be, which are whether it is relative to a
+                    // symbol and whether the frame still owes it an offset. Every plan its readers
+                    // have agreed to so far was worked out against the address it used to be, and a
+                    // plan naming a register whose `lea` has just gone is exactly the gap this is
+                    // here to keep shut. So the whole entry goes and the chain waits.
+                    open.retain(|_, held| {
+                        !took.contains(&held.from)
+                            && held.folds.iter().all(|fold| fold.into != ready.from)
+                    });
                 }
             }
             for written in written(func, inst) {
@@ -706,6 +718,77 @@ mod tests {
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// An address whose own set completes after one of its readers has already collected a plan of
+    /// its own, which is `int *q = &tmp[i]; *q = 0; ... tmp[j] = 39; ... return *q;` and is the
+    /// shape that miscompiled.
+    ///
+    /// The outer `lea` writes where the array starts, two inner `lea`s scale a subscript onto it,
+    /// and each inner one has readers of its own. The first reader of the first inner `lea` agrees
+    /// to a plan naming the outer register, since that is what the address it is taking reads at
+    /// the time. Then the second inner `lea` arrives, the outer set is complete, both inner ones
+    /// take the outer address into themselves and the outer `lea` goes. The agreed plan now names a
+    /// register nothing writes, and committing it would put that register in a load.
+    ///
+    /// So the entry goes when the address under it is rewritten. What is left works every address
+    /// out from something that is written, which is the whole of what this checks.
+    #[test]
+    fn a_plan_against_an_address_that_has_since_moved_is_not_committed() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let outer = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(outer, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)))
+            .finish();
+
+        let mut inner = Vec::new();
+        let mut given = vec![array];
+        for _ in 0..2 {
+            let index = func.new_vreg(GPR);
+            let address = func.new_vreg(GPR);
+            given.push(index);
+            func.build(block, lea)
+                .def(address, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(outer, GPR))
+                        .indexed(mir::Operand::read(index, GPR), 4),
+                )
+                .finish();
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+                .finish();
+            inner.push(address);
+        }
+        // The second reader of the first inner address, which is what makes its set complete after
+        // that address has already been rewritten.
+        let value = func.new_vreg(GPR);
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(inner[0], GPR)).plus(4))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 3);
+
+        // Every register an address is left naming either comes into the block or is written in
+        // it, and the one that is gone is the outer `lea`'s, which is the register the stale plan
+        // named.
+        let written: Vec<mir::Reg> =
+            func.insts(block).flat_map(|inst| written(&func, inst)).collect();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for reg in address_regs(&func, inst) {
+                assert!(
+                    given.contains(&reg) || written.contains(&reg),
+                    "an address reads {reg:?} and nothing writes it"
+                );
+            }
+        }
+        assert!(!written.contains(&outer), "the outer address is still there");
     }
 
     /// An indexed address with two readers, which both of them can take. The index goes into the
