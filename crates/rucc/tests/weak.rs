@@ -146,8 +146,10 @@ int later(void) { return 1; }
 /// those is a `static` that stopped being one.
 #[test]
 fn a_static_name_has_nothing_to_give_way_to_and_is_told_so() {
-    let (ok, _, said) =
-        compile("static", "static int quiet(void) __attribute__((weak));\nstatic int quiet(void) { return 1; }\n");
+    let (ok, _, said) = compile(
+        "static",
+        "static int quiet(void) __attribute__((weak));\nstatic int quiet(void) { return 1; }\n",
+    );
 
     assert!(!ok, "expected this to be refused: {said}");
     assert!(said.contains("E0711"), "{said}");

@@ -565,8 +565,16 @@ mod tests {
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars, weak: Vec::new() }, &[], &names, &target(os), true, Output::default())
-            .expect("a machine with a writer")
+        print(
+            &[],
+            &Globals { vars, weak: Vec::new() },
+            &[],
+            &names,
+            &target(os),
+            true,
+            Output::default(),
+        )
+        .expect("a machine with a writer")
     }
 
     /// The same, with every variable given a section of its own.
