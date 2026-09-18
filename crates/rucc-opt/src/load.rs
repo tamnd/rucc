@@ -17,8 +17,8 @@
 //! opportunities, for a fraction of the machinery.
 //!
 //! The two are not alternatives and this is not a stand-in for the other one. What it is is the
-//! part that can be written without an alias oracle, and the part whose cost is one walk over each
-//! block.
+//! part whose cost is one walk over each block, and it is the first pass in the pipeline to ask
+//! the alias analysis anything.
 //!
 //! # What it knows
 //!
@@ -37,19 +37,23 @@
 //! subscript twice, so the shape this pass is most obviously for is one it cannot see until that
 //! lands.
 //!
-//! # What throws the table away
+//! # What throws the table away, and what only takes entries out of it
 //!
-//! Anything that could write anywhere. There is no alias analysis in this pass, so a store to one
-//! address is treated as a possible write to every address, and the table is emptied before the
-//! store records what it just wrote. A call, an atomic, a fence and a `memcpy` empty it and record
-//! nothing. That is [`Opcode::touches_memory`], which is the conservative predicate, so an opcode
-//! added to the IR later throws the table away rather than being quietly assumed harmless.
+//! A store and a call ask [`crate::alias`] which entries they could have written and take those
+//! out, leaving the rest. `*p = v; total += *q;` with two locals keeps the entry for `q`, and a
+//! call keeps every entry for a local whose address never left the function, which is the escape
+//! layer of section 8.4 and the cheapest interprocedural flavoured fact there is. The oracle is
+//! built once for the function, since the escape analysis inside it is one walk and every query
+//! wants it.
 //!
-//! This costs less than it sounds like. A store immediately followed by a read of what was stored
-//! still works, because the store empties the table and then puts back the one entry the load is
-//! about to ask for. What the barrier really costs is the second address: `*p = v; total += *q;`
-//! with two locals is refused even where the two cannot be the same object, and telling them apart
-//! is the alias oracle's answer rather than this pass's.
+//! Everything else that touches memory still empties the whole table, which is an atomic, a
+//! fence, a `memcpy` and a volatile access of either kind. That is [`Opcode::touches_memory`]
+//! with the plain store and the call taken out of it, so an opcode added to the IR later empties
+//! the table rather than being quietly assumed harmless.
+//!
+//! The type-based layer is on, and `-fno-strict-aliasing` still works, because the flag is
+//! applied where the accesses are made rather than here: `rucc_lower` leaves the type off every
+//! access when it is given, so the layer has nothing to answer with.
 //!
 //! A volatile access empties the table and records nothing either way. Whether a volatile store
 //! could be forwarded from is an argument about what `volatile` promises, and this pass does not
@@ -83,6 +87,7 @@ use std::collections::HashMap;
 
 use rucc_ir::{Block, Flags, Func, Inst, Opcode, Type, Value};
 
+use crate::alias::{Access, Alias};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -121,7 +126,7 @@ impl Pass for LoadForward {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         // What each removed load's result is read as, applied to the whole function once at the
         // end. Rewriting each one where it is found would be a walk over the function per load,
@@ -129,20 +134,27 @@ impl Pass for LoadForward {
         // redirection of a result does not change one.
         let mut forward: HashMap<Value, Value> = HashMap::new();
         let mut gone: Vec<Inst> = Vec::new();
+        // Built once for the whole function rather than once per block, because the escape
+        // analysis inside it is a walk over the function and the answer does not vary by block.
+        let mut alias = Alias::new(func, an.surroundings());
 
         for block in func.blocks().collect::<Vec<Block>>() {
             let mut known: HashMap<Value, Held> = HashMap::new();
             for inst in func.insts(block).collect::<Vec<Inst>>() {
-                match act(func, inst) {
+                match act(func, &alias, inst) {
                     Act::Ignore => {}
                     Act::Forget => known.clear(),
-                    Act::Wrote { address, value, ty } => {
-                        // Emptied first and recorded second, so that the store's own address
-                        // survives the clearing its own possible aliasing caused.
-                        known.clear();
-                        known.insert(address, Held { ty, value, stored: true });
+                    Act::Called => {
+                        known.retain(|_, held| alias.clobbered_by(&held.access, inst).is_no());
                     }
-                    Act::Read { address, result, ty } => {
+                    Act::Wrote { address, value, ty, access } => {
+                        // The entries this store could have written go first and the store's own
+                        // goes in second, so that its address survives the invalidation its own
+                        // write caused.
+                        known.retain(|_, held| alias.query(&held.access, &access).is_no());
+                        known.insert(address, Held { ty, value, stored: true, access });
+                    }
+                    Act::Read { address, result, ty, access } => {
                         match known.get(&address).copied() {
                             Some(held) if held.ty == ty => {
                                 if fuel.take() {
@@ -160,12 +172,11 @@ impl Pass for LoadForward {
                             Some(_) => stats.missed(WIDTH),
                             None => {}
                         }
-                        known.insert(address, Held { ty, value: result, stored: false });
+                        known.insert(address, Held { ty, value: result, stored: false, access });
                     }
                 }
             }
         }
-
         for inst in gone {
             func.remove_inst(inst);
         }
@@ -192,6 +203,10 @@ struct Held {
     value: Value,
     /// Whether a store put it there, rather than a load having read it.
     stored: bool,
+    /// The reference the access that established this made, which is what a later store or call
+    /// is asked about. It is kept rather than rebuilt because the instruction it came from may be
+    /// one this pass is about to remove.
+    access: Access,
 }
 
 /// What one instruction does to the table.
@@ -200,20 +215,27 @@ enum Act {
     Ignore,
     /// It could write anywhere, so nothing the table says is known any more.
     Forget,
-    /// It writes this value of this type at this address, and could have written anywhere else.
-    Wrote { address: Value, value: Value, ty: Type },
-    /// It reads a value of this type from this address into this result.
-    Read { address: Value, result: Value, ty: Type },
+    /// It is a call, so what it could have written is a question for the oracle, one entry at a
+    /// time.
+    Called,
+    /// It writes this value of this type at this address, covering these bytes.
+    Wrote { address: Value, value: Value, ty: Type, access: Access },
+    /// It reads a value of this type from this address into this result, covering these bytes.
+    Read { address: Value, result: Value, ty: Type, access: Access },
 }
 
-/// Which of the four an instruction is.
+/// Which of the five an instruction is.
 ///
 /// The two interesting cases are narrow on purpose. A plain non-volatile `Load` with one address
 /// and one result, and a plain non-volatile `Store` of one value to one address. `AtomicLoad` and
 /// `AtomicStore` are separate opcodes in this IR and are not these, so an ordering never reaches
 /// here as something to forward, and neither does a load carrying a memory token, which is what
 /// more than one result would mean.
-fn act(func: &Func, inst: Inst) -> Act {
+///
+/// A call that returns by way of a pointer it was handed is a call like any other here, because
+/// the handing over is what the escape analysis sees and the answer for that local is then that
+/// the call may write it.
+fn act(func: &Func, alias: &Alias<'_>, inst: Inst) -> Act {
     let data = &func[inst];
     if !data.opcode.touches_memory() {
         return Act::Ignore;
@@ -225,19 +247,22 @@ fn act(func: &Func, inst: Inst) -> Act {
     match data.opcode {
         Opcode::Load => {
             let mut results = data.results();
-            let (Some(&address), Some(result), None) =
-                (args.first(), results.next(), results.next())
+            let (Some(&address), Some(result), None, Some(access)) =
+                (args.first(), results.next(), results.next(), alias.reads(inst))
             else {
                 return Act::Forget;
             };
-            Act::Read { address, result, ty: func[result].ty }
+            Act::Read { address, result, ty: func[result].ty, access }
         }
         Opcode::Store => {
-            let (Some(&value), Some(&address)) = (args.first(), args.get(1)) else {
+            let (Some(&value), Some(&address), Some(access)) =
+                (args.first(), args.get(1), alias.writes(inst))
+            else {
                 return Act::Forget;
             };
-            Act::Wrote { address, value, ty: func[value].ty }
+            Act::Wrote { address, value, ty: func[value].ty, access }
         }
+        Opcode::Call | Opcode::TailCall => Act::Called,
         _ => Act::Forget,
     }
 }
@@ -351,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_between_the_two_accesses_is_a_write_to_everything() {
+    fn a_call_cannot_touch_a_local_whose_address_never_left_the_function() {
         let (mut names, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build);
@@ -361,13 +386,35 @@ mod tests {
         let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.ret(&[first, second]);
 
+        // Nothing is said about `g` at all, and nothing has to be. The address of the slot is
+        // never handed to anything, so there is no way for `g` to have it.
         let stats = run(&mut func);
-        assert!(!stats.changed(), "nothing here says what the call did to that address");
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
+    }
+
+    #[test]
+    fn a_call_handed_the_address_of_the_local_can_write_it() {
+        let (mut names, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
+        build.call(names.intern("g"), signature, &[slot]);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        // The same function with the one difference that matters. Handing the address over is
+        // what the escape analysis is looking for, and after it the honest answer is that the
+        // call may have written through it.
+        let stats = run(&mut func);
+        assert!(!stats.changed(), "the call was given the address, so it may have written there");
         assert_eq!(loads(&func), 2);
     }
 
     #[test]
-    fn a_store_to_another_address_is_a_write_to_everything_too() {
+    fn a_store_to_a_local_that_cannot_be_the_other_one_leaves_it_alone() {
         let (_, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build);
@@ -377,12 +424,50 @@ mod tests {
         let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.ret(&[first, second]);
 
-        // Two allocas cannot be the same object, so this is an opportunity and not a hazard. It is
-        // left on the table on purpose: telling the two apart is the alias oracle's answer and
-        // this pass is the version that does not have one.
+        // Two allocas are two objects, which is the first layer of the oracle and the one that
+        // needs nothing analysed.
         let stats = run(&mut func);
-        assert!(!stats.changed());
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
+    }
+
+    #[test]
+    fn a_store_through_an_address_that_could_be_the_same_one_is_a_write_to_it() {
+        let (_, mut func, block) = blank();
+        // Two pointers this function was handed. Neither walks back to an object, and nothing
+        // says they are two, so the honest answer is that the store could have been to `p`.
+        let p = func.append_param(block, Type::PTR);
+        let q = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let first = build.load(Type::int(64), p, plain(8), Flags::NONE);
+        build.store(first, q, plain(8), Flags::NONE);
+        let second = build.load(Type::int(64), p, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        let stats = run(&mut func);
+        assert!(!stats.changed(), "the store may have been to the same place");
         assert_eq!(loads(&func), 2);
+    }
+
+    #[test]
+    fn a_store_past_the_end_of_what_the_load_read_is_not_a_write_to_it() {
+        let (_, mut func, block) = blank();
+        let p = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let first = build.load(Type::int(64), p, plain(8), Flags::NONE);
+        let eight = build.iconst(Type::int(64), 8);
+        let past = build.binary(Opcode::PtrAdd, p, eight, Flags::NONE);
+        build.store(first, past, plain(8), Flags::NONE);
+        let second = build.load(Type::int(64), p, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        // One address, two offsets, and eight bytes from each of them do not meet. That is the
+        // offset layer, and it is the one that does not care what either address points at.
+        let stats = run(&mut func);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
     }
 
     #[test]

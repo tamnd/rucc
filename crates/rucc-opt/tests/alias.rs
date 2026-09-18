@@ -47,7 +47,7 @@ use rucc_ir::{
     Builder, Def, Extra, Flags, Func, Global, InstData, MemInfo, MemOrder, Meta, MetaNode, Module,
     Opcode, Restrict, Signature, TbaaNode, Type, Value,
 };
-use rucc_opt::{Access, Alias, Answer, Reason};
+use rucc_opt::{Access, Alias, Answer, Reason, Surroundings};
 use rucc_target::{TargetInfo, Triple};
 
 /// How many bytes every object in a generated function is.
@@ -74,7 +74,8 @@ fn a_no_is_only_ever_said_about_two_references_that_really_do_not_meet() {
     for _ in 0..400 {
         let case = Case::new(&mut random);
         let (module, func, accesses) = case.build();
-        let mut alias = Alias::new(&func, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&func, &around);
 
         for (i, (a, truth_a)) in accesses.iter().enumerate() {
             for (b, truth_b) in accesses.iter().skip(i) {
@@ -103,7 +104,7 @@ fn a_no_is_only_ever_said_about_two_references_that_really_do_not_meet() {
         assert!(counts.queries() >= total);
 
         // A second analysis of the same function agrees with the first, everywhere.
-        let mut again = Alias::new(&func, &module);
+        let mut again = Alias::new(&func, &around);
         for (a, _) in &accesses {
             for (b, _) in &accesses {
                 assert_eq!(again.query(a, b), alias.query(a, b), "not repeatable in {case:?}");
@@ -343,7 +344,8 @@ impl Case {
         }
         build.ret(&[]);
 
-        let alias = Alias::new(&func, &module);
+        let around = Surroundings::of(&module);
+        let alias = Alias::new(&func, &around);
         let accesses = out
             .into_iter()
             .map(|(inst, object, plan)| {

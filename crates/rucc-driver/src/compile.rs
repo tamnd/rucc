@@ -6226,9 +6226,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // Dropping it, which is the direction that is worth a word, and the word is the one every
         // other pointer target gets rather than a complaint about the types not matching.
         let dropping = format!("{prefix}B *f(const B *p) {{ return p; }}\n");
-        let warning =
-            "/main.c:3:27: warning: return discards 'const' qualifier from pointer target type \
-             [E0514]";
+        let warning = "/main.c:3:27: warning: return discards 'const' qualifier from pointer \
+             target type [E0514]";
         assert_eq!(run(&opts, &dropping).messages, [warning]);
 
         // A pointer to an array of something else is still an incompatible pointer, because

@@ -39,8 +39,8 @@ use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, nofree, params,
-    pass,
+    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, alias, extents, heap, image, nofree,
+    params, pass,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -192,6 +192,16 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// `addq $0`. Over the corpus at `-O2` the run is worth 3000 bytes across 1830 programs, 224 of
 /// them smaller and 4 larger, with every result unchanged.
 ///
+/// A second `simplify-cfg` runs after that `simplify` at `-O1`, `-Os` and `-Oz`, and the two speed
+/// levels already had one further down for what `ivopts` and the second `licm` leave. What it is
+/// for is the branch nobody has to take any more. Forwarding a load turns a comparison of what was
+/// read into a comparison of what was written, `fold` settles it, and what is then left is a
+/// conditional branch on a constant with a block on the other side of it that the program cannot
+/// reach. Nothing else at these three levels looks at an edge after `load-forward` has run, so
+/// until now the branch and the block it guards were both written out. The block is usually the
+/// interesting half, since it is where the call that was never going to happen is, and at the two
+/// size levels a block that goes is bytes that go.
+///
 /// `hoist` is the first of the two check passes and it runs where it does because of what is above
 /// it. It needs a loop that tests at the bottom, which is what `header-copy` makes, and it needs a
 /// preheader to put a check in, which is what the `canon` after it puts back. Running it before
@@ -236,6 +246,7 @@ const O1: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "hoist",
     "discharge",
     "dead-plane",
@@ -398,6 +409,7 @@ const OS: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "discharge",
     "dead-plane",
     "coalesce",
@@ -430,6 +442,7 @@ const OZ: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "discharge",
     "dead-plane",
     "coalesce",
@@ -730,6 +743,10 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     } else {
         Arc::default()
     };
+    // The same, for the alias oracle. This one is not conditional on a pass being in the list.
+    // It is four small tables rather than a copy of the data, several passes want an oracle, and
+    // a list to keep in step with the passes that do would be a thing to forget to add a name to.
+    let around = Arc::new(alias::Surroundings::of(module));
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -757,9 +774,9 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let an = cached
-                .entry(id)
-                .or_insert_with(|| Analyses::new(machine).reading(Arc::clone(&images)));
+            let an = cached.entry(id).or_insert_with(|| {
+                Analyses::new(machine).reading(Arc::clone(&images)).around(Arc::clone(&around))
+            });
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.

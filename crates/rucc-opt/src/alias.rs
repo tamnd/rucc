@@ -80,12 +80,12 @@
 //! does an access through a pointer that came out of memory, which is not a question about names
 //! and never will be.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
 use rucc_ir::{
-    AttrSet, Attrs, DataLayout, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Module, Opcode,
-    Restrict, SymbolRef, Type, Value,
+    AttrSet, Attrs, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Module, Opcode, Restrict,
+    Type, Value,
 };
 
 /// How far back through address arithmetic a pointer is chased before the answer is given up on.
@@ -322,6 +322,91 @@ impl Access {
     }
 }
 
+/// What the module around a function says, for a pass that has only the function.
+///
+/// A function pass is handed one function and not the module it is in, and the manager hands out
+/// a mutable borrow of that function, so there is nothing left to borrow the module with. An
+/// oracle that took a `&Module` was therefore one no pass could build, which is why none did. The
+/// parts of a module this analysis asks about are four and none of them is large, so they are
+/// copied out once per module and the copy is what a pass is given, which is what
+/// [`crate::image::Images`] already does with the images of `const` globals.
+///
+/// A default one says nothing, and nothing is the conservative answer at every place it is read:
+/// no name is one object, no call has attributes, every pair of type nodes conflicts and the
+/// width of a pointer is unknown. So a pass given one optimizes less and never wrongly.
+#[derive(Clone, Debug, Default)]
+pub struct Surroundings {
+    /// What each name in the module refers to.
+    named: HashMap<Symbol, Named>,
+    /// The node above each type node, by position, which is the whole of what layer 3 walks. A
+    /// node this does not have is a node from somewhere else, and the answer for one of those is
+    /// that it conflicts.
+    parents: Vec<Option<Meta>>,
+    /// What an address takes, which is the only thing layer 4 needs the data layout for.
+    pointer_bytes: Option<u64>,
+}
+
+/// What one name in a module refers to.
+#[derive(Clone, Copy, Debug)]
+enum Named {
+    /// A function, and what it is declared to be, which is what a call site reads.
+    Func(Attrs),
+    /// A global variable.
+    Global,
+    /// An alias or an ifunc, which is exactly a second name for something else.
+    Alias,
+}
+
+impl Surroundings {
+    /// What this module says.
+    #[must_use]
+    pub fn of(module: &Module) -> Self {
+        let mut named = HashMap::new();
+        for id in module.funcs() {
+            named.insert(module[id].name, Named::Func(module[id].attrs));
+        }
+        for id in module.globals() {
+            named.insert(module[id].name, Named::Global);
+        }
+        for id in module.aliases() {
+            named.insert(module[id].name, Named::Alias);
+        }
+        let parents = module.metadata().map(|meta| module[meta].parent()).collect();
+        let bits = u64::from(module.datalayout.pointer_bits);
+        Self { named, parents, pointer_bytes: Some(bits.div_ceil(8)) }
+    }
+
+    /// Whether this symbol is a name for an object no other name also names.
+    ///
+    /// An `alias` or an `ifunc` is exactly a second name for something, so two different symbols
+    /// can be one object and the rule that two objects do not alias does not reach them. A name
+    /// this does not have at all is treated the same way, because something is wrong and the
+    /// conservative answer is the one to be wrong in the direction of.
+    fn one_object(&self, name: Symbol) -> bool {
+        matches!(self.named.get(&name), Some(Named::Func(_) | Named::Global))
+    }
+
+    /// What a function of that name is declared to be, for a call whose callee is here.
+    fn attrs(&self, name: Symbol) -> Option<Attrs> {
+        match self.named.get(&name) {
+            Some(&Named::Func(attrs)) => Some(attrs),
+            _ => None,
+        }
+    }
+
+    /// The node above this one, and `None` both for a node at the top and for a node this does
+    /// not have. The two are told apart by [`Surroundings::has`], because they are not the same
+    /// answer.
+    fn parent(&self, node: Meta) -> Option<Meta> {
+        self.parents.get(node.index()).copied().flatten()
+    }
+
+    /// Whether this node is one of the module's.
+    fn has(&self, node: Meta) -> bool {
+        node.index() < self.parents.len()
+    }
+}
+
 /// Which of a function's locals had their address leave it.
 ///
 /// Section 8.4 calls this the most valuable interprocedural-flavoured fact available without
@@ -436,14 +521,14 @@ impl Counts {
 
 /// The analysis over one function.
 ///
-/// It borrows the module because a global's address is a symbol and whether two symbols are two
-/// objects is a question about the module, and it borrows the function because everything else
-/// is. The escape analysis is run once when this is built, since every query may ask it and it
-/// is one walk over the function.
+/// It borrows what the module said because a global's address is a symbol and whether two
+/// symbols are two objects is a question about the module, and it borrows the function because
+/// everything else is. The escape analysis is run once when this is built, since every query may
+/// ask it and it is one walk over the function.
 #[derive(Debug)]
 pub struct Alias<'a> {
     func: &'a Func,
-    module: &'a Module,
+    around: &'a Surroundings,
     options: Options,
     escapes: Escapes,
     counts: Counts,
@@ -452,14 +537,14 @@ pub struct Alias<'a> {
 impl<'a> Alias<'a> {
     /// The analysis of this function, with the type-based layer on, which is GCC's `-O2`.
     #[must_use]
-    pub fn new(func: &'a Func, module: &'a Module) -> Self {
-        Self::with(func, module, Options::default())
+    pub fn new(func: &'a Func, around: &'a Surroundings) -> Self {
+        Self::with(func, around, Options::default())
     }
 
     /// The same, with the type-based layer where the command line left it.
     #[must_use]
-    pub fn with(func: &'a Func, module: &'a Module, options: Options) -> Self {
-        Self { func, module, options, escapes: Escapes::of(func), counts: Counts::default() }
+    pub fn with(func: &'a Func, around: &'a Surroundings, options: Options) -> Self {
+        Self { func, around, options, escapes: Escapes::of(func), counts: Counts::default() }
     }
 
     /// Which locals escaped, for a caller that wants the fact on its own.
@@ -607,20 +692,10 @@ impl<'a> Alias<'a> {
             // Fresh storage this function made is not any named object.
             (Origin::Local(_), Origin::Global(_)) | (Origin::Global(_), Origin::Local(_)) => true,
             (Origin::Global(one), Origin::Global(other)) => {
-                one != other && self.one_object(one) && self.one_object(other)
+                one != other && self.around.one_object(one) && self.around.one_object(other)
             }
             _ => false,
         }
-    }
-
-    /// Whether this symbol is a name for an object no other name in the module also names.
-    ///
-    /// An `alias` or an `ifunc` is exactly a second name for something, so two different symbols
-    /// can be one object and the rule that two objects do not alias does not reach them. A name
-    /// the module does not have at all is treated the same way, because something is wrong and
-    /// the conservative answer is the one to be wrong in the direction of.
-    fn one_object(&self, name: Symbol) -> bool {
-        matches!(self.module.lookup(name), Some(SymbolRef::Func(_) | SymbolRef::Global(_)))
     }
 
     /// Whether two type nodes can describe the same byte.
@@ -638,7 +713,13 @@ impl<'a> Alias<'a> {
             if node == ancestor {
                 return true;
             }
-            match self.module[node].parent() {
+            if !self.around.has(node) {
+                // A node from another module, which is a module that has been merged badly or a
+                // function printed on its own and read back. Either way nothing is known about
+                // where it sits, and the answer that cannot be wrong is that it conflicts.
+                return true;
+            }
+            match self.around.parent(node) {
                 Some(up) => node = up,
                 None => return false,
             }
@@ -707,11 +788,7 @@ impl<'a> Alias<'a> {
         let Extra::Call(info) = self.func[call].extra else {
             return None;
         };
-        let name = self.func[info].callee?;
-        match self.module.lookup(name)? {
-            SymbolRef::Func(id) => Some(self.module[id].attrs),
-            _ => None,
-        }
+        self.around.attrs(self.func[info].callee?)
     }
 
     fn mem(&self, inst: Inst) -> Option<MemInfo> {
@@ -747,9 +824,8 @@ impl<'a> Alias<'a> {
     /// How many bytes a value of this type takes, which for an address is the target's answer
     /// and not the type's.
     fn width(&self, ty: Type) -> Option<u64> {
-        let layout: &DataLayout = &self.module.datalayout;
         if ty.is_ptr() {
-            return Some(u64::from(layout.pointer_bits).div_ceil(8));
+            return self.around.pointer_bytes;
         }
         let bits = u64::from(ty.bits()) * u64::from(ty.lanes());
         (bits > 0).then(|| bits.div_ceil(8))
@@ -868,7 +944,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
         assert_eq!(alias.counts().answered(Reason::Distinct), 1);
@@ -905,7 +982,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -923,7 +1001,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -946,7 +1025,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -964,7 +1044,8 @@ mod tests {
         build.store(read, second, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Offset));
     }
@@ -982,7 +1063,8 @@ mod tests {
         build.store(read, second, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1000,7 +1082,8 @@ mod tests {
         build.store(read, object, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(a.origin, b.origin, "both are still that one object");
         assert_eq!(a.offset, None);
@@ -1019,7 +1102,8 @@ mod tests {
         build.store(read, outside, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         assert_eq!(alias.escapes().count(), 0);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Escape));
@@ -1040,7 +1124,8 @@ mod tests {
         build.store(read, outside, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         assert_eq!(alias.escapes().count(), 1);
         let read = first(&f, Opcode::Load);
         let write = last(&f, Opcode::Store);
@@ -1079,7 +1164,8 @@ mod tests {
         let mut build = Builder::new(&mut f, next);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let alias = Alias::new(&f, &around);
         assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
     }
 
@@ -1094,7 +1180,8 @@ mod tests {
         build.icmp(IntPred::Eq, object, outside);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let alias = Alias::new(&f, &around);
         assert_eq!(alias.escapes().count(), 0);
     }
 
@@ -1110,7 +1197,8 @@ mod tests {
         build.unary(Opcode::PtrToInt, object, Type::int(64));
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let alias = Alias::new(&f, &around);
         assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
     }
 
@@ -1128,7 +1216,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Restrict));
     }
@@ -1147,7 +1236,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1187,7 +1277,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Tbaa));
     }
@@ -1207,7 +1298,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1230,18 +1322,19 @@ mod tests {
         build.ret(&[]);
 
         let options = Options { strict_aliasing: false };
-        let mut alias = Alias::with(&f, &module, options);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::with(&f, &around, options);
         let (a, b) = two(&alias, &f);
         // The `restrict` layer still answers, which is the point: the flag is one condition in
         // one place and it does not reach anything else.
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Restrict));
 
-        let mut without = Alias::with(&f, &module, options);
+        let mut without = Alias::with(&f, &around, options);
         let plainer = Access { restrict: Restrict::NONE, ..a };
         let other = Access { restrict: Restrict::NONE, ..b };
         assert_eq!(without.query(&plainer, &other), Answer::May);
 
-        let mut with = Alias::new(&f, &module);
+        let mut with = Alias::new(&f, &around);
         assert_eq!(with.query(&plainer, &other), Answer::No(Reason::Tbaa));
     }
 
@@ -1264,7 +1357,8 @@ mod tests {
         build.store(read, object, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1281,7 +1375,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::VOLATILE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         // Two different objects, and the answer is still that they conflict, because moving
         // one volatile access across another is the thing `volatile` exists to forbid.
@@ -1300,7 +1395,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -1318,7 +1414,8 @@ mod tests {
         build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let alias = Alias::new(&f, &around);
         let copy = first(&f, Opcode::Memcpy);
         let read = alias.reads(copy).expect("a copy reads");
         let written = alias.writes(copy).expect("a copy writes");
@@ -1363,7 +1460,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Escape));
         assert_eq!(alias.read_by(&reference, call), Answer::No(Reason::Escape));
@@ -1381,7 +1479,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::May);
     }
@@ -1398,7 +1497,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
         assert_eq!(alias.read_by(&reference, call), Answer::May);
@@ -1416,7 +1516,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
         assert_eq!(alias.read_by(&reference, call), Answer::No(Reason::Attribute));
@@ -1437,7 +1538,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         // The one pointer it was handed is a parameter of unknown origin, which may be that
         // global, so this is the answer that cannot be wrong.
@@ -1458,7 +1560,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
     }
@@ -1481,7 +1584,8 @@ mod tests {
         );
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let around = Surroundings::of(&module);
+        let mut alias = Alias::new(&f, &around);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::May);
     }

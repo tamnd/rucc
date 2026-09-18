@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use rucc_ir::Func;
 
+use crate::alias::Surroundings;
 use crate::image::Images;
 use crate::machine::Machine;
 use crate::predict::Callees;
@@ -180,6 +181,7 @@ impl Preserved {
 pub struct Analyses {
     machine: Machine,
     images: Arc<Images>,
+    around: Arc<Surroundings>,
     cfg: OnceCell<Cfg>,
     doms: OnceCell<Dominators>,
     post: OnceCell<PostDominators>,
@@ -203,6 +205,7 @@ impl Analyses {
         Self {
             machine,
             images: Arc::default(),
+            around: Arc::default(),
             cfg: OnceCell::new(),
             doms: OnceCell::new(),
             post: OnceCell::new(),
@@ -231,6 +234,17 @@ impl Analyses {
         self
     }
 
+    /// The same cache, with what the module around the function says.
+    ///
+    /// Counted rather than copied for the reason above, and separate from [`Analyses::new`] for
+    /// the reason above as well: an empty one says nothing and a pass that is given one asks
+    /// fewer questions and answers none of them wrongly.
+    #[must_use]
+    pub fn around(mut self, around: Arc<Surroundings>) -> Self {
+        self.around = around;
+        self
+    }
+
     /// The machine this function is being compiled for.
     ///
     /// Not an analysis, and here because this is the one thing a pass is handed besides the
@@ -247,6 +261,16 @@ impl Analyses {
     #[must_use]
     pub fn images(&self) -> &Images {
         &self.images
+    }
+
+    /// What the module around this function says, which is what an alias oracle is built on.
+    ///
+    /// Here for the same reason the images are. A pass is handed one function, and whether two
+    /// symbols are two objects, what a call's callee is declared to be and how wide an address is
+    /// are all questions about the module it cannot otherwise ask.
+    #[must_use]
+    pub fn surroundings(&self) -> &Surroundings {
+        &self.around
     }
 
     /// The control flow graph, computed if it is not already here.
@@ -399,9 +423,12 @@ impl Analyses {
     /// For the caller that changed the function itself rather than through a pass, and for a
     /// test that wants a cold cache. The machine is not thrown away, because it is not an
     /// analysis and nothing a pass did to the function changed which target it is for. Neither are
-    /// the images, for the same reason: no pass writes to a `const` global.
+    /// the images, and neither is what the module says, for the same reason: no pass writes to a
+    /// `const` global and no function pass changes the module around it.
     pub fn clear(&mut self) {
-        *self = Self::new(self.machine).reading(Arc::clone(&self.images));
+        *self = Self::new(self.machine)
+            .reading(Arc::clone(&self.images))
+            .around(Arc::clone(&self.around));
     }
 
     /// Forgets one analysis and nothing else.

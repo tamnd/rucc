@@ -150,7 +150,7 @@ pub mod uses;
 // `alias::Options` is deliberately not re-exported: [`pipeline::Options`] already has that name
 // here and two of them at the top of the crate would be one import mistake away from a flag going
 // to the wrong place.
-pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
+pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason, Surroundings};
 pub use analysis::{Analyses, Analysis, Preserved};
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
