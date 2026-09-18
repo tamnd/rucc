@@ -87,14 +87,19 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// eliminate, because a constant a fold produced is a branch condition the control flow pass can
 /// then read, and because the comparison that branch was on is dead once it has.
 ///
-/// `image` is between the first `fold` and the first `simplify`, and both neighbours are the
-/// position. What it reads is a load from a `const` global at a constant byte offset, and until
-/// `fold` has run there is no constant byte offset: a subscript arrives from the front end as the
-/// index sign extended and multiplied by the element size, so every array and every string in the
-/// program would be a load it could not answer. What it writes is a constant standing where a load
-/// stood, which is arithmetic for the peephole behind it to collapse. Running it here rather than
-/// alongside the summaries before the pipeline is the whole of `crate::image`'s design and that
-/// module says so at length.
+/// `image` has a `fold` on each side of it, which is the other place in this list where a pass is
+/// named twice in a row, and both of them are the position rather than the pass. What it reads is
+/// a load from a `const` global at a constant byte offset, and until something has folded the
+/// address there is no constant byte offset: a subscript arrives from the front end as the index
+/// sign extended and multiplied by the element size, so without the `fold` ahead of it every array
+/// and every string in the program is a load it cannot answer. The `fold` behind it is the mirror
+/// of that. What `image` writes is a constant where a load stood, and what stands on top of it is
+/// whatever the program did with the value it read, so a `const double` converted to an `int` and
+/// compared against one is three folds in a row and only the first of them is this pass. Nothing
+/// later in the list would do it in time: the branch passes read the condition, and a condition
+/// still spelled as a conversion of a constant is a branch they leave standing. Running `image`
+/// before the pipeline rather than inside it is the alternative that does not work, and
+/// `crate::image` says at length why.
 ///
 /// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
 /// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
@@ -206,6 +211,7 @@ const O1: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -265,6 +271,7 @@ const O2: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -301,6 +308,7 @@ const O3: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -357,6 +365,7 @@ const OS: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -389,6 +398,7 @@ const OZ: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -1310,7 +1320,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("5: narrow, "), "{text}");
+        assert!(text.contains("6: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
@@ -1443,10 +1453,11 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &names, &opts);
-        // The level folds twice, once at the top and once after the loop pipeline, and what a
-        // dump request names is a pass rather than a position, so both runs are written out. The
-        // side is what this is about: not one of the two is a `before`.
-        assert_eq!(report.dumps.len(), 2, "both runs of the pass, one dump each");
+        // The level folds three times, twice at the top on either side of `image` and once after
+        // the loop pipeline, and what a dump request names is a pass rather than a position, so
+        // every run is written out. The side is what this is about: not one of the three is a
+        // `before`.
+        assert_eq!(report.dumps.len(), 3, "every run of the pass, one dump each");
         assert!(
             report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
             "{:?}",

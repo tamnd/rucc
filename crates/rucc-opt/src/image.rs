@@ -36,10 +36,17 @@
 //!
 //! # Where it runs
 //!
-//! Directly after the first `fold`, which is the pass that turns the subscript arithmetic above
-//! into the offset this reads, and directly before `simplify`, which is what folds the arithmetic
-//! standing on top of whatever this wrote. Those two neighbours are the whole of the position: one
-//! ahead of it makes this possible and one behind it makes it worth doing.
+//! With a `fold` on each side of it, at every level that optimizes and at none that does not.
+//!
+//! The one ahead is what turns the subscript arithmetic above into the offset this reads, so
+//! without it this answers nothing. The one behind is the mirror of that, and it is the half that
+//! is easy to leave out. What this writes is a constant where a load stood, and standing on top of
+//! it is whatever the program did with the value: `(int) one != 1` on a `const double` is a
+//! conversion and a comparison, and folding those is what turns the branch into a branch the
+//! control flow passes can take out. Nothing later in the list arrives in time, because the branch
+//! passes read the condition and a condition still spelled as a conversion of a constant is a
+//! branch they leave standing. That is the difference between a program that links and one that
+//! does not, which is what `gcc.c-torture/execute/20030216-1.c` is.
 //!
 //! # Which globals are believed
 //!

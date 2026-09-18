@@ -2548,6 +2548,20 @@ decl #0 x : int object external static defined
         assert!(!text.contains("movl\t$30, %eax"), "{text}");
     }
 
+    /// `gcc.c-torture/execute/20030216-1.c`, which is the program the whole of this is for.
+    ///
+    /// It calls a function nothing defines, guarded by a condition the optimizer is meant to prove
+    /// false, so the program links exactly when the call has been folded away. Getting there is
+    /// three folds standing on each other: the load of the `const double`, the conversion of it to
+    /// an `int`, and the comparison against one.
+    #[test]
+    fn a_call_guarded_by_a_condition_a_read_only_object_settles_is_not_emitted() {
+        let text = optimized(
+            "void link_error(void);\nconst double one = 1.0;\nint main(void) { if ((int) one != 1) link_error(); return 0; }\n",
+        );
+        assert!(!text.contains("call\tlink_error"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
