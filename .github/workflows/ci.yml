@@ -375,6 +375,36 @@ jobs:
       - name: build tests/safety with the elimination off and on
         run: cargo xtask accounting
 
+  # Every program in the suite above is a few lines of C written to provoke one judgement, which is
+  # the right shape for asking whether a check fires and the wrong shape for asking whether a real
+  # library survives the monitor. tamnd/rucc#1307 is what the gap between those two questions costs:
+  # a hole nothing in the suite could see, found by somebody compiling SQLite by hand. Three more of
+  # the same shape have been found since and every one of them was found the same way, so this is
+  # that by hand run made standing.
+  #
+  # The amalgamation is fetched rather than vendored, because it is nine megabytes of somebody
+  # else's C and a copy of it would be in this compiler's history forever. It is pinned by hash for
+  # the ordinary reason, and the check does not care which version it gets: the workload is plain
+  # SQL and its answers are arithmetic.
+  sqlite:
+    name: an instrumented sqlite that has to be right
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the target library
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: fetch the amalgamation
+        run: |
+          curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tar.gz" | sha256sum -c -
+          tar xzf sqlite.tar.gz
+      - name: build it at both levels and hold it to its answers
+        run: cargo xtask sqlite
+        env:
+          RUCC_SQLITE_AMALGAMATION: ${{ github.workspace }}/sqlite-autoconf-3530400/sqlite3.c
+
   # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
   # layer that can see a calling convention at all: everything cheaper than it reads what the
   # compiler produced, and where an argument travels is not in the source. It is its own job for
