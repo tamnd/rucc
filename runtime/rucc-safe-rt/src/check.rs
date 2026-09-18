@@ -616,6 +616,61 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
     }
 }
 
+/// The judgement a byte-wise write makes about the pointers it wrote over: there are none now.
+///
+/// [`relocate`] is this for a copy, where the destination gets the source's slots. A `memset`, a
+/// `strcpy` or a `read` into a buffer has no source of slots to give, because what it writes is
+/// bytes rather than pointers, so every slot the range reaches has to go.
+///
+/// Leaving them is worse than the stale metadata the other planes are about, because a slot that
+/// outlives the word it describes can permit rather than refuse. [`crate::aux_slot::Slot::read`]
+/// rebuilds the base by subtracting a displacement from the pointer value beside it, so a word
+/// filled with `0xff` by a `memset` and then read back as a pointer answers with a capability whose
+/// base is that value minus the old displacement and whose extent is the old object's. The wild
+/// address is inside its own bounds by construction, and the version is the old object's and is
+/// live while the old object is, so a dereference of it passes both questions. Without the slot the
+/// same read recovers nothing, and the access is refused where it should be.
+///
+/// Every word the range touches, including the two at the ends it may only touch part of, because
+/// half a pointer is not a pointer. Nothing at all when the destination is not an allocation this
+/// runtime laid out, for the reason [`relocate`] gives.
+///
+/// The slot is read before it is written, which is not an optimization of the store. It is an
+/// optimization of the cache line: a buffer with no pointers in it is nearly every buffer a
+/// `memset` touches, its aux is already empty, and writing zeroes over zeroes would dirty two bytes
+/// of cache line per byte written and send them to memory.
+///
+/// # Safety
+///
+/// The address is not read through by this function.
+pub unsafe fn erase(addr: *const c_void, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let addr = addr as u64;
+    let into = recover::recover(addr as *const c_void);
+    if into.meta.class() != Class::Allocated as u8 {
+        return;
+    }
+    let word = WORD as u64;
+    let mut at = addr & !(word - 1);
+    let after = addr.wrapping_add(len as u64).wrapping_add(word - 1) & !(word - 1);
+    while at < after {
+        if let Some(slot) = aux_slot::address_of(into, at) {
+            // SAFETY: the address came from `address_of`, so it is a slot inside the aux of the
+            // instance the recovery found, and a slot is `AUX_PER_WORD` bytes the runtime owns and
+            // wrote as a pair of words.
+            unsafe {
+                let held = core::ptr::read(slot as *const [u64; 2]);
+                if held != [0, 0] {
+                    core::ptr::write_bytes(slot as *mut u8, 0, AUX_PER_WORD);
+                }
+            }
+        }
+        at = at.wrapping_add(word);
+    }
+}
+
 /// The judgement a call out of this build makes: whatever it was handed may now hold something.
 ///
 /// A pointer passed to a function this compiler did not build goes somewhere nothing reports from.

@@ -147,6 +147,63 @@ impl Kind {
     }
 }
 
+/// The word the row was written with, which is what decides the planes the wrapper maintains.
+///
+/// [`Kind`] says which way the bytes go and that is what the summary counts, but it is not enough
+/// to know what a wrapper has to do. `moves` and `writes` are both a write of a known length, and
+/// they are not the same judgement: a copy hands the destination the source's aux, and a byte-wise
+/// write has no source of slots to hand over and has to clear the destination's. A `Kind` cannot
+/// tell those apart, so the wiring cannot be checked against it. This can.
+///
+/// One variant per arm of [`crate::__judge`], which is what makes the check in this module's tests
+/// possible: a test whose `match` over this is exhaustive stops compiling when somebody adds an
+/// eighth word, and it is the adding of a word that is the risky moment rather than the adding of
+/// a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clause {
+    /// `reads(arg, ...)`, which judges and touches no plane.
+    Reads,
+    /// `writes(arg, len)`, a byte-wise write of a known length.
+    Writes,
+    /// `moves(dst, src, len)`, a copy, which carries the source's slots across.
+    Moves,
+    /// `copies(dst, src)`, a byte-wise write whose length is a walk of the source.
+    Copies,
+    /// `appends(dst, src)` and `appends(dst, src, limit)`, the same after a walk of the
+    /// destination.
+    Appends,
+    /// `scatters(arg, count)`, a write into each buffer an iovec array names.
+    Scatters,
+    /// `gathers(arg, count)`, a read out of each of them.
+    Gathers,
+}
+
+impl Clause {
+    /// The word the row was written with.
+    #[must_use]
+    pub const fn what(self) -> &'static str {
+        match self {
+            Self::Reads => "reads",
+            Self::Writes => "writes",
+            Self::Moves => "moves",
+            Self::Copies => "copies",
+            Self::Appends => "appends",
+            Self::Scatters => "scatters",
+            Self::Gathers => "gathers",
+        }
+    }
+
+    /// Whether the clause puts bytes into the range rather than taking them out of it.
+    ///
+    /// Not the same question as [`Kind::Writes`] on one effect, because a clause can name two
+    /// arguments going opposite ways. This is a property of the word, and it is what the coverage
+    /// test uses to decide which clauses have to be exercised.
+    #[must_use]
+    pub const fn writing(self) -> bool {
+        matches!(self, Self::Writes | Self::Moves | Self::Copies | Self::Appends | Self::Scatters)
+    }
+}
+
 /// How far an argument reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Extent {
@@ -201,6 +258,8 @@ pub struct Iovec {
 pub struct Effect {
     /// The argument, named as the row names it.
     pub arg: &'static str,
+    /// The word the row was written with, which is what says the planes the wrapper maintains.
+    pub clause: Clause,
     /// Which way the bytes go.
     pub kind: Kind,
     /// How far it reaches.
@@ -461,6 +520,8 @@ pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32, kind:
             unsafe {
                 crate::check::judge(entry.base.cast_const(), entry.len, crate::types::CHARACTER);
             };
+            // SAFETY: as above, over the aux, as in the same clause.
+            unsafe { crate::check::erase(entry.base.cast_const(), entry.len) };
         }
         total = total.saturating_add(entry.len);
     }
@@ -769,6 +830,8 @@ macro_rules! __judge {
         unsafe { $crate::check::wrote($arg.cast(), $len) };
         // SAFETY: as above, and the type plane covers the same granules the init plane does.
         unsafe { $crate::check::judge($arg.cast(), $len, $crate::types::CHARACTER) };
+        // SAFETY: as above, over the aux, which described pointers these bytes have replaced.
+        unsafe { $crate::check::erase($arg.cast(), $len) };
     };
     (moves, $name:ident, $dst:ident, $src:ident, $len:tt) => {
         $crate::effects::range($crate::__site!($name, $dst), $dst.cast(), $len);
@@ -799,6 +862,8 @@ macro_rules! __judge {
         unsafe {
             $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
         };
+        // SAFETY: as above, over the aux, as in `writes`.
+        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
     (appends, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: as the `copies` arm, and the destination is a string as well.
@@ -820,6 +885,8 @@ macro_rules! __judge {
         unsafe {
             $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
         };
+        // SAFETY: as the `copies` arm.
+        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
     (appends, $name:ident, $dst:ident, $src:ident, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
@@ -838,6 +905,8 @@ macro_rules! __judge {
         unsafe {
             $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
         };
+        // SAFETY: as the unbounded arm.
+        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
     (scatters, $name:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
@@ -925,6 +994,7 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($arg),
+                clause: $crate::effects::Clause::Reads,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Nul,
             },
@@ -935,6 +1005,7 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($arg),
+                clause: $crate::effects::Clause::Reads,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
             },
@@ -945,11 +1016,13 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Copies,
                 kind: $crate::effects::Kind::Writes,
                 extent: $crate::effects::Extent::NulOf(stringify!($src)),
             },
             $crate::effects::Effect {
                 arg: stringify!($src),
+                clause: $crate::effects::Clause::Copies,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Nul,
             },
@@ -962,16 +1035,19 @@ macro_rules! __effects {
             // where the write starts.
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Nul,
             },
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Writes,
                 extent: $crate::effects::Extent::NulOf(stringify!($src)),
             },
             $crate::effects::Effect {
                 arg: stringify!($src),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Nul,
             },
@@ -982,11 +1058,13 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Nul,
             },
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Writes,
                 extent: $crate::effects::Extent::NulOfWithin(
                     stringify!($src),
@@ -995,6 +1073,7 @@ macro_rules! __effects {
             },
             $crate::effects::Effect {
                 arg: stringify!($src),
+                clause: $crate::effects::Clause::Appends,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::NulWithin(stringify!($limit)),
             },
@@ -1005,11 +1084,13 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($dst),
+                clause: $crate::effects::Clause::Moves,
                 kind: $crate::effects::Kind::Writes,
                 extent: $crate::effects::Extent::SizedBy(stringify!($len)),
             },
             $crate::effects::Effect {
                 arg: stringify!($src),
+                clause: $crate::effects::Clause::Moves,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::SizedBy(stringify!($len)),
             },
@@ -1020,6 +1101,7 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($arg),
+                clause: $crate::effects::Clause::Scatters,
                 kind: $crate::effects::Kind::Writes,
                 extent: $crate::effects::Extent::Vectors(stringify!($count)),
             },
@@ -1030,6 +1112,7 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($arg),
+                clause: $crate::effects::Clause::Gathers,
                 kind: $crate::effects::Kind::Reads,
                 extent: $crate::effects::Extent::Vectors(stringify!($count)),
             },
@@ -1042,6 +1125,7 @@ macro_rules! __effects {
             $($done,)*
             $crate::effects::Effect {
                 arg: stringify!($arg),
+                clause: $crate::__clause!($kind),
                 kind: $crate::__kind!($kind),
                 extent: $crate::effects::Extent::SizedBy(stringify!($len)),
             },
@@ -1061,11 +1145,34 @@ macro_rules! __kind {
     };
 }
 
+/// The clause word itself, as data, for the one arm of [`crate::__effects`] that does not know
+/// which word it matched.
+///
+/// The other arms name their word, so they can write the variant down. The trailing arm matches
+/// `reads` and `writes` both and has the word in hand as a token, which is what this turns into a
+/// value. Two macros rather than one returning a pair, because the arms that do know their word
+/// need the [`crate::effects::Kind`] and the clause in two different places in the same literal.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __clause {
+    (reads) => {
+        $crate::effects::Clause::Reads
+    };
+    (writes) => {
+        $crate::effects::Clause::Writes
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::alloc::{alloc, dealloc};
+    use crate::check;
+    use crate::fail::Descriptor;
+    use crate::layout::{Cap, Class, Meta, perm};
+    use crate::recover;
     use crate::turnstile::turn;
+    use crate::types::{self, TypeId};
 
     /// Runs one judgement and says whether it refused, without the panic reaching the harness.
     ///
@@ -1270,5 +1377,315 @@ mod tests {
         let text = b"hello\0";
         // SAFETY: the bytes are a live local and are terminated.
         assert_eq!(unsafe { scan("t", text.as_ptr().cast()) }, 5);
+    }
+
+    /// The clauses [`every_writing_clause_maintains_the_planes_a_wrapper_owes`] runs a real row
+    /// for, which is every word that puts bytes into a range.
+    ///
+    /// Written out rather than derived from [`Clause::writing`], because a list derived from the
+    /// thing it is checking would agree with it whatever either of them said.
+    const EXERCISED: &[Clause] =
+        &[Clause::Writes, Clause::Moves, Clause::Copies, Clause::Appends, Clause::Scatters];
+
+    /// A real descriptor, because the plane checks take one and the reporter reads it.
+    static ROW: Descriptor = Descriptor { judgement: 9, class: 0, size: 8, pc: 0 };
+
+    /// Two types that are neither untyped nor character, so that the type plane has an answer it
+    /// can be wrong about. A plane holding either of these refuses an access through the other.
+    const MARK: TypeId = types::interned(7);
+    /// The second of them, used where a test needs to ask a question the first would answer yes to.
+    const OTHER: TypeId = types::interned(9);
+
+    /// The capability of a whole instance the allocator just handed back, as `cap_of` reads it.
+    fn of(ptr: *mut c_void) -> Cap {
+        let addr = ptr as usize;
+        let region = alloc::covering(addr).expect("the allocator's own storage is watched");
+        let (lo, ext) = recover::extent(&region, addr).expect("a live instance owns it");
+        // SAFETY: the region is the one covering the address.
+        let ver = unsafe { region.plane.version(addr) };
+        Cap::new(
+            lo as u64,
+            ext as u64,
+            ver,
+            Meta::new(Class::Allocated, perm::READ | perm::WRITE, 0),
+        )
+    }
+
+    /// Whether the init plane says every byte of the range has been written.
+    fn written(ptr: *mut c_void, len: usize) -> bool {
+        // SAFETY: the range is inside an instance the caller allocated, and is not read through.
+        !refused(|| unsafe { check::filled(at(ptr, 0), len, &ROW) })
+    }
+
+    /// Whether the type plane still holds an answer that refuses an access through `ty`.
+    fn insists(ptr: *mut c_void, len: usize, ty: TypeId) -> bool {
+        // SAFETY: as `written`.
+        refused(|| unsafe { check::typed(at(ptr, 0), len, ty, &ROW) })
+    }
+
+    /// What the word `offset` bytes in says about a pointer read out of it.
+    ///
+    /// Bottom is the aux saying nothing, which is what a byte-wise write over the word has to
+    /// leave behind. Anything else is a slot, and what it holds is worth looking at rather than
+    /// just counting, because a slot is a displacement from the pointer value rather than an
+    /// address: asking about the wrong pointee still rebuilds a capability, and it is the base and
+    /// the version that say which object it is really about.
+    fn recalled(ptr: *mut c_void, offset: usize, pointee: *mut c_void) -> Cap {
+        // SAFETY: the word is in an instance the caller allocated, and neither address is read
+        // through.
+        unsafe { crate::cap::load(of(ptr), at(ptr, offset), pointee) }
+    }
+
+    /// An instance with a pointer in the word `offset` bytes in and a type plane that says [`MARK`].
+    ///
+    /// The three planes in the state a real destination is in before a library function writes over
+    /// it: nothing written, a type that is not a character type, and a word describing a pointer.
+    fn dressed(size: usize, offset: usize, pointee: *mut c_void) -> *mut c_void {
+        let ptr = alloc(size);
+        // SAFETY: real capabilities in this test's own storage, neither read through.
+        unsafe { crate::cap::store(of(ptr), at(ptr, offset), pointee, of(pointee)) };
+        // SAFETY: the range is the whole of an instance this test owns.
+        unsafe { check::judge(at(ptr, 0), size, MARK) };
+        ptr
+    }
+
+    #[test]
+    fn every_writing_clause_maintains_the_planes_a_wrapper_owes() {
+        let _turn = turn();
+        // The invariant tamnd/rucc#1307 is about, in the half a table cannot state. A clause is
+        // wired to the planes inside an arm of `__judge`, which is tokens rather than data, so no
+        // walk of the table can see whether the wiring is there. What a test can do is run a real
+        // row per clause over instrumented memory and look at the planes afterwards, which is what
+        // this does, and the walk below then says every row that writes goes through one of these.
+        //
+        // Three holes of this exact shape have been found by hand: the type plane said nothing at
+        // all until tamnd/rucc#1148, `memcpy` carried no aux until the same, and every byte-wise
+        // write left the destination's aux describing the previous contents. The last is the worst
+        // of the three, because a slot that outlives the pointer it described can permit rather
+        // than refuse.
+        for clause in EXERCISED {
+            exercise(*clause);
+        }
+    }
+
+    /// Runs one real row of the given clause and asserts the three planes moved.
+    ///
+    /// The `match` is exhaustive on purpose. Adding an eighth word to the grammar is the moment
+    /// this invariant is at risk, and until somebody says here what the new word owes the planes,
+    /// this file does not compile.
+    fn exercise(clause: Clause) {
+        match clause {
+            Clause::Reads | Clause::Gathers => {
+                panic!("{} does not write, so it owes the planes nothing", clause.what())
+            }
+            Clause::Writes => writes(),
+            Clause::Moves => moves(),
+            Clause::Copies => copies(),
+            Clause::Appends => appends(),
+            Clause::Scatters => scatters(),
+        }
+    }
+
+    /// `memset`, the plain byte-wise write of a length the row was given.
+    fn writes() {
+        let pointee = alloc(128);
+        let dst = dressed(64, 24, pointee);
+        assert!(!written(dst, 64), "a fresh instance has had nothing written to it");
+        assert!(insists(dst, 64, OTHER), "and the type plane has an answer");
+        assert!(!recalled(dst, 24, pointee).is_bottom(), "and the word describes a pointer");
+
+        // SAFETY: a live instance of sixty four bytes, written for all of it.
+        unsafe { crate::wrap::memset(dst, 0, 64) };
+
+        assert!(written(dst, 64), "memset records what it wrote");
+        assert!(!insists(dst, 64, OTHER), "and that the bytes are characters now");
+        assert!(recalled(dst, 24, pointee).is_bottom(), "and that the word is no longer a pointer");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(dst);
+            dealloc(pointee);
+        }
+    }
+
+    /// `memcpy`, the one writing clause whose destination takes the source's answers rather than
+    /// fresh ones.
+    fn moves() {
+        let pointee = alloc(128);
+        let stale = alloc(128);
+        let dst = dressed(64, 24, stale);
+        let src = dressed(64, 24, pointee);
+        // SAFETY: the whole of an instance this test owns.
+        unsafe { check::wrote(at(src, 0), 64) };
+        // SAFETY: as above, and the source is what the destination is about to be told.
+        unsafe { check::judge(at(src, 0), 64, OTHER) };
+        let held = of(pointee);
+        assert_eq!(
+            recalled(dst, 24, stale).ver,
+            of(stale).ver,
+            "the destination is carrying somebody else's answer"
+        );
+
+        // SAFETY: two live instances of sixty four bytes, copied whole.
+        unsafe { crate::wrap::memcpy(dst, src.cast_const(), 64) };
+
+        assert!(written(dst, 64), "a copy carries the source's init answers across");
+        assert!(
+            !insists(dst, 64, OTHER),
+            "and the source's type, rather than recording characters"
+        );
+        assert!(insists(dst, 64, MARK), "which is what tells a carry from a character write");
+        let back = recalled(dst, 24, pointee);
+        assert_eq!(back.lo, pointee as u64, "and the source's slots, so the pointer arrives whole");
+        assert_eq!(back.ext, 128, "with the extent it was stored with");
+        assert_eq!(
+            back.ver, held.ver,
+            "and the version, which is the half a stale slot gets wrong"
+        );
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(dst);
+            dealloc(src);
+            dealloc(pointee);
+            dealloc(stale);
+        }
+    }
+
+    /// `strcpy`, a byte-wise write whose length is a walk of the source.
+    fn copies() {
+        let pointee = alloc(128);
+        let dst = dressed(64, 0, pointee);
+        let src = alloc(64);
+        put(src, b"hello", true);
+
+        // SAFETY: two live instances, and the destination has room for the source and its
+        // terminator.
+        unsafe { crate::wrap::strcpy(dst.cast(), src.cast_const().cast()) };
+
+        assert!(written(dst, 6), "a discovered write records what the walk turned out to reach");
+        assert!(!insists(dst, 6, OTHER), "over the type plane as well");
+        assert!(recalled(dst, 0, pointee).is_bottom(), "and the word it wrote over says nothing");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(dst);
+            dealloc(src);
+            dealloc(pointee);
+        }
+    }
+
+    /// `strcat`, the same after a walk of the destination.
+    fn appends() {
+        let pointee = alloc(128);
+        let dst = dressed(64, 0, pointee);
+        let src = alloc(64);
+        put(dst, b"one", true);
+        put(src, b"hello", true);
+
+        // SAFETY: two live instances, and the destination has room for both strings.
+        unsafe { crate::wrap::strcat(dst.cast(), src.cast_const().cast()) };
+
+        assert!(written(dst, 9), "an append is recorded from the destination, terminator included");
+        assert!(!insists(dst, 9, OTHER), "over the type plane as well");
+        assert!(recalled(dst, 0, pointee).is_bottom(), "and the word it wrote over says nothing");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(dst);
+            dealloc(src);
+            dealloc(pointee);
+        }
+    }
+
+    /// A scatter, which is a write into each buffer an iovec array names.
+    ///
+    /// Through [`vectors`] rather than through a row, because every `scatters` row is a syscall and
+    /// this is the whole of what they share. A test that opened a pipe to reach `readv` would be
+    /// testing the pipe.
+    fn scatters() {
+        let pointee = alloc(128);
+        let buffer = dressed(64, 24, pointee);
+        let array = [Iovec { base: buffer, len: 64 }];
+
+        // SAFETY: the array is a live local of one element and the buffer is a live instance.
+        let total = unsafe { vectors("t", array.as_ptr().cast(), 1, Kind::Writes) };
+        assert_eq!(total, 64);
+
+        assert!(written(buffer, 64), "the kernel's write is recorded as one");
+        assert!(!insists(buffer, 64, OTHER), "over the type plane as well");
+        assert!(
+            recalled(buffer, 24, pointee).is_bottom(),
+            "and the word it wrote over says nothing"
+        );
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(buffer);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn every_row_that_writes_goes_through_a_clause_the_behaviour_test_runs() {
+        // The other half of the invariant, and the half that is data. The test above says what
+        // each word owes the planes; this says that every row writing anything was spelled with
+        // one of those words, so a row added tomorrow either lands on wiring that has been checked
+        // or fails here.
+        let mut seen = 0;
+        for table in crate::TABLES {
+            for row in *table {
+                for effect in row.effects {
+                    if effect.kind != Kind::Writes {
+                        continue;
+                    }
+                    seen += 1;
+                    assert!(
+                        effect.clause.writing(),
+                        "{} writes {} through {}, which is not a writing word",
+                        row.name,
+                        effect.arg,
+                        effect.clause.what()
+                    );
+                    assert!(
+                        EXERCISED.contains(&effect.clause),
+                        "{} writes {} through {}, which no test runs a row for",
+                        row.name,
+                        effect.arg,
+                        effect.clause.what()
+                    );
+                }
+            }
+        }
+        assert!(seen > 0, "a walk that found no writing rows is a walk of the wrong thing");
+    }
+
+    #[test]
+    fn a_clause_and_the_kind_beside_it_agree_about_direction() {
+        // A row is spelled once and read as two values, and the generator writes both down in the
+        // same literal. Anything a `reads` word produced with `Kind::Writes` beside it, or the
+        // other way about, is a typo in an arm of `__effects`.
+        for table in crate::TABLES {
+            for row in *table {
+                for effect in row.effects {
+                    let agrees = match effect.clause {
+                        Clause::Reads | Clause::Gathers => effect.kind == Kind::Reads,
+                        Clause::Writes | Clause::Scatters => effect.kind == Kind::Writes,
+                        // The three words that name two arguments, one going each way, so there is
+                        // nothing here to disagree with. What holds them to their direction is the
+                        // test above rather than this walk.
+                        Clause::Moves | Clause::Copies | Clause::Appends => true,
+                    };
+                    assert!(
+                        agrees,
+                        "{} spells {} with {} and calls it {}",
+                        row.name,
+                        effect.arg,
+                        effect.clause.what(),
+                        effect.kind.what()
+                    );
+                }
+            }
+        }
     }
 }

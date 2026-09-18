@@ -905,6 +905,40 @@ mod tests {
     }
 
     #[test]
+    fn a_word_a_byte_wise_write_filled_does_not_answer_with_what_it_used_to_hold() {
+        let _turn = turn();
+        // The one stale slot hazard that permits rather than refuses, which is what makes it worse
+        // than the other two. A slot is a displacement from the pointer value beside it, so a word
+        // a `memset` filled and then read back as a pointer would answer with a capability based
+        // at that value minus the old displacement and as wide as the old object. The wild address
+        // is inside its own bounds by construction, and the version is the old object's and is
+        // live while the old object is, so the bounds question and the lifetime question both pass
+        // and the dereference is allowed. Every other wrong answer in this file is a refusal of a
+        // correct program.
+        let pointee = alloc(128);
+        let holder = alloc(64);
+        let word = at(holder, 24);
+        // SAFETY: real capabilities in this test's own storage, and the pointer stored is eight
+        // bytes into its object, so the displacement is not zero.
+        unsafe { store(of(holder), word, at(pointee, 8), of(pointee)) };
+
+        // SAFETY: a live instance of sixty four bytes, filled for all of it.
+        unsafe { crate::wrap::memset(holder, 0xff, 64) };
+
+        let wild = usize::MAX as *const c_void;
+        // SAFETY: the word is in an instance this test owns, and `wild` is what the word now holds
+        // and is never read through.
+        let back = unsafe { load(of(holder), word, wild) };
+        assert!(back.is_bottom(), "a word that was written over as bytes describes no pointer");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
     fn growing_a_buffer_brings_the_capabilities_in_it_along() {
         let _turn = turn();
         // `realloc` is always a copy here and never a resize in place, so it has the problem an
