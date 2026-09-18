@@ -2041,6 +2041,21 @@ mod tests {
         assert_eq!(update(&mut func, &mut names), 0);
     }
 
+    /// The constant run passes the condition state the same way the register run does, because the
+    /// arithmetic moves down to the store here too.
+    #[test]
+    fn a_constant_run_with_a_carry_reader_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let carry = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu_imm(&mut func, &mut names, block, "add_ri_64", word, 1);
+        alu(&mut func, &mut names, block, "adc_rr_64", carry, carry);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
     /// The local, which is the same place twice and folds, and whose frame entry comes off the
     /// list for the reason the register run's does.
     #[test]
