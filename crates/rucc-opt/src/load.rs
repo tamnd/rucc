@@ -39,17 +39,23 @@
 //!
 //! # What throws the table away
 //!
-//! Anything that could write anywhere. There is no alias analysis in this pass, so a store to one
-//! address is treated as a possible write to every address, and the table is emptied before the
-//! store records what it just wrote. A call, an atomic, a fence and a `memcpy` empty it and record
-//! nothing. That is [`Opcode::touches_memory`], which is the conservative predicate, so an opcode
-//! added to the IR later throws the table away rather than being quietly assumed harmless.
+//! Anything that could write anywhere, and what that means is the alias oracle's answer. A call and
+//! a store each take out the entries the oracle says they may write and leave the rest standing.
+//! Everything else that touches memory, which is an atomic, a fence, a `memcpy` and anything else
+//! [`Opcode::touches_memory`] is true of, empties the table and records nothing. That predicate is
+//! the conservative one, so an opcode added to the IR later throws the table away rather than being
+//! quietly assumed harmless.
 //!
-//! This costs less than it sounds like. A store immediately followed by a read of what was stored
-//! still works, because the store empties the table and then puts back the one entry the load is
-//! about to ask for. What the barrier really costs is the second address: `*p = v; total += *q;`
-//! with two locals is refused even where the two cannot be the same object, and telling them apart
-//! is the alias oracle's answer rather than this pass's.
+//! The oracle arrived late and this pass is the first consumer it has ever had. Until tamnd/rucc#1467
+//! a call and a store both emptied the whole table, because `crate::alias` wanted the module and a
+//! pass is handed one function. What the whole table cost was the second address: `*p = v; total +=
+//! *q;` with two locals was refused even where the two cannot be the same object. It is not refused
+//! now.
+//!
+//! What the oracle is worth here rests on the escape analysis more than on anything else in it.
+//! `spec/optimizer/08-alias-analysis.md` section 8.4 calls that the cheapest interprocedural
+//! flavoured fact there is, and it is what answers the ordinary case: a local whose address never
+//! leaves the function cannot be touched by any call in it, whatever the callee does.
 //!
 //! A volatile access empties the table and records nothing either way. Whether a volatile store
 //! could be forwarded from is an argument about what `volatile` promises, and this pass does not
@@ -83,8 +89,13 @@ use std::collections::HashMap;
 
 use rucc_ir::{Block, Flags, Func, Inst, Opcode, Type, Value};
 
+use crate::alias::{Access, Alias};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+
+/// What this pass is called, which the pipeline matches on to decide whether to build the module
+/// facts the oracle asks for.
+pub const NAME: &str = "load-forward";
 
 /// Recorded for a load that read what a store in the same block had just written.
 const FORWARDED: &str = "load replaced by the value a store in the same block wrote there";
@@ -121,7 +132,7 @@ impl Pass for LoadForward {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         // What each removed load's result is read as, applied to the whole function once at the
         // end. Rewriting each one where it is found would be a walk over the function per load,
@@ -130,37 +141,63 @@ impl Pass for LoadForward {
         let mut forward: HashMap<Value, Value> = HashMap::new();
         let mut gone: Vec<Inst> = Vec::new();
 
-        for block in func.blocks().collect::<Vec<Block>>() {
-            let mut known: HashMap<Value, Held> = HashMap::new();
-            for inst in func.insts(block).collect::<Vec<Inst>>() {
-                match act(func, inst) {
-                    Act::Ignore => {}
-                    Act::Forget => known.clear(),
-                    Act::Wrote { address, value, ty } => {
-                        // Emptied first and recorded second, so that the store's own address
-                        // survives the clearing its own possible aliasing caused.
-                        known.clear();
-                        known.insert(address, Held { ty, value, stored: true });
-                    }
-                    Act::Read { address, result, ty } => {
-                        match known.get(&address).copied() {
-                            Some(held) if held.ty == ty => {
-                                if fuel.take() {
-                                    forward.insert(result, held.value);
-                                    gone.push(inst);
-                                    stats.optimized(if held.stored { FORWARDED } else { REUSED });
-                                    continue;
-                                }
-                                // Out of fuel, which is a request to stop transforming and not to
-                                // stop looking. The walk goes on so that the count of what could
-                                // have gone is the same at every fuel setting, which is what makes
-                                // a bisection over it monotonic.
-                                stats.missed(NO_FUEL);
-                            }
-                            Some(_) => stats.missed(WIDTH),
-                            None => {}
+        // The oracle borrows the function, so the walk that reads it is a scope of its own and
+        // every edit happens after it. Built once, because the escape analysis inside it is one
+        // walk over the function and every query may ask it.
+        {
+            let mut alias = Alias::new(func, an.outside());
+            for block in func.blocks().collect::<Vec<Block>>() {
+                let mut known: HashMap<Value, Held> = HashMap::new();
+                for inst in func.insts(block).collect::<Vec<Inst>>() {
+                    match act(func, inst) {
+                        Act::Ignore => {}
+                        Act::Forget => known.clear(),
+                        Act::Called => {
+                            known.retain(|_, held| alias.clobbered_by(&held.access, inst).is_no());
                         }
-                        known.insert(address, Held { ty, value: result, stored: false });
+                        Act::Wrote { address, value, ty } => {
+                            // The entries this store may have written go, and the rest stay. Its
+                            // own goes in after, so that the address it just wrote survives its own
+                            // clearing whatever the oracle made of it.
+                            let Some(wrote) = alias.writes(inst) else {
+                                known.clear();
+                                continue;
+                            };
+                            known.retain(|_, held| alias.query(&held.access, &wrote).is_no());
+                            known.insert(address, Held { ty, value, stored: true, access: wrote });
+                        }
+                        Act::Read { address, result, ty } => {
+                            match known.get(&address).copied() {
+                                Some(held) if held.ty == ty => {
+                                    if fuel.take() {
+                                        forward.insert(result, held.value);
+                                        gone.push(inst);
+                                        stats.optimized(if held.stored {
+                                            FORWARDED
+                                        } else {
+                                            REUSED
+                                        });
+                                        continue;
+                                    }
+                                    // Out of fuel, which is a request to stop transforming and not
+                                    // to stop looking. The walk goes on so that the count of what
+                                    // could have gone is the same at every fuel setting, which is
+                                    // what makes a bisection over it monotonic.
+                                    stats.missed(NO_FUEL);
+                                }
+                                Some(_) => stats.missed(WIDTH),
+                                None => {}
+                            }
+                            // A load with no access is a load the oracle could say nothing about
+                            // later, so it is not recorded at all rather than recorded as
+                            // something no call can be asked about.
+                            if let Some(read) = alias.reads(inst) {
+                                known.insert(
+                                    address,
+                                    Held { ty, value: result, stored: false, access: read },
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -192,27 +229,38 @@ struct Held {
     value: Value,
     /// Whether a store put it there, rather than a load having read it.
     stored: bool,
+    /// Which bytes it is, for asking the oracle whether a call or a store reaches them.
+    ///
+    /// The access of the instruction that put the entry here, which is the same address and the
+    /// same width as any load that will match it, since matching is by address value and by type.
+    access: Access,
 }
 
 /// What one instruction does to the table.
 enum Act {
     /// Nothing. It touches no memory.
     Ignore,
-    /// It could write anywhere, so nothing the table says is known any more.
+    /// It could write anywhere the oracle cannot rule out, and nothing here says what it wrote.
     Forget,
-    /// It writes this value of this type at this address, and could have written anywhere else.
+    /// A call, which writes whatever the oracle cannot say it does not.
+    Called,
+    /// It writes this value of this type at this address, and may write elsewhere.
     Wrote { address: Value, value: Value, ty: Type },
     /// It reads a value of this type from this address into this result.
     Read { address: Value, result: Value, ty: Type },
 }
 
-/// Which of the four an instruction is.
+/// Which of the five an instruction is.
 ///
 /// The two interesting cases are narrow on purpose. A plain non-volatile `Load` with one address
 /// and one result, and a plain non-volatile `Store` of one value to one address. `AtomicLoad` and
 /// `AtomicStore` are separate opcodes in this IR and are not these, so an ordering never reaches
 /// here as something to forward, and neither does a load carrying a memory token, which is what
 /// more than one result would mean.
+///
+/// A call is its own answer rather than a `Forget`, because the oracle is asked a different
+/// question about one: `Alias::clobbered_by` rather than `Alias::query`, since a call has no access
+/// of its own and what it may write is what its attributes and its arguments say.
 fn act(func: &Func, inst: Inst) -> Act {
     let data = &func[inst];
     if !data.opcode.touches_memory() {
@@ -223,6 +271,7 @@ fn act(func: &Func, inst: Inst) -> Act {
     }
     let args = &func[data.args];
     match data.opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Act::Called,
         Opcode::Load => {
             let mut results = data.results();
             let (Some(&address), Some(result), None) =
@@ -244,14 +293,18 @@ fn act(func: &Func, inst: Inst) -> Act {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Func, InstData, MemInfo, MemOrder, Restrict, Signature, Type,
-        Value,
+        AttrSet, Attrs, Block, Builder, Extra, Flags, Func, InstData, MemInfo, MemOrder, Module,
+        Restrict, Signature, Type, Value,
     };
+    use rucc_target::{TargetInfo, Triple};
 
     use super::*;
     use crate::Fuel;
+    use crate::outside::Outside;
 
     /// An empty function with one block, which is where every test below builds.
     fn blank() -> (Interner, Func, Block) {
@@ -280,9 +333,15 @@ mod tests {
         build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
     }
 
-    /// Runs the pass over the function with as much fuel as it wants.
+    /// Runs the pass over the function with as much fuel as it wants and no module facts.
     fn run(func: &mut Func) -> Stats {
         LoadForward.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// The same, with what the oracle would know if this function were in that module.
+    fn run_in(func: &mut Func, module: &Module) -> Stats {
+        let mut an = crate::machine::fixtures::analyses().about(Arc::new(Outside::of(module)));
+        LoadForward.run(func, &mut an, &mut Fuel::unlimited())
     }
 
     /// How many loads are left in the function.
@@ -351,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_between_the_two_accesses_is_a_write_to_everything() {
+    fn a_call_cannot_touch_a_local_whose_address_never_left_the_function() {
         let (mut names, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build);
@@ -361,13 +420,34 @@ mod tests {
         let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.ret(&[first, second]);
 
+        // The escape analysis and nothing else. `g` is a name this module has never heard of and
+        // it could do anything at all, and it still cannot reach an address it was never given.
         let stats = run(&mut func);
-        assert!(!stats.changed(), "nothing here says what the call did to that address");
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
+    }
+
+    #[test]
+    fn a_call_handed_the_address_is_a_write_to_it() {
+        let (mut names, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
+        build.call(names.intern("g"), signature, &[slot]);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        // The address escaped into the call, so the callee has it and nothing here says what it
+        // did with it. This is the half of the previous test that must not move.
+        let stats = run(&mut func);
+        assert!(!stats.changed());
         assert_eq!(loads(&func), 2);
     }
 
     #[test]
-    fn a_store_to_another_address_is_a_write_to_everything_too() {
+    fn a_store_to_an_address_that_cannot_be_this_one_leaves_it_alone() {
         let (_, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let slot = local(&mut build);
@@ -377,12 +457,53 @@ mod tests {
         let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.ret(&[first, second]);
 
-        // Two allocas cannot be the same object, so this is an opportunity and not a hazard. It is
-        // left on the table on purpose: telling the two apart is the alias oracle's answer and
-        // this pass is the version that does not have one.
+        // Two allocas cannot be the same object, which is the oracle's first layer and the one
+        // that answers most of what real code asks. Until tamnd/rucc#1467 this was left on the
+        // table with a comment saying so.
+        let stats = run(&mut func);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
+    }
+
+    #[test]
+    fn a_store_the_oracle_cannot_place_takes_the_table_with_it() {
+        let (mut names, mut func, entry) = blank();
+        let elsewhere = func.append_param(entry, Type::PTR);
+        let mut build = Builder::new(&mut func, entry);
+        let slot = local(&mut build);
+        // Handed out, so the local is one somebody else's pointer could be naming.
+        let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
+        build.call(names.intern("g"), signature, &[slot]);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.store(first, elsewhere, plain(8), Flags::NONE);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        // A pointer handed in is an address the walk cannot follow back to an object, and this
+        // local's address did leave the function, so the escape layer has nothing to say either.
+        // Nothing left says these are two objects, so the store may be to this one.
         let stats = run(&mut func);
         assert!(!stats.changed());
         assert_eq!(loads(&func), 2);
+    }
+
+    #[test]
+    fn a_store_through_a_pointer_from_nowhere_cannot_reach_a_local_that_stayed_here() {
+        let (_, mut func, entry) = blank();
+        let elsewhere = func.append_param(entry, Type::PTR);
+        let mut build = Builder::new(&mut func, entry);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.store(first, elsewhere, plain(8), Flags::NONE);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        // The other half of the test above. Nothing ever handed this address out, so no pointer
+        // this function cannot follow is naming it, whatever that pointer is.
+        let stats = run(&mut func);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
     }
 
     #[test]
@@ -454,6 +575,41 @@ mod tests {
         assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
         assert_eq!(loads(&func), 1);
         assert_eq!(returned(&func), vec![first]);
+    }
+
+    #[test]
+    fn a_call_to_something_declared_to_read_no_memory_writes_none_either() {
+        // The module's half of the oracle, which is the one thing a pass handed a function cannot
+        // work out for itself. The address escaped into an earlier call, so the escape layer has
+        // nothing left to say and what answers is `g` being declared `const`.
+        let mut names = Interner::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        let quiet = names.intern("g");
+        let mut callee = Func::new(quiet, Signature::new().with_params(&[Type::PTR]));
+        callee.attrs = Attrs { set: AttrSet::READNONE, ..Attrs::default() };
+        module.add_func(callee);
+
+        let name = names.intern("f");
+        let build = || {
+            let mut func = Func::new(name, Signature::new().with_returns(&[Type::int(64)]));
+            let block = func.create_block();
+            let mut build = Builder::new(&mut func, block);
+            let slot = local(&mut build);
+            let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
+            build.call(quiet, signature, &[slot]);
+            let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+            build.call(quiet, signature, &[slot]);
+            let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+            build.ret(&[first, second]);
+            func
+        };
+
+        assert!(!run(&mut build()).changed(), "without the module there is nothing to read");
+        let mut func = build();
+        let stats = run_in(&mut func, &module);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
     }
 
     #[test]

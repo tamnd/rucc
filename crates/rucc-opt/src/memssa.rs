@@ -84,13 +84,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{
-    Block, BlockCall, Def, Flags, Func, Inst, InstData, MemOrder, Module, Opcode, Type, Value,
-};
+use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, MemOrder, Opcode, Type, Value};
 
 use crate::alias::{Access, Alias, Answer, Options};
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
+use crate::outside::Outside;
 
 /// How many alias queries one walk may make before it gives up.
 ///
@@ -411,17 +410,17 @@ pub struct Walk<'a> {
 impl<'a> Walk<'a> {
     /// A walk over this function, with GCC's budget.
     #[must_use]
-    pub fn new(func: &'a Func, module: &'a Module) -> Self {
-        Self::with(func, module, Options::default(), MAX_ALIAS_QUERIES_PER_ACCESS)
+    pub fn new(func: &'a Func, outside: &'a Outside) -> Self {
+        Self::with(func, outside, Options::default(), MAX_ALIAS_QUERIES_PER_ACCESS)
     }
 
     /// The same, with the alias options the command line left and a budget of your own.
     #[must_use]
-    pub fn with(func: &'a Func, module: &'a Module, options: Options, limit: u32) -> Self {
+    pub fn with(func: &'a Func, outside: &'a Outside, options: Options, limit: u32) -> Self {
         Self {
             func,
             cfg: Cfg::new(func),
-            alias: Alias::with(func, module, options),
+            alias: Alias::with(func, outside, options),
             limit,
             counts: Counts::default(),
         }
@@ -641,7 +640,7 @@ fn combine(a: Option<Clobber>, b: Option<Clobber>) -> Option<Clobber> {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, MemInfo, Restrict, Signature, parse, verify_func};
+    use rucc_ir::{Builder, MemInfo, Module, Restrict, Signature, parse, verify_func};
 
     use super::*;
 
@@ -868,7 +867,8 @@ block2:
         let (module, changed) = built(text);
         assert!(changed, "the function has memory in it");
         let func = one(&module);
-        let mut walk = Walk::new(func, &module);
+        let outside = Outside::of(&module);
+        let mut walk = Walk::new(func, &outside);
         let answer = walk.clobber(last_load(func));
         (answer, *walk.counts())
     }
@@ -1069,7 +1069,8 @@ block2:
         let (module, _) = built(&text);
         let func = one(&module);
         let load = nth(func, Opcode::Load, 0);
-        let mut walk = Walk::with(func, &module, Options::default(), 0);
+        let outside = Outside::of(&module);
+        let mut walk = Walk::with(func, &outside, Options::default(), 0);
         assert_eq!(walk.clobber(load), Clobber::Unknown);
         assert_eq!(walk.counts().exhausted(), 1);
     }
@@ -1091,13 +1092,14 @@ block2:
         let load = nth(func, Opcode::Load, 0);
 
         // With no rewrite to offer, the copy is where it stops.
-        let mut walk = Walk::new(func, &module);
+        let outside = Outside::of(&module);
+        let mut walk = Walk::new(func, &outside);
         let stopped_at = walk.clobber(load).inst().expect("something wrote it");
         assert_eq!(func[stopped_at].opcode, Opcode::Memcpy);
 
         // The same walk, with a caller that can see through the copy. It says nothing about the
         // reference here, which is enough to show the callback is reached and obeyed.
-        let mut walk = Walk::new(func, &module);
+        let mut walk = Walk::new(func, &outside);
         let mut seen = Vec::new();
         let answer = walk.clobber_with(load, &mut |reference, inst| {
             seen.push(func[inst].opcode);

@@ -84,9 +84,11 @@ use std::collections::HashSet;
 
 use rucc_base::Symbol;
 use rucc_ir::{
-    AttrSet, Attrs, DataLayout, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Module, Opcode,
-    Restrict, SymbolRef, Type, Value,
+    AttrSet, Attrs, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Opcode, Restrict, Type,
+    Value,
 };
+
+use crate::outside::Outside;
 
 /// How far back through address arithmetic a pointer is chased before the answer is given up on.
 ///
@@ -436,14 +438,18 @@ impl Counts {
 
 /// The analysis over one function.
 ///
-/// It borrows the module because a global's address is a symbol and whether two symbols are two
-/// objects is a question about the module, and it borrows the function because everything else
-/// is. The escape analysis is run once when this is built, since every query may ask it and it
-/// is one walk over the function.
+/// It borrows the function because nearly everything it asks is a question about one, and it
+/// borrows an [`Outside`] because the rest is a question about the module: whether two symbols are
+/// two objects, what a callee is declared to do, where a type node sits in the tree, and how wide
+/// an address is. That is a copy of four module facts rather than the module itself, so that a
+/// pass handed `&mut module[id]` can still build this. See [`crate::outside`] for why.
+///
+/// The escape analysis is run once when this is built, since every query may ask it and it is one
+/// walk over the function.
 #[derive(Debug)]
 pub struct Alias<'a> {
     func: &'a Func,
-    module: &'a Module,
+    outside: &'a Outside,
     options: Options,
     escapes: Escapes,
     counts: Counts,
@@ -452,14 +458,14 @@ pub struct Alias<'a> {
 impl<'a> Alias<'a> {
     /// The analysis of this function, with the type-based layer on, which is GCC's `-O2`.
     #[must_use]
-    pub fn new(func: &'a Func, module: &'a Module) -> Self {
-        Self::with(func, module, Options::default())
+    pub fn new(func: &'a Func, outside: &'a Outside) -> Self {
+        Self::with(func, outside, Options::default())
     }
 
     /// The same, with the type-based layer where the command line left it.
     #[must_use]
-    pub fn with(func: &'a Func, module: &'a Module, options: Options) -> Self {
-        Self { func, module, options, escapes: Escapes::of(func), counts: Counts::default() }
+    pub fn with(func: &'a Func, outside: &'a Outside, options: Options) -> Self {
+        Self { func, outside, options, escapes: Escapes::of(func), counts: Counts::default() }
     }
 
     /// Which locals escaped, for a caller that wants the fact on its own.
@@ -620,7 +626,7 @@ impl<'a> Alias<'a> {
     /// the module does not have at all is treated the same way, because something is wrong and
     /// the conservative answer is the one to be wrong in the direction of.
     fn one_object(&self, name: Symbol) -> bool {
-        matches!(self.module.lookup(name), Some(SymbolRef::Func(_) | SymbolRef::Global(_)))
+        self.outside.one_object(name)
     }
 
     /// Whether two type nodes can describe the same byte.
@@ -638,7 +644,7 @@ impl<'a> Alias<'a> {
             if node == ancestor {
                 return true;
             }
-            match self.module[node].parent() {
+            match self.outside.parent(node) {
                 Some(up) => node = up,
                 None => return false,
             }
@@ -708,10 +714,7 @@ impl<'a> Alias<'a> {
             return None;
         };
         let name = self.func[info].callee?;
-        match self.module.lookup(name)? {
-            SymbolRef::Func(id) => Some(self.module[id].attrs),
-            _ => None,
-        }
+        self.outside.attrs(name)
     }
 
     fn mem(&self, inst: Inst) -> Option<MemInfo> {
@@ -747,9 +750,8 @@ impl<'a> Alias<'a> {
     /// How many bytes a value of this type takes, which for an address is the target's answer
     /// and not the type's.
     fn width(&self, ty: Type) -> Option<u64> {
-        let layout: &DataLayout = &self.module.datalayout;
         if ty.is_ptr() {
-            return Some(u64::from(layout.pointer_bits).div_ceil(8));
+            return self.outside.pointer_bytes();
         }
         let bits = u64::from(ty.bits()) * u64::from(ty.lanes());
         (bits > 0).then(|| bits.div_ceil(8))
@@ -868,7 +870,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
         assert_eq!(alias.counts().answered(Reason::Distinct), 1);
@@ -905,7 +908,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -923,7 +927,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -946,7 +951,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -964,7 +970,8 @@ mod tests {
         build.store(read, second, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Offset));
     }
@@ -982,7 +989,8 @@ mod tests {
         build.store(read, second, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1000,7 +1008,8 @@ mod tests {
         build.store(read, object, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(a.origin, b.origin, "both are still that one object");
         assert_eq!(a.offset, None);
@@ -1019,7 +1028,8 @@ mod tests {
         build.store(read, outside, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         assert_eq!(alias.escapes().count(), 0);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Escape));
@@ -1040,7 +1050,8 @@ mod tests {
         build.store(read, outside, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         assert_eq!(alias.escapes().count(), 1);
         let read = first(&f, Opcode::Load);
         let write = last(&f, Opcode::Store);
@@ -1079,7 +1090,8 @@ mod tests {
         let mut build = Builder::new(&mut f, next);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
         assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
     }
 
@@ -1094,7 +1106,8 @@ mod tests {
         build.icmp(IntPred::Eq, object, outside);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
         assert_eq!(alias.escapes().count(), 0);
     }
 
@@ -1110,7 +1123,8 @@ mod tests {
         build.unary(Opcode::PtrToInt, object, Type::int(64));
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
         assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
     }
 
@@ -1128,7 +1142,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Restrict));
     }
@@ -1147,7 +1162,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1187,7 +1203,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Tbaa));
     }
@@ -1207,7 +1224,8 @@ mod tests {
         build.store(read, other, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1230,18 +1248,19 @@ mod tests {
         build.ret(&[]);
 
         let options = Options { strict_aliasing: false };
-        let mut alias = Alias::with(&f, &module, options);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::with(&f, &outside, options);
         let (a, b) = two(&alias, &f);
         // The `restrict` layer still answers, which is the point: the flag is one condition in
         // one place and it does not reach anything else.
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Restrict));
 
-        let mut without = Alias::with(&f, &module, options);
+        let mut without = Alias::with(&f, &outside, options);
         let plainer = Access { restrict: Restrict::NONE, ..a };
         let other = Access { restrict: Restrict::NONE, ..b };
         assert_eq!(without.query(&plainer, &other), Answer::May);
 
-        let mut with = Alias::new(&f, &module);
+        let mut with = Alias::new(&f, &outside);
         assert_eq!(with.query(&plainer, &other), Answer::No(Reason::Tbaa));
     }
 
@@ -1264,7 +1283,8 @@ mod tests {
         build.store(read, object, info, Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::May);
     }
@@ -1281,7 +1301,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::VOLATILE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         // Two different objects, and the answer is still that they conflict, because moving
         // one volatile access across another is the thing `volatile` exists to forbid.
@@ -1300,7 +1321,8 @@ mod tests {
         build.store(read, other, plain(4), Flags::NONE);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
     }
@@ -1318,7 +1340,8 @@ mod tests {
         build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
         build.ret(&[]);
 
-        let alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
         let copy = first(&f, Opcode::Memcpy);
         let read = alias.reads(copy).expect("a copy reads");
         let written = alias.writes(copy).expect("a copy writes");
@@ -1363,7 +1386,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Escape));
         assert_eq!(alias.read_by(&reference, call), Answer::No(Reason::Escape));
@@ -1381,7 +1405,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::May);
     }
@@ -1398,7 +1423,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
         assert_eq!(alias.read_by(&reference, call), Answer::May);
@@ -1416,7 +1442,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
         assert_eq!(alias.read_by(&reference, call), Answer::No(Reason::Attribute));
@@ -1437,7 +1464,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         // The one pointer it was handed is a parameter of unknown origin, which may be that
         // global, so this is the answer that cannot be wrong.
@@ -1458,7 +1486,8 @@ mod tests {
         let mut build = builder(&mut f);
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
     }
@@ -1481,7 +1510,8 @@ mod tests {
         );
         build.ret(&[]);
 
-        let mut alias = Alias::new(&f, &module);
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::May);
     }

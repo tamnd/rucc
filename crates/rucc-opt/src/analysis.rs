@@ -39,6 +39,7 @@ use rucc_ir::Func;
 
 use crate::image::Images;
 use crate::machine::Machine;
+use crate::outside::Outside;
 use crate::predict::Callees;
 use crate::{
     Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Liveness, Loops, PostDominators,
@@ -180,6 +181,7 @@ impl Preserved {
 pub struct Analyses {
     machine: Machine,
     images: Arc<Images>,
+    outside: Arc<Outside>,
     cfg: OnceCell<Cfg>,
     doms: OnceCell<Dominators>,
     post: OnceCell<PostDominators>,
@@ -203,6 +205,7 @@ impl Analyses {
         Self {
             machine,
             images: Arc::default(),
+            outside: Arc::default(),
             cfg: OnceCell::new(),
             doms: OnceCell::new(),
             post: OnceCell::new(),
@@ -231,6 +234,20 @@ impl Analyses {
         self
     }
 
+    /// The same cache, with those module facts in it for a pass that asks the alias oracle.
+    ///
+    /// Separate from [`Analyses::reading`] for the same reason that one is separate from
+    /// [`Analyses::new`]: the empty one is the right default, it answers `May` to everything it
+    /// would have used the module for, and a caller that has no module gets a slower compile
+    /// rather than a wrong one.
+    ///
+    /// Counted rather than copied, and there is one of these per module.
+    #[must_use]
+    pub fn about(mut self, outside: Arc<Outside>) -> Self {
+        self.outside = outside;
+        self
+    }
+
     /// The machine this function is being compiled for.
     ///
     /// Not an analysis, and here because this is the one thing a pass is handed besides the
@@ -247,6 +264,16 @@ impl Analyses {
     #[must_use]
     pub fn images(&self) -> &Images {
         &self.images
+    }
+
+    /// The module facts an alias oracle asks for.
+    ///
+    /// Here for the reason the images are, and [`crate::outside`] sets out the rest of it: a pass
+    /// is handed `&mut module[id]`, so the module is the one thing it cannot borrow, and the
+    /// oracle wants four small things out of it.
+    #[must_use]
+    pub fn outside(&self) -> &Outside {
+        &self.outside
     }
 
     /// The control flow graph, computed if it is not already here.
@@ -399,9 +426,12 @@ impl Analyses {
     /// For the caller that changed the function itself rather than through a pass, and for a
     /// test that wants a cold cache. The machine is not thrown away, because it is not an
     /// analysis and nothing a pass did to the function changed which target it is for. Neither are
-    /// the images, for the same reason: no pass writes to a `const` global.
+    /// the images, for the same reason: no pass writes to a `const` global. Neither are the module
+    /// facts, since a function pass cannot add a symbol or a type node.
     pub fn clear(&mut self) {
-        *self = Self::new(self.machine).reading(Arc::clone(&self.images));
+        *self = Self::new(self.machine)
+            .reading(Arc::clone(&self.images))
+            .about(Arc::clone(&self.outside));
     }
 
     /// Forgets one analysis and nothing else.

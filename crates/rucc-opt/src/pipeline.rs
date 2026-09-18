@@ -39,8 +39,8 @@ use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, nofree, params,
-    pass,
+    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, load, nofree,
+    outside, params, pass,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -63,6 +63,15 @@ const READS_SUMMARIES: &[&str] = &[
     "discharge-narrow",
     "discharge-every",
 ];
+
+/// Which passes build an alias oracle, and so want the module facts it asks about.
+///
+/// A list for the same reason as the one above, and it will grow the same way: the redundant load
+/// elimination of `spec/optimizer/16-gvn-and-pre.md` section 16.2 and the dead store elimination of
+/// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
+/// empty table, which answers `May` to every question it would have used the module for, so what
+/// forgetting a name costs is a missed optimization rather than a wrong answer.
+const READS_OUTSIDE: &[&str] = &[load::NAME];
 
 /// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -730,6 +739,15 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     } else {
         Arc::default()
     };
+    // And the same again for the alias oracle's half of the module, which is what each name
+    // refers to, what a callee is declared to do, the tree of type nodes and the layout. Built
+    // only for a run with a pass that asks, since the empty one answers `May` and every pass here
+    // is correct against that.
+    let outside = if passes.iter().any(|pass| READS_OUTSIDE.contains(&pass.name())) {
+        Arc::new(outside::Outside::of(module))
+    } else {
+        Arc::default()
+    };
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -757,9 +775,9 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let an = cached
-                .entry(id)
-                .or_insert_with(|| Analyses::new(machine).reading(Arc::clone(&images)));
+            let an = cached.entry(id).or_insert_with(|| {
+                Analyses::new(machine).reading(Arc::clone(&images)).about(Arc::clone(&outside))
+            });
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.
