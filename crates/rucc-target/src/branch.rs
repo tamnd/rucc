@@ -28,6 +28,15 @@
 //! goes when the jump is not taken. There is never a second jump in the same block, because the
 //! layout makes a block for one rather than writing it.
 //!
+//! # The jump the layout did not write
+//!
+//! An `asm` template may write one itself, which is how a loop a program spelled out by hand
+//! reaches the machine IR: the lowering turns each label into a block and each jump into a block
+//! with two arms whose last instruction is already the jump. [`BranchInsts::conditional`] is the
+//! list the layout reads to tell one of those, and what it does then is nothing at all, beyond the
+//! block on the second arm that every two-armed block needs when neither arm is laid out next.
+//! The arms are in the order the jump means, taken first, so the shape is the one above already.
+//!
 //! # The condition state is not an operand
 //!
 //! Nothing here mentions the flags, on a machine that has them or on one that does not. What
@@ -82,6 +91,16 @@ pub struct BranchInsts {
     /// and the layout only has to know the name so that it can tell a block that already ends in
     /// one from a block that still wants a jump.
     pub indirect: &'static str,
+    /// Every jump that reads the condition state and goes to the block's first successor when what
+    /// it reads holds.
+    ///
+    /// [`Self::if_true`] and [`Self::if_false`] are two of these and the entries below name the
+    /// rest, since a condition and its opposite are both jumps of this kind. The layout writes
+    /// those two itself and reads this list for the other question: whether the block it is
+    /// looking at already ends in one. A block does when an `asm` template wrote the jump, which
+    /// is how a loop a program spelled out by hand arrives here, and the layout then writes
+    /// nothing in front of it. Empty is a target whose templates never end a block that way.
+    pub conditional: &'static [&'static str],
     /// The comparisons a branch on their answer can be folded into, and what each pair becomes.
     ///
     /// Empty is a target that does not do this, and the layout then writes the test every time.

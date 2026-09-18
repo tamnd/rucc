@@ -403,3 +403,45 @@ fn an_asm_goto_says_what_is_missing_too() {
     assert!(!ok, "an `asm goto` was accepted");
     assert!(said.contains("jumps to a label"), "{said}");
 }
+
+#[test]
+fn a_label_and_a_jump_back_to_it_are_written_as_a_loop() {
+    // The loop libgmp carries a limb at a time, out of `MPN_INCR_U` in `gmp-impl.h`. A template that
+    // jumps is not one instruction and cannot stay inside one block, so the label becomes a block of
+    // its own and the jump ends the block it stands in. The pointer is written inside the loop and
+    // read again at the top of it, which is why the operand it is in has to arrive at the label
+    // rather than be assumed to still be where it started.
+    let source = "void f(long *p) { long *d; \
+                  asm volatile (\"\\n.Lasm_%=_top:\\n\\taddq $1, (%0)\\n\\tlea %c2(%0), %0\\n\\tjc .Lasm_%=_top\" \
+                  : \"=r\" (d) : \"0\" (p), \"n\" (sizeof(long)) : \"memory\"); }\n";
+    let body = body(&asm("template-loop", source), "f");
+    assert!(body.contains("addq\t$1, ("), "the add into memory never reached the listing:\n{body}");
+    assert!(body.contains("leaq\t8("), "the step along a limb never reached the listing:\n{body}");
+    let Some(at) = body.find("\tjb\t") else { panic!("the carry never became a jump:\n{body}") };
+    let to = body[at + 4..].lines().next().expect("a jump names where it goes").trim();
+    // The arm the carry takes is a critical edge, so the pass that splits those stands a block of its
+    // own on it and the jump arrives there rather than at the top of the loop. That block holds the
+    // moves the arm turns into, of which there are none here, and the jump on to where the template
+    // said, so the loop is one hop further round than the template wrote it.
+    let to = landing(&body, to).unwrap_or(to);
+    let back = body[..at].contains(&format!("\n{to}:"));
+    assert!(back, "the jump goes to {to}, which is not a place above it:\n{body}");
+}
+
+/// Where a block that holds nothing but a jump sends whatever arrived at it.
+fn landing<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let at = body.find(&format!("\n{label}:\n"))?;
+    let rest = body[at + label.len() + 3..].trim_start_matches(['\t', ' ']);
+    rest.strip_prefix("jmp")?.lines().next().map(str::trim)
+}
+
+#[test]
+fn a_jump_with_no_condition_on_it_says_what_is_missing() {
+    // Nothing reaches whatever the jump goes past, and a template that writes one is asking for a
+    // shape this does not build yet. Saying so is the point: the alternative is a listing that keeps
+    // the instructions and drops the jump, which is a program that builds and does not run.
+    let source = "void f(void) { asm volatile (\"jmp .Lgone\\n.Lgone:\"); }\n";
+    let (ok, _, said) = run("template-jump", source);
+    assert!(!ok, "an unconditional jump inside a template was accepted");
+    assert!(said.contains("which nothing here assembles"), "{said}");
+}

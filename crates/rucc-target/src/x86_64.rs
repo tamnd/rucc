@@ -42,7 +42,7 @@ pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
 };
 pub use crate::x86_64::insts::{ADDRESSES, ALIGN, Address, Form, INSTS, address, form};
-pub use crate::x86_64::read::{At, Disp, Line, Piece, read};
+pub use crate::x86_64::read::{At, Disp, Line, Piece, Step, read};
 pub use crate::x86_64::text::{
     Arg, Shape, Width, Written, gpr_letter, gpr_name, gpr_named, machine, operand_width, written,
 };
@@ -311,8 +311,17 @@ pub static BRANCH: BranchInsts = BranchInsts {
     if_false: "jcc_e",
     jump: "jmp",
     indirect: "jmp_reg",
+    conditional: &CONDITIONAL,
     fused: &FUSED,
 };
+
+/// Every jump on the condition state this machine has, which is ten conditions.
+///
+/// The same ten the comparisons are described at and the same ten a template may write, since a
+/// jump the reader gives back is one of these by name. What reads this is the layout, to tell a
+/// block whose jump is already there from one that still wants a test and a jump behind it.
+static CONDITIONAL: [&str; 10] =
+    ["jcc_e", "jcc_ne", "jcc_l", "jcc_le", "jcc_g", "jcc_ge", "jcc_b", "jcc_be", "jcc_a", "jcc_ae"];
 
 /// Every comparison the test in front of a branch can be taken off, which is all of them.
 ///
