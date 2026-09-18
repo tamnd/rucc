@@ -151,6 +151,16 @@ reading it wants, two that disagree do not combine, and `==` and `!=` want neith
 reading of whatever they are combined with. Enumerating this as rules would be hundreds of them
 across predicates, operand orders and widths, all of them the same statement.
 
+The same buckets answer a second question in this tier, also by hand and for the same reason. A
+comparison of a value whose sign bit is known clear against a constant that is not positive is
+narrowed by the buckets the pair can be in: a magnitude is never below a constant that is not
+positive, and is never equal to a negative one, so the set the predicate accepts loses at least the
+below bucket and what is left is false or is a shorter question. `fabs(x) < 0.0` folds to false that
+way. The value with the sign bit known clear is what `fabs` lowers to, which is a bitcast of an and
+against a mask whose top bit is clear rather than a call. It never folds to true, because the
+narrowing only ever takes buckets away, so `fabs(x) >= 0.0` stays as it is, which is correct: a NaN
+has its sign bit cleared like anything else and compares false against everything.
+
 *Tier 6, select and control, roughly 20.* `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)`
 to a zero-extended condition, min and max recognition, absolute value recognition.
 
