@@ -151,6 +151,18 @@ pub static HAND: &[(Opcode, &str)] = &[
     // part of building them.
     (Opcode::FrameAddress, "`crate::lower`, as the walk up the saved frame pointers"),
     (Opcode::ReturnAddress, "`crate::lower`, as the same walk with one load at the end of it"),
+    // The pair that saves a place in a function and comes back to it, built here because what the
+    // first of them writes down is where control comes back to, which is a place in this function
+    // and not a value a pattern can bind. Each is a group of instructions rather than one, and the
+    // first of them ends the block it was written in, which no rule can do.
+    (
+        Opcode::SetjmpMarker,
+        "`crate::lower`, as the four words it writes and the block the restore comes back to",
+    ),
+    (
+        Opcode::LongjmpMarker,
+        "`crate::lower`, as the four words read back, the frame put back and the jump",
+    ),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),
