@@ -286,7 +286,8 @@ void g(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
         let then = body.find(second).unwrap_or_else(|| panic!("no {second} in {name}:\n{body}"));
         assert!(at < then, "{second} came out in front of {first}:\n{body}");
         let between = &body[at..then];
-        assert_eq!(between.lines().count(), 1, "something got between the pair in {name}:\n{body}");
+        let over = between.matches('\n').count();
+        assert_eq!(over, 1, "something got between the pair in {name}:\n{body}");
         assert!(!body.contains("$0"), "an operand was zeroed rather than read in {name}:\n{body}");
     }
 }
