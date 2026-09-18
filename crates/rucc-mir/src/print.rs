@@ -201,6 +201,10 @@ impl<'a> Printer<'a> {
             self.out.push_str(" = ");
         }
         self.out.push_str(self.names.resolve(data.opcode.name()));
+        // In front of the list rather than in it, because it is a fact about the instruction and
+        // not a thing the instruction names, and because a word in the list would have to be told
+        // apart from an opcode's operands by a reader that does not know what the opcode is.
+        let _ = write!(self.out, "{}", data.flags);
 
         // Everything to the right of the opcode is one comma-separated list, however many
         // different kinds of thing are in it. A fixed order and one separator is what makes the

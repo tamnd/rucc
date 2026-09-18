@@ -40,7 +40,7 @@
 //! ```
 //!
 //! So a jump target is a block without an instruction growing a field for one.
-//! `rucc_mir::InstData` is twenty four bytes by assertion and a block reference does not fit in
+//! `rucc_mir::InstData` is twenty eight bytes by assertion and a block reference does not fit in
 //! it, and every pass over the graph already reads the arms, so putting the target where the
 //! graph already is costs nothing and keeps the two from disagreeing.
 //!

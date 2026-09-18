@@ -81,8 +81,8 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
-    Abi, AsmOperand, AsmOperands, Block, Def, Extra, FloatPred, Func, Inst, Linkage, MemOrder,
-    Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
+    Abi, AsmOperand, AsmOperands, Block, Def, Extra, Flags, FloatPred, Func, Inst, Linkage,
+    MemOrder, Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -1568,6 +1568,19 @@ impl<'a> Lowering<'a> {
         self.out.build(block, opcode).at(span).mem(at).finish();
     }
 
+    /// The one instruction of a group that reaches the program's own memory.
+    ///
+    /// A `long double` moves in two instructions with a frame slot at one end of them, and the
+    /// other end is the address the program wrote. That end is the access, so it is the one that
+    /// carries what the program said about it, and the trip through the slot is this compiler's
+    /// own business the way a spill is. See [`Self::carried`].
+    fn x87_touching(&mut self, name: &str, inst: Inst, at: mir::Mem) {
+        let block = self.at.expect("a block is being filled");
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let (span, flags) = (self.source.span(inst), self.carried(inst));
+        self.out.build(block, opcode).at(span).flags(flags).mem(at).finish();
+    }
+
     /// One instruction of a group that names nothing at all.
     ///
     /// The arithmetic is these. Both of an add's operands are already on the stack when it runs
@@ -1595,7 +1608,7 @@ impl<'a> Lowering<'a> {
         let from = self.through(from);
         let into = self.x87_slot(result);
         let into = self.through(into);
-        self.x87_at("fld_t", span, from);
+        self.x87_touching("fld_t", inst, from);
         self.x87_at("fstp_t", span, into);
         Ok(())
     }
@@ -1610,7 +1623,7 @@ impl<'a> Lowering<'a> {
         let into = self.reg_of(address)?;
         let into = self.through(into);
         self.x87_at("fld_t", span, from);
-        self.x87_at("fstp_t", span, into);
+        self.x87_touching("fstp_t", inst, into);
         Ok(())
     }
 
@@ -2737,7 +2750,8 @@ impl<'a> Lowering<'a> {
         let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
         let block = self.at.expect("a block is being filled");
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
-        let mut build = self.out.build(block, opcode).at(self.source.span(inst));
+        let (span, flags) = (self.source.span(inst), self.carried(inst));
+        let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in form.operands().iter().zip([got, flag, want, put]) {
             let operand = mir::Operand {
                 reg,
@@ -2822,7 +2836,8 @@ impl<'a> Lowering<'a> {
         let got = self.new_reg(old);
         let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
-        let mut build = self.out.build(block, opcode).at(span);
+        let flags = self.carried(inst);
+        let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in form.operands().iter().zip([got, put]) {
             build = build.operand(mir::Operand {
                 reg,
@@ -3605,6 +3620,32 @@ impl<'a> Lowering<'a> {
             .collect()
     }
 
+    /// What the IR instruction said about itself that the machine instruction has to keep saying.
+    ///
+    /// One flag today. `volatile` says the access happens exactly once and is never moved or
+    /// merged, and nothing below here can work that out again: a `volatile` load and an ordinary
+    /// one are the same instruction over the same address, so a pass that puts two accesses
+    /// together would put these together too. Carried rather than checked here, because the pass
+    /// that has to refuse is a long way down and this is the last place the answer is known.
+    ///
+    /// The instructions this compiler writes for itself get nothing, which is the right answer
+    /// for all of them: a prologue, a spill and the moves around a call were asked for by the
+    /// machine rather than by the program.
+    ///
+    /// Every access the flag is legal on carries it: the loads and the stores a rule matched,
+    /// the two ends of a `long double` copy that are the program's own memory, and the compare
+    /// and exchange and the read modify write. An `asm` statement does not, and it is the one
+    /// exception on purpose. What the flag says there is that the statement stays even when
+    /// nothing reads what it wrote, which is a different sentence about a different thing, and
+    /// every `asm` is already fixed where it stands whether the word was written or not.
+    fn carried(&self, inst: Inst) -> mir::Flags {
+        if self.source[inst].flags.contains(Flags::VOLATILE) {
+            mir::Flags::VOLATILE
+        } else {
+            mir::Flags::NONE
+        }
+    }
+
     /// Build the machine instruction a match calls for.
     fn emit(&mut self, inst: Inst, matched: &Match<Term>) -> Result<(), Unsupported> {
         let rule: &Rule = TABLE.rule(matched);
@@ -3649,7 +3690,8 @@ impl<'a> Lowering<'a> {
 
         let block = self.at.expect("a block is being filled");
         let opcode = mir::Opcode::new(self.names.intern(head));
-        let mut build = self.out.build(block, opcode).at(self.source.span(inst));
+        let (span, flags) = (self.source.span(inst), self.carried(inst));
+        let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in descs.iter().zip(regs) {
             let operand = mir::Operand {
                 reg,

@@ -35,8 +35,9 @@
 //! A store followed by a load of the same address is not on its own a dead load. The same pair of
 //! instructions is what a write to a local variable and a read of it back look like, and when that
 //! variable is `volatile` the read is one the program insisted on and the standard says happens.
-//! Machine IR does not carry that word, and by the time the pass runs it could not: a volatile
-//! access and an ordinary one are the same instruction with the same operands.
+//! Machine IR carries that word now, on the instruction the access was selected from, so the
+//! question could be asked here. It is still the wrong question to build the pass on, because
+//! `volatile` is not the only reason a read of a place the program named has to stay.
 //!
 //! So this does not look for the pattern. [`crate::finish`] records which instruction each of the
 //! allocator's moves became, and this pass only ever takes out one of those. A spill slot belongs

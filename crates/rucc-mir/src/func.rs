@@ -32,8 +32,8 @@ use rucc_diag::Span;
 use rucc_target::RegClass;
 
 use crate::inst::{
-    Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, InstLayout, Mem, MemRef,
-    Opcode, Operand, OperandList, Param, Reg, Weight,
+    Amode, Block, BlockCall, BlockData, Flags, Imm, ImmRef, Inst, InstData, InstLayout, Mem,
+    MemRef, Opcode, Operand, OperandList, Param, Reg, Weight,
 };
 
 /// How far a function's name reaches.
@@ -446,6 +446,7 @@ impl Func {
             imm: None,
             mem: None,
             symbol: None,
+            flags: Flags::NONE,
             span: Span::DUMMY,
         }
     }
@@ -501,6 +502,7 @@ impl Func {
             imm: None,
             mem: None,
             symbol: None,
+            flags: Flags::NONE,
             span: Span::DUMMY,
         }
     }
@@ -685,6 +687,7 @@ pub struct InstBuilder<'a> {
     imm: Option<i64>,
     mem: Option<Amode>,
     symbol: Option<Symbol>,
+    flags: Flags,
     span: Span,
 }
 
@@ -763,6 +766,17 @@ impl InstBuilder<'_> {
         self
     }
 
+    /// Says what the program said about the instruction that its operands do not.
+    ///
+    /// Given in one piece rather than one flag at a time, because what the caller has is the set
+    /// the instruction above it carried and picking it apart to put it back together is a place
+    /// for a flag to go missing.
+    #[must_use]
+    pub fn flags(mut self, flags: Flags) -> Self {
+        self.flags = flags;
+        self
+    }
+
     /// Says where in the source the instruction came from.
     #[must_use]
     pub fn at(mut self, span: Span) -> Self {
@@ -773,13 +787,14 @@ impl InstBuilder<'_> {
     /// Puts the instruction at the end of the block it was started in, or in no block at all if
     /// it was started loose.
     pub fn finish(self) -> Inst {
-        let InstBuilder { func, block, opcode, operands, imm, mem, symbol, span } = self;
+        let InstBuilder { func, block, opcode, operands, imm, mem, symbol, flags, span } = self;
         let data = InstData {
             opcode,
             operands: func.push_operands(&operands),
             imm: imm.map(|value| func.add_imm(value)),
             mem: mem.map(|amode| func.add_amode(amode)),
             symbol,
+            flags,
         };
         let inst = func.create_inst(data, span);
         if let Some(block) = block {

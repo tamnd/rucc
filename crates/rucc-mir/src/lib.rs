@@ -16,10 +16,10 @@
 //!
 //! # The shape of an instruction
 //!
-//! An opcode, an operand vector, an optional immediate, an optional memory addressing mode, and
-//! the symbol it names. Twenty-four bytes. The operands are in one order, the ones the
-//! instruction writes and then the ones it reads, with the registers a memory operand names
-//! last, and [`InstBuilder`] is what keeps them that way.
+//! An opcode, an operand vector, an optional immediate, an optional memory addressing mode, the
+//! symbol it names and one set of flags. Twenty-eight bytes. The operands are in one order, the
+//! ones the instruction writes and then the ones it reads, with the registers a memory operand
+//! names last, and [`InstBuilder`] is what keeps them that way.
 //!
 //! Where an instruction goes is on its block rather than on the instruction, in the order the
 //! terminator's own arms run, which is regalloc2's arrangement and the one the allocator
@@ -62,8 +62,8 @@ mod print;
 
 pub use func::{Binding, CfiOp, Func, InstBuilder, Patch, Visibility, defs};
 pub use inst::{
-    Amode, Block, BlockCall, BlockData, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode, Operand,
-    OperandList, Param, Reach, Reg, Weight,
+    Amode, Block, BlockCall, BlockData, Flags, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode,
+    Operand, OperandList, Param, Reach, Reg, Weight,
 };
 // An operand's role and its constraint are a target's description of an instruction before they
 // are anything in the machine IR, so they are written down in `rucc-target` where a target
