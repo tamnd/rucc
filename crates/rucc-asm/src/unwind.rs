@@ -370,9 +370,7 @@ fn windows(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Result<Unwind, E
         // front of the image. The second is the first plus the length, which the relocation carries
         // as its addend rather than as a second symbol at the end of the function.
         let len = i64::try_from(func.len).expect("a function this size");
-        for (symbol, addend) in
-            [(func.name.clone(), 0), (func.name.clone(), len), (name, 0)]
-        {
+        for (symbol, addend) in [(func.name.clone(), 0), (func.name.clone(), len), (name, 0)] {
             out.relocs.push(Reloc {
                 at: out.bytes.len(),
                 symbol,
@@ -451,7 +449,8 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
             // A push, which says two things about one instruction: the end of the frame is a word
             // further up, and the register went in the word it just moved past. One code says both.
             [(_, CfiOp::DefCfaOffset(moved)), (_, CfiOp::Offset { reg, offset })]
-                if i64::from(*moved) - below == word && i64::from(*offset) == -i64::from(*moved) =>
+                if i64::from(*moved) - below == word
+                    && i64::from(*offset) == -i64::from(*moved) =>
             {
                 below += word;
                 steps.push((at, Step::Push(*reg)));
@@ -492,18 +491,11 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
 }
 
 /// One step, as the nodes that say it.
-fn code(
-    func: &Extent,
-    conv: &CallRegs,
-    at: u8,
-    step: Step,
-    below: i64,
-) -> Result<Vec<u8>, Error> {
+fn code(func: &Extent, conv: &CallRegs, at: u8, step: Step, below: i64) -> Result<Vec<u8>, Error> {
     match step {
         Step::Push(reg) => Ok(vec![at, PUSH_NONVOL | machine(func, conv, reg)? << 4]),
         Step::Alloc(size)
-            if (word_size(conv)..=SMALL_FRAME).contains(&size)
-                && size % word_size(conv) == 0 =>
+            if (word_size(conv)..=SMALL_FRAME).contains(&size) && size % word_size(conv) == 0 =>
         {
             let steps = u8::try_from(size / word_size(conv) - 1).expect("a frame this small");
             Ok(vec![at, ALLOC_SMALL | steps << 4])
@@ -548,13 +540,7 @@ fn large(func: &Extent, at: u8, size: i64, word: i64) -> Result<Vec<u8>, Error> 
 /// what fits in a node, and one counts in bytes and takes two nodes for anything else. A general
 /// purpose register counts in words and a vector register counts in sixteens, which is what one of
 /// them is.
-fn slot(
-    func: &Extent,
-    conv: &CallRegs,
-    at: u8,
-    reg: u16,
-    above: i64,
-) -> Result<Vec<u8>, Error> {
+fn slot(func: &Extent, conv: &CallRegs, at: u8, reg: u16, above: i64) -> Result<Vec<u8>, Error> {
     if above < 0 {
         let why = format!("a register saved {} bytes below its own frame", -above);
         return Err(frame(func, why));
@@ -592,7 +578,10 @@ fn machine(func: &Extent, conv: &CallRegs, reg: u16) -> Result<u8, Error> {
         .map(|reg| reg.number())
         .filter(|number| *number < 16);
     found.ok_or_else(|| {
-        frame(func, format!("a register saved under DWARF number {reg}, which this machine has none of"))
+        frame(
+            func,
+            format!("a register saved under DWARF number {reg}, which this machine has none of"),
+        )
     })
 }
 
@@ -697,22 +686,20 @@ mod tests {
             (8, CfiOp::DefCfaOffset(56)),
             (8, CfiOp::RememberState),
         ];
-        assert_eq!(
-            info(rows),
-            vec![
-                // Version one and no flags, a prologue of eight bytes, three nodes, and no
-                // register the frame is counted from.
-                1, 8, 3, 0, //
-                // Thirty two bytes of frame, which is four slots and is written as one less.
-                8, ALLOC_SMALL | (3 << 4), //
-                // rbx, which is three to DWARF and three to the machine.
-                2, PUSH_NONVOL | (3 << 4), //
-                // rbp, which is six to DWARF and five to the machine.
-                1, PUSH_NONVOL | (5 << 4), //
-                // An odd number of nodes, padded so the next record starts on a word.
-                0, 0,
-            ]
-        );
+        let want = [
+            // Version one and no flags, a prologue of eight bytes, three nodes, and no register
+            // the frame is counted from.
+            vec![1, 8, 3, 0],
+            // Thirty two bytes of frame, which is four slots and is written as one less.
+            vec![8, ALLOC_SMALL | (3 << 4)],
+            // rbx, which is three to DWARF and three to the machine.
+            vec![2, PUSH_NONVOL | (3 << 4)],
+            // rbp, which is six to DWARF and five to the machine.
+            vec![1, PUSH_NONVOL | (5 << 4)],
+            // An odd number of nodes, padded so the next record starts on a word.
+            vec![0, 0],
+        ];
+        assert_eq!(info(rows), want.concat());
     }
 
     /// A frame larger than the four bits of a code, in the form that counts slots, and one larger
@@ -741,16 +728,14 @@ mod tests {
             (14, CfiOp::Offset { reg: XMM6, offset: -40 }),
             (14, CfiOp::RememberState),
         ];
-        assert_eq!(
-            info(rows),
-            vec![
-                1, 14, 4, 0, //
-                // xmm6 at sixteen bytes up, which the code counts in sixteens.
-                14, SAVE_XMM128 | (6 << 4), 0x01, 0x00, //
-                8, ALLOC_SMALL | (4 << 4), //
-                1, PUSH_NONVOL | (5 << 4),
-            ]
-        );
+        let want = [
+            vec![1, 14, 4, 0],
+            // xmm6 at sixteen bytes up, which the code counts in sixteens.
+            vec![14, SAVE_XMM128 | (6 << 4), 0x01, 0x00],
+            vec![8, ALLOC_SMALL | (4 << 4)],
+            vec![1, PUSH_NONVOL | (5 << 4)],
+        ];
+        assert_eq!(info(rows), want.concat());
     }
 
     /// A general purpose register in a slot, in the same shape, counted in words instead.
@@ -761,16 +746,14 @@ mod tests {
             (13, CfiOp::Offset { reg: R12, offset: -48 }),
             (13, CfiOp::RememberState),
         ];
-        assert_eq!(
-            info(rows),
-            vec![
-                1, 13, 3, 0, //
-                // r12, which is twelve to both, three words up.
-                13, SAVE_NONVOL | (12 << 4), 0x03, 0x00, //
-                8, ALLOC_SMALL | (7 << 4), //
-                0, 0,
-            ]
-        );
+        let want = [
+            vec![1, 13, 3, 0],
+            // r12, which is twelve to both, three words up.
+            vec![13, SAVE_NONVOL | (12 << 4), 0x03, 0x00],
+            vec![8, ALLOC_SMALL | (7 << 4)],
+            vec![0, 0],
+        ];
+        assert_eq!(info(rows), want.concat());
     }
 
     /// A function with nothing to say still gets a description, because a function with no row at
@@ -803,7 +786,8 @@ mod tests {
             ]
         );
         assert!(out.relocs.iter().all(|reloc| reloc.kind == Reference::Image));
-        let labels: Vec<_> = out.labels.iter().map(|label| (label.name.as_str(), label.at)).collect();
+        let labels: Vec<_> =
+            out.labels.iter().map(|label| (label.name.as_str(), label.at)).collect();
         assert_eq!(labels, vec![("$unwind$one", 0), ("$unwind$two", 4)]);
     }
 
