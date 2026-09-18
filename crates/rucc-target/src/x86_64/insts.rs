@@ -39,9 +39,9 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    Align, AluCarry, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87,
-    Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi, CmpSetRm,
-    CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
+    Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
+    ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
+    CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing,
     Lea, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
     Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store,
@@ -82,6 +82,19 @@ pub enum Form {
     /// reads the state and does not carry a condition in its name is a third kind that the two
     /// tests over that list have to be able to tell from the other two. Naming it is what lets them.
     AluCarry,
+    /// The same instruction as [`Form::AluCarry`] with a constant where its second source is.
+    ///
+    /// `adc $0, %rax`, which is what a program writes for the third word of a number three words
+    /// wide: there is nothing to add there except the bit that fell off the second word, and a
+    /// constant zero is how the instruction that adds only the bit is spelled. libgmp's
+    /// `add_sssaaaa` in `longlong.h` is the whole reason this is here.
+    ///
+    /// The operand vector is [`Form::AluRi`]'s and the condition state is read the way
+    /// [`Form::AluCarry`] reads it, so this is the two of them crossed and nothing more. It is a
+    /// form of its own for the reason that one is: the list of what reads the state is taken off
+    /// these names rather than typed out, so an instruction that reads it has to be findable by
+    /// its form.
+    AluCarryI,
     /// The same instruction as [`Form::AluRr`] reading its second source out of memory.
     ///
     /// One operand vector shorter than [`Form::AluRr`] and one addressing mode longer, which is
@@ -997,7 +1010,7 @@ impl Form {
         match self {
             LoadImm => &LOAD_IMM,
             AluRr | AluCarry => &TWO_ADDRESS_RR,
-            AluRi | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
+            AluRi | AluCarryI | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi | CmpSetRm => &ONE_TO_ONE,
@@ -1054,7 +1067,10 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | AluMi | ShiftRi | CmpSetRi | CmpRi | CmpSetMi | CmpMi)
+        matches!(
+            self,
+            LoadImm | AluRi | AluCarryI | AluMi | ShiftRi | CmpSetRi | CmpRi | CmpSetMi | CmpMi
+        )
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -1173,6 +1189,14 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sbb_rr_16", AluCarry),
     ("sbb_rr_32", AluCarry),
     ("sbb_rr_64", AluCarry),
+    ("adc_ri_8", AluCarryI),
+    ("adc_ri_16", AluCarryI),
+    ("adc_ri_32", AluCarryI),
+    ("adc_ri_64", AluCarryI),
+    ("sbb_ri_8", AluCarryI),
+    ("sbb_ri_16", AluCarryI),
+    ("sbb_ri_32", AluCarryI),
+    ("sbb_ri_64", AluCarryI),
     ("and_rr_8", AluRr),
     ("and_rr_16", AluRr),
     ("and_rr_32", AluRr),
@@ -2034,7 +2058,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 592);
+        assert_eq!(described, 600);
     }
 
     #[test]

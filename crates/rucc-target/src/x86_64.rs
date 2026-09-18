@@ -683,7 +683,7 @@ static COMPARES: [Compare; 88] = [
 /// door lists them, and they are the eight rows here that carry no condition in their names. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 218] = [
+static READERS: [Reader; 226] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -692,6 +692,14 @@ static READERS: [Reader; 218] = [
     Reader { name: "sbb_rr_16", reads: Reads::Carry },
     Reader { name: "sbb_rr_32", reads: Reads::Carry },
     Reader { name: "sbb_rr_64", reads: Reads::Carry },
+    Reader { name: "adc_ri_8", reads: Reads::Carry },
+    Reader { name: "adc_ri_16", reads: Reads::Carry },
+    Reader { name: "adc_ri_32", reads: Reads::Carry },
+    Reader { name: "adc_ri_64", reads: Reads::Carry },
+    Reader { name: "sbb_ri_8", reads: Reads::Carry },
+    Reader { name: "sbb_ri_16", reads: Reads::Carry },
+    Reader { name: "sbb_ri_32", reads: Reads::Carry },
+    Reader { name: "sbb_ri_64", reads: Reads::Carry },
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -1439,6 +1447,7 @@ mod tests {
                 matches!(
                     shape,
                     Form::AluCarry
+                        | Form::AluCarryI
                         | Form::CmpSet
                         | Form::CmpSetRi
                         | Form::CmpSetRm
@@ -1454,7 +1463,7 @@ mod tests {
         assert_eq!(entries, readers);
 
         for entry in &READERS {
-            if form(entry.name) == Some(Form::AluCarry) {
+            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI)) {
                 assert_eq!(entry.reads, Reads::Carry, "{} reads a condition", entry.name);
                 continue;
             }

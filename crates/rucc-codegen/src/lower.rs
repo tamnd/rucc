@@ -3009,6 +3009,7 @@ impl<'a> Lowering<'a> {
         // that reason, because the walk below it is over the opcode's operands and an address is
         // not one of those.
         let mut writes = vec![0usize; list.len()];
+        let mut reads = vec![false; list.len()];
         let mut held = vec![false; list.len()];
         for step in &steps {
             let x86_64::Step::Line(line) = step else { continue };
@@ -3032,6 +3033,8 @@ impl<'a> Lowering<'a> {
                 *held.get_mut(index).ok_or_else(refused)? = true;
                 if matches!(desc.role, Role::Def | Role::EarlyDef) {
                     *writes.get_mut(index).ok_or_else(refused)? += 1;
+                } else {
+                    *reads.get_mut(index).ok_or_else(refused)? = true;
                 }
             }
         }
@@ -3081,6 +3084,20 @@ impl<'a> Lowering<'a> {
             }
         }
 
+        // An output an instruction of the template also reads, which the statement said nothing
+        // about because an output is what a statement says the other thing about. What it holds
+        // there is undefined, and a program writing one means it: `sbb %0, %0` in libgmp's
+        // `add_mssaaaa` subtracts a register from itself and is asking for the borrow bit rather
+        // than for the number, so whatever the register held, the answer is the same. Undefined is
+        // not the same as absent though, since the allocator is owed a definition in front of every
+        // use, so it gets the zero an output nothing wrote gets and for the same reason.
+        for index in 0..list.len() {
+            if !reads[index] || places[index].read.is_some() || places[index].write.is_none() {
+                continue;
+            }
+            places[index].read = Some(self.seeded(inst, list[index])?);
+        }
+
         // Worked out once for the whole template, since the list is one list and every instruction
         // of the template gets it. Not worked out at all for a template with no instructions, which
         // is where there is nothing for it to go on.
@@ -3099,6 +3116,28 @@ impl<'a> Lowering<'a> {
             self.instruction(inst, line, &places, &list, &clobbered)?;
         }
         Ok(())
+    }
+
+    /// A register holding a zero, for an operand of a template that is read before anything filled
+    /// it.
+    ///
+    /// Two things ask for this and they are the same thing twice. An output the template reads has
+    /// nothing to be read out of until the instruction that writes it has run, and a loop carries
+    /// an operand into a block before the instruction that fills it, so both are a use in front of
+    /// every definition. What the program is owed there is nothing, since the value is undefined
+    /// either way, and what the allocator is owed is a register something wrote.
+    fn seeded(&mut self, inst: Inst, operand: AsmOperand) -> Result<mir::Reg, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let value = operand.result.or(operand.value).ok_or_else(refused)?;
+        let class = self.class_of(self.source[value].ty);
+        if class != self.gpr {
+            return Err(refused());
+        }
+        let block = self.at.expect("a block is being filled");
+        let reg = self.out.new_vreg(class);
+        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
+        self.out.build(block, put).at(self.source.span(inst)).def(reg, class).imm(0).finish();
+        Ok(reg)
     }
 
     /// A template with labels in it, as the blocks its jumps leave and arrive at.
@@ -3164,7 +3203,7 @@ impl<'a> Lowering<'a> {
         }
 
         // What each of them holds where the template starts.
-        for &(index, class) in &carried {
+        for &(index, _) in &carried {
             if places[index].read.is_some() {
                 continue;
             }
@@ -3172,14 +3211,7 @@ impl<'a> Lowering<'a> {
                 places[index].read = places[index].write;
                 continue;
             }
-            if class != self.gpr {
-                return Err(refused());
-            }
-            let block = self.at.expect("a block is being filled");
-            let reg = self.out.new_vreg(class);
-            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
-            self.out.build(block, put).at(span).def(reg, class).imm(0).finish();
-            places[index].read = Some(reg);
+            places[index].read = Some(self.seeded(inst, list[index])?);
         }
 
         // The blocks, made before the walk because a jump forwards names a label the walk has not
@@ -3393,8 +3425,10 @@ impl<'a> Lowering<'a> {
         // this asks. An output has a result and an input has a value, an output written `+` has
         // both because it is read before it is written, and an output a matching constraint names
         // is read as the input that named it. See [`read_as`].
+        // An output with neither is read as well, and what it holds there is undefined, which
+        // [`Self::assembly`] says why and puts a zero in a register for.
         let placeable = match desc.role {
-            Role::Use => read_as(list, index).is_some(),
+            Role::Use => read_as(list, index).is_some() || operand.result.is_some(),
             Role::Def | Role::EarlyDef => operand.result.is_some(),
         };
         let ty = match (operand.result, operand.value) {
