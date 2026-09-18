@@ -274,6 +274,14 @@ static STACK_AGAINST: [Arg; 2] = [Stack(1), Stack(0)];
 // The top on its own, which is what a pop that throws its value away names.
 static STACK_TOP: [Arg; 1] = [Stack(0)];
 
+// The other multiplicand, which is the one register a widening multiply names. Everything else it
+// touches is a fixed register the opcode carries as an operand, and it sits at the same index as a
+// division's divisor because the three operands in front of it are the same three: two answers and
+// the source that shares a register with one of them.
+static MULTIPLIER_16: [Arg; 1] = [Reg(3, Word)];
+static MULTIPLIER_32: [Arg; 1] = [Reg(3, Long)];
+static MULTIPLIER_64: [Arg; 1] = [Reg(3, Quad)];
+
 // The divisor, which is the one register a division names. Everything else it touches is a fixed
 // register the opcode carries as an operand so that the allocator keeps out of it.
 static DIVISOR_8: [Arg; 1] = [Reg(3, Byte)];
@@ -452,6 +460,16 @@ static TEXT: &[(&str, &[Written])] = &[
     ("not_r_16", &[spell("notw", &[Reg(0, Word)])]),
     ("not_r_32", &[spell("notl", &[Reg(0, Long)])]),
     ("not_r_64", &[spell("notq", &[Reg(0, Quad)])]),
+    // The multiply that keeps both halves of its product, signed and unsigned. One instruction each
+    // and one argument each, which is what tells them from the divisions below: a division on this
+    // machine is written as two instructions because the high half of the dividend has to be filled
+    // first, and a multiply fills nothing.
+    ("mul_wide_16", &[spell("mulw", &MULTIPLIER_16)]),
+    ("mul_wide_32", &[spell("mull", &MULTIPLIER_32)]),
+    ("mul_wide_64", &[spell("mulq", &MULTIPLIER_64)]),
+    ("imul_wide_16", &[spell("imulw", &MULTIPLIER_16)]),
+    ("imul_wide_32", &[spell("imull", &MULTIPLIER_32)]),
+    ("imul_wide_64", &[spell("imulq", &MULTIPLIER_64)]),
     // Division and remainder, signed and unsigned. The four widening instructions have no operands
     // at all: each of them reads one fixed register and writes another, and the opcode carries
     // both of those as operands so that the allocator leaves them alone.
@@ -1427,7 +1445,10 @@ mod tests {
     /// Two kinds of operand are deliberately not named. The first source of a two-address
     /// instruction is the destination, which the allocator has arranged by now, so writing it
     /// again would be writing the same register twice. And a division names its dividend and both
-    /// of its answers in the opcode, so all it is given is the divisor. A compare and exchange is
+    /// of its answers in the opcode, so all it is given is the divisor. The multiply that keeps
+    /// both halves of its product is the same thing again with one word changed: one multiplicand
+    /// and both halves of the answer are fixed registers the opcode carries, so all it is given is
+    /// the other multiplicand. A compare and exchange is
     /// the second kind: what it compares against and where it leaves what it found are both `rax`,
     /// which the instruction reads and writes without being told.
     ///
@@ -1447,7 +1468,12 @@ mod tests {
             if insts.is_empty()
                 || matches!(
                     form,
-                    Form::DivQuo | Form::DivRem | Form::CmpXchg | Form::JmpReg | Form::CpuId
+                    Form::MulWide
+                        | Form::DivQuo
+                        | Form::DivRem
+                        | Form::CmpXchg
+                        | Form::JmpReg
+                        | Form::CpuId
                 )
             {
                 continue;

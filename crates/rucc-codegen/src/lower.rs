@@ -214,13 +214,31 @@ struct Place {
 /// register nobody has said anything about. So a write looks among the outputs and a read among the
 /// inputs, and an output written `+` answers for either, since it is read before it is written.
 ///
+/// The other way a read of such a register is said is a matching constraint. `"=a"` on an output
+/// and `"0"` on an input is the program saying that one register holds the input on the way in and
+/// the output on the way out, and it is how a statement fills a register the instruction reads and
+/// writes without writing the register down twice. The letter is on the output, which has no value
+/// to read, and the value is on the input, which has no letter, so neither of them answers this on
+/// its own and the answer is the input: what a read wants is the register the value arrived in, and
+/// that is the input's place.
+///
 /// `None` is a register the instruction uses and the statement put nothing in, which is the usual
 /// answer rather than an unusual one. `cpuid` writes four registers and a program that wanted one
 /// of them names one. See [`Lowering::spare`], which is where that one goes.
 fn bound(list: &[AsmOperand], reg: PhysReg, role: Role) -> Option<usize> {
-    list.iter().position(|operand| {
-        operand.fixed.and_then(x86_64::gpr_letter) == Some(reg)
+    let letter = |operand: &AsmOperand| operand.fixed.and_then(x86_64::gpr_letter);
+    let named = list.iter().position(|operand| {
+        letter(operand) == Some(reg)
             && if role.is_def() { operand.result.is_some() } else { operand.value.is_some() }
+    });
+    if named.is_some() || role.is_def() {
+        return named;
+    }
+    list.iter().position(|operand| {
+        operand.value.is_some()
+            && operand
+                .tied
+                .is_some_and(|at| list.get(at).is_some_and(|out| letter(out) == Some(reg)))
     })
 }
 

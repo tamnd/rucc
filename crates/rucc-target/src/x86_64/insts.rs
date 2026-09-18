@@ -42,9 +42,10 @@ use Form::{
     Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
     Call, Cmov, Cmp, CmpRi, CmpRm, CmpSet, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87,
     CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87,
-    DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop,
-    Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search,
-    Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, MulWide,
+    Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
+    Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -200,6 +201,22 @@ pub enum Form {
     /// not have been wrong. It would have been a claim this machine does not make, and the point of
     /// a form is that it is what the manual says rather than what is convenient.
     Swap,
+    /// A multiply that keeps the whole of its answer, in the two registers it takes to hold it.
+    ///
+    /// The product of two numbers of a width is twice that width, and every other multiply on this
+    /// machine throws the top half away. This one does not: it reads `rax` and one other place and
+    /// writes the low half back to `rax` and the high half to `rdx`. So it is the first form here
+    /// with two definitions that a program is meant to read, which is what makes it the one a
+    /// bignum library asks for and cannot get any other way. A library that multiplies two limbs
+    /// wants both halves, and building them out of four narrower multiplies costs what the
+    /// instruction was put on the machine to save.
+    ///
+    /// The same shape as [`Form::DivQuo`] read the other way round, and the one thing that differs
+    /// between them is worth saying. A division writes `rdx` early, because the register is filled
+    /// before the divisor is read and so may not hold the divisor. Nothing fills anything here:
+    /// both definitions happen after both sources have been read, which is what an ordinary
+    /// definition means, and it is what lets the multiplier sit in `rdx` and still be read.
+    MulWide,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
     DivQuo,
     /// The remainder of a division, which comes back in `rdx` and destroys `rax` on the way.
@@ -697,6 +714,22 @@ static CPU_ID: [OperandDesc; 6] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
 ];
+// One multiplicand is in `rax` and the other is anywhere else, and both halves of the product come
+// back, the low one in `rax` and the high one in `rdx`. Two definitions and both of them wanted,
+// which is what tells this from the two below: a division writes the register its other answer is
+// in so that nothing is left there, and this writes it because that is where half the answer is.
+//
+// Neither definition is early, which is the other thing that is not the same as a division. Early
+// says the register is gone before the operands are read, and it is true of a division because the
+// sign extension that fills `rdx` runs in front of it. Nothing runs in front of this one, so `rdx`
+// still holds whatever it held when the sources are read, and saying so is what lets the second
+// multiplicand be allocated there.
+static MUL_WIDE: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR),
+];
 // The dividend is in `rax` and the divisor is anywhere else. A division produces both answers
 // and this opcode is one of them, so the register the other one lands in is written here as
 // well, and it is written early: the sign extension that fills it runs before the division
@@ -893,6 +926,7 @@ impl Form {
             Set => &ONE_WRITTEN,
             Convert | Search => &ONE_TO_ONE,
             CpuId => &CPU_ID,
+            MulWide => &MUL_WIDE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
             Lea => &ADDRESS,
@@ -1162,6 +1196,22 @@ pub static INSTS: &[(&str, Form)] = &[
     ("not_r_16", UnaryR),
     ("not_r_32", UnaryR),
     ("not_r_64", UnaryR),
+    // The multiply that keeps both halves of its product, signed and unsigned. No rule selects one,
+    // and the reason is that nothing in the IR asks for a product wider than its operands: a C
+    // multiply of two values of a type is a value of that type, and the wide product is something
+    // only a library that is building arithmetic out of limbs wants. So what reaches one is a
+    // program that named it, which is `umul_ppmm` in libgmp's `longlong.h`.
+    //
+    // Three widths and not four. The eight bit form is a different instruction wearing the same
+    // name: its answer is sixteen bits and both halves of it are in `ax`, so it writes one register
+    // where these write two and the description above is not true of it. It has encoder rows, the
+    // way every one of these does, and it gets an opcode on the day something reaches it.
+    ("mul_wide_16", MulWide),
+    ("mul_wide_32", MulWide),
+    ("mul_wide_64", MulWide),
+    ("imul_wide_16", MulWide),
+    ("imul_wide_32", MulWide),
+    ("imul_wide_64", MulWide),
     // Division and remainder, signed and unsigned.
     ("idiv_quo_8", DivQuo),
     ("idiv_quo_16", DivQuo),
@@ -1823,7 +1873,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 528);
+        assert_eq!(described, 534);
     }
 
     #[test]
