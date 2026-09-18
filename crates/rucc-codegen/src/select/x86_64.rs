@@ -309,6 +309,31 @@ mod tests {
     ///
     /// So these have operands a rule could have named, unlike everything in [`TEMPLATE`], and they
     /// are still not instructions a rule could have been written for.
+    /// The add with carry and the subtract with borrow, which read a bit off the instruction in
+    /// front of them.
+    ///
+    /// Exempt one step further out again than [`CONDITIONAL`]. A conditional move reads the
+    /// condition state and leaves it alone, so what is missing from a rule that named one is the
+    /// comparison. These read it and write it both, and what is missing is worse than a comparison:
+    /// the bit they read is the carry out of an addition, and an addition in the IR is an addition
+    /// of a width with no carry out at all, so there is no term a rule could match that the bit is
+    /// a part of. A program gets one by writing both halves itself in a template, which is what
+    /// `add_ssaaaa` and `sub_ddmmss` in libgmp's `longlong.h` are.
+    ///
+    /// What keeps the two halves together once they are two instructions in a block is not here. It
+    /// is `rucc_target::FlagInsts`, which the scheduler reads for exactly this, and the test below
+    /// checks the entry is there rather than trusting that somebody remembered.
+    const CARRY: &[&str] = &[
+        "adc_rr_8",
+        "adc_rr_16",
+        "adc_rr_32",
+        "adc_rr_64",
+        "sbb_rr_8",
+        "sbb_rr_16",
+        "sbb_rr_32",
+        "sbb_rr_64",
+    ];
+
     const CONDITIONAL: &[&str] = &[
         "cmov_e_16",
         "cmov_e_32",
@@ -730,6 +755,9 @@ mod tests {
             if CONDITIONAL.contains(&opcode) {
                 continue;
             }
+            if CARRY.contains(&opcode) {
+                continue;
+            }
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
@@ -882,6 +910,39 @@ mod tests {
         for &(opcode, form) in x86_64::INSTS {
             if both.contains(&form) {
                 assert!(WIDE.contains(&opcode), "{opcode} works on a pair and is not on the list");
+            }
+        }
+    }
+
+    /// The same claim about the carry pair, and the one thing that has to be true of them that is
+    /// not true of anything else on any of these lists. An instruction here reads the condition
+    /// state and writes it, which is what makes it half of a pair and not a rewrite of its own, and
+    /// the scheduler will only keep it behind the instruction that set the bit if the target says
+    /// it reads one.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_it_reads_a_carry_says_it_reads_the_state() {
+        let written = heads();
+        for &opcode in CARRY {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert_eq!(form, x86_64::Form::AluCarry, "{opcode} is not one of the pair");
+            assert_eq!(
+                x86_64::FLAGS.reads(opcode),
+                Some(rucc_target::Reads::Carry),
+                "{opcode} does not say it reads the carry, so the scheduler may move it"
+            );
+            assert!(
+                (x86_64::FLAGS.writes)(opcode),
+                "{opcode} is said to leave the condition state alone"
+            );
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which only a template asks for",
+                TABLE.source
+            );
+        }
+        for &(opcode, form) in x86_64::INSTS {
+            if form == x86_64::Form::AluCarry {
+                assert!(CARRY.contains(&opcode), "{opcode} reads a carry and is not on the list");
             }
         }
     }

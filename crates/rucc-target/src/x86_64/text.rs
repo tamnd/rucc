@@ -338,6 +338,17 @@ static TEXT: &[(&str, &[Written])] = &[
     ("sub_rr_16", &[spell("subw", &[Reg(2, Word), Reg(0, Word)])]),
     ("sub_rr_32", &[spell("subl", &[Reg(2, Long), Reg(0, Long)])]),
     ("sub_rr_64", &[spell("subq", &[Reg(2, Quad), Reg(0, Quad)])]),
+    // The same two again reading the carry the two above left, which is not an argument either,
+    // for a plainer reason than the destination's: it is not a register, so there is nothing to
+    // spell. What says these read it is the condition state description rather than this table.
+    ("adc_rr_8", &[spell("adcb", &[Reg(2, Byte), Reg(0, Byte)])]),
+    ("adc_rr_16", &[spell("adcw", &[Reg(2, Word), Reg(0, Word)])]),
+    ("adc_rr_32", &[spell("adcl", &[Reg(2, Long), Reg(0, Long)])]),
+    ("adc_rr_64", &[spell("adcq", &[Reg(2, Quad), Reg(0, Quad)])]),
+    ("sbb_rr_8", &[spell("sbbb", &[Reg(2, Byte), Reg(0, Byte)])]),
+    ("sbb_rr_16", &[spell("sbbw", &[Reg(2, Word), Reg(0, Word)])]),
+    ("sbb_rr_32", &[spell("sbbl", &[Reg(2, Long), Reg(0, Long)])]),
+    ("sbb_rr_64", &[spell("sbbq", &[Reg(2, Quad), Reg(0, Quad)])]),
     ("and_rr_8", &[spell("andb", &[Reg(2, Byte), Reg(0, Byte)])]),
     ("and_rr_16", &[spell("andw", &[Reg(2, Word), Reg(0, Word)])]),
     ("and_rr_32", &[spell("andl", &[Reg(2, Long), Reg(0, Long)])]),
