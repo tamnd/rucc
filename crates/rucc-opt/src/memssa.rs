@@ -250,6 +250,112 @@ pub fn build(func: &mut Func) -> bool {
     true
 }
 
+/// Takes the chain back off, and says whether it did.
+///
+/// The inverse of [`build`], and it is here because the back end has never seen memory SSA and is
+/// not going to: `rucc_codegen::capability` says outright that the chain comes off before it runs.
+/// Nothing was taking it off, so until this existed the only way to use the chain was to not use
+/// it. A pass that wants the walk builds the chain, does its work and strips it, which is a linear
+/// walk each way on top of whatever the pass itself costs.
+///
+/// Keeping the chain across passes instead would be cheaper and is a much bigger claim to make,
+/// since every edit to the control flow graph in the optimizer would have to keep the memory
+/// parameters in step with the blocks. That is worth wanting later and is not what this is.
+///
+/// Three things come off, in the order they have to. Every instruction on the chain loses its
+/// incoming version and its outgoing one, which is [`Func::without_mem`], and what it produced
+/// otherwise is forwarded to what the bare one produces. Every memory parameter comes off the
+/// block that has it and the matching argument comes off every branch to that block. The
+/// `mem_entry` at the top goes last, because until the rest is off it is a definition with
+/// readers.
+///
+/// It gives back `false` and changes nothing for a function that is not on the chain.
+pub fn strip(func: &mut Func) -> bool {
+    let mut forward: Vec<(Value, Value)> = Vec::new();
+    let mut gone: Vec<Inst> = Vec::new();
+    let mut entry = None;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        for inst in func.insts(block).collect::<Vec<Inst>>() {
+            if func[inst].opcode == Opcode::MemEntry {
+                entry = Some(inst);
+                continue;
+            }
+            if !func.carries_mem(inst) {
+                continue;
+            }
+            let bare = func.without_mem(inst);
+            func.insert_before(bare, inst);
+            // The results the bare one kept are at the same positions, and the version of memory
+            // the old one produced is past the end of them, so zipping forwards exactly the ones
+            // that have somewhere to go.
+            for (old, new) in func[inst].results().zip(func[bare].results()) {
+                forward.push((old, new));
+            }
+            gone.push(inst);
+        }
+    }
+    if entry.is_none() && gone.is_empty() {
+        return false;
+    }
+    for inst in gone {
+        func.remove_inst(inst);
+    }
+    let forward: HashMap<Value, Value> = forward.into_iter().collect();
+    if !forward.is_empty() {
+        substitute(func, &forward);
+    }
+    drop_params(func);
+    if let Some(inst) = entry {
+        func.remove_inst(inst);
+    }
+    true
+}
+
+/// Takes the memory parameter off every block that has one, and the argument off every branch to
+/// it.
+///
+/// A parameter that goes has to take the argument in the same position out of every branch, and
+/// only the caller knows which branches there are, which is why [`Func::retain_params`] does not
+/// do it. The position is worked out before anything is removed, because renumbering the
+/// parameters and rewriting the arguments cannot both go first.
+fn drop_params(func: &mut Func) {
+    let mut at: HashMap<Block, Vec<usize>> = HashMap::new();
+    let mut going: HashSet<Value> = HashSet::new();
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let mut keep = Vec::new();
+        for (index, &param) in func[block].params.iter().enumerate() {
+            if func[param].ty.is_mem() {
+                going.insert(param);
+            } else {
+                keep.push(index);
+            }
+        }
+        if keep.len() != func[block].params.len() {
+            at.insert(block, keep);
+        }
+    }
+    if at.is_empty() {
+        return;
+    }
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(terminator) = func.terminator(block) else {
+            continue;
+        };
+        for target in func.target_list(terminator).iter() {
+            let call = func[target];
+            let Some(keep) = at.get(&call.block) else {
+                continue;
+            };
+            let args: Vec<Value> = keep.iter().map(|&index| func[call.args][index]).collect();
+            let args = func.push_values(&args);
+            func.set_block_call(target, BlockCall { args, ..call });
+        }
+    }
+    for block in at.keys().copied().collect::<Vec<Block>>() {
+        func.retain_params(block, |param| !going.contains(&param));
+    }
+}
+
 /// The `mem_entry` above that instruction, which is where every chain starts.
 ///
 /// It goes at the very top of the entry block, and the verifier insists on that: a start to the
@@ -1157,5 +1263,167 @@ block2:
         let store = nth(&func, Opcode::Store, 0);
         let load = nth(&func, Opcode::Load, 0);
         assert_eq!(func.mem_in(load), func.mem_out(store));
+    }
+
+    /// Builds the chain, takes it back off, and insists the result verifies both times. A half
+    /// removed chain is exactly the kind of thing that would pass a shape assertion and fail on a
+    /// real file, so the verifier is the assertion that matters here too.
+    fn stripped(text: &str) -> (Module, bool) {
+        let (mut module, names) = read(text);
+        let id = module.funcs().next().expect("one function");
+        build(&mut module[id]);
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("after building: {errors:#?}");
+        }
+        let changed = strip(&mut module[id]);
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("after stripping: {errors:#?}");
+        }
+        (module, changed)
+    }
+
+    /// Nothing anywhere in the function is on the chain any more.
+    fn off(func: &Func) {
+        for block in func.blocks() {
+            assert!(
+                func[block].params.iter().all(|&param| !func[param].ty.is_mem()),
+                "a block kept a memory parameter"
+            );
+            for inst in func.insts(block) {
+                assert_ne!(
+                    func[inst].opcode,
+                    Opcode::MemEntry,
+                    "the start of the chain is still here"
+                );
+                assert!(!func.carries_mem(inst), "an instruction is still on the chain");
+            }
+        }
+    }
+
+    #[test]
+    fn a_straight_line_comes_off_the_chain_the_way_it_went_on() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    store %1 -> %0, align 4
+    %2 = load.i32 %0, align 4
+    return %2
+",
+        );
+        let (module, changed) = stripped(&text);
+        assert!(changed);
+        let func = one(&module);
+        off(func);
+        // The instructions are the same ones doing the same thing, which is the whole claim: the
+        // address the load reads is still the function's parameter and the value returned is
+        // still what the load read.
+        let load = nth(func, Opcode::Load, 0);
+        let param = func[func.entry().expect("an entry")].params[0];
+        assert_eq!(func[func[load].args][0], param);
+        let ret = nth(func, Opcode::Return, 0);
+        assert_eq!(func[func[ret].args][0], func[load].results().next().expect("a result"));
+    }
+
+    #[test]
+    fn a_join_gives_its_memory_parameter_back_and_so_does_every_branch_to_it() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    jump block3
+
+block2:
+    jump block3
+
+block3:
+    %3 = load.i32 %0, align 4
+    return %3
+",
+        );
+        let (module, changed) = stripped(&text);
+        assert!(changed);
+        let func = one(&module);
+        off(func);
+        let join = func.blocks().nth(3).expect("four blocks");
+        assert!(func[join].params.is_empty(), "the join kept a parameter");
+        for block in func.blocks() {
+            let Some(terminator) = func.terminator(block) else { continue };
+            for call in func.successors(terminator) {
+                assert!(func[call.args].is_empty(), "a branch kept an argument");
+            }
+        }
+    }
+
+    #[test]
+    fn a_parameter_that_was_never_memory_keeps_its_place() {
+        // The argument a branch passes goes by position, so a block with a memory parameter
+        // beside an ordinary one is where taking the wrong one out would show.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    br_if %1, block1(%2), block2
+
+block1(%3: i32):
+    store %3 -> %0, align 4
+    jump block3
+
+block2:
+    jump block3
+
+block3:
+    %4 = load.i32 %0, align 4
+    return %4
+",
+        );
+        let (module, _) = stripped(&text);
+        let func = one(&module);
+        off(func);
+        let arm = func.blocks().nth(1).expect("four blocks");
+        assert_eq!(func[arm].params.len(), 1);
+        let param = func[arm].params[0];
+        assert_eq!(func[param].ty, Type::int(32));
+        let store = nth(func, Opcode::Store, 0);
+        assert_eq!(func[func[store].args][0], param, "the store lost the value it writes");
+    }
+
+    #[test]
+    fn a_function_that_was_never_on_the_chain_is_left_alone() {
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = add %0, %0
+    return %1
+",
+        );
+        let (mut module, names) = read(&text);
+        let id = module.funcs().next().expect("one function");
+        assert!(!strip(&mut module[id]));
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("{errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_call_that_returns_something_keeps_it() {
+        // A call is threaded like a store and gives back a value as well, so its results are the
+        // one place where the version of memory sits behind something that has a reader.
+        let text = format!(
+            "{HEADER}\nfunc @f() -> i32, linkage(external) {{\nblock0:\n    %0 = call @g() : () -> \
+             i32\n    return %0\n}}\n"
+        );
+        let (module, changed) = stripped(&text);
+        assert!(changed);
+        let func = one(&module);
+        off(func);
+        let call = nth(func, Opcode::Call, 0);
+        let ret = nth(func, Opcode::Return, 0);
+        assert_eq!(func[call].results().count(), 1);
+        assert_eq!(func[func[ret].args][0], func[call].results().next().expect("a result"));
     }
 }

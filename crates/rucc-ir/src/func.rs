@@ -508,6 +508,34 @@ impl Func {
         self.create_inst(InstData { args, ..data }, &results, span)
     }
 
+    /// The same instruction with the version of memory taken back off.
+    ///
+    /// The inverse of [`Func::with_mem`] and the same shape for the same reason: a result cannot be
+    /// taken off an instruction that already exists, so this makes a new one and the caller puts it
+    /// where the old one was, forwards the results it kept, which are at the same positions, and
+    /// deletes the old one. The memory result has no forwarding to do, because taking the chain off
+    /// is only ever done when nothing reads it any more.
+    ///
+    /// The new instruction is not in any block. Its results are what the old one produced without
+    /// the version of memory at the end of them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is not on the chain, which is a caller that did not look first.
+    pub fn without_mem(&mut self, inst: Inst) -> Inst {
+        assert!(self.carries_mem(inst), "this is not on the memory chain");
+        let data = self[inst];
+        let mut args = self[data.args].to_vec();
+        if self.mem_in(inst).is_some() {
+            args.pop();
+        }
+        let results: Vec<Type> =
+            data.results().map(|result| self[result].ty).filter(|ty| !ty.is_mem()).collect();
+        let span = self.span(inst);
+        let args = self.push_values(&args);
+        self.create_inst(InstData { args, ..data }, &results, span)
+    }
+
     /// Where an instruction came from in the source.
     #[must_use]
     pub fn span(&self, inst: Inst) -> Span {
