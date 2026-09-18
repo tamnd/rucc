@@ -37,7 +37,7 @@
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
-use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
+use rucc_target::{PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
 use rucc_object::{Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
@@ -151,11 +151,11 @@ pub fn assemble(
             patch,
         });
     }
-    // Only where something reads it. The other two formats answer the same question their own way,
-    // and a DWARF table under a name their linker does not know is a section nothing looks at.
-    if unwind && target.object_format == ObjectFormat::Elf {
+    // In whichever of the two shapes the target reads, which is what decides whether a prologue
+    // this cannot describe is a refusal or is nothing at all. See [`unwind::table`].
+    if unwind {
         if let Some(conv) = target.call_regs {
-            text.unwind = unwind::table(&text.funcs, &rows, conv);
+            text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format)?;
         }
     }
     Ok(text)

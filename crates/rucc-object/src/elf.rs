@@ -30,6 +30,10 @@ use crate::section::{Array, Binding, Property, Reference, Visibility};
 /// nobody else defines it. The fourth is a table slot as well and holds an offset into a thread's
 /// own block rather than an address, because a thread-local variable has a copy per thread and no
 /// address at all. The fifth is the address itself, at the two widths this machine writes one at.
+///
+/// Nothing for how far something is from the front of the image. This format has no relocation of
+/// that kind because nothing it writes wants one, and a file asking for one here is a file whose
+/// unwind table was built for the other platform.
 pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
@@ -38,7 +42,7 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
-        Reference::Address { .. } => return None,
+        Reference::Address { .. } | Reference::Image => return None,
     })
 }
 
@@ -95,6 +99,14 @@ pub(crate) fn ordered() -> SectionFlags {
 
 /// What a record of where a patcher's room is is called.
 pub(crate) const PATCHABLE: &str = "__patchable_function_entries";
+
+/// What the unwind table is called here, and what it is aligned to.
+///
+/// One section rather than two: a record carries the codes for its own function, so there is nothing
+/// for a second section to hold. Eight, because a record is looked up by address at a point where
+/// the program is usually already crashing, and an unaligned read there is a second fault on top of
+/// the first.
+pub(crate) const FRAMES: (&str, u64) = (".eh_frame", 8);
 
 /// The section a variable the loader writes into before anything reads it goes in, when the program
 /// asked for the half of it the linker keeps apart from the rest.

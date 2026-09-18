@@ -26,11 +26,6 @@
 //! underscore in front of the C name and Mach-O has no way to say how long a function is, wanting
 //! `.subsections_via_symbols` instead. It is written when the target that needs it is.
 //!
-//! `.pdata` and `.xdata`, which is how Windows unwinds. They are a table describing the shape of a
-//! prologue rather than the instruction stream ELF's `.eh_frame` is, so they are their own piece of
-//! work, and a file whose functions have unwind records is refused for COFF rather than written
-//! without them.
-//!
 //! Thread-local storage. Reaching a thread-local variable is a different instruction sequence per
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
@@ -156,6 +151,16 @@ impl Flavour {
         }
     }
 
+    /// Where the unwind table goes: the section the records are in and what it is aligned to, and
+    /// the second section holding what those records point at, on the format that keeps the two
+    /// apart.
+    fn tables(self) -> ((&'static str, u64), Option<(&'static str, u64)>) {
+        match self {
+            Flavour::Elf => (elf::FRAMES, None),
+            Flavour::Coff => (coff::FUNCTIONS, Some(coff::CODES)),
+        }
+    }
+
     /// Anything that has to be written into the finished bytes rather than said to the writer.
     fn finish(self, bytes: &mut [u8], ordered: &[String]) {
         match self {
@@ -204,8 +209,8 @@ impl std::error::Error for Error {}
 /// this file does not define is refused the same way, since the front end is what reports that as
 /// a program's mistake and one reaching here means it did not. So is anything the target's format
 /// has no way to write, which for COFF is a thread-local variable, a reference through a table the
-/// platform does not have, a record of where a patcher's room is, an unwind table and a section the
-/// startup code is expected to gather. See [`Error`].
+/// platform does not have, a record of where a patcher's room is and a section the startup code is
+/// expected to gather. See [`Error`].
 pub fn write(
     text: &Text,
     data: &Data,
@@ -457,44 +462,75 @@ pub fn write(
 
     // The unwind table, if there is one. Its own section rather than part of the text, because it
     // is read rather than run: the loader maps it and the linker gathers every input's into one
-    // table and builds the index the unwinder binary searches. Eight, because a record is looked
-    // up by address at a point where the program is usually already crashing and an unaligned read
-    // there is a second fault on top of the first.
+    // table and builds the index the unwinder searches.
     if !text.unwind.bytes.is_empty() {
-        let frames = obj.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
-        obj.append_section_data(frames, &text.unwind.bytes, 8);
-        for reloc in &text.unwind.relocs {
-            // Against the section the function is in rather than against the function's own name,
-            // which is the same reason the record of a patcher's room is written that way and one
-            // more besides. The section is the only one of the two that is settled here: a global
-            // name is answered at load time by whichever object defines it first, so a distance
-            // measured to one is not a distance the linker can work out, and it says so and stops.
-            // The effect was that nothing this compiler wrote could go into a shared library at
-            // all, because every function has a record and every record pointed at a name.
-            //
-            // A function defined elsewhere has no record here, so the lookup failing means the
-            // record is for something that is not a function in this file, and that is a bug
-            // rather than a shape to handle: the writer says what it was given rather than
-            // guessing.
-            let found = text.funcs.iter().position(|func| func.name == reloc.symbol);
-            let Some((section, at)) = found.map(|i| split[i]) else {
-                let why =
-                    format!("'{}' has an unwind record and is not a function here", reloc.symbol);
+        let ((name, align), second) = flavour.tables();
+        let frames = obj.add_section(Vec::new(), name.into(), SectionKind::ReadOnlyData);
+        obj.append_section_data(frames, &text.unwind.bytes, align);
+        // What the rows point at, on the format that keeps the descriptions in a section of their
+        // own, and a name for each of them, because a row reaches one through a relocation and a
+        // relocation names a symbol. The names are never offered to another file: what they point
+        // at is one function's prologue, described for the runtime of this program and nothing else.
+        let mut described = HashMap::new();
+        if !text.unwind.info.is_empty() {
+            let Some((name, align)) = second else {
+                let why = "an unwind table here is one section and it was given two".to_owned();
                 return Err(Error::Refused { why });
             };
-            let symbol = obj.section_symbol(section);
+            let codes = obj.add_section(Vec::new(), name.into(), SectionKind::ReadOnlyData);
+            obj.append_section_data(codes, &text.unwind.info, align);
+            for label in &text.unwind.labels {
+                let id = obj.add_symbol(Symbol {
+                    name: label.name.clone().into_bytes(),
+                    value: label.at as u64,
+                    size: 0,
+                    kind: SymbolKind::Label,
+                    scope: SymbolScope::Compilation,
+                    weak: false,
+                    section: SymbolSection::Section(codes),
+                    flags: SymbolFlags::None,
+                });
+                described.insert(label.name.clone(), id);
+            }
+        }
+        for reloc in &text.unwind.relocs {
+            let (symbol, addend) = match described.get(&reloc.symbol) {
+                // A description in the section above, reached by its own name and needing no
+                // correction, since the name is at the description rather than at the front of the
+                // section it is in.
+                Some(&id) => (id, reloc.addend),
+                // A function, and against the section it is in rather than against its own name,
+                // which is the same reason the record of a patcher's room is written that way and
+                // one more besides. The section is the only one of the two that is settled here: a
+                // global name is answered at load time by whichever object defines it first, so a
+                // distance measured to one is not a distance the linker can work out, and it says
+                // so and stops. The effect was that nothing this compiler wrote could go into a
+                // shared library at all, because every function has a record and every record
+                // pointed at a name.
+                //
+                // A function defined elsewhere has no record here, so the lookup failing means the
+                // record is for something that is not a function in this file, and that is a bug
+                // rather than a shape to handle: the writer says what it was given rather than
+                // guessing.
+                None => {
+                    let found = text.funcs.iter().position(|func| func.name == reloc.symbol);
+                    let Some((section, at)) = found.map(|i| split[i]) else {
+                        let why = format!(
+                            "'{}' has an unwind record and is not a function here",
+                            reloc.symbol
+                        );
+                        return Err(Error::Refused { why });
+                    };
+                    // Where the function starts inside its section, since the section symbol is
+                    // where the section starts and the two are the same byte only for the first
+                    // function in one.
+                    (obj.section_symbol(section), reloc.addend + at as i64)
+                }
+            };
             let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
-            let record = Relocation {
-                offset: reloc.at as u64,
-                symbol,
-                // Where the function starts inside its section, since the section symbol is where
-                // the section starts and the two are the same byte only for the first function in
-                // one.
-                addend: reloc.addend + at as i64,
-                flags,
-            };
+            let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
             obj.add_relocation(frames, record)
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
         }
@@ -536,9 +572,6 @@ fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
     let why = |why: String| Err(Error::Refused { why });
     if text.funcs.iter().any(|func| func.patch.is_some()) {
         return why("a record of where a patcher's room is has no section flags here".to_owned());
-    }
-    if !text.unwind.bytes.is_empty() {
-        return why("unwinding is a table rather than a section of records here".to_owned());
     }
     for reloc in text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs)) {
         if matches!(reloc.kind, Reference::Got | Reference::Thread) {
@@ -1884,15 +1917,11 @@ mod tests {
         let mut room = calling("puts");
         room.funcs[0].patch = Some(Patch { at: 0, before: 0 });
 
-        let mut unwound = calling("puts");
-        unwound.unwind.bytes = vec![0; 32];
-
-        let cases: [(&str, &Text, &Data); 5] = [
+        let cases: [(&str, &Text, &Data); 4] = [
             ("thread-local", &ordinary, &thread),
             ("startup", &ordinary, &gathered),
             ("table", &table, &empty),
             ("patcher", &room, &empty),
-            ("unwinding", &unwound, &empty),
         ];
         for (what, text, data) in cases {
             let error = write(text, data, &[], &windows(), Output::default())

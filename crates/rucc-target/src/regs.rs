@@ -421,6 +421,23 @@ impl CallRegs {
         self.dwarf.get(usize::from(class.number()))?.get(usize::from(reg.number())).copied()
     }
 
+    /// Which register of that class DWARF gave that number to, which is [`Self::dwarf`] the other
+    /// way round, and `None` for a number no register of the class holds.
+    ///
+    /// What asks is a table written in the machine's own numbering rather than DWARF's, which is
+    /// what Windows unwinds from. A row a prologue produces carries DWARF's number, because that is
+    /// what the format two of the three platforms want is written in, and the machine's number is
+    /// this register's place in its class. The two disagree over the first eight general purpose
+    /// registers on x86-64 and nowhere else, which is the worst shape a disagreement can have: every
+    /// number is a register either way, so the table comes out well formed and about the wrong
+    /// registers.
+    #[must_use]
+    pub fn machine(&self, class: RegClass, dwarf: u16) -> Option<PhysReg> {
+        let numbers = self.dwarf.get(usize::from(class.number()))?;
+        let at = numbers.iter().position(|&number| number == dwarf)?;
+        Some(PhysReg::new(u8::try_from(at).ok()?))
+    }
+
     /// Whether a call preserves that general purpose register.
     #[must_use]
     pub fn preserves_int(&self, reg: PhysReg) -> bool {
