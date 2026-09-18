@@ -126,6 +126,39 @@ const X87_BYTES: u32 = 16;
 /// block with more of them than this has nowhere to put the ninth.
 const X87_DEPTH: usize = 8;
 
+/// How far into the buffer of a `__builtin_setjmp` each of the four words it writes is.
+///
+/// The first three are gcc's, measured against gcc 16.2.0 on x86-64 at `-O0`: the frame pointer,
+/// the address control comes back to, and the stack pointer, in that order. The fourth is this
+/// compiler's own. gcc has no word for the answer because it writes a second block that sets the
+/// answer to one and is arrived at from the restore, and this writes the answer through memory
+/// instead, for the reason [`Lowering::saves_place`] gives.
+///
+/// None of the four is an interface. The buffer is the program's memory and its five words are
+/// the front end's promise about how much of it there is, but nothing except the matching restore
+/// ever reads a word of it, and a buffer written by one compiler was never going to be one another
+/// compiler could come back through.
+const JUMP_FRAME: i32 = 0;
+
+/// Where the address control comes back to is. See [`JUMP_FRAME`].
+const JUMP_PC: i32 = 8;
+
+/// Where the stack pointer is. See [`JUMP_FRAME`].
+const JUMP_STACK: i32 = 16;
+
+/// Where the address of the word the answer arrives in is. See [`JUMP_FRAME`].
+const JUMP_ANSWER: i32 = 24;
+
+/// How many bytes the word a `__builtin_setjmp` answers with takes in the frame, and what it is
+/// aligned to, which are the same number because it is one machine word.
+const JUMP_WORD: u32 = 8;
+
+/// How many registers the restore needs to hold things in while it puts the frame back.
+///
+/// Four, and every one of them is a register nothing else in the function may be in, which is why
+/// they are counted here rather than asked for one at a time. See [`Lowering::comes_back`].
+const JUMP_REGS: usize = 4;
+
 /// How many bytes a value passes through on its way between a register and the x87 stack.
 ///
 /// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
@@ -476,6 +509,14 @@ pub struct Stack {
     /// is no other way to reach it: the distance from the stack pointer to the frame is a number
     /// the layout works out, and what a walk up the chain needs is the link the prologue saved.
     pub walks_frames: bool,
+    /// Whether the function saved a place for a `__builtin_longjmp` to come back to, which is what
+    /// `__builtin_setjmp` does.
+    ///
+    /// A function like that keeps a frame pointer whatever the flags say as well, and for a reason
+    /// of the same shape: the two registers the restore puts back are the frame pointer and the
+    /// stack pointer, and a frame that did not keep the first of them has nothing in it saying
+    /// where the caller's frame is for the epilogue to find after control has come back.
+    pub saves_place: bool,
 }
 
 impl Stack {
@@ -483,10 +524,17 @@ impl Stack {
     ///
     /// Everything else in a layout comes from the flags the function is compiled under or from the
     /// allocation, so this takes one and returns it rather than building one.
+    ///
+    /// A function that saved a place is not a leaf whatever it called. What a leaf buys is the red
+    /// zone, which is the words below the stack pointer nothing else may write, and a function
+    /// control comes back into from a `__builtin_longjmp` has already had something else running
+    /// down there: whatever it called and whatever that called, or a signal handler on the same
+    /// stack. Every one of those has written over the red zone by the time control arrives, so a
+    /// value this function left there would not be there any more.
     #[must_use]
     pub fn layout<'a>(&'a self, base: Layout<'a>) -> Layout<'a> {
         Layout {
-            leaf: self.calls.is_none(),
+            leaf: self.calls.is_none() && !self.saves_place,
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
             grows: self.grown_at.is_some(),
@@ -581,6 +629,14 @@ struct Lowering<'a> {
     /// One for the whole function for the reason above, and four rather than two because it is
     /// two words: the one the unit had and the one with the rounding field turned to truncate.
     control: Option<usize>,
+    /// The word a `__builtin_setjmp` in this function answers with, once one has asked for it.
+    ///
+    /// One for the whole function however many saves there are in it, because the word is written
+    /// and read back with nothing in between: the save writes a zero into it and the instruction
+    /// straight after reads it, and the only other thing that ever writes it is a restore arriving
+    /// between those two. Two saves sharing it is two pairs each doing that, and neither can be
+    /// inside the other.
+    answer: Option<usize>,
     /// Which rules have fired so far.
     fired: Fired,
 }
@@ -675,6 +731,7 @@ impl<'a> Lowering<'a> {
             slots: vec![None; counts.values],
             crossing: None,
             control: None,
+            answer: None,
             fired: Fired::new(),
         }
     }
@@ -840,6 +897,21 @@ impl<'a> Lowering<'a> {
                     self.indirect_branch(inst)?;
                     continue;
                 }
+                // The pair that saves a place in this function and comes back to it. Built here
+                // for the reason the address of a label is, and for two more. The reason is the
+                // same: the first of them writes down where control comes back to, which is a
+                // place in this function and not a value a rule pattern can bind. The extra ones
+                // are that each of them is a group of instructions over a buffer the program owns
+                // rather than one instruction, and that the first of them leaves the block it was
+                // written in and carries on in a new one, which is a thing no rule can do.
+                Opcode::SetjmpMarker => {
+                    self.saves_place(inst)?;
+                    continue;
+                }
+                Opcode::LongjmpMarker => {
+                    self.comes_back(inst)?;
+                    continue;
+                }
                 // Where this thread's own storage starts, built here for a reason of the same
                 // shape: what it reads is `%fs`, which is not a register the rule language can
                 // bind and not one a proof over bitvectors could say anything about, because what
@@ -972,7 +1044,12 @@ impl<'a> Lowering<'a> {
             // this function was lowered by and not the rules something was tried with.
             self.fired.mark(matched.rule);
         }
-        self.edges(block, out)
+        // Whichever block the walk ended in rather than the one it started in. The two are the
+        // same block for every function that does not save a place for a `__builtin_longjmp`, and
+        // where they differ it is the last of them that the terminator and the arms belong to.
+        // See [`Self::saves_place`].
+        let last = self.at.expect("a block is being filled");
+        self.edges(block, last)
     }
 
     /// One call, which is built from the convention rather than matched against the table for the
@@ -2079,6 +2156,282 @@ impl<'a> Lowering<'a> {
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
         self.out.build(block, opcode).at(span).operand(mir::Operand::read(reg, self.gpr)).finish();
         Ok(())
+    }
+
+    /// `__builtin_setjmp`, which writes down where the function is so that a `__builtin_longjmp`
+    /// somewhere else can bring control back here, and answers zero on the way past.
+    ///
+    /// Four words of the buffer, the three gcc writes and one of this compiler's own, and then the
+    /// block ends: everything after the save in the IR block is put into a new machine IR block,
+    /// and the address of that block is what went into the buffer. That is the whole reason the
+    /// block is split here. An address points at a label, a machine IR block is the only thing in
+    /// this representation that has one, and a save is in the middle of a block rather than at the
+    /// end of one.
+    ///
+    /// # How the answer gets back
+    ///
+    /// Through the frame rather than through a register. The save writes a zero into a word of its
+    /// own frame, puts the address of that word in the buffer, and the new block reads the word
+    /// back. The restore writes a one through the address it finds in the buffer before it goes.
+    /// So one load answers zero on the way past and one on the way back, and neither path has to
+    /// agree with the other about a register.
+    ///
+    /// gcc does it the other way round, with a second block that sets the answer to one and is
+    /// what the restore arrives at. That block is one nothing in the function jumps to, and a
+    /// machine IR whose blocks are walked from the entry has nowhere to put such a thing: the
+    /// allocator lays a function out in the line it is going to be emitted in, and a block no edge
+    /// reaches is not in that line. The word in the frame costs eight bytes of stack and one load,
+    /// and it needs nothing said anywhere about a block arrived at from outside.
+    ///
+    /// # What the allocator is told
+    ///
+    /// That every register it hands out is gone at the end of the first block. That is what makes
+    /// the rest of the function right on the way back: control arrives from a `__builtin_longjmp`
+    /// in some other function, and the only two registers that puts back are the stack pointer and
+    /// the frame pointer, so anything this function still wants has to be in the frame those two
+    /// reach. It is said with a write of every one of those registers, which is the same thing a
+    /// call says about the registers a callee may destroy, on an instruction with nothing else on
+    /// it so that the stores above are not caught up in it.
+    fn saves_place(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let &buffer = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let buf = self.reg_of(buffer)?;
+        let at = self.at.expect("a block is being filled");
+        let gpr = self.gpr;
+        let moves = x86_64::FRAME.moves(gpr).expect("a class the target says how to move");
+        let store = self.named(moves.store);
+        let load = self.named(moves.load);
+        let lea = self.named(x86_64::FRAME.lea);
+        let put = self.named(x86_64::FRAME.imm);
+        let nothing = x86_64::FRAME.pad.expect("a target with an instruction that does nothing");
+        let nothing = self.named(nothing);
+        self.stack.saves_place = true;
+        let answer = self.answer_slot();
+        let back = self.out.create_block();
+
+        // The zero this answers with, into the word a restore writes a one into.
+        let zero = self.out.new_vreg(gpr);
+        self.out.build(at, put).at(span).def(zero, gpr).imm(0).finish();
+        let mem = self.frame_mem();
+        let made = self.out.build(at, store).at(span).uses(zero, gpr).mem(mem).finish();
+        self.stack.addresses.push((made, answer));
+
+        // The four words: where that word is, where control comes back to, and the two registers
+        // the restore puts back.
+        let found = self.frame_address(at, answer);
+        self.write_word(at, span, store, found, buf, JUMP_ANSWER);
+        let pc = self.out.new_vreg(gpr);
+        self.out.build(at, lea).at(span).def(pc, gpr).mem(mir::Mem::block(back)).finish();
+        self.write_word(at, span, store, pc, buf, JUMP_PC);
+        let frame = mir::Reg::physical(self.conv.frame_pointer);
+        self.write_word(at, span, store, frame, buf, JUMP_FRAME);
+        let stack = mir::Reg::physical(self.conv.stack_pointer);
+        self.write_word(at, span, store, stack, buf, JUMP_STACK);
+
+        // Nothing is in a register past this point, which is what the rest of the function is
+        // allowed to assume about the way back in.
+        let gone = self.across_jump();
+        let mut build = self.out.build(at, nothing).at(span);
+        for (reg, class) in gone {
+            build = build.operand(mir::Operand::write(reg, class));
+        }
+        build.finish();
+
+        // And the rest of the block, which is the block the address above was of.
+        *self.out.succs_mut(at) = vec![mir::BlockCall::to(back)];
+        self.at = Some(back);
+        let reg = self.new_reg(result);
+        let mem = self.frame_mem();
+        let made = self.out.build(back, load).at(span).def(reg, gpr).mem(mem).finish();
+        self.stack.addresses.push((made, answer));
+        Ok(())
+    }
+
+    /// `__builtin_longjmp`, which reads a buffer a `__builtin_setjmp` filled in and goes there.
+    ///
+    /// Everything comes out of the buffer before anything is put back, and the four registers it
+    /// comes out into are physical ones rather than values the allocator places. Both of those are
+    /// about the same moment. The stack pointer is one of the things being put back, a value the
+    /// allocator sent to the stack is reached through the stack pointer, and between the
+    /// instruction that moves it and the jump there is no stack this function owns any more. A
+    /// register named outright is a register nothing reloads into and nothing else is in, which is
+    /// the only way to hold something across that moment.
+    ///
+    /// Four of them because that is how many things are in the air at once: where to go, the frame
+    /// pointer to put back, the one the matching save is to answer with, and one register used
+    /// twice, first for the address that one is written through and then for the stack pointer.
+    ///
+    /// Nothing after this in the block is reached. The marker is not a terminator, for the reason
+    /// `spec/08-ir.md` gives, so the block goes on and whatever the front end wrote after it is
+    /// written out and never run.
+    fn comes_back(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let &buffer = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let buf = self.reg_of(buffer)?;
+        let at = self.at.expect("a block is being filled");
+        let gpr = self.gpr;
+        let moves = x86_64::FRAME.moves(gpr).expect("a class the target says how to move");
+        let load = self.named(moves.load);
+        let store = self.named(moves.store);
+        let mov = self.named(moves.mov);
+        let put = self.named(x86_64::FRAME.imm);
+        let jump = self.named(x86_64::BRANCH.indirect);
+
+        let held = self.jump_regs();
+        if held.len() < JUMP_REGS {
+            return Err(self.unsupported(inst));
+        }
+        let pc = mir::Reg::physical(held[0]);
+        let frame = mir::Reg::physical(held[1]);
+        let spare = mir::Reg::physical(held[2]);
+        let one = mir::Reg::physical(held[3]);
+
+        self.read_word(at, span, load, pc, buf, JUMP_PC);
+        self.read_word(at, span, load, frame, buf, JUMP_FRAME);
+        self.read_word(at, span, load, spare, buf, JUMP_ANSWER);
+
+        // What the matching save answers with, written through the address that came out of the
+        // buffer, because the word it goes in is in the other function's frame and this one has no
+        // way of knowing where that is.
+        self.out.build(at, put).at(span).def(one, gpr).imm(1).finish();
+        let mem = mir::Mem::at(mir::Operand::read(spare, gpr));
+        self.out.build(at, store).at(span).uses(one, gpr).mem(mem).finish();
+
+        // The stack last of the four, so that the register the buffer is reached through is done
+        // with before the stack it may have been spilled to stops being this function's.
+        self.read_word(at, span, load, spare, buf, JUMP_STACK);
+        let stack = mir::Reg::physical(self.conv.stack_pointer);
+        self.copy(at, span, mov, stack, spare);
+        let base = mir::Reg::physical(self.conv.frame_pointer);
+        self.copy(at, span, mov, base, frame);
+
+        // And the jump, which reads the two registers just put back as well as the address it
+        // goes through. Neither of those is printed, because the target's spelling of an indirect
+        // jump has one argument and it is the first one read. They are there because the code
+        // control arrives at reaches its frame through them, and because without them the two
+        // instructions above write registers nothing reads: a scheduler is then free to put the
+        // jump in front of them, and at `-O2` it does.
+        self.out
+            .build(at, jump)
+            .at(span)
+            .operand(mir::Operand::read(pc, gpr))
+            .operand(mir::Operand::read(stack, gpr))
+            .operand(mir::Operand::read(base, gpr))
+            .finish();
+        Ok(())
+    }
+
+    /// One word of the buffer of a `__builtin_setjmp`, written from a register.
+    fn write_word(
+        &mut self,
+        at: mir::Block,
+        span: Span,
+        store: mir::Opcode,
+        from: mir::Reg,
+        buf: mir::Reg,
+        word: i32,
+    ) {
+        let mem = mir::Mem::at(mir::Operand::read(buf, self.gpr)).plus(word);
+        self.out.build(at, store).at(span).uses(from, self.gpr).mem(mem).finish();
+    }
+
+    /// One word of that buffer, read back into a register.
+    fn read_word(
+        &mut self,
+        at: mir::Block,
+        span: Span,
+        load: mir::Opcode,
+        into: mir::Reg,
+        buf: mir::Reg,
+        word: i32,
+    ) {
+        let mem = mir::Mem::at(mir::Operand::read(buf, self.gpr)).plus(word);
+        self.out.build(at, load).at(span).def(into, self.gpr).mem(mem).finish();
+    }
+
+    /// One register into another, which is the one shape of instruction the builder has no word
+    /// for because neither operand is a definition of a value or a read of memory.
+    fn copy(
+        &mut self,
+        at: mir::Block,
+        span: Span,
+        mov: mir::Opcode,
+        into: mir::Reg,
+        from: mir::Reg,
+    ) {
+        self.out
+            .build(at, mov)
+            .at(span)
+            .operand(mir::Operand::write(into, self.gpr))
+            .operand(mir::Operand::read(from, self.gpr))
+            .finish();
+    }
+
+    /// The word a `__builtin_setjmp` in this function answers with, asked for once and kept.
+    fn answer_slot(&mut self) -> usize {
+        match self.answer {
+            Some(index) => index,
+            None => {
+                let index = self.stack.locals.len();
+                self.stack.locals.push(Local { size: JUMP_WORD, align: JUMP_WORD });
+                self.answer = Some(index);
+                index
+            }
+        }
+    }
+
+    /// An address in this function's frame with nothing in its displacement, which is what an
+    /// instruction reaching one of its stack objects is written with until [`crate::finish`] knows
+    /// where the object is.
+    fn frame_mem(&self) -> mir::Mem {
+        mir::Mem::at(mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr))
+    }
+
+    /// Every register the allocator hands out, which is what a `__builtin_setjmp` destroys.
+    ///
+    /// Both files, since a `double` live across a save has the same problem an integer does. The
+    /// two registers a frame is reached through are not here: the restore puts both of them back,
+    /// which is the whole of what it puts back, and a function whose frame pointer was destroyed
+    /// by its own save would have nothing left to find its caller with.
+    fn across_jump(&self) -> Vec<(mir::Reg, RegClass)> {
+        let mut gone = Vec::new();
+        for &reg in self.conv.int_order {
+            if reg == self.conv.stack_pointer || reg == self.conv.frame_pointer {
+                continue;
+            }
+            gone.push((mir::Reg::physical(reg), self.gpr));
+        }
+        for &reg in self.conv.sse_order {
+            gone.push((mir::Reg::physical(reg), self.conv.sse_class));
+        }
+        gone
+    }
+
+    /// The registers a `__builtin_longjmp` may hold things in while it puts a frame back.
+    ///
+    /// The ones the allocator hands out, less the two a frame is reached through. The scratch
+    /// registers are not among them on purpose: the rewriter writes a reload into one of those
+    /// wherever it likes, and one of these has to survive from the load that fills it to the
+    /// instruction that reads it however many instructions apart those are.
+    fn jump_regs(&self) -> Vec<PhysReg> {
+        self.conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|&reg| {
+                reg != self.conv.stack_pointer
+                    && reg != self.conv.frame_pointer
+                    && !crate::pipeline::SCRATCH.contains(&reg)
+            })
+            .collect()
+    }
+
+    /// A machine opcode of this target from the name the target gives it.
+    fn named(&mut self, name: &str) -> mir::Opcode {
+        mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")))
     }
 
     /// `__builtin_frame_address` and `__builtin_return_address`, which are a walk up the chain of
@@ -4489,20 +4842,20 @@ mod tests {
         let (mut names, mut source, block, args) = blank(&[Type::PTR]);
         let mut build = Builder::new(&mut source, block);
         let operands = build.func().push_values(&[args[0]]);
-        build.inst(InstData { args: operands, ..InstData::new(Opcode::LongjmpMarker) }, &[]);
+        build.inst(InstData { args: operands, ..InstData::new(Opcode::MetaBegin) }, &[]);
 
-        // The mark that a jump goes back through here, which nothing writes an instruction for
-        // yet: what it needs is for the allocator to be told a block can be arrived at twice, and
-        // that is `tamnd/rucc#223`. Nothing about it is a width or a register, so there is nothing
-        // for the message to add beyond the name.
+        // The mark that an object has come into being, which nothing writes an instruction for
+        // yet: what it needs is a write over a range of the lifetime plane, and that is
+        // `tamnd/rucc#856`. Nothing about it is a width or a register, so there is nothing for the
+        // message to add beyond the name.
         let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("no rule writes a longjmp marker");
-        assert_eq!(failed.to_string(), "no rule lowers a `longjmp_marker`");
+            .expect_err("no rule writes the beginning of a lifetime");
+        assert_eq!(failed.to_string(), "no rule lowers a `meta_begin`");
 
         // It produces nothing, so there is no type in the message and nothing invents one, and the
         // instruction comes back so a caller can ask the function where it was.
         let inst = failed.inst().expect("the instruction it is about");
-        assert_eq!(source[inst].opcode, Opcode::LongjmpMarker);
+        assert_eq!(source[inst].opcode, Opcode::MetaBegin);
     }
 
     /// A barrier is written by name here, and what it is depends on the ordering and on nothing
