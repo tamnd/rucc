@@ -178,6 +178,23 @@ impl Meta {
     /// the flags that are left.
     pub const REBUILT: u8 = 16;
 
+    /// Flag: the storage is in a region this runtime watches but did not lay out, so there is no
+    /// header and no aux in front of the payload.
+    ///
+    /// An allocator that adopts a region says where each of its objects begins and ends, and that
+    /// is all it says. The bytes in front of one are the arena's own, and how far in front of it
+    /// the arena's base is, is the arena's business. So the address arithmetic that finds a block's
+    /// aux from its payload, which is `crate::aux_slot::address_of`, has no region to land in here
+    /// and lands wherever the subtraction takes it, which is usually below the mapping and is a
+    /// fault when nothing is mapped there. That was tamnd/rucc#1453.
+    ///
+    /// It is a flag rather than a class because the class is the allocator's and is the truth: the
+    /// storage really was handed out by an allocator, and a report about it should say so. What is
+    /// not true of it is the layout, and `alloc::Watch::carved` is the field that records that per
+    /// region. This is the same fact travelling with a capability, for the readers that have one
+    /// and not the region it came out of.
+    pub const ADOPTED: u8 = 32;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {

@@ -199,18 +199,25 @@ impl Slot {
 /// `p->next` brings the capability of `p`, and the capability of whatever `next` holds is the thing
 /// that ends up in the slot this returns the address of.
 ///
-/// Nothing for a word that has no slot, which is three cases and they are all different questions
+/// Nothing for a word that has no slot, which is four cases and they are all different questions
 /// the caller has already had to ask: storage that is not an allocation and so has no aux at all,
-/// a word that is not inside the object, and a word that is not pointer aligned. The last is not a
-/// refusal either. A pointer sized store at an odd offset is something a C program may legitimately
-/// do through a packed structure, and what it means for the aux is that the capability cannot be
-/// written down, not that the store is wrong.
+/// storage an allocator this crate did not write laid out, a word that is not inside the object,
+/// and a word that is not pointer aligned. The last is not a refusal either. A pointer sized store
+/// at an odd offset is something a C program may legitimately do through a packed structure, and
+/// what it means for the aux is that the capability cannot be written down, not that the store is
+/// wrong.
 #[must_use]
 pub const fn address_of(container: Cap, addr: u64) -> Option<u64> {
     // Only the allocator lays a block out this way. A stack object's aux is beside the frame and a
     // static's is in a section of the image, and until those exist the honest answer for both is
     // that there is no slot rather than an address in front of somebody else's storage.
     if container.meta.class() != Class::Allocated as u8 {
+        return None;
+    }
+    // And only this crate's allocator. An adopted arena's objects are allocations, so the class
+    // above says so and is right, but nothing of ours sits in front of one and the subtraction at
+    // the end would name whatever is below the arena. See `Meta::ADOPTED` and tamnd/rucc#1453.
+    if container.meta.flags() & Meta::ADOPTED != 0 {
         return None;
     }
     // The whole word has to be in the object, so a four byte tail at the end of a payload has no
