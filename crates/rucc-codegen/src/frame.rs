@@ -85,6 +85,25 @@
 //! not a constant, so there is no register left for the rest of the frame to be counted from, and
 //! what fixes that is a second pointer held for the purpose. The lowering refuses that pair rather
 //! than this guessing at it.
+//!
+//! # Late
+//!
+//! Where in the prologue the frame pointer is established is the platform's answer rather than this
+//! file's, and [`rucc_target::CallRegs::late_frame_pointer`] is where the reason for it is written
+//! down. On Windows it goes up after the frame has been taken rather than before, because the
+//! unwind record there cannot describe the other order, and that moves it: it holds a copy of the
+//! body's stack pointer rather than the address of the caller's copy of itself.
+//!
+//! Which is the easier of the two to lay out rather than the harder. Every offset here is from the
+//! body's stack pointer already, so in a frame like this the frame pointer holds exactly what those
+//! offsets are counted from, and a frame that grows needs no adjustment at all where the other
+//! order needs the whole frame and every push taken off. [`Frame::late`] is what says which it is.
+//!
+//! The realigned frame is the one that cannot have it whatever the platform says. There the
+//! prologue forces the alignment after the pushes, which leaves the pushes at a distance from the
+//! body's stack pointer that is not a constant, so a pointer established after all that gives the
+//! record nothing to count them from. Such a frame keeps the early order and is the one shape on
+//! Windows that still has no record, which is `tamnd/rucc#1422`.
 
 use rucc_mir::Func;
 use rucc_regalloc::Allocation;
@@ -221,6 +240,7 @@ pub struct Frame {
     realign: Option<u32>,
     incoming: Incoming,
     frame_pointer: bool,
+    late: bool,
     grows: bool,
 }
 
@@ -342,6 +362,9 @@ impl Frame {
         // does. Forcing an alignment is one of the two and growing while the function runs is the
         // other.
         let frame_pointer = layout.frame_pointer || realign.is_some() || layout.grows;
+        // Where in the prologue the pointer is established, which is the platform's answer except
+        // in the one frame that has an answer of its own. See `Late` above.
+        let late = conv.late_frame_pointer && realign.is_none();
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
         // short of aligned when the function starts, and one word further off for every push. The
@@ -380,8 +403,12 @@ impl Frame {
         // then took the frame, so the body's stack pointer is that far below where the frame
         // pointer was set. That distance is what a variable length array destroys and the frame
         // pointer is what is left, which is why a growing frame keeps one.
+        //
+        // Unless the pointer is established late, where there is nothing to take off: the prologue
+        // points it at the stack pointer once the frame is whole, so the two hold the same address
+        // when the body starts and every distance from one is a distance from the other.
         let mut shift = if free { -offset(body) } else { offset(shifted) };
-        if layout.grows {
+        if layout.grows && !late {
             shift -= offset(size) + offset(word) * i32::try_from(saved_int.len()).expect("a frame");
         }
         for at in slots
@@ -403,15 +430,23 @@ impl Frame {
             below: shifted,
             size,
             realign,
-            incoming: if realign.is_some() || layout.grows {
+            incoming: match () {
+                // A pointer established late holds what the body's stack pointer holds, so the
+                // caller's stack is the whole frame and every push above it, which is the same
+                // number a frame with no pointer counts from the stack pointer.
+                () if late && layout.grows => {
+                    Incoming::from_frame(offset(size + word * pushed + conv.return_address))
+                }
                 // The prologue saves the frame pointer before it does anything else and points it
                 // at where it saved it, so the caller's stack is one word for that and one return
                 // address above it, whatever the prologue did to the stack pointer afterwards.
-                Incoming::from_frame(offset(word + conv.return_address))
-            } else {
-                Incoming::from_stack(offset(size + word * pushed + conv.return_address))
+                () if realign.is_some() || layout.grows => {
+                    Incoming::from_frame(offset(word + conv.return_address))
+                }
+                () => Incoming::from_stack(offset(size + word * pushed + conv.return_address)),
             },
             frame_pointer,
+            late,
             grows: layout.grows,
         }
     }
@@ -508,6 +543,14 @@ impl Frame {
     #[must_use]
     pub fn frame_pointer(&self) -> bool {
         self.frame_pointer
+    }
+
+    /// Whether the prologue points the frame pointer at the frame after taking it rather than
+    /// before, which is [`rucc_target::CallRegs::late_frame_pointer`] and the one frame that cannot
+    /// have it whatever the platform says. See `Late` in the module documentation.
+    #[must_use]
+    pub fn late(&self) -> bool {
+        self.late
     }
 }
 
@@ -857,6 +900,63 @@ mod tests {
         assert_eq!(frame.outgoing(), 32);
         assert_eq!(frame.size(), 40);
         assert_eq!(frame.incoming(), Incoming::from_stack(48));
+    }
+
+    #[test]
+    fn a_windows_frame_pointer_is_established_after_the_frame_rather_than_before_it() {
+        let (func, allocation) = pressure(&WIN64, 4, 2);
+        let base = Layout::new(&WIN64, REGS);
+        let kept = Frame::of(&func, &allocation, &Layout { frame_pointer: true, ..base });
+        let dropped = Frame::of(&func, &allocation, &base);
+
+        // The unwind record that platform reads cannot describe the other order, so the prologue
+        // pushes, takes the frame and only then points the pointer at it. What that buys is that
+        // the pointer holds what the stack pointer holds, so a frame with one and a frame without
+        // one are the same frame with the same numbers in it.
+        assert!(kept.frame_pointer());
+        assert!(kept.late());
+        assert!(!dropped.frame_pointer());
+        assert_eq!(kept.size(), dropped.size());
+        assert_eq!((kept.slot(0), kept.slot(1)), (dropped.slot(0), dropped.slot(1)));
+        assert_eq!(kept.incoming(), Incoming::from_stack(dropped.incoming().at + 8));
+    }
+
+    #[test]
+    fn a_windows_frame_that_grows_keeps_the_numbers_it_had_and_changes_the_register() {
+        let (func, allocation) = pressure(&WIN64, 4, 2);
+        let base = Layout::new(&WIN64, REGS);
+        let there = Layout { leaf: false, frame_pointer: true, ..base };
+        let still = Frame::of(&func, &allocation, &there);
+        let grown = Frame::of(&func, &allocation, &Layout { grows: true, ..there });
+
+        // A frame that grows keeps a pointer whatever the flags asked for, and on this platform
+        // that pointer is established late, which means it is a copy of the stack pointer as the
+        // body finds it. So every distance the frame had already worked out from the stack pointer
+        // is the same distance from the pointer, and growing changes which register the offsets are
+        // counted from and nothing else. That is the whole of why this frame needs no adjustment.
+        assert!(grown.grows());
+        assert!(grown.late());
+        assert_eq!(grown.size(), still.size());
+        assert_eq!(grown.outgoing(), still.outgoing());
+        assert_eq!((grown.slot(0), grown.slot(1)), (still.slot(0), still.slot(1)));
+        assert_eq!(grown.incoming(), Incoming::from_frame(still.incoming().at));
+    }
+
+    #[test]
+    fn a_realigned_frame_on_windows_keeps_the_early_order_it_has_no_choice_about() {
+        let (func, allocation) = pressure(&WIN64, 2, 4);
+        let locals = [Local { size: 64, align: 32 }];
+        let base = Layout::new(&WIN64, REGS);
+        let frame = Frame::of(&func, &allocation, &Layout { locals: &locals, ..base });
+
+        // Forcing the alignment leaves the pushes at no constant distance from anything, so the
+        // pointer has to go up before the mask and the platform's answer does not apply. Such a
+        // frame is described by nothing and the assembler refuses it by name, which is
+        // `tamnd/rucc#1422`.
+        assert_eq!(frame.realign(), Some(32));
+        assert!(frame.frame_pointer());
+        assert!(!frame.late());
+        assert_eq!(frame.incoming(), Incoming::from_frame(16));
     }
 
     #[test]

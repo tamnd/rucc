@@ -326,6 +326,7 @@ impl Table {
 const PUSH_NONVOL: u8 = 0;
 const ALLOC_LARGE: u8 = 1;
 const ALLOC_SMALL: u8 = 2;
+const SET_FPREG: u8 = 3;
 const SAVE_NONVOL: u8 = 4;
 const SAVE_NONVOL_FAR: u8 = 5;
 const SAVE_XMM128: u8 = 8;
@@ -344,6 +345,10 @@ enum Step {
     Push(u16),
     /// The frame was taken, that many bytes of it.
     Alloc(i64),
+    /// The frame pointer was pointed at the stack pointer, which is the one address the slots are
+    /// counted from. Which register it is is a field of the header rather than part of the code, so
+    /// there is nothing to carry here.
+    Frame,
     /// A register went into a slot, named as DWARF numbers it, that far below the end of the frame.
     Save { reg: u16, from: i64 },
 }
@@ -391,7 +396,8 @@ fn windows(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Result<Unwind, E
 /// Four bytes of header and then the codes. The header is the version, which is one, and no flags,
 /// since this compiler writes no exception handler and no record that continues another one; how
 /// long the prologue is; how many nodes of codes follow; and which register the frame is counted
-/// from, which is none, because the one prologue shape that would need one is refused below.
+/// from, which is the frame pointer in a function that keeps one and nothing in a function that
+/// does not.
 ///
 /// How long the prologue is is taken as where the last instruction that touched the frame ended,
 /// rather than where the last instruction of the prologue ended. The two differ by the pieces that
@@ -399,14 +405,14 @@ fn windows(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Result<Unwind, E
 /// for is telling an address inside the prologue from one after it. An address in those trailing
 /// pieces is one where the frame is already whole, so it is the right answer for both.
 fn describe(info: &mut Vec<u8>, func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<(), Error> {
-    let codes = codes(func, rows, conv)?;
+    let Described { codes, base } = codes(func, rows, conv)?;
     let prologue = codes.last().map_or(0, |code| code[0]);
     let nodes = codes.iter().map(Vec::len).sum::<usize>() / 2;
     let count = u8::try_from(nodes).map_err(|_| {
         let why = format!("a prologue of {nodes} unwind slots, more than a record holds");
         frame(func, why)
     })?;
-    info.extend_from_slice(&[1, prologue, count, 0]);
+    info.extend_from_slice(&[1, prologue, count, base]);
     // Backwards, because the runtime reads them from the address it is unwinding at and works its
     // way to the front of the function, so it wants the last thing the prologue did first.
     for code in codes.iter().rev() {
@@ -428,10 +434,13 @@ fn describe(info: &mut Vec<u8>, func: &Extent, rows: &Rows, conv: &CallRegs) -> 
 ///
 /// Every code carries where the instruction that did it ended, which is what the rows already hold,
 /// so the two are the same number and no translation is needed for it.
-fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Error> {
+fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Described, Error> {
     let end = rows.iter().position(|(_, op)| *op == CfiOp::RememberState).unwrap_or(rows.len());
     let rows = &rows[..end];
     let word = i64::from(conv.word);
+    // What the rows call the frame pointer, or nothing on a target no register of has a number,
+    // which is a target this format is not written for anyway.
+    let pointer = conv.dwarf(conv.int_class, conv.frame_pointer);
     // How far the end of the frame is above the stack pointer, which starts at the return address
     // the call itself pushed and grows with everything the prologue puts below it.
     let mut below = i64::from(conv.return_address);
@@ -462,12 +471,26 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
             [(_, CfiOp::Offset { reg, offset })] => {
                 steps.push((at, Step::Save { reg: *reg, from: i64::from(*offset) }));
             }
-            // The frame pointer form. What cannot be said is not the pointer itself, which has a
-            // code of its own, but what this compiler does after establishing it: the registers it
-            // saves next sit below the frame the code would count from, and the frame it takes
-            // afterwards has no row at all, since from there on the rules are counted from the
-            // pointer and the stack pointer moving no longer changes them. A record without the
-            // frame in it is a record that unwinds to the wrong place, so it is refused instead.
+            // The frame pointer, pointed at the stack pointer once the frame is whole. The code says
+            // which register it is and how far above the end of the prologue it was left, and the
+            // runtime reads both the other way round: it takes the register the function is stopped
+            // in, subtracts that distance, and has the one address every slot below is measured
+            // from. Here the distance is nothing, since the prologue points it at the stack pointer
+            // itself, and the row saying so is the whole frame rather than a change of register,
+            // which is how this tells the shape it can describe from the one it cannot.
+            [(_, CfiOp::DefCfa { reg, offset })]
+                if Some(*reg) == pointer && i64::from(*offset) == below =>
+            {
+                steps.push((at, Step::Frame));
+            }
+            // The other order, which is the pointer established before the frame is taken. What
+            // cannot be said is not the pointer itself but what this compiler does after
+            // establishing it: the registers it saves next sit below the place the codes would count
+            // from, and the frame it takes afterwards has no row at all, since from there on the
+            // rules are counted from the pointer and the stack pointer moving no longer changes
+            // them. A record without the frame in it is a record that unwinds to the wrong place, so
+            // it is refused instead. A realigned frame is the one that still arrives here, which is
+            // `tamnd/rucc#1422`.
             [(_, CfiOp::DefCfaRegister(_))] => {
                 let why = "a frame pointer established before the frame is taken";
                 return Err(frame(func, why.to_owned()));
@@ -487,7 +510,29 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
     // Every slot is measured from where the stack pointer ends the prologue, which is the one place
     // in the frame this format counts from, and the rows measure from the end of the frame instead.
     // The two are `below` apart once the prologue has done everything it does.
-    steps.into_iter().map(|(at, step)| code(func, conv, at, step, below)).collect()
+    let base = if steps.iter().any(|(_, step)| matches!(step, Step::Frame)) {
+        machine(func, conv, pointer.expect("a row that named the frame pointer"))?
+    } else {
+        0
+    };
+    let codes = steps
+        .into_iter()
+        .map(|(at, step)| code(func, conv, at, step, below))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Described { codes, base })
+}
+
+/// A prologue as this format holds it: the codes, and which register the slots below them are
+/// counted from.
+///
+/// The second is a field of the header rather than a code, which is why it comes back beside them
+/// rather than among them. It is the machine's number for the frame pointer in the low four bits and
+/// how far above the end of the prologue the pointer was left, in sixteens, in the four above that.
+/// Zero in a function that keeps no frame pointer, which is a register number no unwinder reads
+/// because a header that names one says so in a code as well.
+struct Described {
+    codes: Vec<Vec<u8>>,
+    base: u8,
 }
 
 /// One step, as the nodes that say it.
@@ -501,6 +546,8 @@ fn code(func: &Extent, conv: &CallRegs, at: u8, step: Step, below: i64) -> Resul
             Ok(vec![at, ALLOC_SMALL | steps << 4])
         }
         Step::Alloc(size) => large(func, at, size, word_size(conv)),
+        // The four bits the other codes put an operand in are reserved here, so they are nothing.
+        Step::Frame => Ok(vec![at, SET_FPREG]),
         Step::Save { reg, from } => slot(func, conv, at, reg, below + from),
     }
 }
@@ -791,9 +838,41 @@ mod tests {
         assert_eq!(labels, vec![("$unwind$one", 0), ("$unwind$two", 4)]);
     }
 
-    /// The frame pointer form, which is refused rather than described. What cannot be said is not
-    /// the pointer but the frame taken after it, which has no row and would come out as a record
-    /// that unwinds to the wrong place.
+    /// The frame pointer form the prologue writes on this platform: the pushes, the frame, and only
+    /// then the pointer, which is what lets the record name a register every slot is counted from.
+    ///
+    /// The register goes in the header rather than in a code, and the four bits above it are how far
+    /// above the end of the prologue the pointer was left, which is nothing here because the
+    /// prologue points it at the stack pointer itself.
+    #[test]
+    fn a_frame_pointer_pointed_at_the_finished_frame_is_a_register_the_header_names() {
+        let rows = vec![
+            (1, CfiOp::DefCfaOffset(16)),
+            (1, CfiOp::Offset { reg: RBP, offset: -16 }),
+            (2, CfiOp::DefCfaOffset(24)),
+            (2, CfiOp::Offset { reg: RBX, offset: -24 }),
+            (9, CfiOp::DefCfaOffset(88)),
+            (12, CfiOp::DefCfa { reg: RBP, offset: 88 }),
+            (18, CfiOp::Offset { reg: XMM6, offset: -40 }),
+            (18, CfiOp::RememberState),
+        ];
+        let want = [
+            // rbp, which is five to the machine, and nothing above it.
+            vec![1, 18, 6, 5],
+            // Forty eight bytes up, which the code counts in sixteens.
+            vec![18, SAVE_XMM128 | (6 << 4), 0x03, 0x00],
+            // The pointer, whose four bits of operand are reserved and so are nothing.
+            vec![12, SET_FPREG],
+            vec![9, ALLOC_SMALL | (7 << 4)],
+            vec![2, PUSH_NONVOL | (3 << 4)],
+            vec![1, PUSH_NONVOL | (5 << 4)],
+        ];
+        assert_eq!(info(rows), want.concat());
+    }
+
+    /// The other order, which is refused rather than described. What cannot be said is not the
+    /// pointer but the frame taken after it, which has no row and would come out as a record that
+    /// unwinds to the wrong place.
     #[test]
     fn a_prologue_this_cannot_describe_is_refused_by_name() {
         let pointer = vec![

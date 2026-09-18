@@ -384,6 +384,11 @@ impl Writer<'_> {
     /// vector registers are stored last, because until the frame has been taken there is nowhere
     /// to store them.
     ///
+    /// Where the pointer is pointed at the frame is the one part of that order the platform gets a
+    /// say in. Windows wants it after the frame has been taken rather than before, because the
+    /// unwind record it reads has no way to describe the other order, so on that target the move
+    /// goes between the frame and the vector stores instead. See `Late` in [`crate::frame`].
+    ///
     /// The landing pad is in front of all of it, because the address it makes reachable is the
     /// address of the function and the address of the function is where the first instruction is.
     /// It has to be written here rather than after the fact, since a probing prologue moves the
@@ -463,12 +468,17 @@ impl Writer<'_> {
             below += word;
             self.row(inst, CfiOp::DefCfaOffset(below));
             self.saved(inst, int, fp, -below);
-            let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
-            let inst = self.two(mov, fp, sp);
-            out.push(inst);
-            let number = self.dwarf(int, fp);
-            self.row(inst, CfiOp::DefCfaRegister(number));
-            from_sp = false;
+            // Straight away unless the platform wants it after the frame, where the same two
+            // instructions go at the bottom of this function instead. See `Late` in
+            // [`crate::frame`].
+            if !frame.late() {
+                let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+                let inst = self.two(mov, fp, sp);
+                out.push(inst);
+                let number = self.dwarf(int, fp);
+                self.row(inst, CfiOp::DefCfaRegister(number));
+                from_sp = false;
+            }
         }
         for &reg in frame.saved_int() {
             let inst = self.push(reg);
@@ -491,6 +501,18 @@ impl Writer<'_> {
         if frame.size() > 0 {
             self.take(&mut out, frame.size(), &mut below, from_sp, probe);
         }
+        // The other half of the pair above, for the platform whose record counts everything from
+        // where the stack pointer ends the prologue. Here it is that register the pointer is a copy
+        // of, so what the row says is the whole distance rather than that nothing has changed, and
+        // the frame is described before it rather than after, which is the whole of what the record
+        // could not say about the early order.
+        if frame.late() && frame.frame_pointer() {
+            let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+            let inst = self.two(mov, fp, sp);
+            out.push(inst);
+            let number = self.dwarf(int, fp);
+            self.row(inst, CfiOp::DefCfa { reg: number, offset: below });
+        }
         for save in frame.saved_sse() {
             let inst = self.store(sse, save.reg, save.at);
             out.push(inst);
@@ -499,13 +521,20 @@ impl Writer<'_> {
             // ordinary frame that register is the stack pointer and the constant is `below`. In one
             // that grows it is the frame pointer, which the address has been counted from since the
             // prologue pointed it at where it saved the caller's copy, so the constant is the two
-            // words above it and nothing the prologue did afterwards changes it. A realigned frame
-            // has no such constant at all and the rule is left out rather than guessed; the one
-            // convention that realigns and the one that preserves a vector register are not the
-            // same convention, so nothing reaches any of this today.
+            // words above it and nothing the prologue did afterwards changes it. Unless the pointer
+            // went up late, where it holds what the stack pointer holds and the constant is `below`
+            // again, which is why the question is about both. A realigned frame has no such constant
+            // at all and the rule is left out rather than guessed. On SysV that costs nothing, since
+            // it preserves no vector register for a prologue to save. On Windows it would be a save
+            // with no row, and what stops that reaching an object file is that a realigned frame
+            // there keeps the early order and is refused whole by the unwind writer, which is
+            // `tamnd/rucc#1422`.
             if frame.realign().is_none() {
-                let above =
-                    if frame.grows() { word + offset(self.conv.return_address) } else { below };
+                let above = if frame.grows() && !frame.late() {
+                    word + offset(self.conv.return_address)
+                } else {
+                    below
+                };
                 self.saved(inst, sse, save.reg, save.at - above);
             }
         }
@@ -971,12 +1000,18 @@ impl Writer<'_> {
             // No row for either of these. The address is counted from the frame pointer here and
             // this is what moves the stack pointer rather than the frame pointer, so the rule that
             // was true before it is still true after it.
-            if pushed == 0 {
+            //
+            // Where the pointer is decides how far back this has to go. The early order left it one
+            // word above the first push, so the pops start that many words below it. The late one
+            // left it where the body's stack pointer was, so they start the whole frame above it,
+            // and in both cases the distance is a constant even in a frame that grew while it ran,
+            // which is why this is written rather than an addition to the stack pointer.
+            let back = if frame.late() { offset(frame.size()) } else { -offset(word * pushed) };
+            if back == 0 {
                 let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
                 out.push(self.two(mov, sp, fp));
             } else {
                 let lea = self.opcode(self.insts.lea);
-                let back = -offset(word * pushed);
                 out.push(self.address(lea, sp, fp, back));
             }
         } else if frame.size() > 0 {
@@ -1713,6 +1748,68 @@ mod tests {
         let added = added(&lines);
         assert!(added.iter().all(|line| !line.contains("chkstk")), "{added:?}");
         assert_eq!(added.len(), 3, "{added:?}");
+    }
+
+    #[test]
+    fn a_windows_prologue_points_its_frame_pointer_at_the_frame_once_the_frame_is_whole() {
+        let (mut func, allocation, mut names) = pressure(&WIN64, 4, 2);
+        let base = Layout::new(&WIN64, REGS);
+        let layout = Layout { frame_pointer: true, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+
+        // The other order, which is what every other platform here writes, has no unwind record on
+        // this one: the record counts its slots from where the stack pointer ends the prologue and
+        // gets there by taking a constant off the frame pointer, so a register pushed after the
+        // pointer was established sits below the place the record counts from. Pushing first and
+        // pointing last is the order that has a record, and it leaves the pointer holding a copy of
+        // the stack pointer, so the spills stay where they were and the epilogue counts the frame
+        // back off the pointer rather than moving the pointer into the stack pointer.
+        assert_eq!(
+            added(&lines),
+            [
+                "x64.push_64 $rbp",
+                "$rsp = x64.sub_ri_64 $rsp, 16",
+                "$rbp = x64.mov_rr_64 $rsp",
+                "x64.mov_mr_64 $rdx, [$rsp]",
+                "x64.mov_mr_64 $rdx, [$rsp + 8]",
+                "$rdx = x64.mov_rm_64 [$rsp]",
+                "$rdx = x64.mov_rm_64 [$rsp + 8]",
+                "$rsp = x64.lea_64 [$rbp + 16]",
+                "$rbp = x64.pop_64",
+                "x64.ret",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_windows_prologue_that_saves_registers_too_pushes_all_of_them_before_the_frame() {
+        let (mut func, allocation, mut names) = pressure(&WIN64, 9, 8);
+        let base = Layout::new(&WIN64, REGS);
+        let layout = Layout { leaf: false, frame_pointer: true, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+
+        // The shape that made the order necessary. All three pushes are above the frame, so every
+        // one of them has a row the record can write, and the pointer is the last thing the
+        // prologue does. Forty eight bytes is the thirty two every Windows caller reserves below a
+        // call, eight for the one value that did not fit in a register, and eight that put the
+        // stack pointer back where a call wants it given three pushes and the return address.
+        assert_eq!(
+            added(&lines),
+            [
+                "x64.push_64 $rbp",
+                "x64.push_64 $rbx",
+                "x64.push_64 $rsi",
+                "$rsp = x64.sub_ri_64 $rsp, 48",
+                "$rbp = x64.mov_rr_64 $rsp",
+                "x64.mov_mr_64 $rsi, [$rsp + 32]",
+                "$rsi = x64.mov_rm_64 [$rsp + 32]",
+                "$rsp = x64.lea_64 [$rbp + 48]",
+                "$rsi = x64.pop_64",
+                "$rbx = x64.pop_64",
+                "$rbp = x64.pop_64",
+                "x64.ret",
+            ]
+        );
     }
 
     #[test]
