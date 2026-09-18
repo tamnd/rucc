@@ -1872,8 +1872,12 @@ mod tests {
     #[test]
     fn a_thirty_two_bit_windows_is_not_told_its_pointer_is_sixty_four_bits_wide() {
         // `_WIN64` is about the pointer rather than the processor, and i686-w64-mingw32-gcc
-        // defines neither it nor `__MINGW64__`.
-        let windows = set_for_tuple("i686-windows-gnu");
+        // defines neither it nor `__MINGW64__`. The target is made by hand because the three
+        // field triple has no 32-bit row yet, so `i686-windows-gnu` predefines nothing at all
+        // and there is no other way to reach this arm.
+        let mut target = TargetInfo::new("x86_64-pc-windows-gnu".parse().expect("a triple"));
+        target.pointer_width = 32;
+        let windows = built_in(&target, &Predef::new());
         assert!(has(&windows, "#define _WIN32 1"));
         assert!(has(&windows, "#define __MINGW32__ 1"));
         for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "WIN64"] {
