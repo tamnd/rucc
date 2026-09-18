@@ -52,6 +52,7 @@ mod frame;
 mod machine;
 mod operand;
 mod regs;
+mod short;
 mod timing;
 pub mod x86_64;
 
@@ -65,6 +66,7 @@ pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
 };
+pub use crate::short::{ShortInsts, Zeroed};
 pub use crate::timing::{Timing, TimingInsts, Unit};
 
 /// A target architecture.

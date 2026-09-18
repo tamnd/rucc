@@ -175,6 +175,7 @@ pub mod quad;
 pub mod retry;
 pub mod schedule;
 pub mod select;
+pub mod shorten;
 pub mod slots;
 pub mod split;
 pub mod switch;
