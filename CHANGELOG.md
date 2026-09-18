@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- An undefined reference to a thread-local variable is written down as thread-local, and `ld` will link it. The object writer gave every undefined name `SymbolKind::Unknown` on the grounds that a name a file does not define is a name that file has nothing to say about, which is the right answer to the function or data question and the wrong answer to this one. A reference to a thread-local variable is satisfied by an offset into a block whose address the machine keeps in a segment register rather than by an address, and the addition is in the code rather than in the relocation, so the linker has to know which of the two numbers is wanted before it has found the definition. When two input files disagree it reports the disagreement instead of guessing, which is what `TLS definition in exceptions.o section .tdata mismatches non-TLS reference in add.o` is. Nothing had to be worked out to fix it, because the relocation is already a `Reference::Thread` and that is the same information the symbol needs, said in the other place the linker looks for it. Found in libmpfr 4.2.2 in tamnd/rucc-real-corpus, where `__gmpfr_flags` is defined in one file and read in about two hundred others, so every reader carried the wrong symbol and the link stopped at the first one. gcc 16.2.0 builds and tests the same pin cleanly on the same host, so this was the whole of the difference. The listing path was never affected, since `gas` reads the type off the relocation it is generating. Closes tamnd/rucc#1461.
+
 ## 0.10.62
 
 ### Added

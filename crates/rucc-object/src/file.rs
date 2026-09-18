@@ -422,10 +422,17 @@ pub fn write(
     // whose references then read a zero address. The listing writes a `.weak` for each of the same
     // names, so the two paths put the same entries in whether or not anything refers to one.
     let weak: HashSet<&str> = data.weak.iter().map(String::as_str).collect();
-    let wanted = text.relocs.iter().map(|reloc| &reloc.symbol);
-    let wanted =
-        wanted.chain(data.objects.iter().flat_map(|object| &object.relocs).map(|r| &r.symbol));
-    let wanted: Vec<&String> = wanted.chain(data.weak.iter()).collect();
+    let relocs = || text.relocs.iter().chain(data.objects.iter().flat_map(|o| &o.relocs));
+    // The names something here reaches through the thread pointer, which is the one thing about an
+    // undefined name this file does know. A reference to a thread-local variable is a different kind
+    // of reference from a reference to an ordinary one and the code that makes it is already
+    // different, so the file has been told, and ELF wants the symbol to say so as well.
+    let thread: HashSet<&str> = relocs()
+        .filter(|reloc| reloc.kind == Reference::Thread)
+        .map(|reloc| reloc.symbol.as_str())
+        .collect();
+    let wanted: Vec<&String> =
+        relocs().map(|reloc| &reloc.symbol).chain(data.weak.iter()).collect();
     for name in wanted {
         if symbols.contains_key(name) {
             continue;
@@ -436,8 +443,18 @@ pub fn write(
             size: 0,
             // What kind of thing an undefined name is is not known here and does not have to be:
             // a linker resolves an undefined symbol by its name, and the type of one that is not
-            // defined anywhere in this file is nothing this file can say.
-            kind: SymbolKind::Unknown,
+            // defined anywhere in this file is nothing this file can say. A thread-local one is the
+            // exception, and the linker makes it one. A reference to a thread-local variable is
+            // satisfied by an offset into a block rather than by an address, so the linker has to
+            // know which of the two it is being asked for before it has found the definition, and it
+            // refuses a link where one file says `STT_TLS` and another does not rather than picking
+            // one. That is tamnd/rucc#1461: libmpfr writes `__gmpfr_flags` in one file and reads it
+            // in a hundred others, and `ld` stopped at the first reader with a mismatch.
+            kind: if thread.contains(name.as_str()) {
+                SymbolKind::Tls
+            } else {
+                SymbolKind::Unknown
+            },
             scope: SymbolScope::Dynamic,
             weak: weak.contains(name.as_str()),
             section: SymbolSection::Undefined,
@@ -1670,6 +1687,54 @@ mod tests {
         // about an undefined weak symbol no relocation names.
         let quiet = file.symbols().find(|s| s.name() == Ok("never_called")).expect("the other");
         assert!(quiet.is_undefined() && quiet.is_weak(), "{:?}", quiet.flags());
+    }
+
+    /// A name this file reads through the thread pointer is undefined and is still known to be
+    /// thread-local.
+    ///
+    /// The other undefined names here are written with no type at all, because a name this file does
+    /// not define is a name this file has nothing to say about. A thread-local one is different in
+    /// the one way that counts: a reference to it is satisfied by an offset into a block rather than
+    /// by an address, so the linker has to know which of the two is wanted before it has found the
+    /// definition, and rather than guess it refuses a link where one file says `STT_TLS` about a name
+    /// and another does not. Writing the type is not extra information, it is the same information
+    /// the relocation already carried, said where the linker looks for it.
+    ///
+    /// That is tamnd/rucc#1461. libmpfr defines `__gmpfr_flags` in `exceptions.c` and reads it in a
+    /// hundred other files, and the link stopped at the first reader with `TLS definition in
+    /// exceptions.o section .tdata mismatches non-TLS reference in add.o`.
+    #[test]
+    fn a_thread_local_name_this_file_only_reads_is_still_written_down_as_thread_local() {
+        let mut text = Text::default();
+        text.funcs.push(extent("reader".to_owned(), 0, 16, Binding::Global));
+        text.bytes.resize(16, 0x90);
+        text.relocs.push(Reloc {
+            at: 3,
+            symbol: "flags".to_owned(),
+            kind: Reference::Thread,
+            addend: -4,
+            after: 0,
+        });
+        // One of them reached the ordinary way, so that what the type says is the relocation's doing
+        // and not something every undefined name here would have got.
+        text.relocs.push(Reloc {
+            at: 10,
+            symbol: "shared".to_owned(),
+            kind: Reference::Got,
+            addend: -4,
+            after: 0,
+        });
+        let data = Data { weak: Vec::new(), objects: vec![] };
+        let bytes = write(&text, &data, &[], &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+
+        let flags = file.symbols().find(|s| s.name() == Ok("flags")).expect("the thread-local one");
+        assert!(flags.is_undefined(), "nothing here defines it");
+        assert_eq!(flags.kind(), SymbolKind::Tls, "which is what the linker refuses to guess");
+
+        let shared = file.symbols().find(|s| s.name() == Ok("shared")).expect("the ordinary one");
+        assert!(shared.is_undefined(), "nothing here defines this one either");
+        assert_eq!(shared.kind(), SymbolKind::Unknown, "and there is nothing to say about it");
     }
 
     /// Not a rewording of the case above: what is checked is the arithmetic between the two.
