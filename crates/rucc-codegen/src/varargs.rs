@@ -788,12 +788,10 @@ fn read(func: &mut Func, inst: Inst, from: Value, ty: Type, size: u64) -> Value 
 /// A pointer has no width of its own here and is as wide as the convention's word, which is the one
 /// question this has to ask the target rather than the type.
 ///
-/// Anything wider than a general purpose register is left alone, which is a `long double`, a
-/// `_Float128` and an `__int128`. The convention travels all three as the address of a copy, and
-/// reading one back that way would be reading through an address nobody wrote: a wide scalar is
-/// passed as itself here today whether or not the signature names it, which is tamnd/rucc#1331 and
-/// is wrong for a named argument first. So they stay as they are and are refused by name further
-/// down, which is where the four field walk leaves the last of them too.
+/// A `long double`, a `_Float128` and an `__int128` are answered for as well, and what the slot
+/// holds for one of those is the address of the copy the caller made rather than the value. That is
+/// [`by_reference`] of the width, the same question the object walk below asks, and the load at the
+/// end of it is the same load either way.
 fn travels(ty: Type, word: u64) -> Option<u64> {
     if !ty.is_scalar() || !(ty.is_int() || ty.is_float() || ty.is_ptr()) {
         return None;
@@ -801,7 +799,7 @@ fn travels(ty: Type, word: u64) -> Option<u64> {
     if ty.is_ptr() {
         return Some(word);
     }
-    (ty.bits() <= 64).then(|| u64::from(ty.bits().div_ceil(8)))
+    Some(u64::from(ty.bits().div_ceil(8)))
 }
 
 /// One `va_arg` on a convention whose list is a plain pointer, as the load at the slot the walk is
@@ -812,17 +810,23 @@ fn travels(ty: Type, word: u64) -> Option<u64> {
 /// so nothing has to be substituted anywhere. Everything the load needs is written in front of it,
 /// and since nothing here branches the instruction does not move and the block is not cut.
 ///
-/// Every scalar [`travels`] answers for is one the convention passes whole, so the slot holds the
-/// value and not an address, and the load is the whole of it. The object walk below is where the
-/// other case is.
+/// A scalar of a width the convention passes whole is in the slot, and the load is the whole of it.
+/// One of the three the convention passes as an address is not, and the slot holds where the caller
+/// put its copy, so the value is one load further on. That is the same question the object walk
+/// below asks and it is asked of the width alone, which is what keeps the two answers together.
 fn value(func: &mut Func, inst: Inst, word: u64) {
     let Some(result) = func[inst].first_result else { return };
     let Some(&list) = func[func[inst].args].first() else { return };
     let ty = func[result].ty;
     let Some(bytes) = travels(ty, word) else { return };
 
-    let from = slot(func, inst, list, word);
-    let mem = func.add_mem(info(bytes, u32::try_from(bytes).unwrap_or(1)));
+    let here = slot(func, inst, list, word);
+    let from = if by_reference(bytes) { read(func, inst, here, Type::PTR, word) } else { here };
+    // The next power of two up from the width, which is the width itself for everything the slot
+    // holds and is sixteen for the ten bytes of an x87 value, since the copy the caller made is an
+    // object of the type and the type is sixteen bytes here.
+    let align = u32::try_from(bytes.next_power_of_two()).unwrap_or(1);
+    let mem = func.add_mem(info(bytes, align));
     let args = func.push_values(&[from]);
     let data = &mut func[inst];
     data.opcode = Opcode::Load;
@@ -1392,19 +1396,26 @@ mod tests {
         assert_eq!(text.matches("store").count(), 1, "{text}");
     }
 
-    /// A scalar wider than a general purpose register is left alone, because the convention travels
-    /// one as the address of a copy and nothing here writes that address yet, which is
-    /// tamnd/rucc#1331. Reading the slot as the value would be reading the low eight bytes of a
-    /// `long double`, and reading it as an address would be following a float.
+    /// A scalar wider than a general purpose register is read through the slot rather than out of
+    /// it, because the convention travels one as the address of a copy the caller made.
+    ///
+    /// Two loads and not one: the slot holds the address and the value is behind it. Reading the
+    /// slot as the value would be reading the low eight bytes of a `long double`, which is the
+    /// bottom of its significand and no number anybody wrote.
     #[test]
-    fn a_wide_scalar_is_left_alone_on_windows() {
+    fn a_wide_scalar_is_read_through_the_slot_on_windows() {
         let wide =
             [Type::int(128), Type::float(rucc_ir::Float::F80), Type::float(rucc_ir::Float::F128)];
         for ty in wide {
             let (mut names, mut func) = built(Opcode::VaArg, ty, 1);
-            let before = printed(&func, &mut names);
             lists(&mut func, &WIN64);
-            assert_eq!(printed(&func, &mut names), before, "{ty:?}");
+            valid(&func, &mut names);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("va_arg"), "{ty:?}: {text}");
+            assert_eq!(text.matches("= load").count(), 3, "{ty:?}: {text}");
+            // Two of the three are addresses, the list's own and the copy's, and the value is
+            // the third. A dump writes a pointer load without a type on it.
+            assert_eq!(text.matches("= load %").count(), 2, "{ty:?}: {text}");
         }
     }
 

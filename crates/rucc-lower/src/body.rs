@@ -1270,8 +1270,22 @@ impl<'u> Body<'_, 'u> {
             // what arrives is copied into it and nothing else in the walk has to know.
             Pass::Reference | Pass::Memory => {
                 let addr = self.func.append_param(entry, Type::PTR);
-                if let Some(Local::Slot(slot)) = local {
-                    self.memcpy(slot, addr, travel.size, travel.align, span);
+                match local {
+                    // A scalar that travelled as an address and is held in a register here,
+                    // which is a `long double` on Windows. The copy the caller made is the
+                    // callee's own and nothing else reads it, so the value is loaded out of it
+                    // once here and the address is not kept.
+                    Some(Local::Value(var)) => {
+                        let loaded = self.value_type(travel.ty, span);
+                        let info = self.access(travel.ty);
+                        let value = self.build(span).load(loaded, addr, info, Flags::NONE);
+                        let value = self.coerce(value, travel.ty, ty, span);
+                        self.ssa.write(var, entry, value);
+                    }
+                    Some(Local::Slot(slot)) => {
+                        self.memcpy(slot, addr, travel.size, travel.align, span);
+                    }
+                    None => {}
                 }
             }
         }
@@ -2501,16 +2515,48 @@ impl<'u> Body<'_, 'u> {
             }
             Pass::Direct => self.eval(expr).into_iter().collect(),
             Pass::Pieces(_) => {
-                let place = self.place(expr);
-                let addr = self.address_of(place, span);
+                let ty = self.tast()[expr].ty;
+                let addr = match repr::value_type(self.types(), self.target(), ty) {
+                    // A scalar that comes back in a register of the other file, which is an
+                    // `__int128` on Windows. The two files are reached through memory and not
+                    // through each other, so the value is written down and read back as the
+                    // sixteen bytes a vector register takes.
+                    Some(_) => {
+                        let value = self.value(expr);
+                        let at = self.scratch(travel.size, travel.align, span);
+                        let info = self.access(ty);
+                        self.build(span).store(value, at, info, Flags::NONE);
+                        at
+                    }
+                    None => {
+                        let place = self.place(expr);
+                        self.address_of(place, span)
+                    }
+                };
                 self.load_slots(addr, &travel, span)
             }
             // The caller passed somewhere to put it, so returning is writing it there.
             Pass::Reference | Pass::Memory => {
-                let place = self.place(expr);
-                let from = self.address_of(place, span);
-                if let Some(into) = self.sret {
-                    self.memcpy(into, from, travel.size, travel.align, span);
+                let ty = self.tast()[expr].ty;
+                match repr::value_type(self.types(), self.target(), ty) {
+                    // A scalar that goes back that way, which is a `long double` on Windows.
+                    // What the program wrote is a value and may be no object at all, as
+                    // `return a * b;` is, so it is computed and then stored where the caller
+                    // asked for it rather than copied from somewhere it never was.
+                    Some(_) => {
+                        let value = self.value(expr);
+                        if let Some(into) = self.sret {
+                            let info = self.access(ty);
+                            self.build(span).store(value, into, info, Flags::NONE);
+                        }
+                    }
+                    None => {
+                        let place = self.place(expr);
+                        let from = self.address_of(place, span);
+                        if let Some(into) = self.sret {
+                            self.memcpy(into, from, travel.size, travel.align, span);
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -6858,10 +6904,24 @@ impl<'u> Body<'_, 'u> {
                 // The callee is given the address of a copy and may write to it, so the copy is
                 // made here and the object the program wrote is not what travels.
                 Pass::Reference => {
-                    let place = self.place(arg);
-                    let from = self.address_of(place, span);
+                    let ty = tast[arg].ty;
                     let copy = self.scratch(travel.size, travel.align, span);
-                    self.memcpy(copy, from, travel.size, travel.align, span);
+                    match repr::value_type(self.types(), self.target(), ty) {
+                        // A scalar that travels that way, which is a `long double` on Windows.
+                        // The value is what the program has, and `f(a * b)` has no object to
+                        // copy from, so the copy is where the value is written rather than
+                        // where it already was.
+                        Some(_) => {
+                            let value = self.value(arg);
+                            let info = self.access(ty);
+                            self.build(span).store(value, copy, info, Flags::NONE);
+                        }
+                        None => {
+                            let place = self.place(arg);
+                            let from = self.address_of(place, span);
+                            self.memcpy(copy, from, travel.size, travel.align, span);
+                        }
+                    }
                     values.push(copy);
                 }
                 // The object's own bytes go in the argument area, which is what `byval` on the
@@ -6924,13 +6984,37 @@ impl<'u> Body<'_, 'u> {
             // The object came back in registers, which are written into whatever wanted it. A
             // call whose value nobody wants leaves them where they are.
             Pass::Pieces(_) => {
-                let at = destination?;
                 let results: Vec<Value> = self.func[inst].results().collect();
-                self.store_slots(at, &plan.ret, &results, span);
-                None
+                match repr::value_type(self.types(), self.target(), plan.ret.ty) {
+                    // A scalar that came back in a register of the other file, which is an
+                    // `__int128` on Windows. It is written down and read back as itself, and
+                    // somewhere to write it is made where nothing else wanted one.
+                    Some(loaded) => {
+                        let at = match destination {
+                            Some(at) => at,
+                            None => self.scratch(plan.ret.size, plan.ret.align, span),
+                        };
+                        self.store_slots(at, &plan.ret, &results, span);
+                        let info = self.access(plan.ret.ty);
+                        Some(self.build(span).load(loaded, at, info, Flags::NONE))
+                    }
+                    None => {
+                        let at = destination?;
+                        self.store_slots(at, &plan.ret, &results, span);
+                        None
+                    }
+                }
             }
-            // The callee wrote it where it was told to, so there is nothing to hand back.
-            Pass::Reference | Pass::Memory => None,
+            // The callee wrote it where it was told to. For an object that is the whole of it
+            // and the caller reads it there, and for a scalar that goes back the same way the
+            // value is read out of it here, because everything a scalar expression reaches
+            // expects a value and not somewhere one is.
+            Pass::Reference | Pass::Memory => {
+                let at = destination?;
+                let loaded = repr::value_type(self.types(), self.target(), plan.ret.ty)?;
+                let info = self.access(plan.ret.ty);
+                Some(self.build(span).load(loaded, at, info, Flags::NONE))
+            }
         }
     }
 

@@ -69,8 +69,22 @@ impl Call {
     pub fn returns(&mut self, arg: &Arg<'_>) -> Pass {
         let shape = match arg {
             // A returned scalar comes back in the first register of its bank and spends nothing,
-            // because the registers a return value uses are not the ones arguments use.
+            // because the registers a return value uses are not the ones arguments use. Unless no
+            // register holds it, where the caller passes somewhere to put it and the callee
+            // writes it there, the same as for an aggregate of that size.
             Arg::Void => return Pass::Ignore,
+            Arg::Scalar(scalar) if self.by_reference(*scalar) => {
+                // Except for the one the ABI brings back in a vector register anyway, which is
+                // an `__int128` on Windows: it goes out as an address and comes back in xmm0.
+                let vector = self.abi.scalars.wide_integer_returns_in;
+                if let (Kind::Integer, Some(format)) = (scalar.kind, vector) {
+                    return Pass::Pieces(vec![Slot::Float { offset: 0, format }]);
+                }
+                if self.abi.return_pointer == ReturnPointer::FirstArgument {
+                    self.integer = self.integer.saturating_sub(1);
+                }
+                return Pass::Reference;
+            }
             Arg::Scalar(_) => return Pass::Direct,
             Arg::Aggregate(shape) => *shape,
         };
@@ -116,10 +130,26 @@ impl Call {
         }
     }
 
-    /// How a scalar argument travels, which is always as itself, and what it costs.
+    /// Whether a scalar travels as the address of a copy rather than as itself.
+    ///
+    /// The size rule of the one ABI that does this is written over the size of the object and
+    /// says nothing about what is in it, so it is asked here the same way and of the same sizes
+    /// the aggregate rules in [`crate::abis`] are written with.
+    fn by_reference(&self, scalar: Scalar) -> bool {
+        self.abi.scalars.wide_is_by_reference && !matches!(scalar.size, 1 | 2 | 4 | 8)
+    }
+
+    /// How a scalar argument travels, which is as itself wherever a register holds it, and what it
+    /// costs.
     fn scalar(&mut self, scalar: Scalar) -> Pass {
         let Banks { shared, integer_width, float_width, .. } = self.abi.banks;
-        let Scalars { in_memory, wide_integer_is_all_or_nothing } = self.abi.scalars;
+        let Scalars { in_memory, wide_integer_is_all_or_nothing, .. } = self.abi.scalars;
+        // A scalar no register holds is the address of a copy the caller made, which costs the
+        // one position that address travels in and nothing else.
+        if self.by_reference(scalar) {
+            self.integer = self.integer.saturating_sub(1);
+            return Pass::Reference;
+        }
         // A `long double` argument on SysV is in the argument area and there is no register file
         // it could have gone in, so it costs nothing and leaves the banks alone.
         if matches!(scalar.kind, Kind::Float(format) if Some(format) == in_memory) {

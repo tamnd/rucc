@@ -482,6 +482,47 @@ fn win64_passes_any_other_size_as_an_address() {
 }
 
 #[test]
+fn win64_passes_a_scalar_no_register_holds_as_an_address_too() {
+    // The three sixteen byte scalars: the x87 `long double`, the IEEE quad and `__int128`. The
+    // rule here is written over the size of the object and reads none of them differently, which
+    // is what mingw's gcc does with all three.
+    let wide = [float(Format::X87Extended, 16), float(Format::Quad, 16), Scalar::integer(16)];
+    for scalar in wide {
+        let mut call = win64();
+        assert_eq!(call.argument(&Arg::Scalar(scalar)), Pass::Reference);
+        // One position for the address, which is all it costs.
+        assert_eq!(call.integer_left(), 3);
+    }
+
+    // And back the same way, where the address the caller passes is the first argument and the
+    // call has one position fewer for what it was called with.
+    for format in [Format::X87Extended, Format::Quad] {
+        let mut call = win64();
+        assert_eq!(call.returns(&Arg::Scalar(float(format, 16))), Pass::Reference);
+        assert_eq!(call.integer_left(), 3);
+    }
+
+    // An `__int128` is the exception, and it is gcc's exception rather than Microsoft's: it goes
+    // out as an address like the other two and comes back in xmm0, so the call keeps all four
+    // positions for what it was called with.
+    let mut call = win64();
+    assert_eq!(call.returns(&Arg::Scalar(int(16))), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(call.integer_left(), 4);
+}
+
+#[test]
+fn no_other_abi_passes_a_wide_scalar_as_an_address() {
+    // A `long double` is in the argument area on SysV, in a vector register on AAPCS64 and in a
+    // pair of general purpose registers on RISC-V. None of the three is an address, and a
+    // classifier that read the size alone would have made all of them one.
+    let wide = float(Format::X87Extended, 16);
+    for mut call in [sysv(), aapcs(), riscv(), DARWIN_ARM64.call()] {
+        assert_eq!(call.argument(&Arg::Scalar(wide)), Pass::Direct);
+        assert_eq!(call.returns(&Arg::Scalar(wide)), Pass::Direct);
+    }
+}
+
+#[test]
 fn win64_classifies_the_ninth_argument_the_way_it_classifies_the_first() {
     let members = pieces(&[int(4), int(4)]);
     let mut call = win64();
