@@ -165,6 +165,7 @@ fn calls(
             Opcode::MetaTypeCopy => carriage(func, names, word, inst),
             Opcode::MetaInit => written(func, names, word, inst),
             Opcode::MetaInitCopy => carried(func, names, word, inst),
+            Opcode::CapCopy => relocated(func, names, word, inst),
             Opcode::MetaEpoch => stamped(func, names, word, inst),
             Opcode::MetaRelease => published(func, names, inst),
             Opcode::MetaAcquire => taken(func, names, inst),
@@ -621,6 +622,19 @@ fn carried(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
     let bytes = fitted(func, inst, length, word);
     let params = &[Type::PTR, Type::PTR, word];
     call(func, names, inst, "__rucc_meta_init_copy", params, &[], &[to, from, bytes]);
+}
+
+/// `cap_copy` becomes `__rucc_cap_copy(destination, source, length)`.
+///
+/// The same shape as [`carried`] again, and the same argument for why it names nothing else: the
+/// capability of a pointer in memory is in the slot beside it, so the slots over the source are
+/// where the answer already is and the runtime moves them across. It is the one of the three that
+/// is not a plane write, and the call it becomes is the one `__rucc_wrap_memcpy` has always made.
+fn relocated(func: &mut Func, names: &mut Interner, word: Type, inst: Inst) {
+    let [to, from, length] = func[func[inst].args] else { return };
+    let bytes = fitted(func, inst, length, word);
+    let params = &[Type::PTR, Type::PTR, word];
+    call(func, names, inst, "__rucc_cap_copy", params, &[], &[to, from, bytes]);
 }
 
 /// `meta_epoch` becomes `__rucc_meta_epoch(pointer, length)`.
@@ -1440,8 +1454,10 @@ mod tests {
     fn a_copy_becomes_the_calls_that_move_the_planes_across() {
         // Three operands each and no descriptor. A plane write refuses nothing, and neither what
         // the copied bytes are nor whether anything ever wrote them is a thing the compiler knows,
-        // so there is no type number and no length beyond the range: both calls read the entries
-        // over the source and write them over the destination.
+        // so there is no type number and no length beyond the range: all three calls read what is
+        // over the source and write it over the destination. The third is the aux rather than a
+        // plane, and it is here because the capability of a pointer inside a structure being copied
+        // whole travels the same way its type and its init do.
         let mut names = Interner::new();
         let mut module = copied(&mut names);
         assert_eq!(lower(&mut module, &mut names), 0);
@@ -1456,6 +1472,8 @@ mod tests {
              call @__rucc_meta_type_copy(%0, %1, %2) : (ptr, ptr, i64)\n    \
              %3 = iconst.i64 24\n    \
              call @__rucc_meta_init_copy(%0, %1, %3) : (ptr, ptr, i64)\n    \
+             %4 = iconst.i64 24\n    \
+             call @__rucc_cap_copy(%0, %1, %4) : (ptr, ptr, i64)\n    \
              return\n\
              }\n"
         );

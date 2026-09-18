@@ -1283,6 +1283,22 @@ pub mod exports {
         unsafe { super::spread(dst, src, len) };
     }
 
+    /// The third of the three a copy makes, and the one about the aux rather than about a plane.
+    ///
+    /// `__rucc_wrap_memcpy` has always called [`super::relocate`] beside the other two. This is the
+    /// same call under a name generated code can reach, so that a copy the compiler wrote for an
+    /// assignment of a whole structure carries the capability of every pointer in it the way a call
+    /// to `memcpy` does.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_meta_init_copy`]. Neither address is read through and they may overlap.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_copy(dst: *const c_void, src: *const c_void, len: usize) {
+        // SAFETY: as above.
+        unsafe { super::relocate(dst, src, len) };
+    }
+
     /// # Safety
     ///
     /// As [`__rucc_meta_init`]. One address, and it is never read through.

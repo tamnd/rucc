@@ -760,6 +760,7 @@ const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 ///
 /// Sorted, and the same test that checks the table above checks this one.
 const RUNTIME_NEVER_FREES: &[&str] = &[
+    "__rucc_cap_copy",
     "__rucc_cap_witness",
     "__rucc_check_bounds",
     "__rucc_check_deriv",

@@ -1050,11 +1050,14 @@ mod tests {
         plane(Opcode::MetaTransfer, Extra::Owner(Owner::Device));
         plane(Opcode::MetaEnd, Extra::None);
 
-        // The two plane writes with two ranges in them, which do not go through the helper above.
+        // The two plane writes with two ranges in them, which do not go through the helper above,
+        // and the aux's copy, which is the same shape and is not a plane write.
         let args = b.func().push_values(&[p, derived, off]);
         b.inst(InstData { args, ..InstData::new(Opcode::MetaTypeCopy) }, &[]);
         let args = b.func().push_values(&[p, derived, off]);
         b.inst(InstData { args, ..InstData::new(Opcode::MetaInitCopy) }, &[]);
+        let args = b.func().push_values(&[p, derived, off]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapCopy) }, &[]);
 
         // The two halves of a synchronization edge, which take the address the edge is keyed on
         // and no length, since an edge is about everything the thread did rather than about bytes.

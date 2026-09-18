@@ -28,7 +28,7 @@ cap             an opaque capability value; 4 machine words when materialized
 
 ### 6.2.2 Instructions
 
-Nineteen of them. The names are written with underscores because the textual IR of the parent's document 08 keeps the dot for the type suffix and the flags, so `cap.of` would read back as the opcode `cap` with a type suffix `of` and there is no such type. Every other multi-word opcode in that set is spelled the same way, `global_addr` and `indirect_br` and `va_start` among them.
+Twenty four of them. The names are written with underscores because the textual IR of the parent's document 08 keeps the dot for the type suffix and the flags, so `cap.of` would read back as the opcode `cap` with a type suffix `of` and there is no such type. Every other multi-word opcode in that set is spelled the same way, `global_addr` and `indirect_br` and `va_start` among them.
 
 **Capability production and movement.**
 
@@ -36,12 +36,15 @@ Nineteen of them. The names are written with underscores because the textual IR 
 %c = cap_of %p                          capability of a pointer value, from the pointer's provenance
 %c = cap_load %cd, %p, %v               capability of the pointer %v, from the aux slot for the word at %p
        cap_store %cd, %p, %v, %c        write %c into the aux slot for the word at %p, which holds %v
+       cap_copy %to, %from, %len        move the aux slots of a copied range along with its bytes
 %c = cap_null                           ⊥
 %c = cap_narrow %c0, %off, %len         sub-object narrowing; -fsafety-subobject only
 %c = cap_recover %p                     boundary recovery from the shadow planes; document 05 section 5.3
 ```
 
 The aux pair takes more operands than the shape of the question suggests, and both of the extra ones are facts about the representation section 5.2.2 settled rather than conveniences. `%cd` is the capability of the object the word at `%p` lives in, and it is there because the aux sits in front of that object and the slot's address is computed from the object's own base and extent, which is `rucc_safe_rt::aux_slot::address_of`. `%v` is the pointer value in the word, and it is there because the slot holds a displacement and an extent relative to that pointer rather than an absolute base, which is what makes the bounds exact in 43 bits. Neither is recoverable from `%p` alone without a shadow lookup, and an instrumented access has both in hand anyway: `%cd` is the capability its own bounds check used, and `%v` is what the store is writing or what the load produced. This is also what makes the common case cheap, since for a store through a pointer whose object and offset are both known the slot's address folds to one displacement off the base.
+
+`cap_copy` is the bulk form of that write and takes neither of the extra operands, because it names no pointer and no capability: a copy moves words whose slots already describe them, and a slot holds a displacement from the word beside it, so moving the slots byte for byte is exactly right and there is nothing for the compiler to work out. It goes in beside `meta_type_copy` and `meta_init_copy` at every copy, and it is not a plane write, which is why it is here with the aux instructions rather than under plane maintenance. Without it an assignment of a whole structure moves a pointer as bytes and leaves the slot beside its new home describing whatever was there before, and neither a `cap_store` nor anything else ever sees that pointer, since the front end turned the assignment into a copy.
 
 **Checks.** Each corresponds to one conjunct of J1 in document 04. They are separate instructions rather than one fused check so that they can be discharged independently, the common case is that bounds survives and everything else is proved.
 
