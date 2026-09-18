@@ -30,9 +30,12 @@
 //! unions, and its errors leave through longjmp from the middle of a C stack the interpreter built.
 //! brotli is the same job as zlib written a different way: a static dictionary of a hundred and
 //! twenty thousand words, a ring buffer it grows as it learns how much it needs, and a distance that
-//! is a number selecting storage from one of several places rather than a pointer to it. None of the
-//! four reaches the others' paths. The rows here are the projects and the code below is the same for
-//! all of them, which is what makes adding the next one a paragraph of data.
+//! is a number selecting storage from one of several places rather than a pointer to it. zstd keeps
+//! several tables of positions over one buffer at once and switches between them by strategy, so the
+//! same storage is indexed three ways in one compression, and its dictionary builder sorts a suffix
+//! array, which is the only code here that sorts pointers into a buffer instead of walking them.
+//! None of the five reaches the others' paths. The rows here are the projects and the code below is
+//! the same for all of them, which is what makes adding the next one a paragraph of data.
 //!
 //! # Why the sources are not in the tree
 //!
@@ -55,6 +58,11 @@
 //! by construction. A listed report that did not arrive is a failure too, because the row is a
 //! claim that the library really does do that and the day it stops being true is a day somebody
 //! should look.
+//!
+//! A row may be green on the first of those and waiting on the second, which is what
+//! [`Project::pending`] is and what zstd is currently doing. It says which question its reports are
+//! waiting on, the check prints that beside the row rather than swallowing it, and nothing else in
+//! the table gets quieter.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -120,6 +128,21 @@ struct Project {
     defines: &'static [&'static str],
     /// Every report the monitor should make, and nothing else.
     known: &'static [Known],
+    /// Why the monitor's reports are not held against [`Project::known`] yet, when they are not.
+    ///
+    /// A row is normally green on both halves, which is that the program gets its answers right and
+    /// that the monitor said exactly what the row says it would. A row can be green on the first
+    /// and blocked on the second, and zstd is the case that made this field: the model refuses a
+    /// derivation that library performs as its ordinary way of working, so the reports are neither
+    /// false positives nor a list somebody can write down, they are one open question arriving a
+    /// few hundred thousand times. Listing them one by one would say nothing and would break on the
+    /// next release, and dropping the row would throw away the half that does work, which is that
+    /// thirty translation units compile at both levels, link, run and answer correctly.
+    ///
+    /// So the row says which question it is waiting on, the check prints that beside the row rather
+    /// than swallowing it, and the field goes away when the question is answered. Nothing else in
+    /// the table gets quieter, because this is per row.
+    pending: Option<&'static str>,
 }
 
 /// The projects, in the order they are run.
@@ -136,6 +159,7 @@ const PROJECTS: &[Project] = &[
         includes: &[],
         defines: &[],
         known: &[],
+        pending: None,
     },
     Project {
         name: "zlib",
@@ -176,6 +200,7 @@ const PROJECTS: &[Project] = &[
                   the four classes tamnd/rucc#431 is about and it is the first one a second \
                   project produced.",
         }],
+        pending: None,
     },
     Project {
         name: "lua",
@@ -224,6 +249,7 @@ const PROJECTS: &[Project] = &[
         // readline.
         defines: &["LUA_USE_LINUX"],
         known: &[],
+        pending: None,
     },
     Project {
         name: "brotli",
@@ -269,6 +295,76 @@ const PROJECTS: &[Project] = &[
         includes: &["c/include"],
         defines: &[],
         known: &[],
+        pending: None,
+    },
+    Project {
+        name: "zstd",
+        variable: "RUCC_ZSTD_SOURCE",
+        marker: "lib/zstd.h",
+        usual: &["zstd"],
+        sources: &[
+            "lib/common/debug.c",
+            "lib/common/entropy_common.c",
+            "lib/common/error_private.c",
+            "lib/common/fse_decompress.c",
+            "lib/common/pool.c",
+            "lib/common/threading.c",
+            "lib/common/xxhash.c",
+            "lib/common/zstd_common.c",
+            "lib/compress/fse_compress.c",
+            "lib/compress/hist.c",
+            "lib/compress/huf_compress.c",
+            "lib/compress/zstd_compress.c",
+            "lib/compress/zstd_compress_literals.c",
+            "lib/compress/zstd_compress_sequences.c",
+            "lib/compress/zstd_compress_superblock.c",
+            "lib/compress/zstd_double_fast.c",
+            "lib/compress/zstd_fast.c",
+            "lib/compress/zstd_lazy.c",
+            "lib/compress/zstd_ldm.c",
+            "lib/compress/zstd_opt.c",
+            "lib/compress/zstd_preSplit.c",
+            "lib/compress/zstdmt_compress.c",
+            "lib/decompress/huf_decompress.c",
+            "lib/decompress/zstd_ddict.c",
+            "lib/decompress/zstd_decompress.c",
+            "lib/decompress/zstd_decompress_block.c",
+            "lib/dictBuilder/cover.c",
+            "lib/dictBuilder/divsufsort.c",
+            "lib/dictBuilder/fastcover.c",
+            "lib/dictBuilder/zdict.c",
+        ],
+        // The list zstd's own makefile passes, less the legacy formats, which are old decoders
+        // nobody builds unless they have old files.
+        includes: &["lib", "lib/common", "lib/compress", "lib/decompress", "lib/dictBuilder"],
+        // The first is the one thing zstd's build decides by looking at the machine rather than at
+        // the platform. Its Huffman decoder ships a hand written amd64 loop in a .S file, this
+        // table compiles C and nothing else, and the flag is zstd's own way of saying to use the C
+        // the loop replaces. Which is the right thing to measure here anyway, since assembly
+        // nobody compiled is assembly the monitor has nothing to say about.
+        //
+        // The second is ours rather than zstd's, and it is a finding rather than a setting. zstd's
+        // four tracing hooks are declared `__attribute__((weak))` and defined by nobody, which is
+        // how a library offers a hook a profiler may fill in, and gcc writes a `.weak` for each so
+        // the link resolves them to nothing and the guarded calls are never made. rucc drops the
+        // attribute on a declaration, so the same four names arrive at the linker as ordinary
+        // undefined symbols and the link fails. tamnd/rucc#1414 is the attribute; this define is
+        // zstd's own way of saying to compile without the hooks, and it comes back out when the
+        // attribute goes in.
+        defines: &["ZSTD_DISABLE_ASM=1", "ZSTD_TRACE=0"],
+        known: &[],
+        pending: Some(
+            "the monitor's reports are not held to a list yet, and they are all one question. \
+             zstd keeps every position as a 32 bit index and one pointer that turns an index into \
+             an address, and ZSTD_window_update computes that pointer as ip - distanceFromBase, \
+             which is the caller's buffer moved back by everything the compressor has seen. It is \
+             never dereferenced and every match finder reads through it at base + matchIndex, \
+             which lands back inside the buffer it came from. J2 refuses the derivation and clears \
+             the capability, so every one of those reads is refused too: 997 derivations, 4,710,697 \
+             reads, 39 distinct sites, and every answer still right. That is question 12 of \
+             spec/safe-memory/17-open-questions.md with a library behind it rather than a test \
+             case, and it is tamnd/rucc#1417.",
+        ),
     },
 ];
 
@@ -304,6 +400,9 @@ pub(crate) fn libraries() -> Result<()> {
             project.name,
             source.display()
         );
+        if let Some(waiting) = project.pending {
+            println!("{}: {waiting}", project.name);
+        }
         let work = build(project, &source)?;
         let ran = safety::read(&runner.run(&work, "the workload")?);
         judge(project, &ran, &mut problems);
@@ -350,6 +449,9 @@ fn judge(
 /// wrong. A listed report that did not arrive means the row is describing a library that no longer
 /// does what it says, or a check that stopped looking, and either one is worth a person's time.
 fn said(project: &Project, level: &str, output: &str, out: &mut Vec<String>) {
+    if project.pending.is_some() {
+        return;
+    }
     let mut wanted: Vec<&Known> = project.known.iter().collect();
     for (judgement, bytes) in reports(output) {
         match wanted.iter().position(|k| k.judgement == judgement && k.bytes == bytes) {
@@ -691,6 +793,7 @@ mod tests {
             includes: &[],
             defines: &[],
             known: &[],
+            pending: None,
         };
         let expecting = Project {
             known: &[Known { judgement: 1, bytes: 2, why: "because the test says so" }],
@@ -717,6 +820,35 @@ mod tests {
         let mut out = Vec::new();
         said(&expecting, "-O0", &format!("{one}{one}"), &mut out);
         assert_eq!(out.len(), 1, "{out:?}");
+
+        // A row waiting on a question is quiet in both directions, since a list it cannot write
+        // yet is a list it cannot be held to either way.
+        let waiting = Project { pending: Some("waiting on something"), ..expecting };
+        let mut out = Vec::new();
+        said(&waiting, "-O0", &one, &mut out);
+        said(&waiting, "-O0", "a run that said nothing", &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// Only a row that names a question is allowed to be quiet about what the monitor said, and the
+    /// reason has to be long enough to be a reason rather than a shrug.
+    #[test]
+    fn a_row_that_is_waiting_says_what_it_is_waiting_on() {
+        for project in PROJECTS {
+            let Some(waiting) = project.pending else {
+                continue;
+            };
+            assert!(
+                waiting.len() > 200,
+                "{}'s pending is too short to say anything: {waiting}",
+                project.name
+            );
+            assert!(
+                waiting.contains("tamnd/rucc#"),
+                "{} is waiting on something nobody can go and read",
+                project.name
+            );
+        }
     }
 
     /// An unset variable and a variable pointing at nothing are the same answer, because the
