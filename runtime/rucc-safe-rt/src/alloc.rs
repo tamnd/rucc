@@ -832,6 +832,11 @@ pub fn alloc_zeroed(count: usize, size: usize) -> *mut c_void {
 /// in place would leave a live capability naming bytes the program has given back. A resize is
 /// two instances by definition, and the plane is what says so.
 ///
+/// Being a copy means it carries what a copy carries. The init plane travels with the bytes, and so
+/// does the aux, which is where the capability of every pointer among those bytes lives. That half
+/// goes through [`crate::check::relocate`], the same function the interposed `memcpy` uses, because
+/// it is the same copy with the allocator rather than a wrapper doing it.
+///
 /// # Safety
 ///
 /// As [`dealloc`].
@@ -864,6 +869,14 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     // The copy carries the old instance's answers, which is read before the old instance is ended
     // rather than after, since ending it is what makes those bytes somebody else's to hand out.
     wrote(fresh as usize, Some(payload), old.min(size));
+    // And the capabilities of whatever pointers were among those bytes, for the reason an
+    // interposed `memcpy` does it: a pointer's capability lives in the aux slot beside the word
+    // rather than in the word, so a copy that moved the words and left the aux would describe the
+    // grown buffer's pointers with whatever the block it landed in was carrying before. This is
+    // the one caller that is not a wrapper, and it is the same copy.
+    // SAFETY: both are live instances of this arena and the range is inside both, which is what
+    // the copy above already relies on.
+    unsafe { crate::check::relocate(fresh, ptr, old.min(size)) };
     // SAFETY: as above, and the copy is done with it.
     unsafe { dealloc(ptr) };
     fresh
