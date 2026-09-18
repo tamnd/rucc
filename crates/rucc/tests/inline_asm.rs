@@ -251,6 +251,48 @@ unsigned long f(unsigned long hi, unsigned long lo, unsigned long d, unsigned lo
 }
 
 #[test]
+fn an_add_and_the_one_that_reads_its_carry_stay_next_to_each_other() {
+    // `add_ssaaaa` and `sub_ddmmss` out of the same header, which is how libgmp adds and subtracts
+    // numbers wider than a register. Both are two instructions in one template with a bit passed
+    // between them, and the bit is not a register, so nothing in an operand vector says the second
+    // waits for the first. What says it is the target's description of the condition state, which
+    // the scheduler reads, and this test is here because getting that wrong is a wrong answer that
+    // the listing on its own looks fine in.
+    let source = "\
+void f(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
+       unsigned long bh, unsigned long bl) {
+  unsigned long h, l;
+  asm (\"addq %5,%q1\\n\\tadcq %3,%q0\"
+       : \"=r\" (h), \"=&r\" (l)
+       : \"0\" (ah), \"rme\" (bh), \"%1\" (al), \"rme\" (bl));
+  *sh = h;
+  *sl = l;
+}
+
+void g(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
+       unsigned long bh, unsigned long bl) {
+  unsigned long h, l;
+  asm (\"subq %5,%q1\\n\\tsbbq %3,%q0\"
+       : \"=r\" (h), \"=&r\" (l)
+       : \"0\" (ah), \"rme\" (bh), \"1\" (al), \"rme\" (bl));
+  *sh = h;
+  *sl = l;
+}
+";
+    let listing = asm("add-ssaaaa", source);
+    for (name, first, second) in [("f", "addq", "adcq"), ("g", "subq", "sbbq")] {
+        let body = body(&listing, name);
+        let at = body.find(first).unwrap_or_else(|| panic!("no {first} in {name}:\n{body}"));
+        let then = body.find(second).unwrap_or_else(|| panic!("no {second} in {name}:\n{body}"));
+        assert!(at < then, "{second} came out in front of {first}:\n{body}");
+        let between = &body[at..then];
+        let over = between.matches('\n').count();
+        assert_eq!(over, 1, "something got between the pair in {name}:\n{body}");
+        assert!(!body.contains("$0"), "an operand was zeroed rather than read in {name}:\n{body}");
+    }
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong

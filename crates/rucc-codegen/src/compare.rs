@@ -276,10 +276,14 @@ fn conditions(
     found.extend(insts.reads(name));
     for &inst in &sequence[at + 1..] {
         let Some(name) = opcode(func, insts, names, inst) else { break };
+        // What it reads before whether it writes, because an instruction can do both and the read
+        // it does is a read of what is there now. An add with carry is the one that does, and
+        // asking the questions the other way round would count it as the end of the walk and never
+        // count the carry it took off the comparison this is about to remove.
+        found.extend(insts.reads(name));
         if (insts.writes)(name) {
             break;
         }
-        found.extend(insts.reads(name));
     }
     found
 }

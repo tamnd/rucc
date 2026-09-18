@@ -206,6 +206,29 @@ struct Place {
     write: Option<mir::Reg>,
 }
 
+/// Whether that operand of the statement is one the assembly may read, and so where a read of it
+/// gets its value from.
+///
+/// [`bound`] asks this question of an operand a constraint letter named and this asks it of one the
+/// template numbered, which is the same question twice because a two-address instruction reaches
+/// its first source both ways. `mulq %3` reaches `rax` by the letter on the output and libgmp says
+/// what is in it with `"%0"` on an input. `addq %5,%q1` reaches its first source by numbering the
+/// output, and libgmp says what is in it with `"0"` on an input in the same way.
+///
+/// So an output written `=` has no value of its own and is still readable when an input is tied to
+/// it, and the value the read wants is that input's. An output written `+` carries its own value
+/// and answers with that. An output nothing is tied to answers `None`, which is a program that told
+/// the compiler the assembly only writes the operand while the instruction reads it before it
+/// writes it, and is refused where it is asked.
+fn read_as(list: &[AsmOperand], index: usize) -> Option<Value> {
+    let operand = list.get(index)?;
+    if operand.value.is_some() {
+        return operand.value;
+    }
+    operand.result?;
+    list.iter().find(|entry| entry.tied == Some(index)).and_then(|entry| entry.value)
+}
+
 /// Which of an assembly statement's operands is in that register, for an instruction that reaches
 /// the register without its text saying so.
 ///
@@ -3161,10 +3184,11 @@ impl<'a> Lowering<'a> {
         .ok_or_else(refused)?;
 
         // Read where the opcode reads and written where it writes, which is what the first half of
-        // this asks. An output has a result and an input has a value, and an output written `+` has
-        // both, because it is read before it is written.
+        // this asks. An output has a result and an input has a value, an output written `+` has
+        // both because it is read before it is written, and an output a matching constraint names
+        // is read as the input that named it. See [`read_as`].
         let placeable = match desc.role {
-            Role::Use => operand.value.is_some(),
+            Role::Use => read_as(list, index).is_some(),
             Role::Def | Role::EarlyDef => operand.result.is_some(),
         };
         let ty = match (operand.result, operand.value) {

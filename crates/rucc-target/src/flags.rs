@@ -36,6 +36,15 @@
 //! The first case needs none of that. Two instructions that made the same comparison of the same
 //! values left the same bits, all of them, so what may read them is not a question.
 //!
+//! # The instruction that reads the state and is not a condition
+//!
+//! An add with carry, and the subtract that goes with it, which arrive from an `asm` template
+//! rather than from a rule. They are here for the half of this description that is not about
+//! finding a comparison: the list of what reads the state is also what the scheduler keeps in
+//! order, so an instruction missing from it is one the scheduler is free to move a comparison in
+//! front of. What they read is [`Reads::Carry`], which is a fourth group with nothing in the table
+//! good for it, so naming them here can only stop a rewrite and never allow one.
+//!
 //! # What is not a [`Zeroing`]
 //!
 //! A shift, because a shift by zero leaves the condition state exactly as it found it, and the
@@ -114,6 +123,16 @@ pub enum Reads {
     Signed,
     /// Where it sits as an unsigned number, which is the carry, alone or with the zero.
     Unsigned,
+    /// The carry as the instruction in front left it, which no comparison is a substitute for.
+    ///
+    /// The other three are parts of the answer to a question, so an instruction that has already
+    /// asked that question can stand in for the one that would have asked it again. An add with
+    /// carry is not reading an answer. It is reading the bit that fell off the end of the addition
+    /// in front of it, and the only thing that leaves that bit is that addition, so nothing this
+    /// pass could put there instead is the same. [`Zeroing::covers`] says no to it for every entry
+    /// there is and will go on saying no to every entry added later, which is what keeps a
+    /// comparison in front of one of these where the program put it.
+    Carry,
 }
 
 /// One instruction that leaves behind the comparison of what it wrote against zero.
@@ -155,6 +174,7 @@ impl Zeroing {
             Reads::Zero => true,
             Reads::Signed => self.signed,
             Reads::Unsigned => self.unsigned,
+            Reads::Carry => false,
         }
     }
 }

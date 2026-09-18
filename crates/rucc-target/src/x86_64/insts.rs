@@ -39,12 +39,12 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
-    Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi, CmpSetRm, CmpSetVec,
-    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec,
-    ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing, Lea, Load,
-    LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret,
-    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store,
+    Align, AluCarry, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87,
+    Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi, CmpSetRm,
+    CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
+    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing,
+    Lea, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
+    Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store,
     StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
@@ -62,6 +62,26 @@ pub enum Form {
     AluRr,
     /// Two-address arithmetic on a register and an immediate.
     AluRi,
+    /// Two-address arithmetic on two registers that reads the carry as well.
+    ///
+    /// `adc` and `sbb`, which are [`Form::AluRr`] with one more source that is not in this vector
+    /// because it is not a register. A program adds two numbers wider than a register by adding the
+    /// low halves and then adding the high halves and the bit that fell off the low ones, and these
+    /// are the second of those two instructions.
+    ///
+    /// The operand vector is [`Form::AluRr`]'s exactly, and that is the point rather than an
+    /// economy. The header above says nothing here mentions flags and that this is a constraint on
+    /// the rule set, and it still holds: no rule reaches one of these. What a template writes is
+    /// two instructions that pass a bit between them, and what has to keep them a pair is the
+    /// description of the condition state next door in [`crate::FlagInsts`], which the scheduler
+    /// reads and which now says these read it. A form saying so as well would be the same fact in
+    /// two places, and two places is where a fact goes wrong.
+    ///
+    /// So why a form of its own rather than [`Form::AluRr`]. Because the list of what reads the
+    /// condition state is taken off these forms rather than typed out, and an instruction that
+    /// reads the state and does not carry a condition in its name is a third kind that the two
+    /// tests over that list have to be able to tell from the other two. Naming it is what lets them.
+    AluCarry,
     /// The same instruction as [`Form::AluRr`] reading its second source out of memory.
     ///
     /// One operand vector shorter than [`Form::AluRr`] and one addressing mode longer, which is
@@ -976,7 +996,7 @@ impl Form {
     pub fn operands(self) -> &'static [OperandDesc] {
         match self {
             LoadImm => &LOAD_IMM,
-            AluRr => &TWO_ADDRESS_RR,
+            AluRr | AluCarry => &TWO_ADDRESS_RR,
             AluRi | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
@@ -1139,6 +1159,20 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sub_rr_16", AluRr),
     ("sub_rr_32", AluRr),
     ("sub_rr_64", AluRr),
+    // The pair of these that carries a bit from one instruction to the next. No rule selects one,
+    // because a rule replaces a term with a term and the bit between these two is not a term this
+    // compiler has: an addition in C is an addition of a width, and the carry out of one is a thing
+    // only the program that wrote the two halves knows it wants. A template is where that program
+    // says so, which is `add_ssaaaa` and `sub_ddmmss` in libgmp's `longlong.h`. Four widths and not
+    // three, unlike the pair forms below, because there is nothing special about the byte one here.
+    ("adc_rr_8", AluCarry),
+    ("adc_rr_16", AluCarry),
+    ("adc_rr_32", AluCarry),
+    ("adc_rr_64", AluCarry),
+    ("sbb_rr_8", AluCarry),
+    ("sbb_rr_16", AluCarry),
+    ("sbb_rr_32", AluCarry),
+    ("sbb_rr_64", AluCarry),
     ("and_rr_8", AluRr),
     ("and_rr_16", AluRr),
     ("and_rr_32", AluRr),
@@ -2000,7 +2034,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 584);
+        assert_eq!(described, 592);
     }
 
     #[test]

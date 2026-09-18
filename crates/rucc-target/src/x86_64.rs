@@ -669,7 +669,20 @@ static COMPARES: [Compare; 88] = [
 /// conditional moves with no comparison and the ten jumps are the rest. The two that are about the
 /// carry and the zero together are filed under the carry, since an entry says which part has to be
 /// right and both of theirs do.
-static READERS: [Reader; 210] = [
+///
+/// The add with carry and the subtract with borrow are first, in the order the description next
+/// door lists them, and they are the eight rows here that carry no condition in their names. What
+/// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
+/// can only stop the pass and never point it at the wrong bits.
+static READERS: [Reader; 218] = [
+    Reader { name: "adc_rr_8", reads: Reads::Carry },
+    Reader { name: "adc_rr_16", reads: Reads::Carry },
+    Reader { name: "adc_rr_32", reads: Reads::Carry },
+    Reader { name: "adc_rr_64", reads: Reads::Carry },
+    Reader { name: "sbb_rr_8", reads: Reads::Carry },
+    Reader { name: "sbb_rr_16", reads: Reads::Carry },
+    Reader { name: "sbb_rr_32", reads: Reads::Carry },
+    Reader { name: "sbb_rr_64", reads: Reads::Carry },
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -1407,6 +1420,8 @@ mod tests {
     /// the pass decided to keep instead, so the list is again taken from the descriptions. That
     /// each entry names the right part is checked against the condition in the opcode's own name,
     /// which is two hundred and ten rows that cannot be hand checked and three groups that can.
+    /// The eight with no condition in their names are the add with carry and the subtract with
+    /// borrow, which have a group of their own and are checked by their form instead.
     #[test]
     fn every_condition_says_which_part_of_the_state_it_is_about() {
         let readers: Vec<&str> = INSTS
@@ -1414,7 +1429,8 @@ mod tests {
             .filter(|&&(_, shape)| {
                 matches!(
                     shape,
-                    Form::CmpSet
+                    Form::AluCarry
+                        | Form::CmpSet
                         | Form::CmpSetRi
                         | Form::CmpSetRm
                         | Form::CmpSetMi
@@ -1429,6 +1445,10 @@ mod tests {
         assert_eq!(entries, readers);
 
         for entry in &READERS {
+            if form(entry.name) == Some(Form::AluCarry) {
+                assert_eq!(entry.reads, Reads::Carry, "{} reads a condition", entry.name);
+                continue;
+            }
             let wanted = match condition(entry.name) {
                 "e" | "ne" => Reads::Zero,
                 "l" | "le" | "g" | "ge" => Reads::Signed,
@@ -1446,13 +1466,16 @@ mod tests {
     /// state, because past that point what is there is not its business. A byte, a move or a jump
     /// wrongly counted as a writer would stop that walk early and leave a condition behind it
     /// unaccounted for, which is the one way this pass could be wrong rather than merely unhelpful.
+    /// The add with carry and the subtract with borrow are the entries here that read the state and
+    /// write it both, and they are why the pass counts what an instruction reads before it asks
+    /// whether it writes rather than after.
     #[test]
     fn a_byte_a_move_or_a_jump_leaves_the_condition_state_where_it_found_it() {
         for entry in &READERS {
             if matches!(form(entry.name), Some(Form::Set | Form::Cmov | Form::Jcc)) {
                 assert!(!writes_flags(entry.name), "{} is said to write the state", entry.name);
             } else {
-                assert!(writes_flags(entry.name), "{} makes a comparison", entry.name);
+                assert!(writes_flags(entry.name), "{} leaves the state alone", entry.name);
             }
         }
     }
