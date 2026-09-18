@@ -55,6 +55,7 @@ use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
+use crate::short::{ShortInsts, Zeroed};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -511,6 +512,25 @@ pub static FLAGS: FlagInsts = FlagInsts {
     readers: &READERS,
     zeroing: &ZEROING,
 };
+
+/// The shorter spellings x86-64 has for the same answer.
+pub static SHORT: ShortInsts = ShortInsts { prefix: "x64.", zeroing: &SHORTER_ZEROS };
+
+/// Writing zero into a register without spelling the zero out.
+///
+/// `movl $0, %eax` is five bytes, one for the opcode and four for a number every one of whose bits
+/// is the same. `xorl %eax, %eax` is two and the processor knows the idiom, so it is shorter and no
+/// slower. The same trade at sixty-four bits is seven bytes against three and at sixteen is four
+/// against three.
+///
+/// Eight bits is not here and the reason is arithmetic rather than a rule: `movb $0, %al` is two
+/// bytes and `xorb %al, %al` is two, so the exchange buys nothing and would cost the condition
+/// state for it.
+static SHORTER_ZEROS: [Zeroed; 3] = [
+    Zeroed { name: "mov_ri_16", into: "xor_rr_16" },
+    Zeroed { name: "mov_ri_32", into: "xor_rr_32" },
+    Zeroed { name: "mov_ri_64", into: "xor_rr_64" },
+];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
 ///

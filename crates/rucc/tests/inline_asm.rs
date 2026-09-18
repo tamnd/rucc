@@ -61,6 +61,14 @@ fn body(text: &str, name: &str) -> String {
     rest[..end].to_string()
 }
 
+/// Whether the listing puts a zero in a register, which is what an output nothing wrote is owed.
+/// The back end spells that either as a move of a zero or, where the condition state is free, as an
+/// exclusive or of a register with itself, and which of the two is in front of a template is not
+/// what a test of the template is about.
+fn zeroed(body: &str) -> bool {
+    body.contains("$0,") || body.contains("xor")
+}
+
 #[test]
 fn a_barrier_is_no_instructions_at_all() {
     // The barrier was spent on the optimizer, which has finished by the time anything is written,
@@ -257,7 +265,7 @@ unsigned long f(unsigned long a, unsigned long b, unsigned long *hi) {
     let body = body(&asm("umul-ppmm", source), "f");
     assert!(body.contains("mulq"), "the multiply never reached the listing:\n{body}");
     assert!(!body.contains("imulq"), "the unsigned multiply became the signed one:\n{body}");
-    assert!(!body.contains("$0"), "a multiplicand was zeroed rather than read:\n{body}");
+    assert!(!zeroed(&body), "a multiplicand was zeroed rather than read:\n{body}");
 }
 
 #[test]
@@ -287,7 +295,7 @@ unsigned long f(unsigned long hi, unsigned long lo, unsigned long d, unsigned lo
         !body.contains("cqto"),
         "the high half was filled over the top of the program's:\n{body}"
     );
-    assert!(!body.contains("$0"), "a half of the dividend was zeroed rather than read:\n{body}");
+    assert!(!zeroed(&body), "a half of the dividend was zeroed rather than read:\n{body}");
 }
 
 #[test]
@@ -328,7 +336,7 @@ void g(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
         let between = &body[at..then];
         let over = between.matches('\n').count();
         assert_eq!(over, 1, "something got between the pair in {name}:\n{body}");
-        assert!(!body.contains("$0"), "an operand was zeroed rather than read in {name}:\n{body}");
+        assert!(!zeroed(&body), "an operand was zeroed rather than read in {name}:\n{body}");
     }
 }
 
@@ -347,7 +355,7 @@ fn an_output_read_before_it_is_written_holds_a_zero_rather_than_nothing() {
     let source = "long f(long x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
     let body = body(&asm("write-only", source), "f");
     assert!(body.contains("addq"), "the template never reached the listing:\n{body}");
-    assert!(body.contains("$0,"), "the operand it reads was never given a value:\n{body}");
+    assert!(zeroed(&body), "the operand it reads was never given a value:\n{body}");
 }
 
 #[test]
@@ -476,5 +484,5 @@ fn an_output_a_template_also_reads_is_read_as_a_zero() {
                   return m; }\n";
     let body = body(&asm("output-read", source), "f");
     assert!(body.contains("sbbq"), "the subtract with borrow never reached the listing:\n{body}");
-    assert!(body.contains("$0,"), "the operand it reads was never given a value:\n{body}");
+    assert!(zeroed(&body), "the operand it reads was never given a value:\n{body}");
 }

@@ -2747,7 +2747,9 @@ decl #0 x : int object external static defined
         let text = asm(&format!("{decl}long f(void) {{ struct wide w = {{ 7 }}; return w.c; }}\n"));
 
         assert!(!text.contains("memset"), "nothing calls the library: {text}");
-        assert!(text.contains("\tmovq\t$0, ") || text.contains("$0, %"), "the zero: {text}");
+        // Either spelling of a zero in a register, the move of one or the exclusive or of the
+        // register with itself that `rucc_codegen::shorten` writes instead where it is free.
+        assert!(text.contains("\tmovq\t$0, ") || text.contains("\txorq\t"), "the zero: {text}");
     }
 
     /// A copy too large to be worth unrolling is a call to the runtime, which is the C library on
@@ -4745,8 +4747,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // compiler stores goes: gcc writes the one instruction because it has a store that takes an
         // immediate and no rule here does. That is a rule this rule set is missing rather than
         // anything about the builtin, and it is the same two instructions a plain `*p = 0` makes.
+        // The register gets its zero from an exclusive or with itself rather than from a move of a
+        // zero, which is `rucc_codegen::shorten` writing the shorter of the two spellings.
         let text = asm("void f(int *p) { __sync_lock_release(p); }\n");
-        assert!(text.contains("movl\t$0, %eax"), "{text}");
+        assert!(text.contains("xorl\t%eax, %eax"), "{text}");
         assert!(text.contains("movl\t%eax, (%rdi)"), "{text}");
         assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
     }

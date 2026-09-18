@@ -29,7 +29,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
-    TargetInfo, TimingInsts, x86_64,
+    ShortInsts, TargetInfo, TimingInsts, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -47,6 +47,7 @@ use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
 use crate::pressure::{Cost, Pressure};
 use crate::schedule;
+use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
 use crate::weights;
@@ -78,6 +79,8 @@ pub struct Machine {
     pub shapes: &'static MachineInsts,
     /// How long each of the machine's instructions takes, and what it takes it on.
     pub timing: &'static TimingInsts,
+    /// Which of the machine's instructions have a shorter spelling of the same answer.
+    pub short: &'static ShortInsts,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -139,6 +142,7 @@ impl Machine {
             flags: &x86_64::FLAGS,
             shapes: &x86_64::MACHINE,
             timing: &x86_64::TIMING,
+            short: &x86_64::SHORT,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -564,6 +568,13 @@ pub fn compile_recording(
     // come between the two, and the layout is the other pass that writes such a pair. Running
     // here means there is nothing left that could put an instruction in the middle of one.
     compare::redundant(&mut func, machine.flags, machine.shapes, names);
+
+    // After that rather than before it, because a comparison it takes out is a write of the
+    // condition state that is gone with it, and this pass is asking which writes of that state are
+    // read. Running in front would see writes the output does not have and turn down rewrites that
+    // are allowed. Nothing here moves an instruction or changes a block, so being behind the
+    // layout's freeze costs it nothing.
+    shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names);
     Ok(func)
 }
 
