@@ -120,13 +120,17 @@ fn plain(form: Form) -> Timing {
         // and the latency is not a number anything waits on for the reason a store's is not:
         // nothing in a register is waiting for it.
         AluMr => (1 + LOAD, Unit::Store),
+        // The same again with the other source a constant, which costs what the register form
+        // costs. Where the second source came from is not something the machine spends a cycle on
+        // once the address is known, and a constant is on the instruction.
+        AluMi => (1 + LOAD, Unit::Store),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
         DivQuo | DivRem => (26, Unit::Div),
         // A load, and a store. A store's latency is not a number anything reads, since nothing in
         // a register waits on it, but it does take the one store unit while it runs.
         Load => (LOAD, Unit::Load),
-        Store | Probe => (1, Unit::Store),
+        Store => (1, Unit::Store),
         // The stack. A push is a store, a pop is a load, and neither is any cheaper than the
         // ordinary one because the address it uses is an ordinary address.
         Push => (1, Unit::Store),

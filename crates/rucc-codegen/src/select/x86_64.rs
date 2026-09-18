@@ -507,7 +507,9 @@ mod tests {
     /// at length.
     fn combine() -> Vec<&'static str> {
         let loads = crate::combine::FOLDS.iter().map(|fold| fold.into);
-        loads.chain(crate::combine::UPDATES.iter().map(|update| update.into)).collect()
+        let stores = crate::combine::UPDATES.iter().map(|update| update.into);
+        let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
+        loads.chain(stores).chain(constants).collect()
     }
 
     #[test]

@@ -39,11 +39,11 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
-    Align, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call,
-    Cmov, Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
+    Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
+    Call, Cmov, Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
     CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem,
     Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87,
-    Prefetch, Probe, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl,
+    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl,
     ShiftRi, Spin, Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
@@ -87,6 +87,29 @@ pub enum Form {
     /// so there is no sixteen, thirty two or sixty four bit form of it that leaves its answer in
     /// memory, and the five operations that do are the ones with rows.
     AluMr,
+    /// The same instruction as [`Form::AluRi`] working on memory rather than on a register.
+    ///
+    /// An addressing mode and an immediate and no register of its own, which no other form here is.
+    /// The registers in the vector are the ones the addressing mode brought, and there is nothing
+    /// in front of them, because the constant is on the instruction and the place the answer goes
+    /// is the place the other source came from. That makes it the shortest description in the
+    /// table and an empty one.
+    ///
+    /// It does not commute and does not need to. [`Form::AluMr`] has a left source and a right
+    /// source and which of them the memory is decides whether a subtraction can use it. Here the
+    /// memory is always the left source, because the immediate cannot be anywhere but on the
+    /// instruction, so `subl $1, (%rax)` is the only arrangement there is and it is the one that
+    /// takes the constant away from the place. The multiply is missing for the reason it is
+    /// missing from [`Form::AluMr`]: `imul` writes a register whatever its sources are.
+    ///
+    /// Two things write one. `rucc_codegen::combine` writes one out of a load, an arithmetic
+    /// against a constant and a store of the same place, which is the reason the form is here. And
+    /// a prologue taking a frame under `-fstack-clash-protection` writes the eight bit inclusive or
+    /// with zero, which touches the page an address is on and puts back the byte that was already
+    /// there. That one is the same instruction as any other member and is described the same way,
+    /// rather than having a form to itself: what a probe wants out of it is the write and not the
+    /// value, and the machine does not know the difference.
+    AluMi,
     /// Two-address arithmetic on one register, which is negation and complement.
     UnaryR,
     /// A two-address shift by a constant.
@@ -143,20 +166,6 @@ pub enum Form {
     /// A store: an addressing mode the value goes to, and the register it comes out of. It
     /// writes no register at all, which makes it the first form here with no definition in it.
     Store,
-    /// A touch of the page an address is on, which reads it and writes back what was already
-    /// there.
-    ///
-    /// An addressing mode and an immediate and no register at all, which no other form here is.
-    /// The immediate is the zero that makes the instruction leave the byte alone, and it is
-    /// written rather than assumed because it is what the machine reads. The address is where the
-    /// stack pointer now is, so the registers in the vector are the ones the addressing mode
-    /// brought and the description has none of its own.
-    ///
-    /// Nothing selects one. The only thing that writes one is a prologue taking a frame under
-    /// `-fstack-clash-protection`, which is `rucc_codegen::finish`, and it is described here
-    /// because the allocator and the encoder read this table about every instruction in a
-    /// function whoever wrote it.
-    Probe,
     /// The value a function gives back, in the register it is given back in.
     ///
     /// It is not the `ret` instruction and it encodes to nothing. What the selector can do about
@@ -691,6 +700,12 @@ static LOAD: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 // same shape and shares the description: one register read, an addressing mode, and nothing the
 // allocator has to find a place for.
 static STORE: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// The same arithmetic again with the register source replaced by a constant, which leaves no
+// register to describe at all. Everything the instruction reads is either in the addressing mode,
+// where the builder puts it, or on the instruction as an immediate, where nothing can be allocated
+// to it. An empty description is the whole truth about it and is not the same emptiness a call has:
+// a call's operands are a fact about a signature this table cannot see, and these really are none.
+static ALU_MI: [OperandDesc; 0] = [];
 // An integer comes back in `rax` on every convention this machine has, which is why the register
 // is written here rather than read out of the convention the session was given. A test checks it
 // against `SYSV` and `WIN64` rather than leaving it as something a reader has to take on trust,
@@ -834,6 +849,7 @@ impl Form {
             Lea => &ADDRESS,
             Load => &LOAD,
             AluMr | Store => &STORE,
+            AluMi => &ALU_MI,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
@@ -847,7 +863,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Probe | Landing | Nop | Spin | Trap | Align => &LEAVE,
+            Ret | Barrier | Landing | Nop | Spin | Trap | Align => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -872,7 +888,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | ShiftRi | CmpSetRi | CmpRi | Probe)
+        matches!(self, LoadImm | AluRi | AluMi | ShiftRi | CmpSetRi | CmpRi)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -883,6 +899,7 @@ impl Form {
             Lea | Load
                 | AluRm
                 | AluMr
+                | AluMi
                 | Store
                 | LoadVec
                 | StoreVec
@@ -891,7 +908,6 @@ impl Form {
                 | CtrlX87
                 | CmpXchg
                 | Rmw
-                | Probe
                 | Prefetch
         )
     }
@@ -922,6 +938,7 @@ impl Form {
             self,
             Load | AluRm
                 | AluMr
+                | AluMi
                 | Store
                 | LoadVec
                 | StoreVec
@@ -930,7 +947,6 @@ impl Form {
                 | CtrlX87
                 | CmpXchg
                 | Rmw
-                | Probe
                 | Prefetch
                 | Push
                 | Pop
@@ -1035,6 +1051,30 @@ pub static INSTS: &[(&str, Form)] = &[
     ("xor_mr_16", AluMr),
     ("xor_mr_32", AluMr),
     ("xor_mr_64", AluMr),
+    // The same five again with the other source a constant rather than a register, which is what a
+    // program that adds one to a counter in memory needs. The eight bit inclusive or is also the
+    // instruction a probing prologue writes to touch a page, and it is one row here rather than two
+    // because it is one instruction.
+    ("add_mi_8", AluMi),
+    ("add_mi_16", AluMi),
+    ("add_mi_32", AluMi),
+    ("add_mi_64", AluMi),
+    ("sub_mi_8", AluMi),
+    ("sub_mi_16", AluMi),
+    ("sub_mi_32", AluMi),
+    ("sub_mi_64", AluMi),
+    ("and_mi_8", AluMi),
+    ("and_mi_16", AluMi),
+    ("and_mi_32", AluMi),
+    ("and_mi_64", AluMi),
+    ("or_mi_8", AluMi),
+    ("or_mi_16", AluMi),
+    ("or_mi_32", AluMi),
+    ("or_mi_64", AluMi),
+    ("xor_mi_8", AluMi),
+    ("xor_mi_16", AluMi),
+    ("xor_mi_32", AluMi),
+    ("xor_mi_64", AluMi),
     // Arithmetic, register with immediate.
     ("add_ri_8", AluRi),
     ("add_ri_16", AluRi),
@@ -1238,8 +1278,6 @@ pub static INSTS: &[(&str, Form)] = &[
     // reason it widens one with the byte widenings. Separate names for the same reason as well.
     ("mov_rm_bit", Load),
     ("mov_mr_bit", Store),
-    // Touching a page without changing it, which is the whole of what a probing prologue writes.
-    ("or_mi_8", Probe),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),
@@ -1661,7 +1699,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 453);
+        assert_eq!(described, 472);
     }
 
     #[test]
@@ -1722,7 +1760,7 @@ mod tests {
                             | CtrlX87
                             | ArithX87
                             | UnaryX87
-                            | Probe
+                            | AluMi
                             | Landing
                             | Nop
                             | Spin
@@ -1881,11 +1919,11 @@ mod tests {
             assert!(!shape.takes_mem());
         }
         // Nothing else here has an empty operand list and an address, and the two halves of that
-        // are worth saying separately. A call has an empty list and no address, and every other
+        // are worth saying separately. A call has an empty list and no address, and almost every
         // instruction that carries an address has an operand for the end of it that is a register.
-        // The probe is the one exception the other way round: it has an address and an empty list,
-        // because the register the address ends in is the stack pointer and the addressing mode is
-        // what brings it.
+        // Arithmetic against a constant in memory is the one exception the other way round: it has
+        // an address and an empty list, because everything it reads is either a register the
+        // addressing mode brought or the constant on the instruction.
         for &(name, shape) in INSTS {
             assert!(
                 shape.operands().is_empty()
@@ -1895,7 +1933,7 @@ mod tests {
                             | Jmp
                             | Ret
                             | Barrier
-                            | Probe
+                            | AluMi
                             | Landing
                             | Nop
                             | Spin
