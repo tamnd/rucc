@@ -101,8 +101,8 @@ fn plain(form: Form) -> Timing {
         // The conditional move on its own belongs here rather than with the pair below it: what it
         // waits for is a comparison somebody else wrote, and once those bits are there it is the
         // one cycle the pair's second half is.
-        LoadImm | AluRr | AluCarry | AluRi | UnaryR | ShiftRi | Move | Lea | Convert | Cmp
-        | CmpRi | Test | Set | Cmov => (1, Unit::Int),
+        LoadImm | AluRr | AluCarry | AluRi | AluCarryI | UnaryR | ShiftRi | Move | Lea
+        | Convert | Cmp | CmpRi | Test | Set | Cmov => (1, Unit::Int),
         // A shift by a count in a register, which is the one shift that is not one cycle. The
         // machine has to read the count register and the condition state together, and what it
         // does about that has cost a cycle on every core here.
