@@ -300,6 +300,185 @@
       (spec (= (bvxor x x) (result))))
 
 
+;; A comparison of a value with itself.
+;;
+;; Ten predicates and one name written in two places. Every one of them is decided before the value
+;; is: a value equals itself, is not below itself and is not above itself, so `eq`, `le` and `ge`
+;; are true and `ne`, `lt` and `gt` are false, at both readings of the bits and at every width.
+;;
+;; This is not a shape anybody writes. It is what another rule leaves behind, which is the reason it
+;; belongs in tier one rather than in a pass that goes looking for it. `x >> 0 != x` is a real test
+;; in `gcc.c-torture/execute/shiftopt-1.c`, and by the time the comparison is reached the shift above
+;; it has already become `x`, so the rule that matters is the one that reads what the rule before it
+;; produced. A macro that expands its argument twice is where the rest of them come from. Without
+;; this the machine compares a register against itself and branches on the answer.
+;;
+;; No floating point comparison is here, and there is no width at which one could be. A value is not
+;; equal to itself when it is a NaN, so `fcmp` of one operand with itself is not decided by the shape
+;; of the term and a rule for it would have to know that the operand is not a NaN, which is a fact
+;; about the function rather than about the instruction.
+
+(rule (simplify (icmp_eq.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 1)
+      (spec (= (ite (= x x) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 1)
+      (spec (= (ite (= x x) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 1)
+      (spec (= (ite (= x x) 1 0) (result))))
+
+(rule (simplify (icmp_eq.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 1)
+      (spec (= (ite (= x x) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 0)
+      (spec (= (ite (not (= x x)) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 0)
+      (spec (= (ite (not (= x x)) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 0)
+      (spec (= (ite (not (= x x)) 1 0) (result))))
+
+(rule (simplify (icmp_ne.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 0)
+      (spec (= (ite (not (= x x)) 1 0) (result))))
+
+(rule (simplify (icmp_slt.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvslt x x) 1 0) (result))))
+
+(rule (simplify (icmp_slt.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvslt x x) 1 0) (result))))
+
+(rule (simplify (icmp_slt.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvslt x x) 1 0) (result))))
+
+(rule (simplify (icmp_slt.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvslt x x) 1 0) (result))))
+
+(rule (simplify (icmp_sle.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsle x x) 1 0) (result))))
+
+(rule (simplify (icmp_sle.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsle x x) 1 0) (result))))
+
+(rule (simplify (icmp_sle.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsle x x) 1 0) (result))))
+
+(rule (simplify (icmp_sle.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsle x x) 1 0) (result))))
+
+(rule (simplify (icmp_sgt.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvsgt x x) 1 0) (result))))
+
+(rule (simplify (icmp_sgt.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvsgt x x) 1 0) (result))))
+
+(rule (simplify (icmp_sgt.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvsgt x x) 1 0) (result))))
+
+(rule (simplify (icmp_sgt.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvsgt x x) 1 0) (result))))
+
+(rule (simplify (icmp_sge.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsge x x) 1 0) (result))))
+
+(rule (simplify (icmp_sge.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsge x x) 1 0) (result))))
+
+(rule (simplify (icmp_sge.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsge x x) 1 0) (result))))
+
+(rule (simplify (icmp_sge.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvsge x x) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvult x x) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvult x x) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvult x x) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvult x x) 1 0) (result))))
+
+(rule (simplify (icmp_ule.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvule x x) 1 0) (result))))
+
+(rule (simplify (icmp_ule.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvule x x) 1 0) (result))))
+
+(rule (simplify (icmp_ule.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvule x x) 1 0) (result))))
+
+(rule (simplify (icmp_ule.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvule x x) 1 0) (result))))
+
+(rule (simplify (icmp_ugt.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvugt x x) 1 0) (result))))
+
+(rule (simplify (icmp_ugt.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvugt x x) 1 0) (result))))
+
+(rule (simplify (icmp_ugt.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvugt x x) 1 0) (result))))
+
+(rule (simplify (icmp_ugt.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 0)
+      (spec (= (ite (bvugt x x) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i8 x) (value.i8 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvuge x x) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i16 x) (value.i16 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvuge x x) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i32 x) (value.i32 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvuge x x) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i64 x) (value.i64 x)))
+      (iconst.i1 1)
+      (spec (= (ite (bvuge x x) 1 0) (result))))
+
+
 ;; The bitwise operations against all zeros and against all ones.
 ;;
 ;; Six identities and four absorbing halves. An `and` with nothing keeps nothing and an `or` with
