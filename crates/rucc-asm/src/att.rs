@@ -333,6 +333,23 @@ impl Writer<'_> {
             let _ = writeln!(self.out, "\t.p2align\t{}, 0x90", boundary.trailing_zeros());
             return Ok(());
         }
+        // The other one, which is the bytes a template wrote out as themselves. They come back the
+        // way they went in, since the directive is what the program wrote and an assembler reading
+        // this listing has to get the same bytes out of it. One directive, because that is how many
+        // the instruction carries.
+        if opcode == x86_64::LITERAL {
+            let bytes: Vec<u8> =
+                data.imm.map(|imm| x86_64::unpacked(func[imm].0).collect()).unwrap_or_default();
+            if bytes.is_empty() {
+                return Err(Error::Opcode {
+                    func: func_name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            }
+            let written: Vec<String> = bytes.iter().map(|byte| format!("0x{byte:02x}")).collect();
+            let _ = writeln!(self.out, "\t.byte\t{}", written.join(", "));
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: func_name.to_owned(), opcode: spelled.to_owned() });
         };

@@ -273,6 +273,26 @@ impl Assembler<'_> {
             }
             return Ok(());
         }
+        // The other one, which is the bytes a template wrote out as themselves. There is nothing to
+        // encode: the program already said what the processor is to be handed, so they go down as
+        // they are.
+        if opcode == x86_64::LITERAL {
+            let Some(imm) = data.imm else {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            let before = self.text.bytes.len();
+            self.text.bytes.extend(x86_64::unpacked(self.func[imm].0));
+            if self.text.bytes.len() == before {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            }
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
         };
@@ -540,6 +560,32 @@ mod tests {
         // The section has to be told as well. A function aligned to eight inside a section aligned
         // to one is aligned to eight in its own reckoning and to nothing at all in the program's.
         assert!(text.align >= 8, "{}", text.align);
+    }
+
+    /// The bytes a template wrote out itself, which go down as they are.
+    ///
+    /// `xgetbv` written as its three bytes, which is how every program that has one writes it,
+    /// between two instructions so that what is checked is that the bytes land where the program
+    /// put them and not just that they land.
+    #[test]
+    fn a_byte_out_of_a_template_is_that_byte_and_nothing_around_it() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
+            let byte = Opcode::new(names.intern("x64.byte"));
+            let two = |func: &mut Func| {
+                func.build(block, add)
+                    .operand(Operand::write(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RCX), GPR))
+                    .finish();
+            };
+            two(func);
+            let bytes = x86_64::packed(&[0x0f, 0x01, 0xd0]).expect("three bytes fit");
+            func.build(block, byte).imm(bytes).finish();
+            two(func);
+        });
+        assert_eq!(hex(&text.bytes), "01 c8 0f 01 d0 01 c8");
     }
 
     #[test]

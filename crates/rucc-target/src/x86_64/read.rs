@@ -123,7 +123,7 @@ use std::borrow::Cow;
 
 use crate::operand::{Constraint, OperandDesc};
 use crate::regs::{PhysReg, Segment};
-use crate::x86_64::insts::{ALIGN, form};
+use crate::x86_64::insts::{ALIGN, LITERAL, form, packed};
 use crate::x86_64::text::{Arg, Shape, Width, gpr_named, machine, written};
 
 /// What one operand of an instruction in a template is filled with.
@@ -290,10 +290,18 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
             continue;
         }
         // A directive before an instruction, because a directive is not a mnemonic and would be
-        // refused by the one below. Only the alignments are read and everything else falls through
-        // to that refusal, which is what a template asking for a section or a symbol gets. A repeat
-        // prefix in front of one is half an instruction and is refused like any other.
+        // refused by the one below. Only the alignments and `.byte` are read and everything else
+        // falls through to that refusal, which is what a template asking for a section or a symbol
+        // gets. A repeat prefix in front of one is half an instruction and is refused like any
+        // other.
         if let Some(line) = alignment(text) {
+            if carried {
+                return None;
+            }
+            steps.push(Step::Line(line));
+            continue;
+        }
+        if let Some(line) = literal(text) {
             if carried {
                 return None;
             }
@@ -414,6 +422,41 @@ fn alignment(text: &str) -> Option<Line> {
         return None;
     }
     Some(Line { opcode: ALIGN, operands: Vec::new(), at: None, imm: Some(i64::from(bytes)) })
+}
+
+/// The bytes that line puts in the instruction stream, or nothing for a line that is not `.byte`.
+///
+/// One [`Line`] for the directive rather than one per byte, because the bytes of one directive are
+/// one instruction of the program: they reach a register once between them, and two instructions
+/// with a place the allocator may write in the middle would be a different thing from what was
+/// written. They travel in the immediate, which is what [`crate::x86_64::packed`] is for.
+///
+/// What a template writes this for is an instruction its assembler was older than. `xgetbv` is the
+/// one that still turns up, written as `.byte 0x0f, 0x01, 0xd0` because the mnemonic arrived in 2008
+/// and the code asking whether the operating system has agreed to save the wide registers is older
+/// than that. It is the one shape of hand written assembly that needs no assembler, since the bytes
+/// are already the answer, and it is not the same thing as a mnemonic this machine has no table
+/// entry for.
+///
+/// A number that is not one byte is refused rather than truncated, and so is a directive with more
+/// bytes in it than fit. Both spellings of a byte are taken, so `0xd0` and `-48` are the same one,
+/// because an assembler takes both and a program that wrote the second meant the first.
+fn literal(text: &str) -> Option<Line> {
+    let (name, rest) = text.split_once(char::is_whitespace)?;
+    if name != ".byte" {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    for piece in rest.split(',') {
+        let byte = match number(piece.trim())? {
+            value @ 0..=255 => value,
+            value @ -128..=-1 => value + 256,
+            _ => return None,
+        };
+        bytes.push(u8::try_from(byte).ok()?);
+    }
+    let imm = packed(&bytes)?;
+    Some(Line { opcode: LITERAL, operands: Vec::new(), at: None, imm: Some(imm) })
 }
 
 /// The largest boundary a template may ask for, which is a page.
@@ -780,6 +823,7 @@ fn number(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::x86_64::insts::unpacked;
 
     /// Every instruction in a template that has nothing in it but instructions.
     ///
@@ -1128,7 +1172,7 @@ mod tests {
         assert_eq!(read("js again", &[]), None, "a condition this backend has no opcode for");
         assert_eq!(read("jc away", &[]), None, "a jump to a label the template does not define");
         assert_eq!(read("again:\njc again\nagain:", &[]), None, "one name on two labels");
-        assert_eq!(plain(".byte 0", &[]), None, "a directive");
+        assert_eq!(plain(".skip 16", &[]), None, "a directive that is not one of the two read");
         assert_eq!(plain("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");
         assert_eq!(plain("movq %%cs:0, %0", &[]), None, "a segment nothing here reaches");
         assert_eq!(plain("movq %%xmm0, %0", &[]), None, "a register in the other file");
@@ -1247,5 +1291,45 @@ mod tests {
         assert_eq!(plain(".p2align four", &[]), None, "a boundary that is not a number");
         assert_eq!(plain(".skip 16", &[]), None, "a directive that is not an alignment");
         assert_eq!(plain("rep; .p2align 4", &[]), None, "a prefix in front of one");
+    }
+
+    /// What a program writes when its assembler was older than the instruction it wants. `xgetbv`
+    /// is the one that still turns up, and libwebp writes it this way in `src/dsp/cpu.c` for the
+    /// same reason everybody else does, which is that the code asking whether the operating system
+    /// has enabled the wide registers is older than the mnemonic.
+    #[test]
+    fn a_byte_directive_is_read_as_one_instruction_carrying_its_bytes() {
+        let lines = plain(".byte 0x0f, 0x01, 0xd0", &[]).expect("a run of bytes");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opcode, LITERAL);
+        assert!(lines[0].operands.is_empty());
+        assert_eq!(lines[0].at, None);
+        let bytes: Vec<u8> = unpacked(lines[0].imm.expect("the bytes")).collect();
+        assert_eq!(bytes, [0x0f, 0x01, 0xd0]);
+        // Both spellings of a byte, since an assembler takes both and a program that wrote the
+        // second meant the first.
+        let lines = plain(".byte -48", &[]).expect("a byte written as a negative number");
+        let bytes: Vec<u8> = unpacked(lines[0].imm.expect("the bytes")).collect();
+        assert_eq!(bytes, [0xd0]);
+        // And one in front of an instruction, which is what a template that writes both looks like.
+        let lines = plain(".byte 0x90\n\tpause", &[]).expect("a byte in front of one");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].opcode, LITERAL);
+        assert_eq!(lines[1].opcode, "pause");
+    }
+
+    /// A number that is not a byte is refused rather than truncated, because a program that wrote
+    /// one meant something this cannot give it and writing the low eight bits would be a program
+    /// that builds and is not the one that was written.
+    #[test]
+    fn a_byte_directive_that_is_not_bytes_is_refused() {
+        assert_eq!(plain(".byte 256", &[]), None, "a number wider than a byte");
+        assert_eq!(plain(".byte -129", &[]), None, "a negative number wider than a byte");
+        assert_eq!(plain(".byte 0x0f, two", &[]), None, "a byte that is not a number");
+        assert_eq!(plain(".byte", &[]), None, "a directive with nothing after it");
+        assert_eq!(plain(".byte 0x0f,", &[]), None, "a list with a hole at the end");
+        assert_eq!(plain(".byte 1,2,3,4,5,6,7,8", &[]), None, "more bytes than fit");
+        assert_eq!(plain(".word 0x0f01", &[]), None, "a directive that is not `.byte`");
+        assert_eq!(plain("rep; .byte 0x90", &[]), None, "a prefix in front of one");
     }
 }

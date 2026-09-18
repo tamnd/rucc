@@ -953,6 +953,12 @@ static TEXT: &[(&str, &[Written])] = &[
     // spell. The number is on the instruction rather than here, since two alignments are the same
     // opcode asking for different boundaries.
     ("align", &[]),
+    // One byte of the instruction stream, written as no instructions for the same reason the
+    // alignment above is. A template that says `.byte 0x0f, 0x01, 0xd0` has already said what the
+    // processor is to be handed, so there is no mnemonic to spell: the listing writes the directive
+    // back out and the object writer puts the byte down. The byte is on the instruction, since
+    // every one of them is a different byte.
+    ("byte", &[]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of
@@ -1434,7 +1440,7 @@ pub fn gpr_name(reg: PhysReg, width: Width) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::operand::Constraint;
-    use crate::x86_64::insts::{ALIGN, Form, INSTS, form};
+    use crate::x86_64::insts::{ALIGN, Form, INSTS, LITERAL, form};
     use crate::x86_64::{GPR, REGS};
 
     /// Every index into the operand vector that one of these arguments names.
@@ -1598,6 +1604,8 @@ mod tests {
         // nothing behind at all, and it leaves a directive, which is not a mnemonic and so is not
         // anything this table could spell. Each writer puts its own down by name.
         assert_eq!(written(ALIGN), Some([].as_slice()));
+        // And a byte out of a template, which is a directive in one writer and a byte in the other.
+        assert_eq!(written(LITERAL), Some([].as_slice()));
         for &(name, insts) in TEXT {
             let form = form(name).expect("every written opcode is a described opcode");
             assert_eq!(
@@ -1612,6 +1620,7 @@ mod tests {
                         | Form::ArgValVec
                         | Form::BrCond
                         | Form::Align
+                        | Form::Literal
                 ),
                 "{name} and whether it is an instruction disagree"
             );

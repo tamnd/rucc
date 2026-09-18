@@ -318,7 +318,12 @@ mod tests {
     /// is nothing about it for a rule to name, and an opcode with no operands and no addressing mode
     /// has nothing. It is not an instruction at all, which is more than the test asks and is the
     /// reason no rule could have been written for it however the rule language grew.
-    const TEMPLATE: &[&str] = &["cpuid", "pause", "align"];
+    ///
+    /// A byte out of a template is the fourth and is there for the same reason as the alignment,
+    /// one step further still: it is not an instruction, and what it holds is a byte the program
+    /// wrote out itself because its assembler was older than the instruction it wanted. There is
+    /// nothing for a rule to have said about a number a program handed the processor directly.
+    const TEMPLATE: &[&str] = &["cpuid", "pause", "align", "byte"];
 
     /// The instructions a template asks for that are right because of the line above them.
     ///
