@@ -65,7 +65,7 @@ The second row is the one that makes Darwin arm64 a *separate ABI* rather than A
 - **Anything not exactly 1, 2, 4 or 8 bytes is passed by hidden reference** to a caller-allocated temporary. This is much simpler than SysV's classification and much easier to get *almost* right, because the common cases coincide.
 - **Variadic floats go in both** the SSE register and the corresponding integer register.
 - **No red zone.**
-- `.pdata`/`.xdata` unwind information encodes the prologue as a sequence of unwind codes, and only a restricted set of prologue shapes is expressible. The prologue emitter is therefore constrained by the *exception* format, which is a coupling that does not exist on ELF.
+- `.pdata`/`.xdata` unwind information encodes the prologue as a sequence of unwind codes, and only a restricted set of prologue shapes is expressible. The prologue emitter is therefore constrained by the *exception* format, which is a coupling that does not exist on ELF. The shape this compiler writes and the codes have no spelling for is the frame pointer one, which establishes the pointer before it takes the frame and so leaves the size of the frame out of the rows entirely; it is refused by name until the prologue is reordered to the shape the platform expects, and document 07.4 says what is written for the shapes that do fit.
 - `long double` is `double`, and the leading-underscore rule differs between i386 and x64.
 
 ## 6.5 i386, the one that looks easy
