@@ -1228,6 +1228,14 @@ static ENCODINGS: &[Encoding] = &[
     // the eight that share `0xFF` and sits one place along from the call, and it is sixty four bits
     // without a prefix saying so for the same reason the call is.
     bytes("jmp", &R, Long, &[0xFF], ext(0, 4), NO_IMM),
+    // And the same mnemonic through an address, which is the row a jump table wants. A compiler
+    // that owns both halves loads the entry and jumps through the register, which is the row above,
+    // and a file written by hand writes the load and the jump as one instruction because it can:
+    // `jmp *72(%r8,%rsi,8)` in libgmp's `mpn/x86_64/mod_34lsub1.asm` is the table at a fixed offset
+    // from a register, indexed by a count, eight bytes to an entry. Same opcode and same three bits
+    // as the register form, since what tells the two apart is the addressing byte rather than
+    // anything in front of it.
+    bytes("jmp", &M, Long, &[0xFF], ext(0, 4), NO_IMM),
     // What a prologue and an epilogue are made of. A push and a pop move eight bytes without
     // being told to, so neither carries the prefix that would say so.
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),

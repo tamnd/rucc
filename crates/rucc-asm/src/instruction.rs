@@ -793,6 +793,21 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_through_a_table_is_the_same_instruction_with_an_address_in_it() {
+        // `jmp *72(%r8,%rsi,8)` in libgmp's `mpn/x86_64/mod_34lsub1.asm`, which is a table of
+        // places at a fixed offset from a register, indexed by a count, eight bytes to an entry. A
+        // compiler that owns both halves loads the entry and jumps through the register, and a file
+        // written by hand writes the load and the jump as one instruction because it can.
+        let written = one("jmp", &["*72(%r8,%rsi,8)".to_owned()]).expect("read");
+        // The REX byte carries the base being one of the high eight, the addressing byte names the
+        // four bits that tell this from the other seven instructions sharing the opcode and says a
+        // scaled index follows, and the byte after it is the scale, the index and the base.
+        assert_eq!(written.bytes, vec![0x41, 0xff, 0x64, 0xf0, 0x48]);
+        // Nothing for a linker to do, since where it goes is a number the machine works out.
+        assert!(written.holes.is_empty());
+    }
+
+    #[test]
     fn an_instruction_with_no_operands() {
         assert_eq!(bytes("ret"), vec![0xc3]);
         assert_eq!(bytes("nop"), vec![0x90]);
