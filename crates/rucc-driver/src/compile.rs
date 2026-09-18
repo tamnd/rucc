@@ -1688,7 +1688,8 @@ decl #0 x : int object external static defined
             "typedef long long v2di __attribute__((__vector_size__(16)));\n",
             "typedef long long v2di_u __attribute__((__vector_size__(16), __aligned__(1)));\n",
         );
-        let loaded = body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"));
+        let loaded =
+            body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"));
         assert_eq!(loaded.matches("align 1\n").count(), 2, "{loaded}");
         assert!(!loaded.contains("align 16"), "{loaded}");
         // The store side, which travels as a copy into whatever the pointer names and so carries
@@ -1696,7 +1697,8 @@ decl #0 x : int object external static defined
         let stored = body(&format!("{prefix}void f(void *p, v2di b) {{ *(v2di_u *)p = b; }}"));
         assert!(stored.contains("memcpy %0, %3, size 16, align 1"), "{stored}");
         // And the aligned spelling of the same two, which is where sixteen is the right answer.
-        let aligned = body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"));
+        let aligned =
+            body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"));
         assert!(aligned.contains("align 16"), "{aligned}");
     }
 
