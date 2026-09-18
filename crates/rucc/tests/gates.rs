@@ -22,16 +22,20 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Two identical functions, each with a multiplication of two constants in it for folding to
 /// find, and each with the constants left over afterwards for dead code elimination to clear up.
+///
+/// Neither constant is a power of two and neither is one of the small ones tier one is about,
+/// because the multiplication is the marker these tests read and a marker another pass would
+/// rewrite says nothing about the pass being gated. Fifteen is the product.
 const SOURCE: &str = "\
 int f(int x) {
     int a = 3;
-    int b = 4;
+    int b = 5;
     return x + (a * b);
 }
 
 int g(int x) {
     int a = 3;
-    int b = 4;
+    int b = 5;
     return x + (a * b);
 }
 ";
@@ -75,14 +79,14 @@ fn body<'a>(ir: &'a str, name: &str) -> &'a str {
 fn without_a_gate_the_two_functions_come_out_the_same() {
     let ir = ir("plain", &["-O2"]);
     assert_eq!(body(&ir, "f").replacen("@f", "@g", 1), body(&ir, "g"));
-    assert!(body(&ir, "f").contains("iconst.i32 12"), "{ir}");
+    assert!(body(&ir, "f").contains("iconst.i32 15"), "{ir}");
     assert!(!body(&ir, "f").contains("mul"), "{ir}");
 }
 
 #[test]
 fn disabling_a_pass_for_one_function_leaves_the_other_optimized() {
     let ir = ir("disable", &["-O2", "-fdisable-fold=g"]);
-    assert!(body(&ir, "f").contains("iconst.i32 12"), "f was not gated:\n{ir}");
+    assert!(body(&ir, "f").contains("iconst.i32 15"), "f was not gated:\n{ir}");
     assert!(body(&ir, "g").contains("mul"), "g kept the multiply it was told to keep:\n{ir}");
 }
 
@@ -104,7 +108,7 @@ fn a_function_is_named_by_its_number_as_well_as_by_its_name() {
 fn enabling_a_pass_reaches_one_function_at_a_level_that_runs_nothing() {
     let ir = ir("enable", &["-O0", "-fenable-fold=1"]);
     assert!(body(&ir, "f").contains("mul"), "nothing asked for f:\n{ir}");
-    assert!(body(&ir, "g").contains("iconst.i32 12"), "g was asked for:\n{ir}");
+    assert!(body(&ir, "g").contains("iconst.i32 15"), "g was asked for:\n{ir}");
 }
 
 #[test]

@@ -4092,6 +4092,23 @@ impl<'a> Lowering<'a> {
                 out.imm = i64::try_from(*value).ok();
                 Ok(at + 1)
             }
+            // A number the rule worked out of the ones it matched rather than one it wrote down,
+            // which is an immediate once it has been worked out and is read here as one. It gives
+            // nothing back when a binding it reads is a register, and a replacement that cannot be
+            // built is a rule this file and the matcher disagree about, which is what `unsupported`
+            // is for.
+            Some(Piece::Computed { work, .. }) => {
+                let matched: Vec<Option<i128>> = bindings
+                    .iter()
+                    .map(|term| match *term {
+                        Term::Num(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                let number = work(&matched).ok_or_else(|| self.unsupported(inst))?;
+                out.imm = i64::try_from(number).ok();
+                Ok(at + 1)
+            }
             Some(Piece::Var { index, .. }) => {
                 match bindings.get(*index) {
                     Some(&Term::Reg(value)) => {

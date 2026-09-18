@@ -35,6 +35,20 @@
 //! The language a guard may be written in is small and this module is where it ends. A head it
 //! does not know is refused with the line it is on, rather than emitted and discovered as a
 //! compile error in generated code, which is the sort of message nobody can act on.
+//!
+//! # Computed numbers
+//!
+//! A replacement may work a number out of the numbers the pattern matched, and such a term
+//! becomes a function of the bindings in exactly the way a guard does. That is what lets a rule
+//! be written once per width rather than once per constant: multiplying by a power of two is a
+//! shift by the log of it, and the log is a number no rule can write down until it has seen which
+//! power it matched.
+//!
+//! What makes a term in a replacement a computation rather than something to build is its head
+//! being one of the arithmetic ones, which is the same closed list a guard is written in. So the
+//! two halves of a rule compute in one language, a head this module does not know is refused the
+//! same way in both, and the crate that runs the table gets a `Piece::Computed` holding a
+//! function rather than a term it would have to evaluate itself.
 
 use std::fmt::Write as _;
 
@@ -47,6 +61,8 @@ const HELPERS: &[(&str, &str)] = &[
     ("sign_extend", SIGN_EXTEND),
     ("zero_extend", ZERO_EXTEND),
     ("extract", EXTRACT),
+    ("power_of_two", POWER_OF_TWO),
+    ("trailing_zeros", TRAILING_ZEROS),
     ("shifted", SHIFTED),
     ("low", LOW),
 ];
@@ -72,10 +88,18 @@ pub fn emit(source: &str, rules: &[Rule], matcher: &Matcher) -> Result<String, V
         return Err(errors);
     }
 
+    let mut computed = Vec::new();
+    let mut body = String::new();
+    replacements(&mut body, source, rules, &guards, &mut wanted, &mut computed, &mut errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
     header(&mut out, source, rules, matcher);
     nodes(&mut out, matcher);
-    replacements(&mut out, source, rules, &guards);
+    out.push_str(&body);
     out.push_str(&guards.iter().flatten().map(String::as_str).collect::<String>());
+    out.push_str(&computed.concat());
     helpers(&mut out, &wanted);
     Ok(out)
 }
@@ -165,7 +189,16 @@ fn nodes(out: &mut String, matcher: &Matcher) {
 }
 
 /// The rules, one array entry each, in the order the file writes them.
-fn replacements(out: &mut String, source: &str, rules: &[Rule], guards: &[Option<String>]) {
+#[allow(clippy::too_many_arguments)]
+fn replacements(
+    out: &mut String,
+    source: &str,
+    rules: &[Rule],
+    guards: &[Option<String>],
+    wanted: &mut Vec<&'static str>,
+    computed: &mut Vec<String>,
+    errors: &mut Vec<Error>,
+) {
     out.push_str(
         "\n/// The rules, in the order the rule file writes them, which is the order the\n\
          /// `accept` of a trie node names.\nstatic RULES: &[Rule] = &[\n",
@@ -177,7 +210,7 @@ fn replacements(out: &mut String, source: &str, rules: &[Rule], guards: &[Option
         let _ = writeln!(out, "        pattern: {pattern:?},");
         out.push_str("        replacement: &[");
         let bound = bound_names(&rule.pattern);
-        for piece in pieces(&rule.replacement, &bound) {
+        for piece in pieces(source, &rule.replacement, &bound, wanted, computed, errors) {
             let _ = write!(out, "\n            {piece},");
         }
         out.push_str("\n        ],\n");
@@ -213,13 +246,29 @@ fn bound_names(pattern: &Term) -> Vec<String> {
 }
 
 /// One replacement term, flattened into the pieces that build it, in pre-order.
-fn pieces(term: &Term, bound: &[String]) -> Vec<String> {
+fn pieces(
+    source: &str,
+    term: &Term,
+    bound: &[String],
+    wanted: &mut Vec<&'static str>,
+    computed: &mut Vec<String>,
+    errors: &mut Vec<Error>,
+) -> Vec<String> {
     let mut out = Vec::new();
-    push_pieces(term, bound, &mut out);
+    push_pieces(source, term, bound, wanted, computed, errors, &mut out);
     out
 }
 
-fn push_pieces(term: &Term, bound: &[String], out: &mut Vec<String>) {
+#[allow(clippy::too_many_arguments)]
+fn push_pieces(
+    source: &str,
+    term: &Term,
+    bound: &[String],
+    wanted: &mut Vec<&'static str>,
+    computed: &mut Vec<String>,
+    errors: &mut Vec<Error>,
+    out: &mut Vec<String>,
+) {
     match &term.kind {
         TermKind::Var(name) => {
             // The reader has already refused a replacement naming something the pattern never
@@ -228,13 +277,72 @@ fn push_pieces(term: &Term, bound: &[String], out: &mut Vec<String>) {
             out.push(format!("Piece::Var {{ name: {name:?}, index: {index} }}"));
         }
         TermKind::Int(value) => out.push(format!("Piece::Int({value})")),
+        TermKind::App { head, args } if computes(head, args.len()) => {
+            // A number the rule works out rather than one it wrote down. What makes it one is its
+            // head being arithmetic, and that is the same closed list a guard is written in, so a
+            // rule that decides whether to fire and a rule that says what to fire compute in one
+            // language rather than in two.
+            let index = computed.len();
+            let mut used = Vec::new();
+            match value(source, term, bound, wanted, &mut used) {
+                Ok(text) => {
+                    computed.push(computation(index, term, &text, bound, &used));
+                    out.push(format!(
+                        "Piece::Computed {{ text: {:?}, work: computed_{index} }}",
+                        term.to_string()
+                    ));
+                }
+                Err(error) => errors.push(error),
+            }
+        }
         TermKind::App { head, args } => {
             out.push(format!("Piece::App {{ head: {head:?}, arity: {} }}", args.len()));
             for arg in args {
-                push_pieces(arg, bound, out);
+                push_pieces(source, arg, bound, wanted, computed, errors, out);
             }
         }
     }
+}
+
+/// Whether a term in a replacement is arithmetic rather than something to build.
+///
+/// The heads are the ones [`value`] compiles and the arities are the ones it takes, so a head
+/// that is arithmetic at one arity and an instruction at another is read as what it was written
+/// as. Nothing in either vocabulary is named this way today and this is what keeps the day one is
+/// from turning a rule into a number quietly.
+fn computes(head: &str, arity: usize) -> bool {
+    matches!((head, arity), ("+" | "-", 2) | ("sign_extend" | "zero_extend" | "extract", 3))
+        || (arity == 1 && suffix(head, "ctz").is_some())
+}
+
+/// One function per computed piece, which is a guard in every way except what it gives back.
+fn computation(index: usize, term: &Term, text: &str, bound: &[String], used: &[usize]) -> String {
+    let mut out = format!(
+        "\n/// `{term}`, which is a number a replacement works out, written on line {}.\n\
+         fn computed_{index}(bound: &[Option<i128>]) -> Option<i128> {{\n",
+        term.line
+    );
+    let mut used = used.to_vec();
+    used.sort_unstable();
+    used.dedup();
+    for at in used {
+        let _ = writeln!(
+            out,
+            "    // {}\n    let Some(Some(v{at})) = {}.copied() else {{ return None }};",
+            bound[at],
+            reads(at)
+        );
+    }
+    let _ = writeln!(out, "    Some({text})\n}}");
+    out
+}
+
+/// How a compiled guard or computation reads one of the bindings.
+///
+/// The first is read by the name for it rather than by its index, because a generated file is
+/// linted along with everything else and clippy asks for the name.
+fn reads(at: usize) -> String {
+    if at == 0 { "bound.first()".to_owned() } else { format!("bound.get({at})") }
 }
 
 /// One function per guarded rule, or nothing for a rule with no guard.
@@ -274,9 +382,9 @@ fn compile_guards(
         for at in used {
             let _ = writeln!(
                 text,
-                "    // {}\n    let Some(Some(v{at})) = bound.get({at}).copied() else {{ return \
-                 false }};",
-                bound[at]
+                "    // {}\n    let Some(Some(v{at})) = {}.copied() else {{ return false }};",
+                bound[at],
+                reads(at)
             );
         }
         let _ = writeln!(text, "    {}\n}}", bare(&condition));
@@ -322,6 +430,14 @@ fn condition(
         return Err(refused(source, term, "a guard is a condition, and this is not one"));
     };
     let arity = args.len();
+    // A question about the bits of one number, which has to be asked at a width: whether a
+    // constant is a power of two is a different question at eight bits and at sixty four, and
+    // the rule that asks it is written at one of them.
+    if let Some(bits) = suffix(head, "power_of_two").filter(|_| arity == 1) {
+        let inner = value(source, &args[0], bound, wanted, used)?;
+        want(wanted, "power_of_two");
+        return Ok(format!("power_of_two({bits}, {inner})"));
+    }
     match (head.as_str(), arity) {
         ("and" | "or", 1..) => {
             let joint = if head == "and" { " && " } else { " || " };
@@ -343,7 +459,7 @@ fn condition(
             term,
             &format!(
                 "`{head}` of {arity} is not a condition a guard can be compiled to. A guard is \
-                 `and`, `or`, `not`, or a comparison of two numbers"
+                 `and`, `or`, `not`, `power_of_two.iN`, or a comparison of two numbers"
             ),
         )),
     }
@@ -367,6 +483,14 @@ fn value(
         }
         TermKind::App { head, args } => {
             let arity = args.len();
+            // Counting the zero bits a number ends in, at a width, which is the log of it when it
+            // is a power of two. This is the one arithmetic here that a replacement needs and a
+            // guard does not, and it is what a shift standing in for a multiplication shifts by.
+            if let Some(bits) = suffix(head, "ctz").filter(|_| arity == 1) {
+                let inner = value(source, &args[0], bound, wanted, used)?;
+                want(wanted, "trailing_zeros");
+                return Ok(format!("trailing_zeros({bits}, {inner})"));
+            }
             match (head.as_str(), arity) {
                 // Adding and subtracting, which is what a guard about two offsets into one object
                 // is written in.
@@ -403,8 +527,9 @@ fn value(
                     source,
                     term,
                     &format!(
-                        "`{head}` of {arity} is not a number a guard can be compiled to. The \
-                         ones that are are `+`, `-`, `sign_extend`, `zero_extend` and `extract`"
+                        "`{head}` of {arity} is not a number this can be compiled to. The ones \
+                         that are are `+`, `-`, `sign_extend`, `zero_extend`, `extract` and \
+                         `ctz.iN`"
                     ),
                 )),
             }
@@ -421,6 +546,16 @@ fn width(source: &str, term: &Term) -> Result<String, Error> {
     }
 }
 
+/// The width a head names, for the heads that are written once per width as `name.iN`.
+///
+/// Nothing if the head is some other name, so that a rule writing `ctz` with no width on it is
+/// refused with the message about what a number can be rather than compiled at a width nobody
+/// chose. The model file says what these mean once per width as well, which is the other half of
+/// the reason the width is written rather than inferred.
+fn suffix(head: &str, name: &str) -> Option<u32> {
+    head.strip_prefix(name)?.strip_prefix(".i")?.parse().ok().filter(|bits| *bits <= 128)
+}
+
 /// Remember a helper, and everything it is written in terms of.
 fn want(wanted: &mut Vec<&'static str>, name: &'static str) {
     if wanted.contains(&name) {
@@ -429,7 +564,7 @@ fn want(wanted: &mut Vec<&'static str>, name: &'static str) {
     wanted.push(name);
     match name {
         "sign_extend" => want(wanted, "shifted"),
-        "zero_extend" | "extract" => want(wanted, "low"),
+        "zero_extend" | "extract" | "power_of_two" | "trailing_zeros" => want(wanted, "low"),
         _ => {}
     }
 }
@@ -474,6 +609,22 @@ fn extract(hi: u32, lo: u32, value: i128) -> i128 {
         return 0;
     }
     low(hi - lo + 1, value >> lo)
+}
+";
+
+const POWER_OF_TWO: &str = "
+/// Whether the low `bits` bits of `value` are one bit set and every other bit clear.
+fn power_of_two(bits: u32, value: i128) -> bool {
+    let masked = low(bits, value);
+    masked > 0 && masked & (masked - 1) == 0
+}
+";
+
+const TRAILING_ZEROS: &str = "
+/// How many zero bits the low `bits` bits of `value` end in, and `bits` when they are all zero.
+fn trailing_zeros(bits: u32, value: i128) -> i128 {
+    let masked = low(bits, value);
+    if masked == 0 { i128::from(bits) } else { i128::from(masked.trailing_zeros()) }
 }
 ";
 
@@ -615,5 +766,94 @@ mod tests {
             "{}",
             errors[0]
         );
+    }
+
+    /// The rule issue 523 was about, whole: a guard asking whether the matched constant is a
+    /// power of two and a replacement shifting by the log of it. Both halves come out as
+    /// functions of the bindings and both bring the helper they are written in.
+    #[test]
+    fn a_replacement_can_work_a_number_out_of_the_one_it_matched() {
+        let out = built(
+            "(rule (simplify (mul.i32 (value.i32 x) (iconst.i32 k)))\n\
+             (if (power_of_two.i32 k))\n\
+             (shl.i32 (value.i32 x) (iconst.i32 (ctz.i32 k)))\n\
+             (spec (= (bvmul x k) (result))))\n",
+        );
+        assert!(
+            out.contains("Piece::Computed { text: \"(ctz.i32 k)\", work: computed_0 }"),
+            "{out}"
+        );
+        assert!(out.contains("fn computed_0(bound: &[Option<i128>]) -> Option<i128> {"), "{out}");
+        assert!(
+            out.contains("let Some(Some(v1)) = bound.get(1).copied() else { return None };"),
+            "{out}"
+        );
+        assert!(out.contains("Some(trailing_zeros(32, v1))"), "{out}");
+        assert!(out.contains("power_of_two(32, v1)"), "{out}");
+        assert!(out.contains("fn power_of_two(bits: u32, value: i128) -> bool {"), "{out}");
+        assert!(out.contains("fn trailing_zeros(bits: u32, value: i128) -> i128 {"), "{out}");
+        assert!(out.contains("fn low(bits: u32, value: i128) -> i128 {"), "{out}");
+    }
+
+    /// The same arithmetic a guard is written in, in a replacement, and the mask a remainder
+    /// becomes is what wants it. Nothing about a computed piece is particular to counting bits.
+    #[test]
+    fn a_replacement_computes_in_the_language_a_guard_computes_in() {
+        let out = built(
+            "(rule (simplify (urem.i32 (value.i32 x) (iconst.i32 k)))\n\
+             (if (power_of_two.i32 k))\n\
+             (and.i32 (value.i32 x) (iconst.i32 (- k 1)))\n\
+             (spec (= (bvurem x k) (result))))\n",
+        );
+        assert!(out.contains("Piece::Computed { text: \"(- k 1)\", work: computed_0 }"), "{out}");
+        assert!(out.contains("Some((v1).saturating_sub(1))"), "{out}");
+        // A subtraction needs no helper, so the only one here is the guard's.
+        assert!(!out.contains("fn trailing_zeros"), "{out}");
+    }
+
+    /// A computation nothing can be made of is refused where it is written, the same as a guard
+    /// is, rather than emitted as a call to a function that does not exist.
+    #[test]
+    fn a_computed_piece_nothing_can_be_made_of_is_refused_where_it_is_written() {
+        let rules = parse(
+            "rules/test.rules",
+            "(rule (simplify (mul.i32 (value.i32 x) (iconst.i32 k)))\n\
+             (shl.i32 (value.i32 x) (iconst.i32 (extract 31 0 (log_of k))))\n\
+             (spec (= (bvmul x k) (result))))\n",
+        )
+        .expect("the rules read");
+        let matcher = Matcher::build("rules/test.rules", &rules).expect("the matcher builds");
+        let errors =
+            emit("rules/test.rules", &rules, &matcher).expect_err("the computation is refused");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].line, 2);
+        assert!(errors[0].message.contains("`log_of` of 1 is not a number"), "{}", errors[0]);
+    }
+
+    /// A head that only looks like one of the arithmetic ones is built rather than computed. The
+    /// width is what says which, so `ctz` with no width on it is a term and not a count.
+    #[test]
+    fn a_head_with_no_width_on_it_is_not_arithmetic() {
+        assert!(computes("ctz.i32", 1));
+        assert!(!computes("ctz", 1));
+        assert!(!computes("ctz.i32", 2));
+        assert!(!computes("ctz.f32", 1));
+    }
+
+    /// The first binding is read by the name for it rather than by an index of zero, which is
+    /// what the generated file being linted along with the rest of the tree comes to here.
+    #[test]
+    fn the_first_binding_is_read_by_the_name_for_it() {
+        let out = built(
+            "(rule (simplify (mul.i32 (iconst.i32 k) (value.i32 x)))\n\
+             (if (power_of_two.i32 k))\n\
+             (shl.i32 (value.i32 x) (iconst.i32 (ctz.i32 k)))\n\
+             (spec (= (bvmul k x) (result))))\n",
+        );
+        let guard = "let Some(Some(v0)) = bound.first().copied() else { return false };";
+        let computed = "let Some(Some(v0)) = bound.first().copied() else { return None };";
+        assert!(out.contains(guard), "{out}");
+        assert!(out.contains(computed), "{out}");
+        assert!(!out.contains("bound.get(0)"), "{out}");
     }
 }

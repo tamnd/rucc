@@ -51,6 +51,22 @@
 //! twice in one pattern, because that would be asking the matcher for an equality test it does
 //! not have.
 //!
+//! A replacement may work a number out of the numbers the pattern matched, which is what lets a
+//! rule be written once per width rather than once per constant:
+//!
+//! ```text
+//! (rule (simplify (mul.i32 (value.i32 x) (iconst.i32 k)))
+//!       (if (power_of_two.i32 k))
+//!       (shl.i32 (value.i32 x) (iconst.i32 (ctz.i32 k)))
+//!       (spec (= (bvmul x k) (result))))
+//! ```
+//!
+//! `(ctz.i32 k)` is arithmetic rather than a term to build, and what says so is its head being
+//! one of the arithmetic ones, which is the same closed list a guard is written in. It compiles
+//! to a function of the bindings exactly as a guard does, and the model file says what it means
+//! at each width exactly as it does for every other head, so the rule is proved as it stands
+//! rather than as the sixty three instances of it nobody wants to read.
+//!
 //! The `spec` clause is required rather than optional. `spec/17-milestones.md` asks that a rule
 //! the solver cannot discharge never enter the rule set, and making the claim part of the
 //! grammar is what gives that somewhere to stand: a rule without one is not an unverified rule,

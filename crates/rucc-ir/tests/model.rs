@@ -79,17 +79,41 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
 
 /// And nothing here is a meaning for a head no instruction has.
 ///
-/// `value.iN` is the exception, and it is the only one. It is not an instruction: it is how a
-/// rule writes an operand that is already computed and sitting in a register, so no opcode is
-/// ever called that and the sweep has no reason to produce the name.
+/// There are exceptions and the list below is all of them. `value.iN` is how a rule writes an
+/// operand that is already computed and sitting in a register, so no opcode is ever called that.
+/// `power_of_two.iN` and `ctz.iN` are arithmetic on the constants a rule matched, which is what a
+/// guard asks about and what a computed replacement works out, and the machine executes neither.
+/// Everything else in the file is an instruction or a typo.
 #[test]
 fn nothing_here_gives_a_meaning_to_a_head_no_instruction_has() {
     let named = named();
     let extra: Vec<&str> = defined()
         .into_iter()
-        .filter(|head| !named.contains(head) && !head.starts_with("value."))
+        .filter(|head| !named.contains(head) && !on_the_matched_constants(head))
         .collect();
     assert!(extra.is_empty(), "the model names something the IR does not: {extra:?}");
+}
+
+/// The heads that are not instructions: an operand the rule already has, and the arithmetic the
+/// rule does on the constants it matched.
+fn on_the_matched_constants(head: &str) -> bool {
+    ["value.", "power_of_two.", "ctz."].iter().any(|name| head.starts_with(name))
+}
+
+/// That arithmetic has a meaning at every width a rule may ask it at.
+///
+/// A head with no entry is a rule the verifier refuses to read, and the refusal names the head
+/// rather than the width, so the four are written out here instead of being found one at a time
+/// by whoever writes the first rule at a width nobody covered.
+#[test]
+fn the_arithmetic_on_matched_constants_is_defined_at_every_width() {
+    let defined = defined();
+    for name in ["power_of_two", "ctz"] {
+        for bits in [8, 16, 32, 64] {
+            let head = format!("{name}.i{bits}");
+            assert!(defined.contains(head.as_str()), "{head} has no meaning in the IR model");
+        }
+    }
 }
 
 /// One bit is the width the rewrite rules of `rucc-opt` are about as much as any other, so its
