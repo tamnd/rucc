@@ -549,9 +549,8 @@ fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
         if matches!(object.place, Place::Thread { .. }) {
             return why(format!("'{}' is thread-local and this format is not", object.name));
         }
-        if let Place::Named(name) = &object.place
-            && Array::of(name).is_some()
-        {
+        let Place::Named(name) = &object.place else { continue };
+        if Array::of(name).is_some() {
             return why(format!("'{name}' is not a list the startup code here gathers"));
         }
     }
