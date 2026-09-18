@@ -12,14 +12,18 @@
 | glibc header tree (shared + per-family) | 5.3 MB | measured: 411 shared files and 77 per family in 453 copies, seven families for nine ABIs, 677 KB gzipped |
 | musl headers, per arch | ~2 MB total | |
 | Linux uapi headers (shared + per-arch `asm/`) | 11.4 MB | measured: 970 shared files and 333 per architecture copies over seven architectures, 2.1 MB gzipped; document 08.3's third tree |
-| mingw-w64 headers + runtime archives | ~15 MB | the largest single bundled item |
 | start files, all targets | ~1 MB | small objects |
 | `librucc_builtins.a`, all tier-1/2 targets | ~10 MB | |
 | **base distribution** | **≤ 75 MB uncompressed, ≤ 30 MB compressed** | |
+| mingw-w64 header tree (on demand) | 80.5 MB | measured: 1,702 headers, 8.5 MB gzipped; §13.2 rather than the base, and the paragraph below says why |
 | linker (on demand) | 15 to 40 MB | document 11.2: separate, not in the binary |
 | Darwin SDK, MSVC SDK | **not distributed** | §13.4 |
 
-**Where the total came from, and why it moved twice.** The kernel header row was missing from the first version of this table, and adding it showed that the rows already summed to 62 MB against a stated base of 60, so the total was restated rather than nudged. Then the two header rows stopped being estimates. Both trees are produced by `tamnd/rucc-cross`, `bin/kernel-headers` and `bin/glibc-headers`, so the numbers in them are what our own output weighs rather than what zig's copy of it does, and that moved the kernel row up from 10.5 MB to 11.4 MB and the glibc row down from 8 MB to 5.3 MB. The rows come to 70.9 MB and the base stays 75, with the slack being the difference between a measurement and a budget.
+**Where the total came from, and why it moved three times.** The kernel header row was missing from the first version of this table, and adding it showed that the rows already summed to 62 MB against a stated base of 60, so the total was restated rather than nudged. Then the two header rows stopped being estimates. Both trees are produced by `tamnd/rucc-cross`, `bin/kernel-headers` and `bin/glibc-headers`, so the numbers in them are what our own output weighs rather than what zig's copy of it does, and that moved the kernel row up from 10.5 MB to 11.4 MB and the glibc row down from 8 MB to 5.3 MB. Then the mingw row stopped being an estimate too, and it left the base, so the rows above the line come to 55.9 MB and the base stays 75.
+
+**The mingw row, which is the one that would not fit.** It was estimated at 15 MB and it is 80.5 MB, measured on the tree `rucc --fetch x86_64-windows-gnu` installs, which is mingw-w64 v14.0.0 with no per architecture split and 1,702 headers in one directory. That is larger than the whole base budget on its own, so bundling it is not a matter of finding room, and the number is not a surprise once you look at where it goes: `mshtml.h` alone is 6.5 MB, which is more than the entire glibc header tree, and `ddk` is 2.2 MB and `GL` is 1.4 MB before any of it declares a C library function. This is the Windows SDK half of the tree rather than the C library half, and a single `#include <windows.h>` reaches 56,110 lines of it.
+
+So the tree is fetched rather than bundled, which is §13.2's cache and is what the compiler already does: it is the one target with a published row in `crates/rucc-sysroot/src/distribution.rs` today, the tarball is 8.5 MB, and a Windows build that has not fetched it says so and names the command. That does not contradict §13.3's rule, it is the rule's exception and the only one: headers are bundled because they are expensive to generate and needed on the first compile, and this tree is neither expensive to generate nor small enough for the first compile to be free. What is still open is whether the published tree should be the whole of upstream or a subset, which is a question about which headers a program on this target is entitled to include and not a question about bytes, so it stays open until somebody has a program the subset breaks.
 
 What the two measurements are made of. The kernel tree is 970 headers every architecture installs identically, 9.1 MB, plus 333 per architecture copies over seven architectures, 2.2 MB, and 1.8 MB and 258 KB of that under `gzip -9`. The glibc tree is 411 shared headers, 3.1 MB, plus 77 files that differ between families in 453 copies, 2.2 MB, and seven families serve the nine glibc ABIs in the target table because the types a program gets are decided by the size of a pointer and a long rather than by the instruction set. Both records are in that repository, both trees are produced on two host architectures in its nightly run and required to come out byte for byte identical, and the glibc tree is also checked by reassembling each ABI's install from the shared tree plus its family's.
 
@@ -56,7 +60,7 @@ The stub generator being deterministic is what makes all of this simple: there i
 
 ## 13.3 What is generated versus bundled
 
-Bundle what is expensive to generate and needed on the first compile: headers, start files, builtins archives. Generate what is cheap and combinatorial: stub shared objects (per tuple per libc version, bundling the cross product is what would blow the budget), import libraries from `.def` files, and the toolchain directory of document 12.6.
+Bundle what is expensive to generate and needed on the first compile: headers, start files, builtins archives. The mingw-w64 tree is the one exception and §13.1 says why, which is that it is 80.5 MB and the whole base budget is 75. Generate what is cheap and combinatorial: stub shared objects (per tuple per libc version, bundling the cross product is what would blow the budget), import libraries from `.def` files, and the toolchain directory of document 12.6.
 
 That split is exactly why the budget in §13.1 closes. The glibc cross product of nine ABIs times a dozen supported versions is unbundlable; the abilist blob that generates it is one megabyte.
 
