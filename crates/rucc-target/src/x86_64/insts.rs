@@ -43,8 +43,8 @@ use Form::{
     Call, Cmov, Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
     CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem,
     Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87,
-    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Set, ShiftCl,
-    ShiftRi, Spin, Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -154,6 +154,18 @@ pub enum Form {
     Set,
     /// A move between widths, which reads one register and writes another.
     Convert,
+    /// A search for a set bit, or a count of the bits above or below the lowest set one, which
+    /// reads one register and writes another of the same width.
+    ///
+    /// The same operand vector as [`Form::Convert`] and a separate form because the two answers
+    /// this description is asked for are both different. A conversion agrees with its source about
+    /// every bit the narrower of the two widths has, and a search agrees with its source about
+    /// nothing: what it writes is a position or a population, which is a number about the source
+    /// rather than any part of it. And a conversion says nothing about the condition state, where
+    /// every one of these writes it. Marking one of these a conversion would tell the bit tracking
+    /// that a register holds bits it does not hold and tell the comparison pass that a comparison
+    /// made before it is still standing, and either one is a wrong program rather than a slow one.
+    Search,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
     DivQuo,
     /// The remainder of a division, which comes back in `rdx` and destroys `rax` on the way.
@@ -842,7 +854,7 @@ impl Form {
             Cmp => &CMP,
             CmpRi => &CMP_RI,
             Set => &ONE_WRITTEN,
-            Convert => &ONE_TO_ONE,
+            Convert | Search => &ONE_TO_ONE,
             CpuId => &CPU_ID,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
@@ -1263,6 +1275,22 @@ pub static INSTS: &[(&str, Form)] = &[
     ("low_8", Convert),
     ("low_16", Convert),
     ("low_32", Convert),
+    // Finding a bit and counting the zeroes in front of it, which read one register and write
+    // another of the same width. A form of their own rather than the conversions above, for the
+    // reason `Form::Search` gives. No rule selects any of them and the reason is
+    // `rucc_codegen::expand`, which builds every bit count out of arithmetic rather than out of
+    // these, so what reaches one today is a program that wrote it in an `asm` template. See
+    // `crate::x86_64::encode` for why the two families are four opcodes and not two.
+    ("bsf_16", Search),
+    ("bsf_32", Search),
+    ("bsf_64", Search),
+    ("bsr_16", Search),
+    ("bsr_32", Search),
+    ("bsr_64", Search),
+    ("lzcnt_32", Search),
+    ("lzcnt_64", Search),
+    ("tzcnt_32", Search),
+    ("tzcnt_64", Search),
     // The address computation the addressing modes are reached through.
     ("lea_64", Lea),
     // Reading and writing memory, at each width the machine has a `mov` for.
@@ -1699,7 +1727,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 472);
+        assert_eq!(described, 482);
     }
 
     #[test]
