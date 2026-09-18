@@ -786,7 +786,7 @@ mod tests {
     /// Which is almost every template written below, and is what [`read`] itself gave back before a
     /// template could hold a label too. A template with one in it comes back as nothing here, so a
     /// test about labels calls [`read`] and reads the steps.
-    fn lines(template: &str, widths: &[Option<Width>]) -> Option<Vec<Line>> {
+    fn plain(template: &str, widths: &[Option<Width>]) -> Option<Vec<Line>> {
         read(template, widths)?
             .into_iter()
             .map(|step| match step {
@@ -800,7 +800,7 @@ mod tests {
     /// arguments, and an opcode whose operand list is empty.
     #[test]
     fn a_template_that_is_one_mnemonic_is_the_instruction_of_that_name() {
-        let lines = lines("pause", &[]).expect("pause is an instruction");
+        let lines = plain("pause", &[]).expect("pause is an instruction");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "pause");
         assert!(lines[0].operands.is_empty());
@@ -811,7 +811,7 @@ mod tests {
     /// built: a segment, a distance into it, and an output the allocator places.
     #[test]
     fn a_read_through_a_segment_is_the_load_the_machine_already_has() {
-        let lines = lines("movq %%fs:0, %0", &[]).expect("a load through a segment");
+        let lines = plain("movq %%fs:0, %0", &[]).expect("a load through a segment");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "mov_rm_64");
         let out = Piece::Operand { index: 0, width: Width::Quad, stated: false };
@@ -825,7 +825,7 @@ mod tests {
     /// cannot get wrong.
     #[test]
     fn a_copy_puts_its_source_and_destination_where_the_opcode_holds_them() {
-        let lines = lines("movq %1, %0", &[]).expect("a copy between two operands");
+        let lines = plain("movq %1, %0", &[]).expect("a copy between two operands");
         assert_eq!(lines[0].opcode, "mov_rr_64");
         assert_eq!(
             lines[0].operands,
@@ -840,17 +840,17 @@ mod tests {
     /// says has to be the width the instruction uses.
     #[test]
     fn a_register_the_template_named_is_read_at_the_width_its_name_says() {
-        let lines = lines("movq %%rax, %0", &[]).expect("a copy out of a named register");
+        let lines = plain("movq %%rax, %0", &[]).expect("a copy out of a named register");
         let source = Piece::Reg { reg: PhysReg::new(0), width: Width::Quad };
         assert_eq!(lines[0].operands[1], source);
-        assert_eq!(lines("movq %%eax, %0", &[]), None, "a narrow name in a wide instruction");
+        assert_eq!(plain("movq %%eax, %0", &[]), None, "a narrow name in a wide instruction");
     }
 
     /// Several instructions, written the way a program writes them, which is one string with the
     /// separators inside it.
     #[test]
     fn a_template_with_several_instructions_is_several_instructions() {
-        let lines = lines("pause\n\tpause ; pause", &[]).expect("three of them");
+        let lines = plain("pause\n\tpause ; pause", &[]).expect("three of them");
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|line| line.opcode == "pause"));
     }
@@ -862,7 +862,7 @@ mod tests {
     fn a_repeat_prefix_on_a_nop_is_the_spin_hint() {
         for template in ["rep; nop", "rep nop", "rep\n\tnop", "repz; nop", "repe nop"] {
             let lines =
-                lines(template, &[]).unwrap_or_else(|| panic!("{template} is the spin hint"));
+                plain(template, &[]).unwrap_or_else(|| panic!("{template} is the spin hint"));
             assert_eq!(lines.len(), 1, "{template}");
             assert_eq!(lines[0].opcode, "pause", "{template}");
             assert!(lines[0].operands.is_empty(), "{template}");
@@ -873,7 +873,7 @@ mod tests {
     /// whose text names none of its operands and whose description names all of them.
     #[test]
     fn an_instruction_whose_operands_are_all_implicit_is_read_from_the_description() {
-        let lines = lines("cpuid", &[]).expect("cpuid is an instruction");
+        let lines = plain("cpuid", &[]).expect("cpuid is an instruction");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "cpuid");
         let regs: Vec<PhysReg> = lines[0]
@@ -896,7 +896,7 @@ mod tests {
     /// means the operand is both the third and the first, which is what `"+r"` beside it says.
     #[test]
     fn an_operand_tied_to_a_named_one_is_read_as_that_one() {
-        let lines = lines("addq %1, %0", &[]).expect("an addition onto an operand");
+        let lines = plain("addq %1, %0", &[]).expect("an addition onto an operand");
         assert_eq!(lines[0].opcode, "add_rr_64");
         let destination = Piece::Operand { index: 0, width: Width::Quad, stated: false };
         let source = Piece::Operand { index: 1, width: Width::Quad, stated: false };
@@ -912,7 +912,7 @@ mod tests {
     /// relaxations are at work on one instruction.
     #[test]
     fn a_shift_by_cl_has_one_operand_of_each_kind_filled_in() {
-        let lines = lines("shlq %%cl, %0", &[]).expect("a shift by cl");
+        let lines = plain("shlq %%cl, %0", &[]).expect("a shift by cl");
         assert_eq!(lines[0].opcode, "shl_rcl_64");
         let destination = Piece::Operand { index: 0, width: Width::Quad, stated: false };
         assert_eq!(lines[0].operands[0], destination);
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn a_comparison_and_a_conditional_move_are_the_two_instructions_they_say_they_are() {
         let widths = [Some(Width::Long); 4];
-        let lines = lines("cmp %1, %2\ncmova %3, %0", &widths).expect("the branchless select");
+        let lines = plain("cmp %1, %2\ncmova %3, %0", &widths).expect("the branchless select");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].opcode, "cmp_rr_32");
         assert_eq!(lines[1].opcode, "cmov_a_32");
@@ -957,7 +957,7 @@ mod tests {
         for (template, opcode, width) in cases {
             let widths = [Some(width); 2];
             let lines =
-                lines(template, &widths).unwrap_or_else(|| panic!("{template} is an addition"));
+                plain(template, &widths).unwrap_or_else(|| panic!("{template} is an addition"));
             assert_eq!(lines[0].opcode, opcode, "{template}");
             let written = Piece::Operand { index: 0, width, stated: true };
             assert_eq!(lines[0].operands[0], written, "{template}");
@@ -972,17 +972,17 @@ mod tests {
     /// is.
     #[test]
     fn a_width_written_on_an_operand_is_what_the_suffix_is_worked_out_from() {
-        let lines = lines("add %q1, %q0", &[Some(Width::Long); 2]).expect("an addition");
+        let lines = plain("add %q1, %q0", &[Some(Width::Long); 2]).expect("an addition");
         assert_eq!(lines[0].opcode, "add_rr_64", "the modifier and not the type");
         assert_eq!(
-            lines("add %1, %0", &[Some(Width::Long); 2]).expect("an addition")[0].opcode,
+            plain("add %1, %0", &[Some(Width::Long); 2]).expect("an addition")[0].opcode,
             "add_rr_32",
             "the type, for the same template without one"
         );
-        let lines = lines("addq %1, %q0", &[None, None]).expect("an addition");
+        let lines = plain("addq %1, %q0", &[None, None]).expect("an addition");
         assert_eq!(lines[0].opcode, "add_rr_64", "an operand whose type has no width here");
         assert_eq!(
-            lines("add %1, %q0", &[Some(Width::Long); 2]),
+            plain("add %1, %q0", &[Some(Width::Long); 2]),
             None,
             "one operand saying a width and the other saying a different one"
         );
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn an_operand_whose_width_came_from_the_template_says_where_it_came_from() {
         let widths = [Some(Width::Long), Some(Width::Quad)];
-        let lines = lines("rep;bsf\t%1, %q0", &widths).expect("the count gmp writes");
+        let lines = plain("rep;bsf\t%1, %q0", &widths).expect("the count gmp writes");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "tzcnt_64", "the modifier and not the type");
         let written = Piece::Operand { index: 0, width: Width::Quad, stated: true };
@@ -1010,19 +1010,19 @@ mod tests {
     /// letters begin one.
     #[test]
     fn a_width_that_disagrees_with_the_instruction_is_refused() {
-        assert_eq!(lines("addq %1, %k0", &[Some(Width::Quad); 2]), None, "half a destination");
-        assert_eq!(lines("addl %1, %q0", &[Some(Width::Long); 2]), None, "the other way round");
+        assert_eq!(plain("addq %1, %k0", &[Some(Width::Quad); 2]), None, "half a destination");
+        assert_eq!(plain("addl %1, %q0", &[Some(Width::Long); 2]), None, "the other way round");
         assert_eq!(
-            lines("addq %1, %h0", &[Some(Width::Quad); 2]),
+            plain("addq %1, %h0", &[Some(Width::Quad); 2]),
             None,
             "a letter this leaves out"
         );
         assert_eq!(
-            lines("addq %1, %q", &[Some(Width::Quad); 2]),
+            plain("addq %1, %q", &[Some(Width::Quad); 2]),
             None,
             "a modifier with no operand"
         );
-        let lines = lines("addb %%bl, %0", &[Some(Width::Byte)]).expect("an addition out of bl");
+        let lines = plain("addb %%bl, %0", &[Some(Width::Byte)]).expect("an addition out of bl");
         assert_eq!(
             lines[0].operands[2],
             Piece::Reg { reg: gpr_named("bl").expect("bl").0, width: Width::Byte },
@@ -1035,10 +1035,10 @@ mod tests {
     #[test]
     fn a_mnemonic_with_no_suffix_is_refused_when_the_arguments_do_not_say_the_width() {
         let mixed = [Some(Width::Long), Some(Width::Quad)];
-        assert_eq!(lines("cmp %0, %1", &mixed), None, "two operands of different widths");
-        assert_eq!(lines("cmp $1, $2", &[]), None, "nothing that has a width at all");
+        assert_eq!(plain("cmp %0, %1", &mixed), None, "two operands of different widths");
+        assert_eq!(plain("cmp $1, $2", &[]), None, "nothing that has a width at all");
         assert_eq!(
-            lines("cmp %0, %1", &[Some(Width::Long)]),
+            plain("cmp %0, %1", &[Some(Width::Long)]),
             None,
             "an operand the statement has not got"
         );
@@ -1061,12 +1061,12 @@ mod tests {
         for (template, opcode) in cases {
             let widths = [Some(Width::Quad); 2];
             let lines =
-                lines(template, &widths).unwrap_or_else(|| panic!("{template} is a search"));
+                plain(template, &widths).unwrap_or_else(|| panic!("{template} is a search"));
             assert_eq!(lines.len(), 1, "{template}");
             assert_eq!(lines[0].opcode, opcode, "{template}");
         }
         assert_eq!(
-            lines("rep; bsfw %1, %0", &[Some(Width::Word); 2]),
+            plain("rep; bsfw %1, %0", &[Some(Width::Word); 2]),
             None,
             "the sixteen bit count, which this assembler has no encoding for"
         );
@@ -1077,16 +1077,16 @@ mod tests {
     /// one that is correct nearly all of the time, which is the worst answer available.
     #[test]
     fn a_prefix_this_does_not_read_is_refused_rather_than_dropped() {
-        assert_eq!(lines("lock; incl %0", &[]), None, "a lock prefix");
-        assert_eq!(lines("rep; movsb", &[]), None, "a repeat this has no instruction for");
+        assert_eq!(plain("lock; incl %0", &[]), None, "a lock prefix");
+        assert_eq!(plain("rep; movsb", &[]), None, "a repeat this has no instruction for");
         assert_eq!(
-            lines("rep; pause", &[]),
+            plain("rep; pause", &[]),
             None,
             "a prefix on an instruction that is already the pair"
         );
-        assert_eq!(lines("rep", &[]), None, "a prefix with nothing behind it");
-        assert_eq!(lines("rep; rep; nop", &[]), None, "two prefixes");
-        assert_eq!(lines("rep nop, %0", &[]), None, "a prefix on an instruction with an argument");
+        assert_eq!(plain("rep", &[]), None, "a prefix with nothing behind it");
+        assert_eq!(plain("rep; rep; nop", &[]), None, "two prefixes");
+        assert_eq!(plain("rep nop, %0", &[]), None, "a prefix on an instruction with an argument");
     }
 
     /// The multiply and the divide that work on a pair of registers, which are the two mnemonics a
@@ -1103,7 +1103,7 @@ mod tests {
         ];
         for (template, opcode, operands) in cases {
             let widths = [Some(Width::Quad); 5];
-            let lines = lines(template, &widths).unwrap_or_else(|| panic!("{template} is a pair"));
+            let lines = plain(template, &widths).unwrap_or_else(|| panic!("{template} is a pair"));
             assert_eq!(lines.len(), 1, "{template} is one instruction");
             assert_eq!(lines[0].opcode, opcode, "{template}");
             assert_eq!(lines[0].operands.len(), operands, "{template}");
@@ -1116,22 +1116,22 @@ mod tests {
     /// the pair forms above do not have.
     #[test]
     fn what_cannot_be_placed_is_refused_rather_than_guessed_at() {
-        assert_eq!(lines("hcf", &[]), None, "a mnemonic this machine does not have");
+        assert_eq!(plain("hcf", &[]), None, "a mnemonic this machine does not have");
         assert_eq!(
-            lines("movq %0", &[]),
+            plain("movq %0", &[]),
             None,
             "an instruction with the wrong number of arguments"
         );
-        assert_eq!(lines("idivb %0", &[]), None, "an opcode the machine writes as more than one");
+        assert_eq!(plain("idivb %0", &[]), None, "an opcode the machine writes as more than one");
         assert_eq!(read("1:", &[]), None, "a local label, which the direction on a jump names");
         assert_eq!(read("jmp again", &[]), None, "an unconditional jump");
         assert_eq!(read("js again", &[]), None, "a condition this backend has no opcode for");
         assert_eq!(read("jc away", &[]), None, "a jump to a label the template does not define");
         assert_eq!(read("again:\njc again\nagain:", &[]), None, "one name on two labels");
-        assert_eq!(lines(".byte 0", &[]), None, "a directive");
-        assert_eq!(lines("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");
-        assert_eq!(lines("movq %%cs:0, %0", &[]), None, "a segment nothing here reaches");
-        assert_eq!(lines("movq %%xmm0, %0", &[]), None, "a register in the other file");
+        assert_eq!(plain(".byte 0", &[]), None, "a directive");
+        assert_eq!(plain("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");
+        assert_eq!(plain("movq %%cs:0, %0", &[]), None, "a segment nothing here reaches");
+        assert_eq!(plain("movq %%xmm0, %0", &[]), None, "a register in the other file");
     }
 
     /// `MPN_INCR_U` out of libgmp's `gmp-impl.h`, which is the loop that carries a one along an
@@ -1183,8 +1183,8 @@ mod tests {
     /// case the backend has lowered since before there was a reader.
     #[test]
     fn a_template_with_nothing_in_it_is_no_instructions() {
-        assert_eq!(lines("", &[]), Some(Vec::new()));
-        assert_eq!(lines("  \n\t # nothing here \n", &[]), Some(Vec::new()));
+        assert_eq!(plain("", &[]), Some(Vec::new()));
+        assert_eq!(plain("  \n\t # nothing here \n", &[]), Some(Vec::new()));
     }
 
     /// The two spellings of a number and the sign in front of one, since a displacement is as
@@ -1204,10 +1204,10 @@ mod tests {
         ];
         for (written, disp) in cases {
             let text = format!("movq {written}, %0");
-            let lines = lines(&text, &[]).unwrap_or_else(|| panic!("{text} is a load"));
+            let lines = plain(&text, &[]).unwrap_or_else(|| panic!("{text} is a load"));
             assert_eq!(lines[0].at.expect("an address").disp, disp, "{text}");
         }
-        assert_eq!(lines("movq %c(%%rbp), %0", &[]), None, "a modifier with no operand");
+        assert_eq!(plain("movq %c(%%rbp), %0", &[]), None, "a modifier with no operand");
     }
 
     /// The three spellings of a boundary, all of which mean the same thing and two of which say it
@@ -1219,14 +1219,14 @@ mod tests {
         let cases = [(".p2align 5", 32), (".align 16", 16), (".balign 8", 8), (".p2align 0", 1)];
         for (template, bytes) in cases {
             let lines =
-                lines(template, &[]).unwrap_or_else(|| panic!("{template} is an alignment"));
+                plain(template, &[]).unwrap_or_else(|| panic!("{template} is an alignment"));
             assert_eq!(lines.len(), 1, "{template}");
             assert_eq!(lines[0].opcode, ALIGN, "{template}");
             assert!(lines[0].operands.is_empty(), "{template}");
             assert_eq!(lines[0].at, None, "{template}");
             assert_eq!(lines[0].imm, Some(bytes), "{template}");
         }
-        let lines = lines(".p2align 4\n\tpause", &[]).expect("an alignment in front of one");
+        let lines = plain(".p2align 4\n\tpause", &[]).expect("an alignment in front of one");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].opcode, ALIGN);
         assert_eq!(lines[1].opcode, "pause");
@@ -1238,14 +1238,14 @@ mod tests {
     /// than a page is one nothing here can give.
     #[test]
     fn an_alignment_that_asks_for_more_than_a_boundary_is_refused() {
-        assert_eq!(lines(".p2align 4, 0x90", &[]), None, "a fill byte");
-        assert_eq!(lines(".p2align 4, 0x90, 8", &[]), None, "a most to skip");
-        assert_eq!(lines(".align 24", &[]), None, "a boundary that is not a power of two");
-        assert_eq!(lines(".balign 8192", &[]), None, "a boundary larger than a page");
-        assert_eq!(lines(".p2align 20", &[]), None, "a power larger than a page");
-        assert_eq!(lines(".p2align", &[]), None, "a boundary that was left out");
-        assert_eq!(lines(".p2align four", &[]), None, "a boundary that is not a number");
-        assert_eq!(lines(".skip 16", &[]), None, "a directive that is not an alignment");
-        assert_eq!(lines("rep; .p2align 4", &[]), None, "a prefix in front of one");
+        assert_eq!(plain(".p2align 4, 0x90", &[]), None, "a fill byte");
+        assert_eq!(plain(".p2align 4, 0x90, 8", &[]), None, "a most to skip");
+        assert_eq!(plain(".align 24", &[]), None, "a boundary that is not a power of two");
+        assert_eq!(plain(".balign 8192", &[]), None, "a boundary larger than a page");
+        assert_eq!(plain(".p2align 20", &[]), None, "a power larger than a page");
+        assert_eq!(plain(".p2align", &[]), None, "a boundary that was left out");
+        assert_eq!(plain(".p2align four", &[]), None, "a boundary that is not a number");
+        assert_eq!(plain(".skip 16", &[]), None, "a directive that is not an alignment");
+        assert_eq!(plain("rep; .p2align 4", &[]), None, "a prefix in front of one");
     }
 }
