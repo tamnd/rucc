@@ -411,11 +411,17 @@ jobs:
           curl -fsSL -o zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
           echo "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23  zlib.tar.gz" | sha256sum -c -
           tar xzf zlib.tar.gz
+      - name: fetch the lua sources
+        run: |
+          curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          echo "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  lua.tar.gz" | sha256sum -c -
+          tar xzf lua.tar.gz
       - name: build them at both levels and hold them to their answers
         run: cargo xtask libraries
         env:
           RUCC_SQLITE_AMALGAMATION: ${{ github.workspace }}/sqlite-autoconf-3530400
           RUCC_ZLIB_SOURCE: ${{ github.workspace }}/zlib-1.3.1
+          RUCC_LUA_SOURCE: ${{ github.workspace }}/lua-5.4.8
 
   # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
   # layer that can see a calling convention at all: everything cheaper than it reads what the
