@@ -224,10 +224,16 @@ pub(crate) fn safety() -> Result<()> {
 /// and are counted apart: the first says elimination is unsound, the second says the case does not
 /// do at `-O2` what it does at `-O0`, which could be either half of the compiler.
 ///
+/// A program the hardware stopped is a third finding and is counted apart from both. It has no
+/// report to compare, so the comparison below would read it as a check that elimination took out,
+/// and it is nothing of the sort. A case with a `gap` line is the exception, because a row nothing
+/// catches yet is a program left to do whatever its undefined behaviour does and a fault is one of
+/// the things that is. See [`crashed`] and [`faulted`].
+///
 /// # Errors
 ///
-/// [`Error::Failed`] with one line per divergence and one per wrong verdict, and [`Error::Io`]
-/// when the suite could not be run at all.
+/// [`Error::Failed`] with one line per divergence, one per fault and one per wrong verdict, and
+/// [`Error::Io`] when the suite could not be run at all.
 pub(crate) fn accounting() -> Result<()> {
     let cases = cases()?;
     let runner = Runner::find("this suite")?;
@@ -236,12 +242,15 @@ pub(crate) fn accounting() -> Result<()> {
     let all =
         Plan { level: OPTIMIZED, without: NO_ELIMINATION, dir: "checks-all", summaries: false };
     let cut = Plan { level: OPTIMIZED, without: &[], dir: "checks-cut", summaries: false };
-    let ran_all = read(&runner.run(&build(&cases, &all)?, "the suite")?);
-    let ran_cut = read(&runner.run(&build(&cases, &cut)?, "the suite")?);
+    let (dir_all, dir_cut) = (build(&cases, &all)?, build(&cases, &cut)?);
+    let ran_all = read(&runner.run(&dir_all, "the suite")?);
+    let ran_cut = read(&runner.run(&dir_cut, "the suite")?);
+    let builds = (dir_all.as_path(), dir_cut.as_path());
 
     let mut problems = Vec::new();
     let mut compared = 0;
     let mut divergences = 0;
+    let mut faults = 0;
     let mut blocked = 0;
     for case in &cases {
         if case.blocked.is_some() {
@@ -253,9 +262,15 @@ pub(crate) fn accounting() -> Result<()> {
             continue;
         };
         compared += 1;
-        if let Err(problem) = diverged(&case.name, a, b) {
+        if let Err(problem) = diverged(case, a, b, builds) {
             problems.push(problem);
-            divergences += 1;
+            // Counted apart, because they are not the same finding and a run of the check that
+            // says one fault and no divergence is a run that says nothing about the optimizer.
+            if faulted(case, a).is_some() || faulted(case, b).is_some() {
+                faults += 1;
+            } else {
+                divergences += 1;
+            }
             // The verdicts are not worth asking about once the two builds disagree. Whichever of
             // them is wrong, the divergence is the finding and two more lines about the same case
             // would bury it.
@@ -269,8 +284,8 @@ pub(crate) fn accounting() -> Result<()> {
     }
 
     println!(
-        "accounting: {compared} programs compared, {divergences} divergences, {blocked} not yet \
-         buildable"
+        "accounting: {compared} programs compared, {divergences} divergences, {faults} faults, \
+         {blocked} not yet buildable"
     );
     if problems.is_empty() {
         return Ok(());
@@ -286,17 +301,43 @@ pub(crate) fn accounting() -> Result<()> {
 /// and the runs are made with abort semantics as section 14.3 asks, so there is at most one report
 /// and the occurrence index is always the first. The judgement is what is left, and it is enough
 /// to catch the failure this exists for, which is a report in A that is not in B at all.
-fn diverged(name: &str, all: &Ran, cut: &Ran) -> std::result::Result<(), String> {
+///
+/// A run that died on a signal is answered before any of that, because it has no report for a
+/// reason that has nothing to do with elimination and the comparison has no way to tell. See
+/// [`faulted`] for the one kind of case where a signal is the expected ending.
+fn diverged(
+    case: &Case,
+    all: &Ran,
+    cut: &Ran,
+    builds: (&Path, &Path),
+) -> std::result::Result<(), String> {
+    let name = &case.name;
+    // The fault first. Reading a segmentation fault as a check that was optimized away sends
+    // somebody after the optimizer for a bug that is in the runtime or in the program, which is
+    // what happened in tamnd/rucc#1399 and took a day to walk back.
+    for (side, ran) in [("with the elimination off", all), ("with it on", cut)] {
+        if let Some(signal) = faulted(case, ran) {
+            return Err(format!(
+                "{name}: died on signal {signal} {side} and reported nothing, so this is a fault \
+                 and not a disagreement about what to check.{}\n{}",
+                assembly(name, builds),
+                indent(&ran.output)
+            ));
+        }
+    }
+
     let (spoke_all, spoke_cut) = (all.output.contains(BANNER), cut.output.contains(BANNER));
     match (spoke_all, spoke_cut) {
         (true, false) => Err(format!(
             "{name}: reported with the elimination off and said nothing with it on, so a check \
-             that would have fired was removed. This is an unsound elimination.\n{}",
+             that would have fired was removed. This is an unsound elimination.{}\n{}",
+            assembly(name, builds),
             indent(&all.output)
         )),
         (false, true) => Err(format!(
             "{name}: said nothing with the elimination off and reported with it on, which is \
-             backwards and means the optimized build changed what the program does.\n{}",
+             backwards and means the optimized build changed what the program does.{}\n{}",
+            assembly(name, builds),
             indent(&cut.output)
         )),
         (true, true) => {
@@ -311,13 +352,59 @@ fn diverged(name: &str, all: &Ran, cut: &Ran) -> std::result::Result<(), String>
                 return Ok(());
             }
             Err(format!(
-                "{name}: refused for J{} with the elimination off and J{} with it on\n{}",
+                "{name}: refused for J{} with the elimination off and J{} with it on{}\n{}",
                 was.unwrap_or_else(|| "?".to_owned()),
                 now.unwrap_or_else(|| "?".to_owned()),
+                assembly(name, builds),
                 indent(&cut.output)
             ))
         }
         (false, false) => Ok(()),
+    }
+}
+
+/// The signal a run died on, when it died on one and said nothing first.
+///
+/// A shell reports a signal death as 128 plus the signal, and the only other thing that gets a
+/// status up there is a refusal, because refusing calls `abort` and that is `SIGABRT`. So the
+/// report is what tells the two apart: a run that printed the banner was stopped by us and is not a
+/// crash however it exited, and a run that printed nothing and was stopped by the hardware is.
+fn crashed(ran: &Ran) -> Option<i32> {
+    let status = ran.status?;
+    if status > 128 && !ran.output.contains(BANNER) { Some(status - 128) } else { None }
+}
+
+/// The signal a run died on, when dying on one is not what the case said would happen.
+///
+/// A gap is a row nothing catches yet, so the program runs into whatever its undefined behaviour
+/// does and one of the things that is, is a fault. Six of the cases in the suite are null pointer
+/// dereferences and reads through an unmapped page waiting on a check that is not written, and
+/// every one of them segfaults on purpose. [`Case::judge`] does not look at the status of a gap for
+/// that reason and neither does this.
+fn faulted(case: &Case, ran: &Ran) -> Option<i32> {
+    if case.gap.is_some() { None } else { crashed(ran) }
+}
+
+/// A sentence about whether the two builds wrote the same assembly for a case, for hanging on the
+/// end of a problem.
+///
+/// This is the first thing worth knowing about any case the two builds disagreed on, and until now
+/// it was the first thing somebody had to go and find out by hand. The accounting exists to catch
+/// an elimination that took out a check, and an elimination that took nothing out cannot have taken
+/// out a check, so identical assembly rules the optimizer out of the question entirely and points
+/// at the runtime, the program or the machine. Nothing is said when the files cannot be read,
+/// because a missing one is its own thing and the problem being reported is not about it.
+fn assembly(name: &str, builds: (&Path, &Path)) -> String {
+    let read = |dir: &Path| std::fs::read(dir.join(format!("{name}.s"))).ok();
+    let (Some(all), Some(cut)) = (read(builds.0), read(builds.1)) else {
+        return String::new();
+    };
+    if all == cut {
+        " The two builds wrote the same assembly, so nothing was eliminated here and whatever \
+         differed did so at run time."
+            .to_owned()
+    } else {
+        " The two builds wrote different assembly.".to_owned()
     }
 }
 
@@ -490,9 +577,14 @@ impl Case {
                     ));
                 }
                 if status != 0 {
+                    // Named rather than left as a number, because 139 is a segmentation fault and
+                    // reads as one to nobody who has not learned to subtract 128 from it.
+                    let how = match crashed(ran) {
+                        Some(signal) => format!("died on signal {signal}"),
+                        None => format!("exited {status}"),
+                    };
                     return Err(format!(
-                        "{name}: exited {status} without a report, so something else went \
-                         wrong\n{}",
+                        "{name}: {how} without a report, so something else went wrong\n{}",
                         indent(&ran.output)
                     ));
                 }
@@ -989,27 +1081,61 @@ mod tests {
         Ran { output: output.to_owned(), status: Some(if output.is_empty() { 0 } else { 134 }) }
     }
 
+    /// A run the hardware stopped, which is a status above 128 and nothing printed.
+    fn died(signal: i32) -> Ran {
+        Ran { output: String::new(), status: Some(128 + signal) }
+    }
+
+    /// A case expecting nothing, for the accounting tests, which are about what the two runs did
+    /// rather than about what the file asked for.
+    fn allowed(name: &str) -> Case {
+        case(name, "/* row: 3.5 one past the end */\n/* allow */\n")
+    }
+
     /// What the runtime prints, near enough for a comparison that only reads two parts of it.
     fn reported(judgement: u8) -> String {
         format!("{BANNER}\n  judgement J{judgement}, an access the capability does not cover\n")
     }
 
+    /// Two build directories that do not exist, for the tests that are not about the assembly.
+    /// Neither case's file can be read out of them, so `assembly` has nothing to say and says
+    /// nothing, and the message under test is the whole message.
+    fn nowhere() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join("rucc-safety-no-such-build");
+        (dir.join("checks-all"), dir.join("checks-cut"))
+    }
+
+    /// Two build directories holding one case's assembly each, with the given contents.
+    fn built(name: &str, all: &str, cut: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("rucc-safety-{name}"));
+        let (a, b) = (dir.join("checks-all"), dir.join("checks-cut"));
+        for (at, text) in [(&a, all), (&b, cut)] {
+            std::fs::create_dir_all(at).expect("a temporary directory");
+            std::fs::write(at.join(format!("{name}.s")), text).expect("write");
+        }
+        (a, b)
+    }
+
     #[test]
     fn two_builds_that_both_said_nothing_have_not_diverged() {
-        assert!(diverged("quiet", &ran(""), &ran("")).is_ok());
+        let (a, b) = nowhere();
+        assert!(diverged(&allowed("quiet"), &ran(""), &ran(""), (&a, &b)).is_ok());
     }
 
     #[test]
     fn two_builds_that_refused_for_the_same_reason_have_not_diverged() {
+        let (a, b) = nowhere();
         let (all, cut) = (ran(&reported(1)), ran(&reported(1)));
-        assert!(diverged("agreed", &all, &cut).is_ok());
+        assert!(diverged(&allowed("agreed"), &all, &cut, (&a, &b)).is_ok());
     }
 
     #[test]
     fn a_report_that_only_the_unoptimized_build_makes_is_an_unsound_elimination() {
         // This is the finding the whole task exists for: a check fired with elimination off and
         // did not fire with it on, so the pass took out a check that had something to say.
-        let said = diverged("lost", &ran(&reported(1)), &ran("")).expect_err("a divergence");
+        let (a, b) = nowhere();
+        let said = diverged(&allowed("lost"), &ran(&reported(1)), &ran(""), (&a, &b))
+            .expect_err("a divergence");
         assert!(said.contains("unsound elimination"), "{said}");
         assert!(said.contains("lost"), "{said}");
     }
@@ -1018,7 +1144,9 @@ mod tests {
     fn a_report_that_only_the_optimized_build_makes_is_reported_the_other_way_round() {
         // Elimination can only take checks away, so this is not elimination being unsound. It is
         // some other part of `-O2` changing what the program does, and saying so points at it.
-        let said = diverged("gained", &ran(""), &ran(&reported(1))).expect_err("a divergence");
+        let (a, b) = nowhere();
+        let said = diverged(&allowed("gained"), &ran(""), &ran(&reported(1)), (&a, &b))
+            .expect_err("a divergence");
         assert!(said.contains("backwards"), "{said}");
     }
 
@@ -1026,9 +1154,61 @@ mod tests {
     fn two_builds_that_refused_for_different_reasons_have_diverged() {
         // Both refused, so nothing was lost, but they disagree about what was wrong and one of
         // the two answers is not the one the case asked for.
+        let (a, b) = nowhere();
         let (all, cut) = (ran(&reported(1)), ran(&reported(2)));
-        let said = diverged("disagreed", &all, &cut).expect_err("a divergence");
+        let said = diverged(&allowed("disagreed"), &all, &cut, (&a, &b)).expect_err("a divergence");
         assert!(said.contains("J1"), "{said}");
         assert!(said.contains("J2"), "{said}");
+    }
+
+    #[test]
+    fn a_run_the_hardware_stopped_is_a_fault_and_not_a_divergence() {
+        // tamnd/rucc#1399. A program that segfaults has no report, and the comparison would have
+        // read the missing one as a check that elimination took out and sent somebody after the
+        // optimizer. The word the message has to carry is that this is a fault.
+        let (a, b) = nowhere();
+        let said = diverged(&allowed("faulted"), &ran(&reported(1)), &died(11), (&a, &b))
+            .expect_err("a fault is a problem");
+        assert!(said.contains("died on signal 11"), "{said}");
+        assert!(said.contains("not a disagreement"), "{said}");
+        assert!(!said.contains("unsound elimination"), "{said}");
+
+        // Either side of the comparison, and the side is named.
+        let said = diverged(&allowed("faulted"), &died(11), &ran(""), (&a, &b))
+            .expect_err("still a problem");
+        assert!(said.contains("with the elimination off"), "{said}");
+
+        // A refusal aborts, which is `SIGABRT` and a status above 128 as well. What tells the two
+        // apart is the report, so this one is not a fault and the comparison gets to see it.
+        assert!(crashed(&ran(&reported(1))).is_none());
+        assert!(crashed(&Ran { output: String::new(), status: Some(1) }).is_none());
+    }
+
+    #[test]
+    fn a_gap_that_faults_is_the_row_doing_what_nothing_catches_it_doing() {
+        // Six of the cases in the suite are null pointer dereferences and reads through an unmapped
+        // page, waiting on checks that are not written. Every one of them segfaults on purpose, and
+        // calling that a fault would be six problems a run of the check can do nothing about.
+        // `Case::judge` does not look at a gap's status for the same reason.
+        let (a, b) = nowhere();
+        let gap = case("a-gap", "/* row: S2 */\n/* refuse: J1 */\n/* gap: #428 */\n");
+        assert!(faulted(&gap, &died(11)).is_none(), "a gap is allowed to fall over");
+        assert!(crashed(&died(11)).is_some(), "and it still died, which is the other question");
+        assert!(diverged(&gap, &died(11), &died(11), (&a, &b)).is_ok());
+    }
+
+    #[test]
+    fn a_problem_says_whether_the_two_builds_wrote_the_same_assembly() {
+        // The first question anybody asks about a case the two builds disagreed on, answered
+        // without them having to go and compile both sides by hand. Identical assembly means
+        // nothing was eliminated, which rules the optimizer out of it entirely.
+        let (a, b) = built("same", "movq %rax, %rbx\n", "movq %rax, %rbx\n");
+        let said = diverged(&allowed("same"), &died(11), &ran(""), (&a, &b)).expect_err("a fault");
+        assert!(said.contains("wrote the same assembly"), "{said}");
+
+        let (a, b) = built("differing", "callq __rucc_check\n", "nop\n");
+        let said = diverged(&allowed("differing"), &ran(&reported(1)), &ran(""), (&a, &b))
+            .expect_err("a divergence");
+        assert!(said.contains("wrote different assembly"), "{said}");
     }
 }
