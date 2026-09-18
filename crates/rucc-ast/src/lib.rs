@@ -55,7 +55,7 @@
 //! dialect, and it is much easier to get right with a test next to it than spread across the
 //! parser.
 
-#![doc(html_root_url = "https://docs.rs/rucc-ast/0.10.55")]
+#![doc(html_root_url = "https://docs.rs/rucc-ast/0.10.56")]
 
 mod asm;
 mod ast;
