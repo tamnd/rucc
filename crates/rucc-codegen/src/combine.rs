@@ -490,6 +490,14 @@ pub struct Bump {
 /// for the same reason. The eight bit inclusive or is also the instruction a probing prologue
 /// writes, which is one instruction described once rather than two things that happen to encode
 /// alike.
+///
+/// Four rows take nothing today. The narrow inclusive or and exclusive or against a constant are on
+/// `crate::select::x86_64`'s list of instructions no rule selects yet, which went out under
+/// tamnd/rucc#368 and come back with the width narrowing in tamnd/rucc#375, so a program that writes
+/// `*p |= 4` through a `char` gets a constant in a register and a run this cannot match. The rows
+/// are here for the reason the descriptions of those instructions stayed: what the machine can do
+/// is true whether or not anything asks for it today, and the rows would otherwise be a second
+/// thing to remember when #375 lands.
 pub static BUMPS: &[Bump] = &[
     Bump { from: "add_ri_8", into: "add_mi_8", load: "mov_rm_8", store: "mov_mr_8" },
     Bump { from: "add_ri_16", into: "add_mi_16", load: "mov_rm_16", store: "mov_mr_16" },
