@@ -43,7 +43,7 @@
 //!
 //! # Which globals are believed
 //!
-//! The four conditions `crate::extents` sets, which is [`crate::extents::vouched`], and one more.
+//! The four conditions `crate::extents` sets, which is that module's `vouched`, and one more.
 //! The extra one is that writing through a pointer to the object is undefined, which is
 //! `Global::constant` and is what puts it in `.rodata`. A global that is not read only can be
 //! written by anything holding its address, including code in another translation unit, and this
