@@ -813,6 +813,11 @@ mod tests {
         assert_eq!(written.bytes, vec![0x41, 0xff, 0x64, 0xf0, 0x48]);
         // Nothing for a linker to do, since where it goes is a number the machine works out.
         assert!(written.holes.is_empty());
+        // And the call, which is the same row one place along. `call *(%rax)` in libgmp's
+        // `tests/amd64call.asm` calls whatever the table entry it just loaded points at.
+        let written = one("call", &["*(%rax)".to_owned()]).expect("read");
+        assert_eq!(written.bytes, vec![0xff, 0x10]);
+        assert!(written.holes.is_empty());
     }
 
     #[test]
