@@ -221,6 +221,36 @@ unsigned long f(unsigned long a, unsigned long b, unsigned long *hi) {
 }
 
 #[test]
+fn a_division_of_a_pair_of_registers_reads_both_halves_the_program_filled() {
+    // `udiv_qrnnd` out of the same header, which is how libgmp does long division a limb at a time.
+    // The dividend is two registers read as one number, and both of them are tied: the low half to
+    // the output the quotient comes back in and the high half to the output the remainder comes back
+    // in. So the instruction reads three registers and its text names one, and what says where the
+    // other two are is a letter on each output and a number on each input.
+    //
+    // The two divisions this compiler already had are each two instructions, because a division in C
+    // divides a number by a number of its own width and the machine divides a pair, so the high half
+    // is filled first and that filling is what a template does not want. The one instruction on its
+    // own is what a program that filled both halves itself is asking for.
+    let source = "\
+unsigned long f(unsigned long hi, unsigned long lo, unsigned long d, unsigned long *rem) {
+  unsigned long q, r;
+  asm (\"divq %4\" : \"=a\" (q), \"=d\" (r) : \"0\" (lo), \"1\" (hi), \"rm\" (d));
+  *rem = r;
+  return q;
+}
+";
+    let body = body(&asm("udiv-qrnnd", source), "f");
+    assert!(body.contains("divq"), "the division never reached the listing:\n{body}");
+    assert!(!body.contains("idivq"), "the unsigned division became the signed one:\n{body}");
+    assert!(
+        !body.contains("cqto"),
+        "the high half was filled over the top of the program's:\n{body}"
+    );
+    assert!(!body.contains("$0"), "a half of the dividend was zeroed rather than read:\n{body}");
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong
