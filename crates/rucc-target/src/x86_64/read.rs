@@ -18,8 +18,8 @@
 //! # What is read and what is not
 //!
 //! One instruction per line, separated by newlines or semicolons, in AT&T syntax. An argument is a
-//! register the template named, an operand of the statement written `%0`, a number written `$5`,
-//! or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
+//! register the template named, an operand of the statement written `%0` or `%q0`, a number
+//! written `$5`, or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
 //!
 //! Everything else is nothing at all rather than a guess, and the caller turns that into a refusal
 //! that names the statement. Labels are not read, because a label inside a function is a place
@@ -43,6 +43,34 @@
 //! caller knows them, and it passes their widths in. Every register argument has to agree on one
 //! width, since two that disagree are an instruction the program will have to spell out itself.
 //!
+//! # The width an operand carries on itself
+//!
+//! `%q0` rather than `%0`, which is the other half of the same question. The letter between the
+//! sigil and the number says how much of that operand's register the instruction uses, and it is
+//! the program overriding the type rather than reading it: `%b0`, `%w0`, `%k0` and `%q0` are the
+//! byte, the word, the long and the quad of the same register.
+//!
+//! A program writes one when the header it is in is read on more than one target. libgmp writes
+//! `%q0` all through `longlong.h`, which every file of that library includes, and it writes it
+//! because the same header is read on the thirty two bit target where a limb is a `long` and the
+//! same line still has to say sixty four bits. On this target the type already says sixty four, so
+//! the modifier is the program saying it twice, and what it costs to leave unread is the whole
+//! library.
+//!
+//! Once an argument says a width the mnemonic no longer has to, so these are read before the suffix
+//! is worked out and they are what it is worked out from. What they do not do is override the type.
+//! An operand is placed at the width the opcode uses and the caller checks that against the type it
+//! has, so a template saying `%q0` of an `int` is refused where it is placed rather than here: the
+//! top half of that register is something nothing defined, and handing it to an instruction is a
+//! program that assembles into something other than what it says.
+//!
+//! Four of them and not the rest. gcc has a dozen more letters in that position and they do other
+//! things: print a constant without its sigil, print the suffix on its own, print an address. Those
+//! are a template asking for text rather than for an instruction, and text is not what this reads.
+//! `%h`, which is the high byte of one of the four registers that have one, is left out for a
+//! different reason, which is that it names a register rather than a part of one and nothing in
+//! this backend has a name for it.
+//!
 //! # The one directive that is read
 //!
 //! An alignment, which is `.p2align`, `.align` and `.balign`, and which is not an instruction at
@@ -59,6 +87,8 @@
 //! What comes back is [`ALIGN`] with the boundary in bytes on it, and everything downstream treats
 //! it the way it treats a fence: an instruction moved across one is an alignment of something other
 //! than what the program pointed at.
+
+use std::borrow::Cow;
 
 use crate::operand::{Constraint, OperandDesc};
 use crate::regs::{PhysReg, Segment};
@@ -229,6 +259,38 @@ fn is_repeat(text: &str) -> bool {
     matches!(text.trim(), "rep" | "repe" | "repz")
 }
 
+/// The instruction a repeat prefix and that mnemonic are together, or nothing for a pair this does
+/// not read.
+///
+/// Three of them, and all three are one instruction a program spelled as a prefix and another
+/// because its assembler was older than the mnemonic for the one it meant. That is not a trick, it
+/// is what the prefix byte does: a processor without the feature ignores it and runs the
+/// instruction behind it, so the old spelling was the way to ask for the new instruction and get
+/// something reasonable on a machine that did not have it.
+///
+/// `rep nop` is `pause`, the hint a spin lock wants, and libuv writes it with `a.k.a. PAUSE` in the
+/// comment beside it. `rep bsf` is `tzcnt` and `rep bsr` is `lzcnt`, which libgmp writes in
+/// `longlong.h` with a comment saying exactly that, and which are not the searches they are spelled
+/// as: a search answers where the bit is and a count answers how many places came before it. So
+/// what comes back is the count, and a prefix left unread here would be a program counting bits and
+/// getting indices.
+///
+/// The suffix comes through, since it is the width and the prefix says nothing about the width. The
+/// sixteen bit one is refused, because there is no encoding for it in this assembler and the reason
+/// is in `crate::x86_64::encode`.
+fn repeated(mnemonic: &str, rest: &str) -> Option<String> {
+    if mnemonic == "nop" && rest.trim().is_empty() {
+        return Some("pause".to_owned());
+    }
+    for (search, count) in [("bsf", "tzcnt"), ("bsr", "lzcnt")] {
+        let Some(suffix) = mnemonic.strip_prefix(search) else { continue };
+        if suffix.is_empty() || suffix == "l" || suffix == "q" {
+            return Some(format!("{count}{suffix}"));
+        }
+    }
+    None
+}
+
 /// One line with anything a comment starts taken off the end of it.
 fn uncommented(text: &str) -> &str {
     let end = text.find('#').into_iter().chain(text.find("//")).min();
@@ -238,13 +300,10 @@ fn uncommented(text: &str) -> &str {
 /// One instruction, or nothing for one this cannot place.
 ///
 /// The flag says a repeat prefix was written in front of it, either on a line of its own or as
-/// the first word of this one. Exactly one combination of a prefix and an instruction is read,
-/// and it is `rep nop`: that is the encoding of `pause`, assemblers have always taken it as one,
-/// and it is what a program writes when it wants the hint on a processor whose assembler is older
-/// than the mnemonic. libuv writes it that way and puts `a.k.a. PAUSE` in the comment beside it.
-/// A prefix on anything else is refused, `lock` included, because a prefix that changes what an
-/// instruction does is not something to guess at: dropping the `lock` off a read modify write
-/// would turn a program that is correct into one that is nearly always correct.
+/// the first word of this one, and what it means is [`repeated`]. A prefix that combination does
+/// not name is refused, `lock` included, because a prefix that changes what an instruction does is
+/// not something to guess at: dropping the `lock` off a read modify write would turn a program that
+/// is correct into one that is nearly always correct.
 fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<Line> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     // The same prefix written on the same line as what it applies to, which is the other way a
@@ -255,14 +314,9 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
         }
         return instruction(rest.trim(), true, widths);
     }
-    let mnemonic = if prefixed {
-        if mnemonic != "nop" || !rest.trim().is_empty() {
-            return None;
-        }
-        "pause"
-    } else {
-        mnemonic
-    };
+    let mnemonic: Cow<'_, str> =
+        if prefixed { Cow::Owned(repeated(mnemonic, rest)?) } else { Cow::Borrowed(mnemonic) };
+    let mnemonic = mnemonic.as_ref();
     // A label ends in a colon and a directive starts with a dot, and neither is an instruction.
     // Both are caught here rather than being looked for, because a mnemonic is letters and digits
     // and nothing else, so anything carrying punctuation is already not one.
@@ -288,7 +342,13 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
     let mut imm = None;
     for (&arg, &given) in only.args.iter().zip(&given) {
         match (arg, given) {
-            (Arg::Reg(index, width), Given::Operand(operand)) => {
+            (Arg::Reg(index, width), Given::Operand(operand, stated)) => {
+                // A width the template wrote on the operand has to be the width the opcode uses,
+                // the way a register the template named has to be. `movq %1, %k0` is a quadword
+                // move into half a register, which is not an instruction and is not half of one.
+                if stated.is_some_and(|stated| stated != width) {
+                    return None;
+                }
                 *operands.get_mut(usize::from(index))? =
                     Some(Piece::Operand { index: operand, width });
             }
@@ -349,12 +409,21 @@ fn tied(described: &[OperandDesc], index: usize) -> Option<usize> {
 /// time. Nothing when they do not say it. An instruction whose arguments are all of them numbers
 /// and addresses has nothing to take a width from, and one whose register arguments disagree about
 /// the width is two instructions at once, and either way the program has to spell it out.
+///
+/// An operand that carried a modifier says its own width and the caller's list is not consulted for
+/// it. That is the modifier's whole purpose, and it means a template can name an operand whose type
+/// has no width here at all as long as it says which part of the register it wants.
 fn suffixed(mnemonic: &str, given: &[Given], widths: &[Option<Width>]) -> Option<String> {
     let mut width: Option<Width> = None;
     for arg in given {
         let each = match *arg {
             Given::Reg(_, each) => each,
-            Given::Operand(index) => (*widths.get(index)?)?,
+            // The template's own answer first, since a program that wrote one wrote it to say
+            // something other than what the type says.
+            Given::Operand(index, stated) => match stated {
+                Some(stated) => stated,
+                None => (*widths.get(index)?)?,
+            },
             // The register an address is counted from is a whole one whatever the instruction
             // reads, and a number is as wide as it needs to be, so neither says anything here.
             Given::Imm(_) | Given::Mem(_) => continue,
@@ -402,7 +471,8 @@ fn arguments(text: &str) -> Vec<&str> {
 /// One argument as the template wrote it, before anything has been matched against an opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Given {
-    Operand(usize),
+    /// `%0`, with the width the template wrote on it for one that carried a modifier.
+    Operand(usize, Option<Width>),
     Reg(PhysReg, Width),
     Imm(i64),
     Mem(At),
@@ -412,7 +482,7 @@ impl Given {
     /// What kind of thing it is, which is what an opcode is looked up by.
     fn shape(&self) -> Shape {
         match self {
-            Given::Operand(_) | Given::Reg(..) => Shape::Reg,
+            Given::Operand(..) | Given::Reg(..) => Shape::Reg,
             Given::Imm(_) => Shape::Imm,
             Given::Mem(_) => Shape::Mem,
         }
@@ -426,7 +496,13 @@ fn given(text: &str) -> Option<Given> {
     }
     let Some(after) = sigil(text) else { return address(text, None).map(Given::Mem) };
     if after.starts_with(|letter: char| letter.is_ascii_digit()) {
-        return after.parse().ok().map(Given::Operand);
+        return after.parse().ok().map(|index| Given::Operand(index, None));
+    }
+    // Before the register names, because `%b0` and `%bl` both begin with the same letter and only
+    // one of them is a register. What tells them apart is what comes after the letter, so the
+    // modifier is tried first and falls through to the names when the rest of it is not a number.
+    if let Some(given) = modified(after) {
+        return Some(given);
     }
     // A segment register is the one name that is followed by an address rather than being an
     // argument on its own, and it is the only way anything here reaches the block a thread owns.
@@ -440,6 +516,22 @@ fn given(text: &str) -> Option<Given> {
     }
     let (reg, width) = gpr_named(after)?;
     Some(Given::Reg(reg, width))
+}
+
+/// An operand with a width written on it, or nothing for anything that is not one.
+///
+/// Given what follows the sigil, so `q0` rather than `%q0`. See the module documentation for which
+/// four letters are read and why the rest are not.
+fn modified(after: &str) -> Option<Given> {
+    let (letter, digits) = after.split_at_checked(1)?;
+    let width = match letter {
+        "b" => Width::Byte,
+        "w" => Width::Word,
+        "k" => Width::Long,
+        "q" => Width::Quad,
+        _ => return None,
+    };
+    Some(Given::Operand(digits.parse().ok()?, Some(width)))
 }
 
 /// What follows the sigil, for something that has one.
@@ -637,6 +729,71 @@ mod tests {
         );
     }
 
+    /// The four widths a template can write on an operand, each of them read as that much of the
+    /// register. libgmp writes the last of them throughout `longlong.h`, which is the header every
+    /// file of that library includes.
+    #[test]
+    fn an_operand_carrying_a_width_is_read_at_the_width_it_carries() {
+        let cases = [
+            ("addb %1, %b0", "add_rr_8", Width::Byte),
+            ("addw %1, %w0", "add_rr_16", Width::Word),
+            ("addl %1, %k0", "add_rr_32", Width::Long),
+            ("addq %1, %q0", "add_rr_64", Width::Quad),
+        ];
+        for (template, opcode, width) in cases {
+            let widths = [Some(width); 2];
+            let lines =
+                read(template, &widths).unwrap_or_else(|| panic!("{template} is an addition"));
+            assert_eq!(lines[0].opcode, opcode, "{template}");
+            assert_eq!(lines[0].operands[0], Piece::Operand { index: 0, width }, "{template}");
+        }
+    }
+
+    /// The modifier is where the width comes from when there is one, so a template that wrote one
+    /// has said what an assembler needs and the mnemonic may carry no suffix at all. The types the
+    /// caller passed in are not consulted for an operand that carries its own width, which is what
+    /// lets a template name an operand whose type is no width this machine has. Whether the two
+    /// agree is asked where the operand is placed rather than here, since that is where the type
+    /// is.
+    #[test]
+    fn a_width_written_on_an_operand_is_what_the_suffix_is_worked_out_from() {
+        let lines = read("add %q1, %q0", &[Some(Width::Long); 2]).expect("an addition");
+        assert_eq!(lines[0].opcode, "add_rr_64", "the modifier and not the type");
+        assert_eq!(
+            read("add %1, %0", &[Some(Width::Long); 2]).expect("an addition")[0].opcode,
+            "add_rr_32",
+            "the type, for the same template without one"
+        );
+        let lines = read("addq %1, %q0", &[None, None]).expect("an addition");
+        assert_eq!(lines[0].opcode, "add_rr_64", "an operand whose type has no width here");
+        assert_eq!(
+            read("add %1, %q0", &[Some(Width::Long); 2]),
+            None,
+            "one operand saying a width and the other saying a different one"
+        );
+    }
+
+    /// A width that disagrees with the instruction is refused the way a register name that
+    /// disagrees is, and a register name is still read as a register even though three of the four
+    /// letters begin one.
+    #[test]
+    fn a_width_that_disagrees_with_the_instruction_is_refused() {
+        assert_eq!(read("addq %1, %k0", &[Some(Width::Quad); 2]), None, "half a destination");
+        assert_eq!(read("addl %1, %q0", &[Some(Width::Long); 2]), None, "the other way round");
+        assert_eq!(read("addq %1, %h0", &[Some(Width::Quad); 2]), None, "a letter this leaves out");
+        assert_eq!(
+            read("addq %1, %q", &[Some(Width::Quad); 2]),
+            None,
+            "a modifier with no operand"
+        );
+        let lines = read("addb %%bl, %0", &[Some(Width::Byte)]).expect("an addition out of bl");
+        assert_eq!(
+            lines[0].operands[2],
+            Piece::Reg { reg: gpr_named("bl").expect("bl").0, width: Width::Byte },
+            "a register whose name starts with a letter a modifier also uses"
+        );
+    }
+
     /// The suffix is worked out from the operands and from nothing else, so a template whose
     /// arguments do not agree about the width, or do not say one at all, is refused.
     #[test]
@@ -648,6 +805,33 @@ mod tests {
             read("cmp %0, %1", &[Some(Width::Long)]),
             None,
             "an operand the statement has not got"
+        );
+    }
+
+    /// The two searches and the two counts, which are four instructions and not two spellings of
+    /// two. libgmp writes all four in `longlong.h`, picking between them on what the processor the
+    /// build was configured for can do, and its comment on the prefixed pair says what they are:
+    /// "This is lzcnt, spelled for older assemblers."
+    #[test]
+    fn a_repeat_prefix_on_a_bit_search_is_the_count_it_is_the_old_spelling_of() {
+        let cases = [
+            ("bsf\t%1, %q0", "bsf_64"),
+            ("bsr\t%1,%0", "bsr_64"),
+            ("rep;bsf\t%1, %q0", "tzcnt_64"),
+            ("rep;bsr\t%1, %q0", "lzcnt_64"),
+            ("rep bsfl %1, %0", "tzcnt_32"),
+            ("rep\n\tbsr %k1, %k0", "lzcnt_32"),
+        ];
+        for (template, opcode) in cases {
+            let widths = [Some(Width::Quad); 2];
+            let lines = read(template, &widths).unwrap_or_else(|| panic!("{template} is a search"));
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, opcode, "{template}");
+        }
+        assert_eq!(
+            read("rep; bsfw %1, %0", &[Some(Width::Word); 2]),
+            None,
+            "the sixteen bit count, which this assembler has no encoding for"
         );
     }
 

@@ -128,6 +128,61 @@ fn a_two_address_instruction_is_read_as_the_operand_it_is_told_to_overwrite() {
 }
 
 #[test]
+fn a_width_written_on_an_operand_is_the_width_the_instruction_is_read_at() {
+    // What libgmp writes throughout `longlong.h`, which every file of that library includes. The
+    // header is shared with the thirty two bit target, where a limb is narrower and the same line
+    // still has to say sixty four bits, so the width is on the operand rather than on the mnemonic.
+    // Here the mnemonic carries no suffix at all and the letter in front of the number is the only
+    // thing saying how wide the addition is.
+    let source =
+        "long f(long x, long y) { asm (\"add %q1, %q0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
+    let text = asm("modifier", source);
+    let body = body(&text, "f");
+    assert!(body.contains("addq"), "the width on the operand was not read:\n{body}");
+}
+
+#[test]
+fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
+    // Two ways of disagreeing and both are refused rather than one half being believed over the
+    // other. A quadword add into half a register is not an instruction, and a quadword add of an
+    // `int` is an instruction reaching a register half of which nothing defined.
+    let mnemonic =
+        "long f(long x, long y) { asm (\"addq %1, %k0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
+    let (ok, _, said) = run("modifier-mnemonic", mnemonic);
+    assert!(!ok, "a width that contradicts the mnemonic was accepted");
+    assert!(said.contains("which nothing here assembles"), "{said}");
+    let ty = "int f(int x, int y) { asm (\"add %q1, %q0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
+    let (ok, _, said) = run("modifier-type", ty);
+    assert!(!ok, "a width that contradicts the type of the operand was accepted");
+    assert!(said.contains("has an operand this cannot place"), "{said}");
+}
+
+#[test]
+fn a_repeat_prefix_in_front_of_a_bit_search_is_the_count_and_not_the_search() {
+    // The other two templates `longlong.h` writes, which are how libgmp counts the zeroes at either
+    // end of a limb. The prefix is not a decoration here and the library's own comment beside the
+    // line says so: it is `lzcnt` spelled the way an assembler from before `lzcnt` existed would
+    // take it. A search answers where the highest set bit is and a count answers how many places
+    // are above it, so reading the prefixed line as the bare one would be a program that does
+    // something other than what it says rather than a program that is a little slower.
+    let leading = "long f(long x) { long n; asm (\"rep;bsr\\t%1, %q0\" : \"=r\" (n) : \"rm\" (x)); \
+                   return n; }\n";
+    let trailing = "long f(long x) { long n; asm (\"rep;bsf\\t%1, %q0\" : \"=r\" (n) : \"rm\" (x)); \
+                    return n; }\n";
+    // And the bare line, which is what the same header writes on a target the library was not told
+    // the count exists on. It stays the search it is written as.
+    let search = "long f(long x) { long n; asm (\"bsr\\t%1,%0\" : \"=r\" (n) : \"rm\" (x)); \
+                  return n; }\n";
+    let counted = body(&asm("count-leading", leading), "f");
+    let below = body(&asm("count-trailing", trailing), "f");
+    let found = body(&asm("search", search), "f");
+    assert!(counted.contains("lzcntq"), "the prefix was dropped:\n{counted}");
+    assert!(below.contains("tzcntq"), "the prefix was dropped:\n{below}");
+    assert!(found.contains("bsrq"), "the search was not read:\n{found}");
+    assert!(!found.contains("lzcnt"), "a bare search became a count:\n{found}");
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong

@@ -1076,6 +1076,25 @@ static ENCODINGS: &[Encoding] = &[
     bytes("bsrw", &MR, Word, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
     bytes("bsrl", &MR, Long, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
     bytes("bsrq", &MR, Quad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    // The counts, which are the same two opcodes with `0xF3` in front of them and are not the same
+    // instructions. A search answers where the bit it found is and a count answers how many places
+    // there were before it, so the two agree only on an argument with one bit in it, and a search
+    // leaves its destination alone for an argument with none where a count writes the width. The
+    // prefix was ignored on a processor without the feature, which is how a program comes to write
+    // the search when it means the count: assemblers older than the mnemonic had no way to spell
+    // it, and libgmp still writes `rep;bsr` with a comment saying it is `lzcnt`.
+    //
+    // No sixteen bit form. That one is `66 f3 0f bd`, which is two prefixes at once, and no `Size`
+    // here says both. Nothing asks for it, since what a program counts the bits of is a word or a
+    // limb and neither of those is sixteen bits on this machine.
+    bytes("lzcntl", &RR, Single, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("lzcntq", &RR, SingleQuad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("tzcntl", &RR, Single, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("tzcntq", &RR, SingleQuad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("lzcntl", &MR, Single, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("lzcntq", &MR, SingleQuad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
+    bytes("tzcntl", &MR, Single, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    bytes("tzcntq", &MR, SingleQuad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
     // A copy between registers, which is a store to a register rather than a load from one, so it
     // is written the same way round as the arithmetic above and not as the conversions.
     bytes("movb", &RR, Byte, &[0x88], pair(1, 0), NO_IMM),
@@ -2501,9 +2520,17 @@ mod tests {
         assert_eq!(hex("btcw", &[Value::Imm(1), word(RDX)]), "66 0f ba fa 01");
         assert_eq!(hex("btq", &[quad(RDX), quad(RAX)]), "48 0f a3 d0");
         assert_eq!(hex("btsl", &[long(RCX), long(RAX)]), "0f ab c8");
-        // The bit scans, written the way the conversions are.
+        // The bit scans, written the way the conversions are, and the counts behind them, which
+        // are the same two opcodes with the prefix that makes them different instructions.
         assert_eq!(hex("bsfq", &[quad(RAX), quad(RDX)]), "48 0f bc d0");
         assert_eq!(hex("bsrl", &[long(RAX), long(RCX)]), "0f bd c8");
+        assert_eq!(hex("lzcntl", &[long(RDX), long(RAX)]), "f3 0f bd c2");
+        assert_eq!(hex("lzcntq", &[quad(RDX), quad(RAX)]), "f3 48 0f bd c2");
+        assert_eq!(hex("tzcntl", &[long(RDX), long(RAX)]), "f3 0f bc c2");
+        assert_eq!(hex("tzcntq", &[quad(RDX), quad(RAX)]), "f3 48 0f bc c2");
+        let counted = Addr { base: Some(RBX), ..Addr::default() };
+        assert_eq!(hex("lzcntq", &[Value::Mem(counted), quad(RAX)]), "f3 48 0f bd 03");
+        assert_eq!(hex("tzcntl", &[Value::Mem(counted), long(RAX)]), "f3 0f bc 03");
         // The widenings reading memory, which is the shape only `movzbl` had.
         let from = Addr { base: Some(RSI), ..Addr::default() };
         assert_eq!(hex("movzbq", &[Value::Mem(from), quad(RAX)]), "48 0f b6 06");

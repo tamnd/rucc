@@ -334,6 +334,26 @@ mod tests {
         "cmov_ae_64",
     ];
 
+    /// The instructions that look for a set bit, which a template asks for and nothing else does.
+    ///
+    /// These have a source and a destination a rule could have named, the way the conditional moves
+    /// above do, and the reason no rule names them is a different one again. It is not that their
+    /// meaning comes from the line in front of them: each of these says on its own exactly what it
+    /// computes. It is that [`crate::expand`] already answers the question they answer, out of
+    /// arithmetic every machine has, and it does that because what these do when the source is zero
+    /// is four different things on four families of processor. A rule that selected one would be a
+    /// rule whose answer depends on which machine ran it.
+    ///
+    /// So the only thing that reaches one is a program that wrote the name in a template, which is
+    /// what the libraries that were counting bits before there was a builtin for it all do.
+    /// `crate::lower` writes them for the reason it writes the three in [`TEMPLATE`], and they are
+    /// not on that list because they are not bare: a rule could have named these operands and the
+    /// claim that list makes would be false of them.
+    const SEARCH: &[&str] = &[
+        "bsf_16", "bsf_32", "bsf_64", "bsr_16", "bsr_32", "bsr_64", "lzcnt_32", "lzcnt_64",
+        "tzcnt_32", "tzcnt_64",
+    ];
+
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
     /// A rule replaces a term with a term, and a term is the value one instruction computes. A
@@ -652,6 +672,9 @@ mod tests {
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
+            if SEARCH.contains(&opcode) {
+                continue;
+            }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {
                 continue;
             }
@@ -716,6 +739,31 @@ mod tests {
                 .all(|desc| matches!(desc.constraint, rucc_target::Constraint::Fixed(_)));
             assert!(fixed, "{opcode} has an operand a rule could name");
             assert!(!form.takes_mem(), "{opcode} is given an address, so a rule could name it");
+        }
+    }
+
+    /// The same claim about the bit searches, read off the description that put them there and read
+    /// both ways round. An instruction is exempt for this reason exactly when the machine describes
+    /// it as a search, so the list cannot grow an opcode that is something else, and a search this
+    /// target grows later cannot be left off the list and quietly go unselected with nobody saying
+    /// why. Nothing in the rule set selects one, which is the other half of the reason and is what
+    /// the check above would have caught in any case.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_only_a_template_searches_for_a_bit_is_one() {
+        let written = heads();
+        for &opcode in SEARCH {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert_eq!(form, x86_64::Form::Search, "{opcode} is not a search");
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which only a template asks for",
+                TABLE.source
+            );
+        }
+        for &(opcode, form) in x86_64::INSTS {
+            if form == x86_64::Form::Search {
+                assert!(SEARCH.contains(&opcode), "{opcode} is a search and is not on the list");
+            }
         }
     }
 

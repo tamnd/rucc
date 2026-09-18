@@ -605,6 +605,20 @@ static TEXT: &[(&str, &[Written])] = &[
     ("low_8", &[spell("movb", &[Reg(1, Byte), Reg(0, Byte)])]),
     ("low_16", &[spell("movw", &[Reg(1, Word), Reg(0, Word)])]),
     ("low_32", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),
+    // Finding a bit and counting the zeroes in front of it. The counts are written under their own
+    // mnemonics rather than as a repeat prefix in front of the searches, which is the same bytes
+    // said the way an assembler this century spells them, and a template that wrote the old
+    // spelling is read into these.
+    ("bsf_16", &[spell("bsfw", &[Reg(1, Word), Reg(0, Word)])]),
+    ("bsf_32", &[spell("bsfl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("bsf_64", &[spell("bsfq", &[Reg(1, Quad), Reg(0, Quad)])]),
+    ("bsr_16", &[spell("bsrw", &[Reg(1, Word), Reg(0, Word)])]),
+    ("bsr_32", &[spell("bsrl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("bsr_64", &[spell("bsrq", &[Reg(1, Quad), Reg(0, Quad)])]),
+    ("lzcnt_32", &[spell("lzcntl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("lzcnt_64", &[spell("lzcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
+    ("tzcnt_32", &[spell("tzcntl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("tzcnt_64", &[spell("tzcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
     // The address computation the addressing modes are reached through.
     ("lea_64", &[spell("leaq", &[Mem, Reg(0, Quad)])]),
     // Reading and writing memory. The width is the width of what is moved rather than of the

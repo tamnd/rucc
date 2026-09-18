@@ -107,6 +107,11 @@ fn plain(form: Form) -> Timing {
         // machine has to read the count register and the condition state together, and what it
         // does about that has cost a cycle on every core here.
         ShiftCl => (2, Unit::Int),
+        // A search for a set bit and the counts spelled the same way, which are the slowest
+        // instructions on this side that are not divides. Three cycles is what every core in this
+        // family has published for all four of them, and it is three rather than one because what
+        // they answer is a position rather than an operation on each bit in place.
+        Search => (3, Unit::Int),
         // A comparison and the byte behind it, which is two instructions written as one name. The
         // byte cannot start until the comparison has set the bits it reads, so the pair costs the
         // two of them one after the other rather than the slower of the two.
