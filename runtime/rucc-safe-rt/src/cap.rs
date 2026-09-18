@@ -862,7 +862,10 @@ mod tests {
         let back = unsafe { load(into, at(target, 24), pointee) };
         assert_eq!(back.lo, pointee as u64, "the copy brought the pointee's base with it");
         assert_eq!(back.ext, 128);
-        assert_eq!(back.ver, held.ver, "and the version, which is the half a stale slot gets wrong");
+        assert_eq!(
+            back.ver, held.ver,
+            "and the version, which is the half a stale slot gets wrong"
+        );
 
         // SAFETY: the addresses `alloc` handed back.
         unsafe {
