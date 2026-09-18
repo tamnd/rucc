@@ -160,6 +160,17 @@ pub enum Piece {
     },
     /// A constant written in the rule.
     Int(i128),
+    /// A constant the rule works out from the ones the pattern matched.
+    ///
+    /// This is what lets a rule be written once per width rather than once per constant. A shift
+    /// that stands in for a multiplication by a power of two shifts by the log of that power, and
+    /// the log is a number no rule can write down until it has seen which power it matched.
+    Computed {
+        /// The computation as the rule file writes it, for anything that has to say what it did.
+        text: &'static str,
+        /// What it works out.
+        work: Computation,
+    },
     /// A term the rule writes, which is an instruction once the caller has built it.
     App {
         /// The name in head position.
@@ -175,6 +186,14 @@ pub enum Piece {
 /// guard about a binding that is not a constant is false, which is how a rule about a number
 /// declines an operand that is a register.
 pub type Guard = fn(&[Option<i128>]) -> bool;
+
+/// A number worked out from the constants a pattern matched.
+///
+/// Handed one entry per binding, the same as a [`Guard`] is, and for the same reason: the
+/// computation is written in the names the pattern bound and those are positions by the time it
+/// runs. It gives nothing back when a binding it reads is not a constant, which is the answer a
+/// guard gives as false, and the rule does not fire.
+pub type Computation = fn(&[Option<i128>]) -> Option<i128>;
 
 /// One rule, as much of it as matching needs.
 #[derive(Debug)]

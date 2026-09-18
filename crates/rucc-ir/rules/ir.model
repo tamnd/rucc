@@ -288,3 +288,58 @@
 (semantics (ret.f64 v) v)
 (semantics (ret.f128 v) v)
 (semantics (brif.i1 v) v)
+
+;; Arithmetic on the constants a rule matched, which is not an instruction and is here because it
+;; has to be said once for both rule sets all the same.
+;;
+;; A guard asks a question about a matched constant and a computed piece of a replacement works a
+;; number out of one, and both of them are read twice: once by `build-tools/rucc-rules`, which
+;; compiles them into the compiler, and once by `build-tools/rucc-verify`, which writes them into
+;; the query. These are the entries that make the second reading possible, and they are the reason
+;; a rule about every power of two can be written once per width rather than once per power.
+;;
+;; Each is written once per width because each is a question about the bits of a number and a
+;; number has no bits until it has a width. Whether a constant is a power of two is a different
+;; question at eight bits and at sixty four, and so is how many zeros it ends in.
+
+;; Whether one bit is set and every other bit is clear, which is what a guard says before a rule
+;; may turn a multiplication into a shift. Zero has no bits set and is refused by the first half,
+;; which matters: without it the second half alone would call zero a power of two, since zero minus
+;; one is every bit set and zero shares none of them.
+(semantics (power_of_two.i8 k) (and (not (= k 0)) (= (bvand k (bvsub k 1)) 0)))
+(semantics (power_of_two.i16 k) (and (not (= k 0)) (= (bvand k (bvsub k 1)) 0)))
+(semantics (power_of_two.i32 k) (and (not (= k 0)) (= (bvand k (bvsub k 1)) 0)))
+(semantics (power_of_two.i64 k) (and (not (= k 0)) (= (bvand k (bvsub k 1)) 0)))
+
+;; How many zero bits a number ends in, which is the log of it when it is a power of two and is
+;; the shift a multiplication by that power becomes.
+;;
+;; Each width above the narrowest is written in terms of the half below it: if the low half is
+;; entirely zero the answer is half the width plus whatever the high half ends in, and otherwise
+;; it is whatever the low half ends in. A number that is zero all through comes back as the width,
+;; which falls out of the same two lines rather than being a case anybody wrote, and is the answer
+;; the guard above keeps any rule here from ever asking for.
+;;
+;; The narrowest is the one case written out, as the bit positions in the order a count of them
+;; would be taken. Eight lines a reviewer can check by eye is what the recursion above stands on.
+(semantics (ctz.i8 x)
+  (ite (= (extract 0 0 x) 1) 0
+  (ite (= (extract 1 1 x) 1) 1
+  (ite (= (extract 2 2 x) 1) 2
+  (ite (= (extract 3 3 x) 1) 3
+  (ite (= (extract 4 4 x) 1) 4
+  (ite (= (extract 5 5 x) 1) 5
+  (ite (= (extract 6 6 x) 1) 6
+  (ite (= (extract 7 7 x) 1) 7 8)))))))))
+(semantics (ctz.i16 x)
+  (ite (= (extract 7 0 x) 0)
+       (+ 8 (zero_extend 8 16 (ctz.i8 (extract 15 8 x))))
+       (zero_extend 8 16 (ctz.i8 (extract 7 0 x)))))
+(semantics (ctz.i32 x)
+  (ite (= (extract 15 0 x) 0)
+       (+ 16 (zero_extend 16 32 (ctz.i16 (extract 31 16 x))))
+       (zero_extend 16 32 (ctz.i16 (extract 15 0 x)))))
+(semantics (ctz.i64 x)
+  (ite (= (extract 31 0 x) 0)
+       (+ 32 (zero_extend 32 64 (ctz.i32 (extract 63 32 x))))
+       (zero_extend 32 64 (ctz.i32 (extract 31 0 x)))))

@@ -168,7 +168,7 @@ use rucc_ir::{
     Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
 };
 
-use crate::rules::{Match, Piece, Table, canonical, compare, identities, strength, width};
+use crate::rules::{Match, Piece, Subject, Table, canonical, compare, identities, strength, width};
 use crate::uses::{count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -494,7 +494,7 @@ fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
             // the last one: a replacement deeper than one instruction would need somewhere to put
             // the ones under it, and a rule that wanted it can be written as two rules that each
             // leave one.
-            pieces => match built(pieces, &found) {
+            pieces => match built(pieces, &found, &matched(&terms, &found)) {
                 Some(rewrite) => rewrite,
                 // Any other shape, which no rule in the file has. A test below says so, because a
                 // rule that fell through here would be a rule that never fires and nothing would
@@ -513,7 +513,11 @@ fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
 /// or a number the rule wrote. Anything else is nothing this pass can build, and the answer to
 /// one is that the rule does not fire, which the test over the whole table turns into a failure
 /// rather than a silence.
-fn built(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
+fn built(
+    pieces: &'static [Piece],
+    found: &Match<Term>,
+    matched: &[Option<i128>],
+) -> Option<Rewrite> {
     if let Some(rewrite) = converted(pieces, found) {
         return Some(rewrite);
     }
@@ -528,9 +532,18 @@ fn built(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
         // wrote, and building the instruction anyway would mean guessing at one of the two.
         return None;
     }
-    let (lhs, rest) = operand(rest, found)?;
-    let (rhs, rest) = operand(rest, found)?;
+    let (lhs, rest) = operand(rest, found, matched)?;
+    let (rhs, rest) = operand(rest, found, matched)?;
     rest.is_empty().then_some(Rewrite::Built { opcode, pred, lhs, rhs })
+}
+
+/// The constants the pattern matched, one entry per binding, in the order it bound them.
+///
+/// The same list a guard is handed and worked out the same way, which is what lets a computed
+/// piece be written in the names the pattern bound. It is collected here rather than kept from
+/// the match because most rules have no computation and no guard and would pay for it every time.
+fn matched(terms: &Terms<'_>, found: &Match<Term>) -> Vec<Option<i128>> {
+    found.bindings.iter().map(|&node| terms.int(node)).collect()
 }
 
 /// The conversion a rule writes, if it wrote one.
@@ -563,7 +576,11 @@ fn converted(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
 }
 
 /// One operand of that instruction, and the pieces after it.
-fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'static [Piece])> {
+fn operand(
+    pieces: &'static [Piece],
+    found: &Match<Term>,
+    matched: &[Option<i128>],
+) -> Option<(Operand, &'static [Piece])> {
     match pieces {
         [Piece::App { head, arity: 1 }, Piece::Var { index, .. }, rest @ ..]
             if head.starts_with("value.") =>
@@ -577,6 +594,16 @@ fn operand(pieces: &'static [Piece], found: &Match<Term>) -> Option<(Operand, &'
             if head.starts_with("iconst.") =>
         {
             Some((Operand::Constant { number: *number, bits: bits_of(head)? }, rest))
+        }
+        // A number the rule works out of the ones it matched, which is how a rule about every
+        // power of two is written once rather than once per power. The computation gives nothing
+        // back when a binding it reads is not a constant, and the answer to that is the same as a
+        // guard that does not hold: the rule does not fire.
+        [Piece::App { head, arity: 1 }, Piece::Computed { work, .. }, rest @ ..]
+            if head.starts_with("iconst.") =>
+        {
+            let number = work(matched)?;
+            Some((Operand::Constant { number, bits: bits_of(head)? }, rest))
         }
         // A number the pattern bound rather than one the rule wrote. This is what a
         // canonicalisation needs: it moves the operand it matched to the other side, and what it
@@ -1365,6 +1392,11 @@ mod tests {
             {
                 Some(rest)
             }
+            [Piece::App { head, arity: 1 }, Piece::Computed { .. }, rest @ ..]
+                if head.starts_with("iconst.") =>
+            {
+                Some(rest)
+            }
             _ => None,
         };
         operand(rest).and_then(operand).is_some_and(<[Piece]>::is_empty)
@@ -2093,9 +2125,9 @@ mod tests {
 
     #[test]
     fn an_instruction_no_rule_is_about_is_left_alone() {
-        // Multiplying by three. Two is tier two and is an addition, and one and zero are tier one,
-        // so three is the smallest constant no tier written yet has anything to say about. Turning
-        // it into a shift and an add is the rest of tier two and is issue 523.
+        // Multiplying by three. Two is tier two and is an addition, one and zero are tier one, and
+        // every power of two is a shift, so three is the smallest constant no tier has anything to
+        // say about. Turning it into a shift and an add is a sequence rather than a rewrite.
         let i32 = Type::int(32);
         let (_, mut func, block) = one_block(i32);
         let x = func.append_param(block, i32);
@@ -2122,6 +2154,106 @@ mod tests {
         assert_eq!(returned(&func, block), doubled);
         assert_eq!(came_from(&func, doubled).0, Opcode::Add);
         assert_eq!(operands(&func, doubled), [x, x]);
+        // And it stays an addition although two is a power of two and the rule below would take
+        // it. A rule naming its constant is more specific than a rule taking whatever constant is
+        // there, so the trie tries it first without anything having to sort the two.
+    }
+
+    #[test]
+    fn multiplying_by_a_power_of_two_becomes_a_shift_by_the_count_of_its_zeros() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let eight = build.iconst(i32, 8);
+        let scaled = build.binary(Opcode::Mul, x, eight, Flags::NONE);
+        build.ret(&[scaled]);
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), scaled);
+        assert_eq!(came_from(&func, scaled).0, Opcode::Shl);
+        let args = operands(&func, scaled);
+        assert_eq!(args[0], x);
+        assert_eq!(number(&func, args[1]), 3);
+    }
+
+    #[test]
+    fn the_power_of_two_with_the_sign_bit_set_is_one_of_them() {
+        // The constant the compiler and the solver would disagree about if either read it at some
+        // width other than the rule's. At 32 bits this is a power of two and shifts by 31, and in
+        // the 128 bit integer the pass matches constants into it is a negative number, so a guard
+        // that forgot to mask would call it no power of two at all.
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let top = build.iconst(i32, 0x8000_0000);
+        let scaled = build.binary(Opcode::Mul, x, top, Flags::NONE);
+        build.ret(&[scaled]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, scaled).0, Opcode::Shl);
+        assert_eq!(number(&func, operands(&func, scaled)[1]), 31);
+    }
+
+    #[test]
+    fn dividing_an_unsigned_value_by_a_power_of_two_becomes_a_shift() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let sixteen = build.iconst(i32, 16);
+        let quotient = build.binary(Opcode::UDiv, x, sixteen, Flags::NONE);
+        build.ret(&[quotient]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, quotient).0, Opcode::LShr);
+        let args = operands(&func, quotient);
+        assert_eq!(args[0], x);
+        assert_eq!(number(&func, args[1]), 4);
+    }
+
+    #[test]
+    fn dividing_a_signed_value_by_a_power_of_two_is_left_alone() {
+        // Deliberately, and this says so rather than leaving it to be read as an oversight. A
+        // signed division rounds towards zero and a shift rounds down, so the two agree only on
+        // values that are not negative. Correcting for that is a bias added before the shift,
+        // which is a sequence of instructions rather than one term in place of another.
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let sixteen = build.iconst(i32, 16);
+        let quotient = build.binary(Opcode::SDiv, x, sixteen, Flags::NONE);
+        build.ret(&[quotient]);
+        assert!(!simplify(&mut func), "no rule turns a signed division into a shift");
+        assert_eq!(came_from(&func, quotient).0, Opcode::SDiv);
+    }
+
+    #[test]
+    fn the_unsigned_remainder_of_a_power_of_two_becomes_a_mask() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let thirty_two = build.iconst(i32, 32);
+        let rest = build.binary(Opcode::URem, x, thirty_two, Flags::NONE);
+        build.ret(&[rest]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, rest).0, Opcode::And);
+        let args = operands(&func, rest);
+        assert_eq!(args[0], x);
+        assert_eq!(number(&func, args[1]), 31);
+    }
+
+    #[test]
+    fn a_division_by_a_constant_that_is_not_a_power_of_two_is_left_alone() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let x = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let ten = build.iconst(i32, 10);
+        let quotient = build.binary(Opcode::UDiv, x, ten, Flags::NONE);
+        build.ret(&[quotient]);
+        assert!(!simplify(&mut func), "ten is no power of two");
+        assert_eq!(came_from(&func, quotient).0, Opcode::UDiv);
     }
 
     #[test]
