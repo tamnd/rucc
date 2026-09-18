@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names this rewrite as one of the
 //! ones that is free before any of that is settled.
 //!
-//! Two rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Three rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -20,6 +20,13 @@
 //! The two meet on a zero, and the order they are asked in is the order they are worth: a zero
 //! whose condition state is free becomes the exclusive or, and a zero whose state is not becomes
 //! the narrow move, which is two bytes off rather than five but costs nothing to say.
+//!
+//! And a comparison of a register against zero becomes a test of the register against itself.
+//! `cmpl $0, %eax` is three bytes and `testl %eax, %eax` is two, the byte being the zero the first
+//! one writes out. That one is asked of every instruction whatever the walk has seen, because the
+//! test writes the condition state exactly as the comparison does: both leave the sign, the zero
+//! and the parity of what is in the register and both clear the carry and the overflow, so every
+//! condition this machine jumps on reads the same answer behind either of them.
 //!
 //! The numbers over the corpus at `-Os` before this pass existed: rucc wrote a move of zero into a
 //! register 21,304 times and GCC 16 wrote it 9 times, and GCC wrote the exclusive or 23,729 times
@@ -38,12 +45,13 @@
 //! that a name it does not know writes the state, so an opcode added to a rule set and not to that
 //! table makes this find less rather than making it wrong.
 //!
-//! The narrower move is a different answer to the same question. That one an encoder could do
-//! without asking anything, since neither instruction touches the condition state and the register
-//! holds the same number afterwards either way. It is not done there because an encoder handed a
-//! sixty-four bit move and writing the bytes of a thirty-two bit one would be writing bytes the
-//! listing beside them does not say, and the listing and the bytes agreeing is worth more than the
-//! two bytes. Choosing the instruction is this pass and spelling the one it chose is the encoder.
+//! The narrower move and the test are a different answer to the same question. Those two an encoder
+//! could do without asking anything, since the narrower move leaves the same number in the same
+//! register and the test leaves the same condition state the comparison left. They are not done
+//! there because an encoder handed a sixty-four bit move and writing the bytes of a thirty-two bit
+//! one would be writing bytes the listing beside them does not say, and the listing and the bytes
+//! agreeing is worth more than the two bytes. Choosing the instruction is this pass and spelling
+//! the one it chose is the encoder.
 //!
 //! # Why it runs last
 //!
@@ -69,9 +77,9 @@
 //! buys is that if some later pass starts writing that shape, this pass stops rather than starts
 //! being wrong.
 //!
-//! Down for the exclusive or alone. The narrower move reads no condition state and writes none, so
-//! nothing about where a state is alive is a question it has to ask, and a function this turns down
-//! is still one it gets.
+//! Down for the exclusive or alone. The narrower move reads no condition state and writes none and
+//! the test writes the same state the comparison it replaces wrote, so where a state is alive is
+//! not a question either of them has to ask, and a function this turns down still gets both.
 //!
 //! # A template a program wrote
 //!
@@ -121,6 +129,7 @@ pub fn shorter(
     // there would be the same interner borrowed twice. The same reason [`crate::compare`] has.
     let wanted = short.zeroing.iter().map(|entry| entry.into);
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
         .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
         .collect();
@@ -153,6 +162,14 @@ pub fn shorter(
                 took += 1;
                 // What stands there now is the same instruction at half the width, which is a
                 // move either way, so what it does to the state is what it did before: nothing.
+            }
+            // A comparison against zero asked of the register alone. Nothing about where the state
+            // is live comes into it, because the shorter instruction writes the same five bits of
+            // state the comparison wrote, so this is asked of every instruction whatever the walk
+            // has seen behind it.
+            let into = tested_form(func, short, names, &opcodes, inst);
+            if into.is_some_and(|op| tested(func, &mut counts, machine, names, inst, op)) {
+                took += 1;
             }
             let Some(name) = opcode(func, flags, names, inst) else {
                 // A name the description does not cover may have read the state and may have
@@ -257,6 +274,47 @@ fn narrowed(
 ) -> bool {
     let mut set = Changes::new();
     set.rewrite(inst, Plan { opcode, ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
+}
+
+/// The shorter comparison this one has, when it has one and the constant it carries is zero.
+///
+/// Zero is the whole of it. A comparison of a register against itself asks whether the register is
+/// zero and nothing else, so the description's entry says what to write instead of a comparison
+/// against zero and says nothing about a comparison against anything, and an instruction carrying
+/// any other number is one this walks past.
+fn tested_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let into = short.tested(name)?;
+    if func[inst].imm.map(|at| func[at].0) != Some(0) {
+        return None;
+    }
+    opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// Rewrites the comparison into the test, which reads the register the comparison read and drops
+/// the constant.
+///
+/// The operands are the ones it had, for the reason [`narrowed`] keeps them: both instructions name
+/// one register and read it, and what changes is the number, which the shorter one does not carry.
+/// So the constant goes and nothing else does. A description where the two are not that shape is one
+/// [`Changes`] turns down, and this reports a rewrite it turned down as not taken.
+fn tested(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, imm: None, ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
 }
 
@@ -562,6 +620,73 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, first), ["mov_ri_32"]);
+    }
+
+    /// The third rewrite. A comparison of a register against zero asks whether the register is
+    /// zero, and so does a test of the register against itself, which says it without a number on
+    /// the instruction.
+    #[test]
+    fn a_comparison_against_zero_becomes_a_test_of_the_register_against_itself() {
+        for (wide, narrow) in [
+            ("cmp_ri_8", "test_rr_8"),
+            ("cmp_ri_16", "test_rr_16"),
+            ("cmp_ri_32", "test_rr_32"),
+            ("cmp_ri_64", "test_rr_64"),
+        ] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let cmp = op(&mut names, wide);
+            let set = op(&mut names, "set_e");
+            let inst = func.build(block, cmp).uses(value, GPR).imm(0).finish();
+            func.build(block, set).def(byte, GPR).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{wide}");
+            assert_eq!(shape(&func, &names, block), [narrow, "set_e"], "{wide}");
+            assert_eq!(regs(&func, inst), [value], "{wide}");
+            assert_eq!(imm(&func, inst), None, "{wide}");
+        }
+    }
+
+    /// A comparison against anything else, which the test cannot ask. What a test leaves is the
+    /// bits of the register it was given, so it answers one question and the question is zero.
+    #[test]
+    fn a_comparison_against_a_number_that_is_not_zero_is_left_alone() {
+        for value in [1, -1, 7, 255, i64::from(i32::MIN)] {
+            let (mut names, mut func, block) = empty();
+            let held = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let cmp = op(&mut names, "cmp_ri_32");
+            let set = op(&mut names, "set_e");
+            let inst = func.build(block, cmp).uses(held, GPR).imm(value).finish();
+            func.build(block, set).def(byte, GPR).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 0, "{value}");
+            assert_eq!(shape(&func, &names, block), ["cmp_ri_32", "set_e"], "{value}");
+            assert_eq!(imm(&func, inst), Some(value), "{value}");
+        }
+    }
+
+    /// The condition state is not a question this rewrite asks. The comparison writes the state and
+    /// the test writes the same state, so a comparison whose answer something reads right behind it
+    /// is rewritten exactly as one whose answer nothing wants is, and a function the carried state
+    /// rule turns down gets it too.
+    #[test]
+    fn a_comparison_is_tested_whatever_the_condition_state_is_doing() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let cmp = op(&mut names, "cmp_ri_32");
+        let set = op(&mut names, "set_e");
+        func.build(first, cmp).uses(value, GPR).imm(0).finish();
+        // A block that reads the state before writing it, which is what `carried` turns a function
+        // down for and what the first rewrite is the only one to need.
+        func.build(second, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, first), ["test_rr_32"]);
+        assert_eq!(shape(&func, &names, second), ["set_e"]);
     }
 
     /// A name the description does not cover, which is anything without this target's prefix. It

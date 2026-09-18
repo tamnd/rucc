@@ -1689,6 +1689,15 @@ pub static INSTS: &[(&str, Form)] = &[
     ("test_cmov_ne_32", TestCmov),
     ("test_cmov_ne_64", TestCmov),
     ("test_rr_8", Test),
+    // The same test at the other three widths, which the layout never writes and the peephole does.
+    // A comparison of a register against zero and a test of that register against itself ask the
+    // machine the same question: both leave the sign, the zero and the parity of what is in the
+    // register and both clear the carry and the overflow, since nothing is below zero unsigned and
+    // a subtraction of zero cannot overflow. The test is the shorter of the two because it carries
+    // no constant.
+    ("test_rr_16", Test),
+    ("test_rr_32", Test),
+    ("test_rr_64", Test),
     // The comparison the test is taken back out in favour of, where the byte being tested came
     // from a comparison and nothing else wanted it. It is the comparison the byte came from with
     // the byte gone, so the flags it sets are the flags the pair already set, and the jump behind
@@ -2058,7 +2067,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 600);
+        assert_eq!(described, 603);
     }
 
     #[test]

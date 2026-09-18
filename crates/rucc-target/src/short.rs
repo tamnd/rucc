@@ -29,6 +29,17 @@
 //! two bytes. Choosing the instruction is this pass's job and spelling the one it chose is the
 //! encoder's.
 //!
+//! The third thing described here is a comparison against zero. `cmpl $0, %eax` asks whether what
+//! is in the register is zero, is above it or is below it, and `testl %eax, %eax` asks the machine
+//! the same three questions of the same register without a constant on the instruction, which is
+//! three bytes against two. Both leave the sign, the zero and the parity of what is in the register,
+//! and both clear the carry and the overflow, so every condition behind either of them reads the
+//! same answer.
+//!
+//! That one is an encoder's rewrite even less than the width one is, since the two instructions are
+//! not even the same length of operand list, and it is here for the same reason: the listing and the
+//! bytes say the same thing because the pass chose the instruction the encoder then spells.
+//!
 //! It is here rather than in the pass for the reason [`crate::FlagInsts`] and
 //! [`crate::BranchInsts`] are here. The pass is in a pipeline crate and `spec/10-backend.md`
 //! section 10.8 says a pipeline crate holds no target-specific code, so what the pass knows about
@@ -45,6 +56,9 @@ pub struct ShortInsts {
     /// Every instruction that puts a constant in a register and has a narrower one that writes the
     /// same register and clears the rest of it.
     pub narrowing: &'static [Narrowed],
+    /// Every instruction that compares a register against a constant and has a shorter one that
+    /// asks the same thing of the register against itself when the constant is zero.
+    pub testing: &'static [Tested],
 }
 
 impl ShortInsts {
@@ -58,6 +72,12 @@ impl ShortInsts {
     #[must_use]
     pub fn narrowed(&self, name: &str) -> Option<Narrowed> {
         self.narrowing.iter().find(|entry| entry.name == name).copied()
+    }
+
+    /// The shorter way of comparing a register against zero, for the instruction of that name.
+    #[must_use]
+    pub fn tested(&self, name: &str) -> Option<&'static str> {
+        self.testing.iter().find(|entry| entry.name == name).map(|entry| entry.into)
     }
 }
 
@@ -92,4 +112,21 @@ pub struct Narrowed {
     /// cleared rather than left alone, so the two say the same thing for a number that is not
     /// negative and fits in this many bits, and disagree for every other number.
     pub writes: u32,
+}
+
+/// One comparison against a constant, and the shorter instruction that asks it against zero.
+///
+/// The shorter one reads the register it is given and reads it again instead of the constant, so it
+/// names one register where the first names a register and a number, and the bytes it saves are the
+/// bytes the number was written in. It says the same thing only for zero: a comparison of a register
+/// against zero and a bitwise and of the register with itself leave the same sign, the same zero and
+/// the same parity, and both leave the carry and the overflow clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tested {
+    /// The opcode that takes the constant.
+    pub name: &'static str,
+    /// The opcode that asks the same question of the register alone. It writes the condition state
+    /// exactly as the first one does, which is why nothing about where the state is live is a
+    /// question this rewrite has to ask.
+    pub into: &'static str,
 }

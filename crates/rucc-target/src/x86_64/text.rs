@@ -828,6 +828,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("test_cmov_ne_32", &[spell("testb", &TEST_COND), spell("cmovnel", &CMOV_32)]),
     ("test_cmov_ne_64", &[spell("testb", &TEST_COND), spell("cmovneq", &CMOV_64)]),
     ("test_rr_8", &[spell("testb", &[Reg(0, Byte), Reg(0, Byte)])]),
+    ("test_rr_16", &[spell("testw", &[Reg(0, Word), Reg(0, Word)])]),
+    ("test_rr_32", &[spell("testl", &[Reg(0, Long), Reg(0, Long)])]),
+    ("test_rr_64", &[spell("testq", &[Reg(0, Quad), Reg(0, Quad)])]),
     // The comparison with nothing kept but the flags, which is the pair above it with the `set`
     // gone. The operands move down one place because the byte they were writing is not there any
     // more, and the order stays reversed for the reason it is reversed above: AT&T writes the

@@ -55,7 +55,7 @@ use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
-use crate::short::{Narrowed, ShortInsts, Zeroed};
+use crate::short::{Narrowed, ShortInsts, Tested, Zeroed};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -514,8 +514,12 @@ pub static FLAGS: FlagInsts = FlagInsts {
 };
 
 /// The shorter spellings x86-64 has for the same answer.
-pub static SHORT: ShortInsts =
-    ShortInsts { prefix: "x64.", zeroing: &SHORTER_ZEROS, narrowing: &NARROWER_MOVES };
+pub static SHORT: ShortInsts = ShortInsts {
+    prefix: "x64.",
+    zeroing: &SHORTER_ZEROS,
+    narrowing: &NARROWER_MOVES,
+    testing: &ZERO_COMPARES,
+};
 
 /// Writing zero into a register without spelling the zero out.
 ///
@@ -551,6 +555,30 @@ static SHORTER_ZEROS: [Zeroed; 3] = [
 /// byte in front of a sixteen bit instruction costs.
 static NARROWER_MOVES: [Narrowed; 1] =
     [Narrowed { name: "mov_ri_64", into: "mov_ri_32", writes: 32 }];
+
+/// Asking whether a register is zero without a zero written on the instruction.
+///
+/// `cmpl $0, %eax` is three bytes, one for the opcode, one saying which register and one for a
+/// number that is nothing. `testl %eax, %eax` is two: it names the register twice and carries no
+/// number at all. The saving is one byte at every width, since the constant a comparison against
+/// zero carries is the one byte a constant can be written in.
+///
+/// The two say the same thing and not merely nearly the same thing. A comparison subtracts zero and
+/// a test keeps the bits the register already has, so the sign, the zero and the parity are those of
+/// what is in the register either way. Nothing is below zero when the comparison is unsigned and a
+/// subtraction of zero cannot overflow, so the carry and the overflow are clear either way too.
+/// Every condition this machine can jump on reads some of those five and no others, so every one of
+/// them reads the same answer behind either instruction.
+///
+/// All four widths are here, eight bits included, which is where this differs from the two tables
+/// above: the byte the constant costs is a byte at every width and there is no width where the
+/// shorter instruction needs a prefix the longer one did not.
+static ZERO_COMPARES: [Tested; 4] = [
+    Tested { name: "cmp_ri_8", into: "test_rr_8" },
+    Tested { name: "cmp_ri_16", into: "test_rr_16" },
+    Tested { name: "cmp_ri_32", into: "test_rr_32" },
+    Tested { name: "cmp_ri_64", into: "test_rr_64" },
+];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
 ///
