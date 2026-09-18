@@ -445,3 +445,28 @@ fn a_jump_with_no_condition_on_it_says_what_is_missing() {
     assert!(!ok, "an unconditional jump inside a template was accepted");
     assert!(said.contains("which nothing here assembles"), "{said}");
 }
+
+#[test]
+fn an_add_with_carry_against_a_constant_is_the_instruction_it_names() {
+    // The third word of a number three words wide, which is `add_sssaaaa` in libgmp's `longlong.h`.
+    // There is nothing to add there except the bit that fell off the word below, and a constant zero
+    // is how the instruction that adds only the bit is spelled.
+    let source = "unsigned long f(unsigned long x) { \
+                  asm (\"add $1, %q0\\n\\tadc $0, %q0\" : \"+r\" (x)); return x; }\n";
+    let body = body(&asm("adc-constant", source), "f");
+    assert!(body.contains("adcq\t$0,"), "the add with carry never reached the listing:\n{body}");
+}
+
+#[test]
+fn an_output_a_template_also_reads_is_read_as_a_zero() {
+    // `sbb %0, %0` in libgmp's `add_mssaaaa`, which subtracts a register from itself and is asking
+    // for the borrow bit rather than for the number, so what the register held does not matter. It
+    // is an output and nothing is tied to it, so the statement never said what is in it, and what
+    // the allocator is owed is still a definition in front of the use.
+    let source = "long f(long x, long y) { long m; \
+                  asm (\"add %2, %1\\n\\tsbb %q0, %q0\" : \"=r\" (m), \"+r\" (x) : \"r\" (y)); \
+                  return m; }\n";
+    let body = body(&asm("output-read", source), "f");
+    assert!(body.contains("sbbq"), "the subtract with borrow never reached the listing:\n{body}");
+    assert!(body.contains("$0,"), "the operand it reads was never given a value:\n{body}");
+}
