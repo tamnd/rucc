@@ -190,6 +190,15 @@ mod tests {
     /// together by the layout, out of a comparison a rule did select and the branch behind it,
     /// which is the same argument `rucc_target::x86_64::Form::CmpSet` is one form rather than two
     /// under.
+    /// The instructions the size directed peephole writes rather than a rule.
+    ///
+    /// [`crate::shorten`] turns a comparison of a register against zero into a test of the register
+    /// against itself, which asks the machine the same thing in one byte less. No rule could select
+    /// one, because whether the rewrite says the same thing depends on the constant the comparison
+    /// carries and a pattern binds a value rather than reads a number out of one. The eight bit test
+    /// is not here because the layout writes that one as well and it is on the list below.
+    const PEEPHOLE: &[&str] = &["test_rr_16", "test_rr_32", "test_rr_64"];
+
     const LAYOUT: &[&str] = &[
         "test_rr_8",
         "cmp_rr_8",
@@ -756,6 +765,9 @@ mod tests {
             if CONVENTION.contains(&opcode) || LAYOUT.contains(&opcode) || FRAME.contains(&opcode) {
                 continue;
             }
+            if PEEPHOLE.contains(&opcode) {
+                continue;
+            }
             if NARROW.contains(&opcode) || BARRIER.contains(&opcode) || X87.contains(&opcode) {
                 continue;
             }
@@ -783,6 +795,23 @@ mod tests {
                 "{opcode} is described and no rule in {} selects it",
                 TABLE.source
             );
+        }
+    }
+
+    /// The same claim about the peephole's list, which is a claim about the target's description
+    /// rather than about this crate: every name on it is one the target really has, and every one
+    /// of them is a shorter spelling the description names, which is what says the peephole is
+    /// where it comes from. A name on the list that the peephole could never write would be an
+    /// instruction nothing writes at all, and this test is what stops that sitting there unnoticed.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_is_one_the_peephole_really_writes() {
+        let shorter: Vec<&str> = x86_64::SHORT.testing.iter().map(|entry| entry.into).collect();
+        for &opcode in PEEPHOLE {
+            assert!(
+                x86_64::form(opcode).is_some(),
+                "{opcode} is not an instruction this describes"
+            );
+            assert!(shorter.contains(&opcode), "{opcode} is not one the peephole writes");
         }
     }
 

@@ -873,6 +873,10 @@ mod tests {
         // early as well now, which is a separate thing the target has to say and is why both
         // answers read `early` here: `rdx` is filled by the sign extension before the division
         // reads its divisor, so nothing else may be sitting in it at that point either.
+        //
+        // What asks whether the second argument is zero reads as a test rather than a comparison
+        // because `crate::shorten` runs last and writes the shorter of the two, which asks the
+        // machine the same thing and leaves the same condition state for the jump behind it.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\n\
@@ -881,7 +885,7 @@ mod tests {
              $rsi($rsi) = x64.arg_val_32\n    \
              $rcx = x64.mov_rr_64 $rdi, block1\n\
              \nblock1:\n    \
-             x64.cmp_ri_32 $rsi, 0\n    \
+             x64.test_rr_32 $rsi\n    \
              x64.jcc_e block3, block2\n\
              \nblock2:\n    \
              $rax = x64.mov_rr_64 $rcx\n    \
