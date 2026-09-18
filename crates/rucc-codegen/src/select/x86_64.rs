@@ -318,7 +318,9 @@ mod tests {
     /// the bit they read is the carry out of an addition, and an addition in the IR is an addition
     /// of a width with no carry out at all, so there is no term a rule could match that the bit is
     /// a part of. A program gets one by writing both halves itself in a template, which is what
-    /// `add_ssaaaa` and `sub_ddmmss` in libgmp's `longlong.h` are.
+    /// `add_ssaaaa` and `sub_ddmmss` in libgmp's `longlong.h` are. The form against a constant is
+    /// here for the same reason and is the same instruction with a zero where the second source is,
+    /// which `add_sssaaaa` writes for the top word of a number three words wide.
     ///
     /// What keeps the two halves together once they are two instructions in a block is not here. It
     /// is `rucc_target::FlagInsts`, which the scheduler reads for exactly this, and the test below
@@ -332,6 +334,14 @@ mod tests {
         "sbb_rr_16",
         "sbb_rr_32",
         "sbb_rr_64",
+        "adc_ri_8",
+        "adc_ri_16",
+        "adc_ri_32",
+        "adc_ri_64",
+        "sbb_ri_8",
+        "sbb_ri_16",
+        "sbb_ri_32",
+        "sbb_ri_64",
     ];
 
     const CONDITIONAL: &[&str] = &[
@@ -924,7 +934,8 @@ mod tests {
         let written = heads();
         for &opcode in CARRY {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
-            assert_eq!(form, x86_64::Form::AluCarry, "{opcode} is not one of the pair");
+            let pair = matches!(form, x86_64::Form::AluCarry | x86_64::Form::AluCarryI);
+            assert!(pair, "{opcode} is not one of the pair");
             assert_eq!(
                 x86_64::FLAGS.reads(opcode),
                 Some(rucc_target::Reads::Carry),
@@ -941,7 +952,7 @@ mod tests {
             );
         }
         for &(opcode, form) in x86_64::INSTS {
-            if form == x86_64::Form::AluCarry {
+            if matches!(form, x86_64::Form::AluCarry | x86_64::Form::AluCarryI) {
                 assert!(CARRY.contains(&opcode), "{opcode} reads a carry and is not on the list");
             }
         }
