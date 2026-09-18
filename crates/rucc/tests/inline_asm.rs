@@ -333,15 +333,21 @@ void g(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
 }
 
 #[test]
-fn a_template_this_cannot_place_still_says_what_is_missing() {
-    // Refused rather than dropped. A template nothing here can place is a program this compiler
-    // cannot build, and a template quietly left out is a program that builds and does the wrong
-    // thing. The same addition as above on an output written `=`, which says the assembly writes
-    // the operand and never reads it, while the instruction reads it before it writes it.
+fn an_output_read_before_it_is_written_holds_a_zero_rather_than_nothing() {
+    // The same addition as above on an output written `=`, which says the assembly writes the
+    // operand and never reads it, while the instruction reads it before it writes it. What is in it
+    // there is undefined and the program said so by writing `=` rather than `+`, so this was refused
+    // for a while on the grounds that a read of something nothing filled is a mistake. It is not
+    // this compiler's to call. GCC 16.2.0 accepts the same statement without a word and adds
+    // whatever the register it picked was holding, and a program that means it is real: libgmp's
+    // `add_mssaaaa` writes `sbb %0, %0` to get the borrow bit, where what the register held cannot
+    // change the answer. So it is accepted and the operand is given the zero an output nothing wrote
+    // gets, because undefined is not the same as absent and the allocator is owed a definition in
+    // front of every use.
     let source = "long f(long x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
-    let (ok, _, said) = run("write-only", source);
-    assert!(!ok, "an operand read where the statement said it is only written was accepted");
-    assert!(said.contains("has an operand this cannot place"), "{said}");
+    let body = body(&asm("write-only", source), "f");
+    assert!(body.contains("addq"), "the template never reached the listing:\n{body}");
+    assert!(body.contains("$0,"), "the operand it reads was never given a value:\n{body}");
 }
 
 #[test]
@@ -451,8 +457,10 @@ fn an_add_with_carry_against_a_constant_is_the_instruction_it_names() {
     // The third word of a number three words wide, which is `add_sssaaaa` in libgmp's `longlong.h`.
     // There is nothing to add there except the bit that fell off the word below, and a constant zero
     // is how the instruction that adds only the bit is spelled.
-    let source = "unsigned long f(unsigned long x) { \
-                  asm (\"add $1, %q0\\n\\tadc $0, %q0\" : \"+r\" (x)); return x; }\n";
+    let source = "unsigned long f(unsigned long s, unsigned long a, unsigned long b) { \
+                  unsigned long t; \
+                  asm (\"add %4, %1\\n\\tadc $0, %q0\" \
+                  : \"=r\" (s), \"=&r\" (t) : \"0\" (s), \"1\" (a), \"r\" (b)); return s; }\n";
     let body = body(&asm("adc-constant", source), "f");
     assert!(body.contains("adcq\t$0,"), "the add with carry never reached the listing:\n{body}");
 }
