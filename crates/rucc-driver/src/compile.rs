@@ -2937,8 +2937,10 @@ decl #0 x : int object external static defined
         let call = text.find("call\ttake").expect("the call");
         assert!(copy < call, "the copy comes first: {text}");
         // Into the bottom of the outgoing area, which is where the stack pointer already is, and
-        // with the size in the register the convention passes the third argument in.
-        assert!(text.contains("leaq\t(%rsp), %rdi"), "the destination: {text}");
+        // with the size in the register the convention passes the third argument in. The address
+        // of the bottom of the frame is the stack pointer itself, so what carries it is the move
+        // rather than the address computation the selector wrote. See `rucc_codegen::shorten`.
+        assert!(text.contains("movq\t%rsp, %rdi"), "the destination: {text}");
         assert!(text.contains("$4096, %edx"), "the size: {text}");
     }
 
