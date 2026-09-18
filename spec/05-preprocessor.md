@@ -42,6 +42,8 @@ Variadic macros support both the standard `__VA_ARGS__` and the GNU `args...` na
 
 Rescanning after replacement continues from the start of the replacement list and may consume tokens from *after* the macro invocation, which is why the expander operates on a token stream with pushback rather than on isolated lists.
 
+**An expansion that came to nothing** still hands on what the invocation was carrying, which is whether anything separated it from the token before and whether it stood first on a line. Both go to whatever gets rescanned next, and that may itself be a macro that vanishes, so a run of them walks the debt along until a real token takes it. The space is what makes `#define E` used as `int a E;` preprocess to `int a ;` rather than `int a;`, which is what GCC and clang both do and is most of the difference between agreeing with the reference on the glibc headers and not. Starting a line matters for a different reason: a line belongs to the file rather than to the macro that happened to be written first on it, and a `#pragma` line is read as the tokens between the `pragma` and the next one that starts a line, so losing it hands the declaration behind the macro to the pragma above it. `SQLITE_API const char sqlite3_version[] = ...` after the `#pragma pack(pop)` in mingw-w64's `<vadefs.h>` is that shape.
+
 **Spans through expansion.** Every token produced by expansion carries both its spelling location and its expansion location, plus a pointer into an expansion trace. This is what lets a diagnostic print the chain from the error site up through three nested macros to the user's call, which is the feature that makes C error messages tolerable and which document 03 committed to.
 
 ## 5.4 Directives

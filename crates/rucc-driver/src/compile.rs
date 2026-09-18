@@ -2014,6 +2014,27 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// A pragma line ends where the next line starts, so a macro that comes to nothing and was
+    /// written first on that next line has to hand the line on rather than take it away. This
+    /// is SQLite through mingw-w64's headers: `<stdarg.h>` leaves a `#pragma pack(pop)` behind
+    /// it and `sqlite3.h` writes every declaration with `SQLITE_API` in front, which is empty.
+    /// Without it the pragma swallows the declaration, the program is left without it, and the
+    /// only thing said about any of it is that there was junk on the pragma.
+    #[test]
+    fn a_declaration_behind_an_empty_macro_is_not_eaten_by_the_pragma_above_it() {
+        let result = run(
+            &options(),
+            concat!(
+                "#pragma pack(push, 1)\n",
+                "#pragma pack(pop)\n",
+                "#define API\n",
+                "API const char version[] = \"3.53.4\";\n",
+                "const char *get(void) { return version; }\n",
+            ),
+        );
+        assert!(result.messages.is_empty(), "{:?}", result.messages);
+    }
+
     /// The two typedef spellings of the 128 bit types. gcc offers them as keywords rather
     /// than as typedefs in a header, which is the only way a program that includes nothing at
     /// all can still use them, and Apple's `<mach/arm/_structs.h>` is one such program.

@@ -935,13 +935,18 @@ fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>, invocation: Tok
     // non-GNU dialect and sit next to a `;` or a `,` several hundred times per header.
     //
     // The space is handed to whatever gets rescanned next, which may itself be a macro that
-    // vanishes, so `a E E E b` walks the debt along until something real takes it. Only the
-    // space carries: a vanished macro cannot start a line that its own replacement did not.
+    // vanishes, so `a E E E b` walks the debt along until something real takes it.
+    //
+    // Standing at the front of a line is handed along the same way. The line belongs to the
+    // file rather than to the macro, so when the macro that was written first on one leaves
+    // nothing behind, the token that ends up first there is the one that starts the line.
+    // Losing it is not cosmetic: a `#pragma` line is read as the tokens between the `pragma`
+    // and the next one that starts a line, so a declaration written as `SQLITE_API const char
+    // sqlite3_version[] = ...` after a `#pragma pack` gets eaten by the pragma instead, and the
+    // program is left without the declaration and with a complaint about junk on the pragma.
     if replacement.is_empty() {
-        if invocation.flags.has(TokenFlags::LEADING_SPACE) {
-            if let Some(next) = pending.last_mut() {
-                next.flags = next.flags.with(TokenFlags::LEADING_SPACE);
-            }
+        if let Some(next) = pending.last_mut() {
+            next.flags = next.flags.with(carried_spacing(invocation.flags));
         }
         return;
     }

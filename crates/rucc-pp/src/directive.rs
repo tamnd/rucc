@@ -2508,6 +2508,30 @@ mod tests {
         );
     }
 
+    /// A line belongs to the file rather than to the macro that happened to be written first
+    /// on it, so a macro that comes to nothing hands the line to whatever follows it. The same
+    /// phase as above is what needs this: `SQLITE_API const char sqlite3_version[] = ...` after
+    /// a `#pragma pack` is read as more of the pragma without it, and the declaration is gone.
+    #[test]
+    fn a_macro_that_came_to_nothing_hands_on_the_line_it_started() {
+        let mut run = Run::new();
+        let out = run.raw("#define E\nint x;\nE int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        // `int x ;` then `int y ;`, and the second `int` is where the `E` stood.
+        assert_eq!(starts, vec![true, false, false, true, false, false]);
+    }
+
+    /// The debt walks along until something real takes it, which is how the space does it too.
+    #[test]
+    fn a_run_of_macros_that_came_to_nothing_hands_the_line_along() {
+        let mut run = Run::new();
+        let out = run.raw("#define E\n#define F(x)\nE F(1) E int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        assert_eq!(starts, vec![true, false, false]);
+    }
+
     #[test]
     fn a_pragma_operator_that_is_not_given_a_string_is_reported() {
         let mut run = Run::new();
