@@ -66,7 +66,7 @@ pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
 };
-pub use crate::short::{ShortInsts, Zeroed};
+pub use crate::short::{Narrowed, ShortInsts, Zeroed};
 pub use crate::timing::{Timing, TimingInsts, Unit};
 
 /// A target architecture.

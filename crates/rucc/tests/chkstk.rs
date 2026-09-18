@@ -90,13 +90,17 @@ fn insts<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 /// Three instructions: the size into the register the routine reads it in, the call, and the
 /// subtraction. The subtraction is of the register rather than of the constant because the routine
 /// hands the size back where it found it and leaves the stack pointer alone.
+///
+/// The size goes in with the thirty-two bit move, which writes the low half of `%rax` and clears
+/// the high half, so what the routine reads in `%rax` is the number. That is `rucc_codegen::shorten`
+/// writing the shorter of the two moves and it is why the register is named `%eax` here.
 #[test]
 fn a_frame_larger_than_a_page_is_reached_by_the_routine_the_runtime_provides() {
     let text = asm("many", MSVC, &[], THREE);
     let lines = insts(&text, "many");
     assert_eq!(
         &lines[..3],
-        ["movq\t$100040, %rax", "call\t__chkstk", "subq\t%rax, %rsp"],
+        ["movl\t$100040, %eax", "call\t__chkstk", "subq\t%rax, %rsp"],
         "{lines:?}"
     );
     assert!(lines.contains(&"addq\t$100040, %rsp"), "{lines:?}");
@@ -105,7 +109,7 @@ fn a_frame_larger_than_a_page_is_reached_by_the_routine_the_runtime_provides() {
     let lines = insts(&text, "onepage");
     assert_eq!(
         &lines[..3],
-        ["movq\t$4136, %rax", "call\t__chkstk", "subq\t%rax, %rsp"],
+        ["movl\t$4136, %eax", "call\t__chkstk", "subq\t%rax, %rsp"],
         "{lines:?}"
     );
 }
@@ -135,7 +139,7 @@ fn the_name_of_the_routine_comes_from_the_runtime_being_built_against() {
     let lines = insts(&text, "many");
     assert_eq!(
         &lines[..3],
-        ["movq\t$100040, %rax", "call\t___chkstk_ms", "subq\t%rax, %rsp"],
+        ["movl\t$100040, %eax", "call\t___chkstk_ms", "subq\t%rax, %rsp"],
         "{lines:?}"
     );
     assert!(!text.contains("call\t__chkstk\n"), "{text}");
