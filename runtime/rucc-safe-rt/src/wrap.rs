@@ -356,6 +356,60 @@ mod tests {
         unsafe { region.init.allows(ptr as usize + offset, len) }
     }
 
+    /// Whether the type plane would let a run of an instance be read as `ty`.
+    fn readable(ptr: *mut c_void, offset: usize, len: usize, ty: crate::types::TypeId) -> bool {
+        let region =
+            crate::alloc::covering(ptr as usize).expect("the address came out of a region of ours");
+        // SAFETY: as `written`, over the other plane the same region carries.
+        unsafe { region.types.allows(ptr as usize + offset, len, ty) }
+    }
+
+    /// Records that a run of an instance was stored through as `ty`, the way generated code does.
+    fn stored_as(ptr: *mut c_void, len: usize, ty: crate::types::TypeId) {
+        // SAFETY: the address is one an instance in the test owns and is never read through.
+        unsafe { crate::check::judge(ptr.cast_const(), len, ty) }
+    }
+
+    #[test]
+    fn a_block_a_wrapper_cleared_is_readable_as_whatever_comes_next() {
+        let _turn = turn();
+        // What an instrumented sqlite3 aborted on within a few hundred calls. A pool allocator
+        // clears a block and hands it back out for a different structure, and C 6.5 says storage
+        // written through a character type is storage the next access gives a type to. `memset`
+        // writes bytes, so once it has run the block owes the old occupant's type to nobody.
+        let ptr = alloc(64);
+        stored_as(ptr, 64, 7);
+        assert!(!readable(ptr, 0, 8, 9), "until something clears it, the old occupant stands");
+        // SAFETY: the instance is live and has room for all of it.
+        unsafe { memset(ptr, 0, 64) };
+        assert!(readable(ptr, 0, 8, 9), "cleared bytes take the type of whoever reads them next");
+        assert!(written(ptr, 0, 64), "and the init plane hears about it as it always did");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_carries_the_type_its_source_had() {
+        let _turn = turn();
+        // The one case C writes down by name, and the reason `moves` does not do what `writes`
+        // does: a copy leaves the destination holding what the source held rather than holding
+        // bytes, which is what keeps a hand rolled growable array usable as its element type once
+        // it has grown into a larger block.
+        let from = alloc(64);
+        let to = alloc(64);
+        stored_as(from, 64, 9);
+        stored_as(to, 64, 7);
+        assert!(!readable(to, 0, 8, 9), "the destination holds whatever was put in it");
+        // SAFETY: both are live instances of sixty four bytes.
+        unsafe { memcpy(to, from.cast_const(), 64) };
+        assert!(readable(to, 0, 8, 9), "and after the copy it holds what the source held");
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
     #[test]
     fn every_row_describes_itself_the_way_it_was_written() {
         // The table and the wrappers come out of the same rows, so this is not checking that they

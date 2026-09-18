@@ -68,8 +68,8 @@
 //! along with the two judgements that record what it asks about. The compiler emits those two
 //! judgements beside every store and every copy, and the C library wrappers record what they wrote
 //! as well, because a plane only some of the writes maintain reports on programs that are correct.
-//! What is missing is the reader: no generated code reaches `__rucc_check_init` yet, so nothing is
-//! refused on this plane's account, and that waits on section 9.3's padding mode.
+//! The reader is emitted too, and the sqlite3 amalgamation compiles to 27984 calls of
+//! `__rucc_check_init`, so this plane does refuse. What waits is section 9.3's padding mode.
 //!
 //! [`epoch`] is section 9.5's epoch plane, which is which thread last wrote a word and when in that
 //! thread's own counting. It is the plane the races of document 03's C1 through C4 are answered
