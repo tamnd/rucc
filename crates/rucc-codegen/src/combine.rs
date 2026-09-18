@@ -142,10 +142,18 @@
 //! left hand side becomes the same instruction with the condition turned over, and `*p < x` is
 //! `x > *p`. Equality and inequality turn over into themselves and the other eight go in pairs.
 //!
-//! A comparison against a constant has no second register and so no row. The instruction that
-//! compares memory against a constant is a real one and folding into it is a separate piece of
-//! work, because what would be folded is the load on the left and the constant is already on the
-//! instruction.
+//! A comparison against a constant has one register rather than two and folds too, which is what
+//! a C program writes as `if (*p == 7)`:
+//!
+//! ```text
+//!   movl 16(%rax), %ecx
+//!   cmpl $7, %ecx          ->    cmpl $7, 16(%rax)
+//! ```
+//!
+//! Nothing is arranged either way round here. The constant is on the instruction and has nowhere
+//! else to be, so the side the load filled is the left hand side and stays the left hand side, and
+//! the condition is the one the comparison already had. What is left holding a register is the byte
+//! the comparison sets, and the block layout usually takes that too.
 //!
 //! # What a `volatile` access gets
 //!
@@ -275,7 +283,9 @@ pub struct Fold {
     ///
     /// [`None`] where the two sources may not be swapped at all, which is subtraction: the
     /// instruction that reads memory reads it as the right hand side and there is no encoding
-    /// that puts it on the left, so a load feeding the left hand side stays where it is.
+    /// that puts it on the left, so a load feeding the left hand side stays where it is. Also
+    /// [`None`] for a comparison against a constant, which has one source rather than two and so
+    /// nothing to swap it with.
     ///
     /// The same name as `into` for an operation that commutes, since writing the two sources in
     /// either order computes the same answer and one instruction covers both.
@@ -297,6 +307,10 @@ pub struct Fold {
 /// byte rather than one of its sources, so the row reads the same and the instruction it names has
 /// a destination neither side has a claim on. The forty rows are ten conditions at four widths and
 /// each names two instructions, because which side the memory is is a condition of its own.
+///
+/// And then the same forty against a constant, which name one instruction each. The constant is on
+/// the instruction and cannot be anywhere else, so the register the load filled is the left hand
+/// side and there is no other arrangement to offer.
 pub static FOLDS: &[Fold] = &[
     Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", swapped: Some("add_rm_8") },
     Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", swapped: Some("add_rm_16") },
@@ -561,6 +575,46 @@ pub static FOLDS: &[Fold] = &[
         load: "mov_rm_64",
         swapped: Some("cmp_set_be_rm_64"),
     },
+    Fold { from: "cmp_set_e_ri_8", into: "cmp_set_e_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_e_ri_16", into: "cmp_set_e_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_e_ri_32", into: "cmp_set_e_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_e_ri_64", into: "cmp_set_e_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_ne_ri_8", into: "cmp_set_ne_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_ne_ri_16", into: "cmp_set_ne_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_ne_ri_32", into: "cmp_set_ne_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_ne_ri_64", into: "cmp_set_ne_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_l_ri_8", into: "cmp_set_l_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_l_ri_16", into: "cmp_set_l_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_l_ri_32", into: "cmp_set_l_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_l_ri_64", into: "cmp_set_l_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_le_ri_8", into: "cmp_set_le_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_le_ri_16", into: "cmp_set_le_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_le_ri_32", into: "cmp_set_le_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_le_ri_64", into: "cmp_set_le_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_g_ri_8", into: "cmp_set_g_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_g_ri_16", into: "cmp_set_g_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_g_ri_32", into: "cmp_set_g_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_g_ri_64", into: "cmp_set_g_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_ge_ri_8", into: "cmp_set_ge_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_ge_ri_16", into: "cmp_set_ge_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_ge_ri_32", into: "cmp_set_ge_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_ge_ri_64", into: "cmp_set_ge_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_b_ri_8", into: "cmp_set_b_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_b_ri_16", into: "cmp_set_b_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_b_ri_32", into: "cmp_set_b_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_b_ri_64", into: "cmp_set_b_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_be_ri_8", into: "cmp_set_be_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_be_ri_16", into: "cmp_set_be_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_be_ri_32", into: "cmp_set_be_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_be_ri_64", into: "cmp_set_be_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_a_ri_8", into: "cmp_set_a_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_a_ri_16", into: "cmp_set_a_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_a_ri_32", into: "cmp_set_a_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_a_ri_64", into: "cmp_set_a_mi_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "cmp_set_ae_ri_8", into: "cmp_set_ae_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_set_ae_ri_16", into: "cmp_set_ae_mi_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_set_ae_ri_32", into: "cmp_set_ae_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_set_ae_ri_64", into: "cmp_set_ae_mi_64", load: "mov_rm_64", swapped: None },
 ];
 
 /// One arithmetic instruction that could work on memory rather than on a register, and the load
@@ -1215,33 +1269,44 @@ fn joined(
         return None;
     }
     let operands = func[func[inst].operands].to_vec();
-    let [answer, first, second] = operands[..] else { return None };
     // The second source is the one the memory operand replaces, which for arithmetic is because
     // the answer is tied to the first and for a comparison is because that is the side the
     // instruction subtracts. Where the load feeds the first source instead, the row says which
     // instruction reads the two the other way round, and that one is written instead: for
     // arithmetic that commutes it is the same instruction, and for a comparison it is the same
     // question with the condition turned over.
-    let (kept, into) = if second.reg == carried.reg {
-        (first, fold.into)
-    } else if first.reg == carried.reg {
-        (second, fold.swapped?)
-    } else {
-        return None;
+    //
+    // A comparison against a constant has one source and no arrangement to choose between, since
+    // the constant is on the instruction and cannot be anywhere else. What is left in front of the
+    // address is the byte on its own.
+    let (front, into) = match operands[..] {
+        [answer, first, second] => {
+            let (kept, into) = if second.reg == carried.reg {
+                (first, fold.into)
+            } else if first.reg == carried.reg {
+                (second, fold.swapped?)
+            } else {
+                return None;
+            };
+            (vec![answer, kept], into)
+        }
+        [answer, only] if only.reg == carried.reg => (vec![answer], fold.into),
+        _ => return None,
     };
     let load = carried.inst;
     let address = func[func[load].operands][1..].to_vec();
     let mut amode = func[func[load].mem?];
-    // The registers an address names are operands behind the ones the instruction writes down, and
-    // there is one of those in front of them here where there was none in front of them in the
-    // load, so every position the mode holds moves along by one.
-    amode.base = amode.base.map(|at| at + 1);
-    amode.index = amode.index.map(|at| at + 1);
+    // The registers an address names are operands behind the ones the instruction writes down. The
+    // load wrote one of those and the instruction that comes out writes however many are in front
+    // of the address here, so every position the mode holds moves along by the difference.
+    let along = u8::try_from(front.len() - 1).expect("a handful of operands");
+    amode.base = amode.base.map(|at| at + along);
+    amode.index = amode.index.map(|at| at + along);
     let into = names.intern(&format!("{}{}", machine.prefix, into));
     Some(Plan {
         opcode: Opcode::new(into),
-        operands: [answer, kept].into_iter().chain(address).collect(),
-        imm: None,
+        operands: front.into_iter().chain(address).collect(),
+        imm: func[inst].imm.map(|at| func[at].0),
         amode: Some(amode),
         symbol: func[load].symbol,
     })
@@ -2213,10 +2278,12 @@ mod tests {
         }
     }
 
-    /// A comparison against a constant, which has no register for a load to fill. There is no row
-    /// for it and nothing to fold, and the load stays where it is.
+    /// A comparison against a constant, which is `if (*p < 7)`. There is one source rather than
+    /// two, so the side the load filled is the only side there is and the condition stays as it
+    /// was written. What is left in front of the address is the byte on its own, which puts the
+    /// base one position earlier than the comparison of two registers leaves it.
     #[test]
-    fn a_comparison_against_a_constant_is_left_where_it_is() {
+    fn a_comparison_against_a_constant_takes_the_load_on_as_its_memory_operand() {
         let (mut names, mut func, block) = empty();
         let base = func.new_vreg(GPR);
         let byte = func.new_vreg(GPR);
@@ -2224,8 +2291,16 @@ mod tests {
         let opcode = op(&mut names, "cmp_set_l_ri_64");
         func.build(block, opcode).def(byte, GPR).uses(word, GPR).imm(7).finish();
 
-        assert_eq!(combine(&mut func, &mut names), 0);
-        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64", "x64.cmp_set_l_ri_64"]);
+        assert_eq!(combine(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.cmp_set_l_mi_64"]);
+        let inst = func.insts(block).next().expect("the comparison");
+        let mem = func[inst].mem.expect("it reads memory now");
+        assert_eq!(func[mem].disp, 16, "the load's displacement came with it");
+        assert_eq!(func[mem].base, Some(1), "and names the operand behind the byte");
+        assert_eq!(func[func[inst].operands][0].reg, byte, "the byte it sets");
+        assert_eq!(func[func[inst].operands][1].reg, base, "the address it took on");
+        let imm = func[inst].imm.expect("the constant is still on it");
+        assert_eq!(func[imm].0, 7, "and is the one that was written");
     }
 
     /// Every row of the table names instructions this target has, and names a load and an
@@ -2255,11 +2330,14 @@ mod tests {
     #[test]
     fn the_table_covers_the_arithmetic_and_the_comparisons_this_target_has() {
         let compares = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_set_")).count();
-        assert_eq!(compares, 40, "ten conditions at four widths");
+        assert_eq!(
+            compares, 80,
+            "ten conditions at four widths, against a register and a constant"
+        );
         let arithmetic = FOLDS.len() - compares;
         assert_eq!(arithmetic, 23, "six operations at four widths, less the eight bit multiply");
         let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
-        assert_eq!(swapped, 59, "everything but the four subtractions");
+        assert_eq!(swapped, 59, "everything but the four subtractions and the constant compares");
     }
 
     /// What a comparison folded on its left hand side comes out as.
@@ -2284,7 +2362,9 @@ mod tests {
             "ae" => "be",
             other => panic!("{other} is not a condition this machine has"),
         };
-        let compares = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_set_"));
+        let compares = FOLDS
+            .iter()
+            .filter(|fold| fold.from.starts_with("cmp_set_") && !fold.from.contains("_ri_"));
         for fold in compares {
             let (front, width) = fold.from.rsplit_once('_').expect("a name ending in a width");
             let condition = front.strip_prefix("cmp_set_").expect("a name with a condition");
@@ -2292,5 +2372,27 @@ mod tests {
             let wanted = format!("cmp_set_{}_rm_{width}", turned(condition));
             assert_eq!(fold.swapped, Some(wanted.as_str()), "{} turns over wrongly", fold.from);
         }
+    }
+
+    /// What a comparison against a constant comes out as. There is one source rather than two, so
+    /// the condition is the one that was written and there is no other arrangement to offer. A row
+    /// that had filled in a `swapped` would be asking the pass to read the constant out of a
+    /// register, which is not an instruction this machine has.
+    #[test]
+    fn a_comparison_against_a_constant_keeps_its_condition_and_has_nothing_to_swap() {
+        let compares = FOLDS
+            .iter()
+            .filter(|fold| fold.from.starts_with("cmp_set_") && fold.from.contains("_ri_"));
+        let mut rows = 0;
+        for fold in compares {
+            let (front, width) = fold.from.rsplit_once('_').expect("a name ending in a width");
+            let front = front.strip_suffix("_ri").expect("a name against a constant");
+            let condition = front.strip_prefix("cmp_set_").expect("a name with a condition");
+            assert_eq!(fold.into, format!("cmp_set_{condition}_mi_{width}"));
+            assert_eq!(fold.swapped, None, "{} has a side to swap", fold.from);
+            assert_eq!(fold.load, format!("mov_rm_{width}"), "{} loads wrongly", fold.from);
+            rows += 1;
+        }
+        assert_eq!(rows, 40, "ten conditions at four widths");
     }
 }
