@@ -416,12 +416,18 @@ jobs:
           curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-5.4.8.tar.gz
           echo "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  lua.tar.gz" | sha256sum -c -
           tar xzf lua.tar.gz
+      - name: fetch the brotli sources
+        run: |
+          curl -fsSL -o brotli.tar.gz https://github.com/google/brotli/archive/refs/tags/v1.1.0.tar.gz
+          echo "e720a6ca29428b803f4ad165371771f5398faba397edf6778837a18599ea13ff  brotli.tar.gz" | sha256sum -c -
+          tar xzf brotli.tar.gz
       - name: build them at both levels and hold them to their answers
         run: cargo xtask libraries
         env:
           RUCC_SQLITE_AMALGAMATION: ${{ github.workspace }}/sqlite-autoconf-3530400
           RUCC_ZLIB_SOURCE: ${{ github.workspace }}/zlib-1.3.1
           RUCC_LUA_SOURCE: ${{ github.workspace }}/lua-5.4.8
+          RUCC_BROTLI_SOURCE: ${{ github.workspace }}/brotli-1.1.0
 
   # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
   # layer that can see a calling convention at all: everything cheaper than it reads what the

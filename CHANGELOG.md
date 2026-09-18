@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- brotli is the fourth row of `cargo xtask libraries`, and it is the second compressor, which wants a word since zlib is already a row. They are the same job and not the same code. zlib is fifteen small files around one sliding window and a hash chain. brotli is thirty one that carry a static dictionary of a hundred and twenty thousand words, split the input into blocks and pick a different set of Huffman tables for each, keep the decoder state in a ring buffer grown as the decoder learns how much it needs, and reach back into that ring with a distance that is allowed to select the dictionary instead. That last part is what earns the row: a distance in a brotli stream is a number that picks storage out of one of several places, and the decoder works out which by arithmetic rather than by holding a pointer to it, which nothing else in the table does. The workload builds a buffer of three kinds of content, words the static dictionary already knows, words it does not and bytes that do not compress at all, so the encoder makes a different decision per block, and round trips it through the whole-buffer interface at three qualities and through the streaming interface seven hundred bytes at a time with an output buffer too small to hold what one call produces. The answers are two checksums the program computes itself, taken in opposite directions, so a run that comes back with the right bytes in the wrong order is still wrong. All thirty one files compile at `-O0` and at `-O2`, both levels link and run, both get the answers right, and the monitor has nothing to say about any of it. A row can now name include directories of its own, because brotli keeps its public headers apart from its C and both the library and the workload reach them by the same spelling, and a project that keeps its C in subdirectories gets one flat directory of assembly out with the path written into each name, since two files called `state.c` in two directories are two files. Part of tamnd/rucc#431 and tamnd/rucc#1307.
+
 ## 0.10.59
 
 ### Added
