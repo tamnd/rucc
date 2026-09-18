@@ -342,6 +342,24 @@ pub struct CallRegs {
     pub stack_pointer: PhysReg,
     /// The frame pointer, which is the register a prologue puts the old stack pointer in.
     pub frame_pointer: PhysReg,
+    /// Whether the prologue points the frame pointer at the frame after taking it rather than
+    /// before taking it.
+    ///
+    /// False everywhere but Windows, and there it is the unwind table asking rather than a
+    /// preference. The record a function carries on that platform counts every slot in it from
+    /// where the stack pointer ends the prologue, and it finds that place by taking a constant off
+    /// the frame pointer, so a register pushed after the pointer was established is below the place
+    /// the record counts from and has no row the format can write. The order that does work is the
+    /// pushes, then the frame, and only then the pointer, which is what Microsoft's compiler emits
+    /// and what gcc emits for this target in every function that saves anything besides the pointer
+    /// itself.
+    ///
+    /// What it costs is the chain: the frame pointer holds a copy of the body's stack pointer
+    /// rather than the address of the caller's copy of itself, so the words that used to lead from
+    /// one frame to the next no longer do. Nothing on this platform walks that chain. Unwinding
+    /// reads the table, there is no profiler's hook that reads the pointer, and gcc gives the chain
+    /// up on the same functions for the same reason.
+    pub late_frame_pointer: bool,
     /// Where a variadic call says how many vector registers it passed arguments in, when the
     /// convention makes it say.
     ///
@@ -677,6 +695,7 @@ mod tests {
             sse_order: &SSE,
             stack_pointer: PhysReg::new(4),
             frame_pointer: PhysReg::new(5),
+            late_frame_pointer: false,
             vector_count: None,
             red_zone: 0,
             shadow,

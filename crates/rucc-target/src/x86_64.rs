@@ -1127,6 +1127,10 @@ pub static SYSV: CallRegs = CallRegs {
     sse_order: &SSE_ORDER,
     stack_pointer: RSP,
     frame_pointer: RBP,
+    // The pointer goes up before the frame does here, which is the order every debugger and every
+    // profiler on this platform expects: the word the pointer names is the caller's copy of it, so
+    // the frames are a chain that can be walked without a table.
+    late_frame_pointer: false,
     vector_count: Some(RAX),
     red_zone: 128,
     shadow: 0,
@@ -1199,6 +1203,9 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         sse_order: &SSE_ORDER,
         stack_pointer: RSP,
         frame_pointer: RBP,
+        // After the frame here, because the unwind record this platform reads cannot describe the
+        // other order. See [`CallRegs::late_frame_pointer`].
+        late_frame_pointer: true,
         vector_count: None,
         red_zone: 0,
         shadow: 32,

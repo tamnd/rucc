@@ -2306,6 +2306,40 @@ decl #0 x : int object external static defined
         assert!(result.text().contains("or_mi_8"), "{}", result.text());
     }
 
+    /// A function that keeps a frame pointer on Windows now has an unwind record and an object.
+    ///
+    /// The record that platform carries counts every slot in it from where the stack pointer ends
+    /// the prologue, and it gets to that place by taking a constant off the frame pointer, so a
+    /// register pushed after the pointer was established has no row the format can write. The order
+    /// that does have one is the pushes, then the frame, and only then the pointer, which is what
+    /// the back end writes there and only there. A variable length array and an `alloca` keep a
+    /// pointer whatever the flags asked for, so before this they were the two shapes of C that
+    /// could not be compiled for that target at all. See tamnd/rucc#1403.
+    #[test]
+    fn a_function_that_keeps_a_frame_pointer_on_windows_reaches_an_object_file() {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        let source = concat!(
+            "void use(void *p);\n",
+            "void array(int n) { int v[n]; v[0] = 1; use(v); }\n",
+            "void taken(unsigned long n) { use(__builtin_alloca(n)); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let bytes = match result.artifact {
+            Artifact::Object { bytes, .. } => bytes,
+            other => panic!("expected an object, got {other:?}"),
+        };
+        assert_eq!(&bytes[..2], b"\x64\x86", "an object that says which machine it is for");
+
+        // And the same two functions for Linux, so that what the test is measuring is the target
+        // rather than the program being one this compiler cannot reach yet.
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
     /// An opcode the rule language has no word for is named anyway, and pointed at.
     ///
     /// The rule language's spelling is the better name when there is one, but an opcode it has
