@@ -103,6 +103,9 @@ pub struct Context<'a> {
     /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
     /// integer type that holds it, which is `-fshort-enums`.
     pub short_enums: bool,
+    /// Whether Microsoft's reading of an anonymous member is taken, which is `-fms-extensions`
+    /// and is on by default for a Windows target because mingw's gcc has it on there.
+    pub ms_extensions: bool,
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default.
     ///
@@ -128,6 +131,7 @@ impl<'a> Context<'a> {
             builtins: true,
             no_builtin: &[],
             short_enums: false,
+            ms_extensions: false,
             trapping_math: true,
         }
     }

@@ -310,30 +310,56 @@ impl Checker<'_> {
     fn member_type(&mut self, field: ast::Field) -> Option<(TypeId, Subject)> {
         let Some(declarator) = field.declarator else {
             let subject = Subject { name: None, span: field.span };
-            // A member with no declarator is an unnamed bit-field, or an anonymous member,
-            // which is a `struct` or a `union` with neither tag nor name and whose members are
-            // reached as if they were written here. Anything else declares nothing at all,
-            // which gcc warns about and accepts.
-            let anonymous = matches!(
-                self.ast[field.specs].ty,
-                TypeSpec::Record { tag: None, fields: Some(_), .. }
-            );
-            if field.bits.is_none() && !anonymous {
-                self.report(
-                    Diagnostic::warning(
-                        "declaration does not declare anything".to_string(),
-                        field.span,
-                    )
-                    .with_code("E0547"),
-                );
-                return None;
+            // The type is built before anything is decided about it, because a tag written on a
+            // member is declared in the scope the record itself is written in and goes on meaning
+            // that afterwards. `struct A { struct Inner { int a; }; };` leaves `struct Inner`
+            // behind for the rest of the file even where the member declares nothing, which is
+            // what gcc does with the same program.
+            let ty = self.specified_type(field.specs, subject, MEMBER);
+            // A member with no declarator is an unnamed bit-field, or an anonymous member, whose
+            // members are reached as if they were written here. Anything else declares nothing at
+            // all, which gcc warns about and accepts.
+            if field.bits.is_some() || self.is_anonymous_member(field.specs, ty) {
+                return Some((ty, subject));
             }
-            return Some((self.specified_type(field.specs, subject, MEMBER), subject));
+            self.report(
+                Diagnostic::warning(
+                    "declaration does not declare anything".to_string(),
+                    field.span,
+                )
+                .with_code("E0547"),
+            );
+            return None;
         };
         let node = self.ast[declarator];
         let span = if node.name.is_some() { node.name_span } else { field.span };
         let subject = Subject { name: node.name, span };
         Some((self.build_type(field.specs, declarator, MEMBER), subject))
+    }
+
+    /// Whether a member written with no declarator is an anonymous one, whose members are reached
+    /// as if they had been written in the record that holds it.
+    ///
+    /// C11 6.7.2.1p13 takes a `struct` or a `union` with neither a tag nor a name. Microsoft's
+    /// rule is wider and takes one written with a tag as well, or one named through a typedef, and
+    /// gcc follows it under `-fms-extensions`, which its mingw build has on without being asked
+    /// for it. The Windows headers rely on that: `<objidl.h>` closes the union inside `STGMEDIUM`
+    /// with `} DUMMYUNIONNAME;`, where `DUMMYUNIONNAME` expands to nothing unless the program
+    /// defined `NONAMELESSUNION`, and the tag in front of the body stays where it was written.
+    /// Reading that as a declaration of nothing drops the member, so the record comes out the
+    /// wrong size as well as without the names, which is a disagreement about layout with every
+    /// object the platform's own compiler built.
+    fn is_anonymous_member(&self, specs: ast::DeclSpecsId, ty: TypeId) -> bool {
+        match self.ast[specs].ty {
+            TypeSpec::Record { tag: None, fields: Some(_), .. } => true,
+            // A typedef name can name anything, and only a record has members to reach, so this
+            // is the one place the type rather than the spelling settles it.
+            TypeSpec::Record { .. } | TypeSpec::Typedef(_) => {
+                self.cx.ms_extensions
+                    && matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Record(_))
+            }
+            _ => false,
+        }
     }
 
     /// The width of a bit-field, folded and measured against the type it was declared in.
@@ -964,6 +990,71 @@ mod tests {
         let ty = checker.declared_type(specs, hole);
         // The anonymous member is a member, and the `int;` beside it is a declaration that
         // declares nothing, which gcc warns about and goes on from.
+        assert_eq!(message(&checker), "declaration does not declare anything");
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
+    }
+
+    /// And it declares the tag it wrote either way. `struct S { struct Inner { int q; }; int c; };`
+    /// leaves `struct Inner` behind for the rest of the file even where the member itself declares
+    /// nothing, which is what gcc does with the same program it warns about.
+    #[test]
+    fn a_member_that_declares_nothing_still_declares_the_tag_that_was_written_on_it() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let q = fixture.declarator(Some("q"), &[]);
+        let c = fixture.declarator(Some("c"), &[]);
+        let inner = structure(&mut fixture, Some("Inner"), &[member(int, q)]);
+        let outer = fixture.int_specs();
+        let specs = structure(&mut fixture, Some("S"), &[bare(inner), member(outer, c)]);
+        let hole = defined(&mut fixture, specs);
+        let tag = fixture.name("Inner");
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(message(&checker), "declaration does not declare anything");
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
+        assert!(checker.scopes.tag(tag).is_some(), "the tag is declared where it was written");
+    }
+
+    /// Microsoft's rule for that same member, which gcc takes under `-fms-extensions` and which a
+    /// Windows target takes without being asked because mingw's gcc has it on. A tag in front of
+    /// the body changes nothing about it: the member has no name, and `q` is reached through it.
+    #[test]
+    fn a_tag_on_a_member_leaves_it_anonymous_under_the_microsoft_rule() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let q = fixture.declarator(Some("q"), &[]);
+        let inner = structure(&mut fixture, Some("Inner"), &[member(int, q)]);
+        let specs = structure(&mut fixture, Some("S"), &[bare(inner)]);
+        let hole = defined(&mut fixture, specs);
+        let name = fixture.name("q");
+
+        let mut checker = fixture.checker_with_ms_extensions();
+        let ty = checker.declared_type(specs, hole);
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
+        let TypeKind::Record(id) = checker.types.kind(checker.types.canonical(ty)) else {
+            panic!("a record type");
+        };
+        assert_eq!(checker.types.record_info(id).fields[0].name, None);
+        // Through the member that holds it and then to the member itself, which is the chain an
+        // access is written out as.
+        assert_eq!(checker.find_field(id, name), Some(vec![0, 0]));
+    }
+
+    /// The rule is about a record and not about a member with no name, so `int;` declares nothing
+    /// under it either, which is the one line of the five gcc still warns about.
+    #[test]
+    fn a_member_that_is_not_a_record_declares_nothing_under_the_microsoft_rule_as_well() {
+        let mut fixture = Fixture::new();
+        let nothing = fixture.int_specs();
+        let c = fixture.declarator(Some("c"), &[]);
+        let outer = fixture.int_specs();
+        let specs = structure(&mut fixture, Some("S"), &[bare(nothing), member(outer, c)]);
+        let hole = defined(&mut fixture, specs);
+
+        let mut checker = fixture.checker_with_ms_extensions();
+        let ty = checker.declared_type(specs, hole);
         assert_eq!(message(&checker), "declaration does not declare anything");
         assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
     }

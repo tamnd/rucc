@@ -1566,6 +1566,13 @@ mod tests {
             Checker::new(&self.ast, cx)
         }
 
+        /// The same under `-fms-extensions`, which widens what counts as an anonymous member.
+        pub(super) fn checker_with_ms_extensions(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.ms_extensions = true;
+            Checker::new(&self.ast, cx)
+        }
+
         /// The same under `-pedantic`, which is where what gcc takes but ISO C never wrote down
         /// is said out loud.
         pub(super) fn checker_with_pedantic(&self) -> Checker<'_> {

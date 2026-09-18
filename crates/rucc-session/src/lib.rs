@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{TargetInfo, Triple};
+use rucc_target::{Os, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -1849,6 +1849,16 @@ pub struct Options {
     /// of embedded C and every ARM EABI object is built with it, and mixing the two answers in one
     /// program is a silent disagreement about layout rather than a link error.
     pub short_enums: bool,
+    /// Whether Microsoft's reading of an anonymous member is taken, from `-fms-extensions` and
+    /// `-fno-ms-extensions`, with the target deciding when neither was written.
+    ///
+    /// C takes a `struct` or a `union` member with neither a tag nor a name as anonymous, and
+    /// Microsoft's rule takes one written with a tag or named through a typedef as well. The
+    /// default is on for a Windows target and off everywhere else, which is what gcc does: its
+    /// mingw build has the flag on without being asked and its Linux build has it off. The
+    /// Windows headers need it, because `<objidl.h>` and the rest close a nameless union with
+    /// `} DUMMYUNIONNAME;` and the macro expands to nothing.
+    pub ms_extensions: Option<bool>,
     /// Whether an access names the type it goes through, from `-fstrict-aliasing` and
     /// `-fno-strict-aliasing`.
     ///
@@ -2145,6 +2155,7 @@ impl Options {
             wrapping: Wrapping::NONE,
             char_signed: None,
             short_enums: false,
+            ms_extensions: None,
             strict_aliasing: true,
             fp_contract: Contract::Off,
             trapping_math: true,
@@ -2250,6 +2261,16 @@ impl Session {
             error_count: 0,
             warning_count: 0,
         }
+    }
+
+    /// Whether Microsoft's reading of an anonymous member is taken.
+    ///
+    /// The command line answers where it said anything, and the target answers otherwise: gcc's
+    /// mingw build has the flag on without being asked for it and its Linux build has it off, and
+    /// a header written for one of the two is read by whichever compiler the platform ships.
+    #[must_use]
+    pub fn ms_extensions(&self) -> bool {
+        self.opts.ms_extensions.unwrap_or(self.opts.target.os == Os::Windows)
     }
 
     /// Records a diagnostic.
