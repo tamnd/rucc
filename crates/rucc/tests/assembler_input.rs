@@ -166,6 +166,58 @@ fn a_loop_written_the_way_a_hand_written_library_writes_one_gives_the_right_answ
 }
 
 #[test]
+fn the_shapes_a_hand_written_library_reaches_memory_with_give_the_right_answers() {
+    // The second half of the same idea. Every instruction here is one the encoder had no row for
+    // until it was asked to read somebody else's file, and each of them is wrong in a different
+    // way if the row is wrong, so the answers are what tells them apart.
+    //
+    // `carryadd` adds into memory without loading first and carries up the array, which is the
+    // only shape of the eight that had no row at all, and it adds a constant to a place in memory
+    // as well. `dshift` moves a window across two registers, which is what shifting a number wider
+    // than a register is and is the instruction GMP writes every one of its shifting loops with.
+    // `highmul` multiplies straight out of memory. `halve` rotates one place through the carry,
+    // which is a third opcode rather than the constant one written short, with `clc` and `stc`
+    // putting the carry where it has to be first. `sumneg` counts a negative index up to zero and
+    // ends on `js`, which is the idiom every GMP loop uses and is one of the six conditions a C
+    // expression has no way to ask about.
+    let dir = dir("memory");
+    let hot = "\t.text\n\t.globl carryadd\n\t.type carryadd, @function\ncarryadd:\n\txorl %eax, \
+               %eax\n\taddq %rsi, (%rdi)\n\tjnc done\n\tmovl $1, %ecx\nup:\n\tcmpq %rdx, \
+               %rcx\n\tjae out\n\taddq $1, (%rdi,%rcx,8)\n\tjnc done\n\taddq $1, %rcx\n\tjmp \
+               up\nout:\n\tmovl $1, %eax\ndone:\n\tret\n\t.size carryadd, .-carryadd\n\t.globl \
+               dshift\n\t.type dshift, @function\ndshift:\n\tmovq %rdx, %rcx\n\tmovq %rdi, \
+               %rax\n\tshldq %cl, %rsi, %rax\n\tret\n\t.size dshift, .-dshift\n\t.globl \
+               highmul\n\t.type highmul, @function\nhighmul:\n\tmovq %rsi, %rax\n\tmulq \
+               (%rdi)\n\tmovq %rdx, %rax\n\tret\n\t.size highmul, .-highmul\n\t.globl \
+               halve\n\t.type halve, @function\nhalve:\n\tmovq %rdi, %rax\n\tclc\n\ttestl %esi, \
+               %esi\n\tje noc\n\tstc\nnoc:\n\trcrq %rax\n\tret\n\t.size halve, .-halve\n\t.globl \
+               sumneg\n\t.type sumneg, @function\nsumneg:\n\txorl %eax, %eax\n\tleaq \
+               (%rdi,%rsi,8), %rdi\n\tnegq %rsi\n\tjz none\nback:\n\taddq (%rdi,%rsi,8), \
+               %rax\n\taddq $1, %rsi\n\tjs back\nnone:\n\tret\n\t.size sumneg, .-sumneg\n";
+    write(&dir, "hot.s", hot);
+    // Two limbs of all ones under a zero, so a one added at the bottom carries the whole way up and
+    // lands in the third, and the same thing in an array of one limb so the carry runs off the end.
+    let main = "#include <stdint.h>\nextern int carryadd(uint64_t *r, uint64_t v, long n);\nextern \
+                uint64_t dshift(uint64_t hi, uint64_t lo, long cnt);\nextern uint64_t highmul(const \
+                uint64_t *p, uint64_t v);\nextern uint64_t halve(uint64_t x, int carry);\nextern \
+                long sumneg(const long *p, long n);\nint main(void) {\n  uint64_t r[3] = \
+                {0xffffffffffffffffUL, 0xffffffffffffffffUL, 0};\n  if (carryadd(r, 1, 3) != 0) \
+                return 1;\n  if (r[0] != 0) return 2;\n  if (r[1] != 0) return 3;\n  if (r[2] != 1) \
+                return 4;\n  uint64_t f[1] = {0xffffffffffffffffUL};\n  if (carryadd(f, 1, 1) != 1) \
+                return 5;\n  if (f[0] != 0) return 6;\n  if (dshift(0x1234UL, \
+                0x8000000000000000UL, 4) != 0x12348UL) return 7;\n  uint64_t big = \
+                0xffffffffffffffffUL;\n  if (highmul(&big, 2) != 1) return 8;\n  if (halve(4, 0) != \
+                2) return 9;\n  if (halve(4, 1) != (0x8000000000000000UL | 2)) return 10;\n  long \
+                p[4] = {1, 2, 3, 4};\n  if (sumneg(p, 4) != 10) return 11;\n  if (sumneg(p, 0) != \
+                0) return 12;\n  return 42;\n}\n";
+    write(&dir, "main.c", main);
+    let (ok, said) = run(&dir, &["main.c", "hot.s", "-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
+}
+
+#[test]
 fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line() {
     // Refusing it is the whole design of the reader: an assembler that skipped what it did not
     // recognise would write an object that links, and what would be wrong with it is a run of

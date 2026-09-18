@@ -337,6 +337,7 @@ static R: [Kind; 1] = [Kind::Reg];
 static RR: [Kind; 2] = [Kind::Reg, Kind::Reg];
 static IR: [Kind; 2] = [Kind::Imm, Kind::Reg];
 static IRR: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Reg];
+static RRR: [Kind; 3] = [Kind::Reg, Kind::Reg, Kind::Reg];
 static MR: [Kind; 2] = [Kind::Mem, Kind::Reg];
 static IM: [Kind; 2] = [Kind::Imm, Kind::Mem];
 static RM: [Kind; 2] = [Kind::Reg, Kind::Mem];
@@ -465,6 +466,53 @@ static ENCODINGS: &[Encoding] = &[
     bytes("imulw", &MR, Word, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imull", &MR, Long, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
     bytes("imulq", &MR, Quad, &[0x0F, 0xAF], pair(0, 1), NO_IMM),
+    bytes("cmpb", &MR, Byte, &[0x3A], pair(0, 1), NO_IMM),
+    bytes("cmpw", &MR, Word, &[0x3B], pair(0, 1), NO_IMM),
+    bytes("cmpl", &MR, Long, &[0x3B], pair(0, 1), NO_IMM),
+    bytes("cmpq", &MR, Quad, &[0x3B], pair(0, 1), NO_IMM),
+    // The same arithmetic the other way about, a register read and an address written. This is the
+    // opcode the register form already uses, since the register form is one register addressing
+    // another and the only thing that changes is what the addressing byte names. So `01` is `addl`
+    // between two registers above and `addl` into memory here, and the difference is entirely in
+    // the byte behind it.
+    //
+    // Nothing this compiler emits is shaped this way. A read and modify and write of a variable in
+    // memory goes through a register in the middle, because the value is wanted afterwards as often
+    // as not and because a register is where the selector puts everything. A file written by hand
+    // has no such habit and adds straight into the array it is walking, which is what GMP does in
+    // every one of its loops.
+    bytes("addb", &RM, Byte, &[0x00], pair(1, 0), NO_IMM),
+    bytes("addw", &RM, Word, &[0x01], pair(1, 0), NO_IMM),
+    bytes("addl", &RM, Long, &[0x01], pair(1, 0), NO_IMM),
+    bytes("addq", &RM, Quad, &[0x01], pair(1, 0), NO_IMM),
+    bytes("orb", &RM, Byte, &[0x08], pair(1, 0), NO_IMM),
+    bytes("orw", &RM, Word, &[0x09], pair(1, 0), NO_IMM),
+    bytes("orl", &RM, Long, &[0x09], pair(1, 0), NO_IMM),
+    bytes("orq", &RM, Quad, &[0x09], pair(1, 0), NO_IMM),
+    bytes("adcb", &RM, Byte, &[0x10], pair(1, 0), NO_IMM),
+    bytes("adcw", &RM, Word, &[0x11], pair(1, 0), NO_IMM),
+    bytes("adcl", &RM, Long, &[0x11], pair(1, 0), NO_IMM),
+    bytes("adcq", &RM, Quad, &[0x11], pair(1, 0), NO_IMM),
+    bytes("sbbb", &RM, Byte, &[0x18], pair(1, 0), NO_IMM),
+    bytes("sbbw", &RM, Word, &[0x19], pair(1, 0), NO_IMM),
+    bytes("sbbl", &RM, Long, &[0x19], pair(1, 0), NO_IMM),
+    bytes("sbbq", &RM, Quad, &[0x19], pair(1, 0), NO_IMM),
+    bytes("andb", &RM, Byte, &[0x20], pair(1, 0), NO_IMM),
+    bytes("andw", &RM, Word, &[0x21], pair(1, 0), NO_IMM),
+    bytes("andl", &RM, Long, &[0x21], pair(1, 0), NO_IMM),
+    bytes("andq", &RM, Quad, &[0x21], pair(1, 0), NO_IMM),
+    bytes("subb", &RM, Byte, &[0x28], pair(1, 0), NO_IMM),
+    bytes("subw", &RM, Word, &[0x29], pair(1, 0), NO_IMM),
+    bytes("subl", &RM, Long, &[0x29], pair(1, 0), NO_IMM),
+    bytes("subq", &RM, Quad, &[0x29], pair(1, 0), NO_IMM),
+    bytes("xorb", &RM, Byte, &[0x30], pair(1, 0), NO_IMM),
+    bytes("xorw", &RM, Word, &[0x31], pair(1, 0), NO_IMM),
+    bytes("xorl", &RM, Long, &[0x31], pair(1, 0), NO_IMM),
+    bytes("xorq", &RM, Quad, &[0x31], pair(1, 0), NO_IMM),
+    bytes("cmpb", &RM, Byte, &[0x38], pair(1, 0), NO_IMM),
+    bytes("cmpw", &RM, Word, &[0x39], pair(1, 0), NO_IMM),
+    bytes("cmpl", &RM, Long, &[0x39], pair(1, 0), NO_IMM),
+    bytes("cmpq", &RM, Quad, &[0x39], pair(1, 0), NO_IMM),
     // Arithmetic, register with immediate. The eight of these share three opcodes and are told
     // apart by the three bits beside the register, which is the column the manual calls `/digit`.
     // Nothing narrower than a word can sign extend a byte, since a byte is already one.
@@ -524,11 +572,67 @@ static ENCODINGS: &[Encoding] = &[
     takes("cmpl", &IR, Fits::Long, Long, &[0x81], ext(1, 7), ImmSize::Id),
     takes("cmpq", &IR, Signed8, Quad, &[0x83], ext(1, 7), ImmSize::Ib),
     takes("cmpq", &IR, Signed32, Quad, &[0x81], ext(1, 7), ImmSize::Id),
-    // The one row that writes an immediate to an address. Every other form of the eight reaches
-    // memory too, on this machine, and none of the rest of them is here, because the only thing
-    // this compiler writes to an address without a register in hand is a probing prologue touching
-    // a page, and that is an inclusive or of zero with one byte. See `crate::frame::Probe`.
+    // The same eight writing an immediate to an address, which is the rows above with an address
+    // where the register was and is why they are grouped by which digit names them rather than by
+    // which instruction they are. The one thing this compiler writes here is the inclusive or of
+    // zero with a byte that a probing prologue touches a page with, see `crate::frame::Probe`, and
+    // the rest are for a file that adds a constant to a counter in memory without loading it first.
+    takes("addb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 0), ImmSize::Ib),
+    takes("addw", &IM, Signed8, Word, &[0x83], ext(1, 0), ImmSize::Ib),
+    takes("addw", &IM, Fits::Word, Word, &[0x81], ext(1, 0), ImmSize::Iw),
+    takes("addl", &IM, Signed8, Long, &[0x83], ext(1, 0), ImmSize::Ib),
+    takes("addl", &IM, Fits::Long, Long, &[0x81], ext(1, 0), ImmSize::Id),
+    takes("addq", &IM, Signed8, Quad, &[0x83], ext(1, 0), ImmSize::Ib),
+    takes("addq", &IM, Signed32, Quad, &[0x81], ext(1, 0), ImmSize::Id),
     takes("orb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 1), ImmSize::Ib),
+    takes("orw", &IM, Signed8, Word, &[0x83], ext(1, 1), ImmSize::Ib),
+    takes("orw", &IM, Fits::Word, Word, &[0x81], ext(1, 1), ImmSize::Iw),
+    takes("orl", &IM, Signed8, Long, &[0x83], ext(1, 1), ImmSize::Ib),
+    takes("orl", &IM, Fits::Long, Long, &[0x81], ext(1, 1), ImmSize::Id),
+    takes("orq", &IM, Signed8, Quad, &[0x83], ext(1, 1), ImmSize::Ib),
+    takes("orq", &IM, Signed32, Quad, &[0x81], ext(1, 1), ImmSize::Id),
+    takes("adcb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 2), ImmSize::Ib),
+    takes("adcw", &IM, Signed8, Word, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcw", &IM, Fits::Word, Word, &[0x81], ext(1, 2), ImmSize::Iw),
+    takes("adcl", &IM, Signed8, Long, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcl", &IM, Fits::Long, Long, &[0x81], ext(1, 2), ImmSize::Id),
+    takes("adcq", &IM, Signed8, Quad, &[0x83], ext(1, 2), ImmSize::Ib),
+    takes("adcq", &IM, Signed32, Quad, &[0x81], ext(1, 2), ImmSize::Id),
+    takes("sbbb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 3), ImmSize::Ib),
+    takes("sbbw", &IM, Signed8, Word, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbw", &IM, Fits::Word, Word, &[0x81], ext(1, 3), ImmSize::Iw),
+    takes("sbbl", &IM, Signed8, Long, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbl", &IM, Fits::Long, Long, &[0x81], ext(1, 3), ImmSize::Id),
+    takes("sbbq", &IM, Signed8, Quad, &[0x83], ext(1, 3), ImmSize::Ib),
+    takes("sbbq", &IM, Signed32, Quad, &[0x81], ext(1, 3), ImmSize::Id),
+    takes("andb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 4), ImmSize::Ib),
+    takes("andw", &IM, Signed8, Word, &[0x83], ext(1, 4), ImmSize::Ib),
+    takes("andw", &IM, Fits::Word, Word, &[0x81], ext(1, 4), ImmSize::Iw),
+    takes("andl", &IM, Signed8, Long, &[0x83], ext(1, 4), ImmSize::Ib),
+    takes("andl", &IM, Fits::Long, Long, &[0x81], ext(1, 4), ImmSize::Id),
+    takes("andq", &IM, Signed8, Quad, &[0x83], ext(1, 4), ImmSize::Ib),
+    takes("andq", &IM, Signed32, Quad, &[0x81], ext(1, 4), ImmSize::Id),
+    takes("subb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 5), ImmSize::Ib),
+    takes("subw", &IM, Signed8, Word, &[0x83], ext(1, 5), ImmSize::Ib),
+    takes("subw", &IM, Fits::Word, Word, &[0x81], ext(1, 5), ImmSize::Iw),
+    takes("subl", &IM, Signed8, Long, &[0x83], ext(1, 5), ImmSize::Ib),
+    takes("subl", &IM, Fits::Long, Long, &[0x81], ext(1, 5), ImmSize::Id),
+    takes("subq", &IM, Signed8, Quad, &[0x83], ext(1, 5), ImmSize::Ib),
+    takes("subq", &IM, Signed32, Quad, &[0x81], ext(1, 5), ImmSize::Id),
+    takes("xorb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 6), ImmSize::Ib),
+    takes("xorw", &IM, Signed8, Word, &[0x83], ext(1, 6), ImmSize::Ib),
+    takes("xorw", &IM, Fits::Word, Word, &[0x81], ext(1, 6), ImmSize::Iw),
+    takes("xorl", &IM, Signed8, Long, &[0x83], ext(1, 6), ImmSize::Ib),
+    takes("xorl", &IM, Fits::Long, Long, &[0x81], ext(1, 6), ImmSize::Id),
+    takes("xorq", &IM, Signed8, Quad, &[0x83], ext(1, 6), ImmSize::Ib),
+    takes("xorq", &IM, Signed32, Quad, &[0x81], ext(1, 6), ImmSize::Id),
+    takes("cmpb", &IM, Fits::Byte, Byte, &[0x80], ext(1, 7), ImmSize::Ib),
+    takes("cmpw", &IM, Signed8, Word, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpw", &IM, Fits::Word, Word, &[0x81], ext(1, 7), ImmSize::Iw),
+    takes("cmpl", &IM, Signed8, Long, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpl", &IM, Fits::Long, Long, &[0x81], ext(1, 7), ImmSize::Id),
+    takes("cmpq", &IM, Signed8, Quad, &[0x83], ext(1, 7), ImmSize::Ib),
+    takes("cmpq", &IM, Signed32, Quad, &[0x81], ext(1, 7), ImmSize::Id),
     // The three-operand multiply, whose source and destination are both written because they are
     // not the same register and whose immediate narrows the same way the eight above do.
     takes("imulw", &IRR, Signed8, Word, &[0x6B], pair(1, 2), ImmSize::Ib),
@@ -588,6 +692,43 @@ static ENCODINGS: &[Encoding] = &[
     bytes("imulw", &R, Word, &[0xF7], ext(0, 5), NO_IMM),
     bytes("imull", &R, Long, &[0xF7], ext(0, 5), NO_IMM),
     bytes("imulq", &R, Quad, &[0xF7], ext(0, 5), NO_IMM),
+    // All eight of the group naming an address instead of a register, which is the same opcode and
+    // the same digit with the addressing byte pointing somewhere else. The compiler loads into a
+    // register first every time, so none of these had a row. A file written by hand multiplies
+    // straight out of the array it is walking, which is what `mulq 16(%r8)` in GMP's division is.
+    bytes("negb", &M, Byte, &[0xF6], ext(0, 3), NO_IMM),
+    bytes("negw", &M, Word, &[0xF7], ext(0, 3), NO_IMM),
+    bytes("negl", &M, Long, &[0xF7], ext(0, 3), NO_IMM),
+    bytes("negq", &M, Quad, &[0xF7], ext(0, 3), NO_IMM),
+    bytes("notb", &M, Byte, &[0xF6], ext(0, 2), NO_IMM),
+    bytes("notw", &M, Word, &[0xF7], ext(0, 2), NO_IMM),
+    bytes("notl", &M, Long, &[0xF7], ext(0, 2), NO_IMM),
+    bytes("notq", &M, Quad, &[0xF7], ext(0, 2), NO_IMM),
+    bytes("mulb", &M, Byte, &[0xF6], ext(0, 4), NO_IMM),
+    bytes("mulw", &M, Word, &[0xF7], ext(0, 4), NO_IMM),
+    bytes("mull", &M, Long, &[0xF7], ext(0, 4), NO_IMM),
+    bytes("mulq", &M, Quad, &[0xF7], ext(0, 4), NO_IMM),
+    bytes("imulb", &M, Byte, &[0xF6], ext(0, 5), NO_IMM),
+    bytes("imulw", &M, Word, &[0xF7], ext(0, 5), NO_IMM),
+    bytes("imull", &M, Long, &[0xF7], ext(0, 5), NO_IMM),
+    bytes("imulq", &M, Quad, &[0xF7], ext(0, 5), NO_IMM),
+    bytes("divb", &M, Byte, &[0xF6], ext(0, 6), NO_IMM),
+    bytes("divw", &M, Word, &[0xF7], ext(0, 6), NO_IMM),
+    bytes("divl", &M, Long, &[0xF7], ext(0, 6), NO_IMM),
+    bytes("divq", &M, Quad, &[0xF7], ext(0, 6), NO_IMM),
+    bytes("idivb", &M, Byte, &[0xF6], ext(0, 7), NO_IMM),
+    bytes("idivw", &M, Word, &[0xF7], ext(0, 7), NO_IMM),
+    bytes("idivl", &M, Long, &[0xF7], ext(0, 7), NO_IMM),
+    bytes("idivq", &M, Quad, &[0xF7], ext(0, 7), NO_IMM),
+    // The two that share the other opcode of the pair, counted up and counted down.
+    bytes("incb", &M, Byte, &[0xFE], ext(0, 0), NO_IMM),
+    bytes("incw", &M, Word, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("incl", &M, Long, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("incq", &M, Quad, &[0xFF], ext(0, 0), NO_IMM),
+    bytes("decb", &M, Byte, &[0xFE], ext(0, 1), NO_IMM),
+    bytes("decw", &M, Word, &[0xFF], ext(0, 1), NO_IMM),
+    bytes("decl", &M, Long, &[0xFF], ext(0, 1), NO_IMM),
+    bytes("decq", &M, Quad, &[0xFF], ext(0, 1), NO_IMM),
     // Shifts by a constant, which carry one byte of count however wide the thing shifted is,
     // because nothing shifts a register by more than sixty three places.
     takes("shlb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 4), ImmSize::Ib),
@@ -637,6 +778,85 @@ static ENCODINGS: &[Encoding] = &[
     bytes("rorw", &RR, Word, &[0xD3], ext(1, 1), NO_IMM),
     bytes("rorl", &RR, Long, &[0xD3], ext(1, 1), NO_IMM),
     bytes("rorq", &RR, Quad, &[0xD3], ext(1, 1), NO_IMM),
+    // The two rotates that go through the carry, which are the middle pair of the eight and are the
+    // reason the group is eight and not six. They shift a bit out into the carry and the old carry
+    // in at the other end, so a chain of them moves a number wider than a register one place, which
+    // is what a halving of a multiple precision sum is and is the only thing anybody uses them for.
+    // No C expression names one, the way no C expression names a plain rotate.
+    takes("rclb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 2), ImmSize::Ib),
+    takes("rclw", &IR, Fits::Byte, Word, &[0xC1], ext(1, 2), ImmSize::Ib),
+    takes("rcll", &IR, Fits::Byte, Long, &[0xC1], ext(1, 2), ImmSize::Ib),
+    takes("rclq", &IR, Fits::Byte, Quad, &[0xC1], ext(1, 2), ImmSize::Ib),
+    takes("rcrb", &IR, Fits::Byte, Byte, &[0xC0], ext(1, 3), ImmSize::Ib),
+    takes("rcrw", &IR, Fits::Byte, Word, &[0xC1], ext(1, 3), ImmSize::Ib),
+    takes("rcrl", &IR, Fits::Byte, Long, &[0xC1], ext(1, 3), ImmSize::Ib),
+    takes("rcrq", &IR, Fits::Byte, Quad, &[0xC1], ext(1, 3), ImmSize::Ib),
+    bytes("rclb", &RR, Byte, &[0xD2], ext(1, 2), NO_IMM),
+    bytes("rclw", &RR, Word, &[0xD3], ext(1, 2), NO_IMM),
+    bytes("rcll", &RR, Long, &[0xD3], ext(1, 2), NO_IMM),
+    bytes("rclq", &RR, Quad, &[0xD3], ext(1, 2), NO_IMM),
+    bytes("rcrb", &RR, Byte, &[0xD2], ext(1, 3), NO_IMM),
+    bytes("rcrw", &RR, Word, &[0xD3], ext(1, 3), NO_IMM),
+    bytes("rcrl", &RR, Long, &[0xD3], ext(1, 3), NO_IMM),
+    bytes("rcrq", &RR, Quad, &[0xD3], ext(1, 3), NO_IMM),
+    // All eight of them shifting by one place with nothing written down, which is a third opcode
+    // beside the constant and the count. It is one byte shorter than writing the one out, and it is
+    // not the same instruction as writing the one out: the overflow flag it leaves is defined here
+    // and undefined there, which matters to the `rcr` a halving is built from.
+    //
+    // This is a row and not a choice. Nothing here decides to write `D1` where a file wrote `C1`
+    // with a one behind it, because that is picking a shorter encoding for the same instruction and
+    // is the relaxation pass's business rather than a lookup's. What this does is take the file
+    // that wrote the one operand form, which is what every hand written file writes.
+    bytes("rolb", &R, Byte, &[0xD0], ext(0, 0), NO_IMM),
+    bytes("rolw", &R, Word, &[0xD1], ext(0, 0), NO_IMM),
+    bytes("roll", &R, Long, &[0xD1], ext(0, 0), NO_IMM),
+    bytes("rolq", &R, Quad, &[0xD1], ext(0, 0), NO_IMM),
+    bytes("rorb", &R, Byte, &[0xD0], ext(0, 1), NO_IMM),
+    bytes("rorw", &R, Word, &[0xD1], ext(0, 1), NO_IMM),
+    bytes("rorl", &R, Long, &[0xD1], ext(0, 1), NO_IMM),
+    bytes("rorq", &R, Quad, &[0xD1], ext(0, 1), NO_IMM),
+    bytes("rclb", &R, Byte, &[0xD0], ext(0, 2), NO_IMM),
+    bytes("rclw", &R, Word, &[0xD1], ext(0, 2), NO_IMM),
+    bytes("rcll", &R, Long, &[0xD1], ext(0, 2), NO_IMM),
+    bytes("rclq", &R, Quad, &[0xD1], ext(0, 2), NO_IMM),
+    bytes("rcrb", &R, Byte, &[0xD0], ext(0, 3), NO_IMM),
+    bytes("rcrw", &R, Word, &[0xD1], ext(0, 3), NO_IMM),
+    bytes("rcrl", &R, Long, &[0xD1], ext(0, 3), NO_IMM),
+    bytes("rcrq", &R, Quad, &[0xD1], ext(0, 3), NO_IMM),
+    bytes("shlb", &R, Byte, &[0xD0], ext(0, 4), NO_IMM),
+    bytes("shlw", &R, Word, &[0xD1], ext(0, 4), NO_IMM),
+    bytes("shll", &R, Long, &[0xD1], ext(0, 4), NO_IMM),
+    bytes("shlq", &R, Quad, &[0xD1], ext(0, 4), NO_IMM),
+    bytes("shrb", &R, Byte, &[0xD0], ext(0, 5), NO_IMM),
+    bytes("shrw", &R, Word, &[0xD1], ext(0, 5), NO_IMM),
+    bytes("shrl", &R, Long, &[0xD1], ext(0, 5), NO_IMM),
+    bytes("shrq", &R, Quad, &[0xD1], ext(0, 5), NO_IMM),
+    bytes("sarb", &R, Byte, &[0xD0], ext(0, 7), NO_IMM),
+    bytes("sarw", &R, Word, &[0xD1], ext(0, 7), NO_IMM),
+    bytes("sarl", &R, Long, &[0xD1], ext(0, 7), NO_IMM),
+    bytes("sarq", &R, Quad, &[0xD1], ext(0, 7), NO_IMM),
+    // The two shifts that name a second register to shift in from, which are the only instructions
+    // on this machine with three operands that are not a multiply. They move a window across a pair
+    // of registers, which is what shifting a number wider than a register is, and they are how GMP
+    // writes every one of its shifting loops.
+    //
+    // The count comes first in both shapes, either as a number or in `cl`, and the register shifted
+    // in is second and the one shifted is last. That is the same order the manual writes them in
+    // backwards, and the addressing byte therefore names the last argument and holds the middle one
+    // beside it, which is the opposite way round from the three operand multiply above.
+    takes("shldw", &IRR, Fits::Byte, Word, &[0x0F, 0xA4], pair(2, 1), ImmSize::Ib),
+    takes("shldl", &IRR, Fits::Byte, Long, &[0x0F, 0xA4], pair(2, 1), ImmSize::Ib),
+    takes("shldq", &IRR, Fits::Byte, Quad, &[0x0F, 0xA4], pair(2, 1), ImmSize::Ib),
+    takes("shrdw", &IRR, Fits::Byte, Word, &[0x0F, 0xAC], pair(2, 1), ImmSize::Ib),
+    takes("shrdl", &IRR, Fits::Byte, Long, &[0x0F, 0xAC], pair(2, 1), ImmSize::Ib),
+    takes("shrdq", &IRR, Fits::Byte, Quad, &[0x0F, 0xAC], pair(2, 1), ImmSize::Ib),
+    bytes("shldw", &RRR, Word, &[0x0F, 0xA5], pair(2, 1), NO_IMM),
+    bytes("shldl", &RRR, Long, &[0x0F, 0xA5], pair(2, 1), NO_IMM),
+    bytes("shldq", &RRR, Quad, &[0x0F, 0xA5], pair(2, 1), NO_IMM),
+    bytes("shrdw", &RRR, Word, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
+    bytes("shrdl", &RRR, Long, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
+    bytes("shrdq", &RRR, Quad, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
@@ -682,6 +902,83 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cmovaew", &RR, Word, &[0x0F, 0x43], pair(0, 1), NO_IMM),
     bytes("cmovael", &RR, Long, &[0x0F, 0x43], pair(0, 1), NO_IMM),
     bytes("cmovaeq", &RR, Quad, &[0x0F, 0x43], pair(0, 1), NO_IMM),
+    // The six conditions above that this compiler has no way to reach. A C comparison comes out as
+    // one of the ten, because the sign and the overflow and the parity are not things an expression
+    // asks about on their own: what `a < b` wants to know is the two of them together, which is `l`,
+    // and the sign by itself is only the answer when one side is a zero the selector folded away.
+    // A file written by hand asks about them directly and GMP does it in every other loop.
+    bytes("cmovow", &RR, Word, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovol", &RR, Long, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovoq", &RR, Quad, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovnow", &RR, Word, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovnol", &RR, Long, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovnoq", &RR, Quad, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovsw", &RR, Word, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovsl", &RR, Long, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovsq", &RR, Quad, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovnsw", &RR, Word, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovnsl", &RR, Long, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovnsq", &RR, Quad, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovpw", &RR, Word, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovpl", &RR, Long, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovpq", &RR, Quad, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovnpw", &RR, Word, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    bytes("cmovnpl", &RR, Long, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    bytes("cmovnpq", &RR, Quad, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    // All sixteen of them reading memory, which is the same opcode with an address where the source
+    // register was and is the shape the instruction was put on the machine for. Loading a value and
+    // then deciding whether to keep it is two instructions, one of which might fault on an address
+    // the condition says not to read, and a conditional move from memory reads either way, so it is
+    // no help with the fault and every help with the branch. This compiler loads first and moves
+    // second, which is why it has never needed these. GMP writes `cmovc 16(%r8), %rbx` instead.
+    bytes("cmovow", &MR, Word, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovol", &MR, Long, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovoq", &MR, Quad, &[0x0F, 0x40], pair(0, 1), NO_IMM),
+    bytes("cmovnow", &MR, Word, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovnol", &MR, Long, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovnoq", &MR, Quad, &[0x0F, 0x41], pair(0, 1), NO_IMM),
+    bytes("cmovbw", &MR, Word, &[0x0F, 0x42], pair(0, 1), NO_IMM),
+    bytes("cmovbl", &MR, Long, &[0x0F, 0x42], pair(0, 1), NO_IMM),
+    bytes("cmovbq", &MR, Quad, &[0x0F, 0x42], pair(0, 1), NO_IMM),
+    bytes("cmovaew", &MR, Word, &[0x0F, 0x43], pair(0, 1), NO_IMM),
+    bytes("cmovael", &MR, Long, &[0x0F, 0x43], pair(0, 1), NO_IMM),
+    bytes("cmovaeq", &MR, Quad, &[0x0F, 0x43], pair(0, 1), NO_IMM),
+    bytes("cmovew", &MR, Word, &[0x0F, 0x44], pair(0, 1), NO_IMM),
+    bytes("cmovel", &MR, Long, &[0x0F, 0x44], pair(0, 1), NO_IMM),
+    bytes("cmoveq", &MR, Quad, &[0x0F, 0x44], pair(0, 1), NO_IMM),
+    bytes("cmovnew", &MR, Word, &[0x0F, 0x45], pair(0, 1), NO_IMM),
+    bytes("cmovnel", &MR, Long, &[0x0F, 0x45], pair(0, 1), NO_IMM),
+    bytes("cmovneq", &MR, Quad, &[0x0F, 0x45], pair(0, 1), NO_IMM),
+    bytes("cmovbew", &MR, Word, &[0x0F, 0x46], pair(0, 1), NO_IMM),
+    bytes("cmovbel", &MR, Long, &[0x0F, 0x46], pair(0, 1), NO_IMM),
+    bytes("cmovbeq", &MR, Quad, &[0x0F, 0x46], pair(0, 1), NO_IMM),
+    bytes("cmovaw", &MR, Word, &[0x0F, 0x47], pair(0, 1), NO_IMM),
+    bytes("cmoval", &MR, Long, &[0x0F, 0x47], pair(0, 1), NO_IMM),
+    bytes("cmovaq", &MR, Quad, &[0x0F, 0x47], pair(0, 1), NO_IMM),
+    bytes("cmovsw", &MR, Word, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovsl", &MR, Long, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovsq", &MR, Quad, &[0x0F, 0x48], pair(0, 1), NO_IMM),
+    bytes("cmovnsw", &MR, Word, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovnsl", &MR, Long, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovnsq", &MR, Quad, &[0x0F, 0x49], pair(0, 1), NO_IMM),
+    bytes("cmovpw", &MR, Word, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovpl", &MR, Long, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovpq", &MR, Quad, &[0x0F, 0x4A], pair(0, 1), NO_IMM),
+    bytes("cmovnpw", &MR, Word, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    bytes("cmovnpl", &MR, Long, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    bytes("cmovnpq", &MR, Quad, &[0x0F, 0x4B], pair(0, 1), NO_IMM),
+    bytes("cmovlw", &MR, Word, &[0x0F, 0x4C], pair(0, 1), NO_IMM),
+    bytes("cmovll", &MR, Long, &[0x0F, 0x4C], pair(0, 1), NO_IMM),
+    bytes("cmovlq", &MR, Quad, &[0x0F, 0x4C], pair(0, 1), NO_IMM),
+    bytes("cmovgew", &MR, Word, &[0x0F, 0x4D], pair(0, 1), NO_IMM),
+    bytes("cmovgel", &MR, Long, &[0x0F, 0x4D], pair(0, 1), NO_IMM),
+    bytes("cmovgeq", &MR, Quad, &[0x0F, 0x4D], pair(0, 1), NO_IMM),
+    bytes("cmovlew", &MR, Word, &[0x0F, 0x4E], pair(0, 1), NO_IMM),
+    bytes("cmovlel", &MR, Long, &[0x0F, 0x4E], pair(0, 1), NO_IMM),
+    bytes("cmovleq", &MR, Quad, &[0x0F, 0x4E], pair(0, 1), NO_IMM),
+    bytes("cmovgw", &MR, Word, &[0x0F, 0x4F], pair(0, 1), NO_IMM),
+    bytes("cmovgl", &MR, Long, &[0x0F, 0x4F], pair(0, 1), NO_IMM),
+    bytes("cmovgq", &MR, Quad, &[0x0F, 0x4F], pair(0, 1), NO_IMM),
     bytes("sete", &R, Byte, &[0x0F, 0x94], ext(0, 0), NO_IMM),
     bytes("setne", &R, Byte, &[0x0F, 0x95], ext(0, 0), NO_IMM),
     bytes("setl", &R, Byte, &[0x0F, 0x9C], ext(0, 0), NO_IMM),
@@ -697,6 +994,12 @@ static ENCODINGS: &[Encoding] = &[
     // not ordered, which is to say one of them was a NaN.
     bytes("setp", &R, Byte, &[0x0F, 0x9A], ext(0, 0), NO_IMM),
     bytes("setnp", &R, Byte, &[0x0F, 0x9B], ext(0, 0), NO_IMM),
+    // The four conditions left, which complete the sixteen. The sign and the overflow are asked
+    // about directly only by a file that knows what the flags hold, which a C expression never does.
+    bytes("seto", &R, Byte, &[0x0F, 0x90], ext(0, 0), NO_IMM),
+    bytes("setno", &R, Byte, &[0x0F, 0x91], ext(0, 0), NO_IMM),
+    bytes("sets", &R, Byte, &[0x0F, 0x98], ext(0, 0), NO_IMM),
+    bytes("setns", &R, Byte, &[0x0F, 0x99], ext(0, 0), NO_IMM),
     // The conversions between widths, which read a register and write a wider one, so the
     // destination is the register beside the addressing byte rather than the one it addresses.
     // How wide the source is decides the opcode and how wide the destination is decides the
@@ -813,6 +1116,50 @@ static ENCODINGS: &[Encoding] = &[
     // What a condition and the block layout come to. The test is a comparison against zero that
     // names the same register twice, so both of its arguments are the one operand.
     bytes("testb", &RR, Byte, &[0x84], pair(1, 0), NO_IMM),
+    // The rest of it. A test against zero is the only one this compiler writes and a byte is the
+    // only width it writes it at, because what it is testing is a condition that already came out
+    // of a comparison. A file written by hand tests a register against itself at its own width and
+    // tests single bits with an immediate, which is what `test $1, %r10` is, and neither of those
+    // had a row.
+    //
+    // The immediate here is never sign extended from a byte. The eight instructions that share
+    // `0x83` all have that form and this one does not, so a small number still costs the full
+    // width, which is one of the few places the table cannot be filled in by analogy.
+    bytes("testw", &RR, Word, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testl", &RR, Long, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testq", &RR, Quad, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testb", &RM, Byte, &[0x84], pair(1, 0), NO_IMM),
+    bytes("testw", &RM, Word, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testl", &RM, Long, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testq", &RM, Quad, &[0x85], pair(1, 0), NO_IMM),
+    bytes("testb", &MR, Byte, &[0x84], pair(0, 1), NO_IMM),
+    bytes("testw", &MR, Word, &[0x85], pair(0, 1), NO_IMM),
+    bytes("testl", &MR, Long, &[0x85], pair(0, 1), NO_IMM),
+    bytes("testq", &MR, Quad, &[0x85], pair(0, 1), NO_IMM),
+    takes("testb", &IR, Fits::Byte, Byte, &[0xF6], ext(1, 0), ImmSize::Ib),
+    takes("testw", &IR, Fits::Word, Word, &[0xF7], ext(1, 0), ImmSize::Iw),
+    takes("testl", &IR, Fits::Long, Long, &[0xF7], ext(1, 0), ImmSize::Id),
+    takes("testq", &IR, Signed32, Quad, &[0xF7], ext(1, 0), ImmSize::Id),
+    takes("testb", &IM, Fits::Byte, Byte, &[0xF6], ext(1, 0), ImmSize::Ib),
+    takes("testw", &IM, Fits::Word, Word, &[0xF7], ext(1, 0), ImmSize::Iw),
+    takes("testl", &IM, Fits::Long, Long, &[0xF7], ext(1, 0), ImmSize::Id),
+    takes("testq", &IM, Signed32, Quad, &[0xF7], ext(1, 0), ImmSize::Id),
+    // The three instructions that do nothing but touch the carry. A C expression has no carry to
+    // touch and the selector never leaves one lying about on purpose, so none of these has been
+    // wanted. GMP clears it before a loop that will add into it and complements it to turn a borrow
+    // into a carry, and both of those are a whole instruction because there is nothing smaller.
+    bytes("clc", &NO_ARGS, Long, &[0xF8], NO_MODRM, NO_IMM),
+    bytes("stc", &NO_ARGS, Long, &[0xF9], NO_MODRM, NO_IMM),
+    bytes("cmc", &NO_ARGS, Long, &[0xF5], NO_MODRM, NO_IMM),
+    // The string move, which reads at `rsi` and writes at `rdi` and steps both, and which is one
+    // instruction and a whole copy when a repeat prefix is put in front of it. Nothing this
+    // compiler emits is a string instruction, because a copy it knows the length of comes out as a
+    // loop it can schedule and one it does not comes out as a call to `memcpy`. A file that wants
+    // the two byte version writes it itself, which is what GMP's `copyi` does.
+    bytes("movsb", &NO_ARGS, Byte, &[0xA4], NO_MODRM, NO_IMM),
+    bytes("movsw", &NO_ARGS, Word, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("movsl", &NO_ARGS, Long, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("movsq", &NO_ARGS, Quad, &[0xA5], NO_MODRM, NO_IMM),
     // The ten conditional jumps, which are one opcode column of sixteen and are told apart by the
     // low four bits the way the ten `setcc` above are. The low bits are the same ones: a jump on
     // a condition and a set on it differ in the byte before, `0x8` against `0x9`, and in nothing
@@ -831,6 +1178,16 @@ static ENCODINGS: &[Encoding] = &[
     bytes("jbe", &D, Long, &[0x0F, 0x86], NO_MODRM, ImmSize::Cd),
     bytes("ja", &D, Long, &[0x0F, 0x87], NO_MODRM, ImmSize::Cd),
     bytes("jae", &D, Long, &[0x0F, 0x83], NO_MODRM, ImmSize::Cd),
+    // The other six of the sixteen, which sit in the same column and differ in the same four bits.
+    // A loop that counts up to zero ends with `js` and a multiple precision add that has run out of
+    // limbs ends with `jnc`, and neither of those is something a C expression asks for, so the ten
+    // above were enough until a file somebody else wrote came along.
+    bytes("jo", &D, Long, &[0x0F, 0x80], NO_MODRM, ImmSize::Cd),
+    bytes("jno", &D, Long, &[0x0F, 0x81], NO_MODRM, ImmSize::Cd),
+    bytes("js", &D, Long, &[0x0F, 0x88], NO_MODRM, ImmSize::Cd),
+    bytes("jns", &D, Long, &[0x0F, 0x89], NO_MODRM, ImmSize::Cd),
+    bytes("jp", &D, Long, &[0x0F, 0x8A], NO_MODRM, ImmSize::Cd),
+    bytes("jnp", &D, Long, &[0x0F, 0x8B], NO_MODRM, ImmSize::Cd),
     bytes("jmp", &D, Long, &[0xE9], NO_MODRM, ImmSize::Cd),
     // The jump on a register being zero, which is the one branch on this machine that has no long
     // form at all: a hundred and twenty seven bytes either way is the whole of its reach, and a
@@ -1501,7 +1858,9 @@ impl Writer<'_> {
 mod tests {
     use super::*;
     use crate::x86_64::text::written;
-    use crate::x86_64::{INSTS, R8, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP, xmm};
+    use crate::x86_64::{
+        INSTS, R8, R10, R12, R13, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, xmm,
+    };
 
     /// The bytes of that instruction, as a string a person can compare with a disassembler's.
     fn hex(mnemonic: &str, values: &[Value]) -> String {
@@ -2055,6 +2414,144 @@ mod tests {
         // The scalar move between two vector registers, which this compiler writes as `movaps`.
         assert_eq!(hex("movss", &[Value::Xmm(xmm(0)), Value::Xmm(xmm(1))]), "f3 0f 10 c8");
         assert_eq!(hex("movsd", &[Value::Xmm(xmm(2)), Value::Xmm(xmm(3))]), "f2 0f 10 da");
+    }
+
+    /// The rows a loop in GMP needs, whose bytes are again what gas writes for the same lines.
+    ///
+    /// Same rule as the group above and for the same reason. Every string here came out of
+    /// `objdump` on an object gas made, so a disagreement means this compiler reads a line
+    /// differently from the assembler every one of these files was written against.
+    ///
+    /// The accumulator form of the test is the one thing here gas writes shorter, `a9` against
+    /// `f7 c0`, and it is the same deferral the group above describes: the table cannot say a row
+    /// applies only when the destination is `rax`, so having that form at all needs a way to
+    /// constrain a row by register and that goes in with relaxation.
+    #[test]
+    fn the_instructions_a_hand_written_loop_writes_into_memory() {
+        // The eight with a register read and an address written, which is the opcode the register
+        // form uses with the addressing byte naming memory instead.
+        let at = Addr { base: Some(RDI), ..Addr::default() };
+        assert_eq!(hex("addq", &[quad(RAX), Value::Mem(at)]), "48 01 07");
+        assert_eq!(hex("addb", &[byte(RAX), Value::Mem(at)]), "00 07");
+        assert_eq!(hex("addw", &[word(RAX), Value::Mem(at)]), "66 01 07");
+        assert_eq!(hex("orq", &[quad(R8), Value::Mem(at)]), "4c 09 07");
+        assert_eq!(hex("sbbq", &[quad(RAX), Value::Mem(at)]), "48 19 07");
+        assert_eq!(hex("andq", &[quad(RAX), Value::Mem(at)]), "48 21 07");
+        assert_eq!(hex("subq", &[quad(RAX), Value::Mem(at)]), "48 29 07");
+        assert_eq!(hex("xorq", &[quad(RAX), Value::Mem(at)]), "48 31 07");
+        assert_eq!(hex("cmpq", &[quad(RAX), Value::Mem(at)]), "48 39 07");
+        assert_eq!(hex("cmpq", &[Value::Mem(at), quad(RAX)]), "48 3b 07");
+        let indexed = Addr { base: Some(RDI), index: Some(R8), scale: 8, disp: 8, ..at };
+        assert_eq!(hex("adcq", &[quad(R15), Value::Mem(indexed)]), "4e 11 7c c7 08");
+        // The same eight with a number written instead of a register, which narrows the way the
+        // register with immediate rows above it do.
+        assert_eq!(hex("addq", &[Value::Imm(1), Value::Mem(at)]), "48 83 07 01");
+        assert_eq!(hex("addq", &[Value::Imm(1000), Value::Mem(at)]), "48 81 07 e8 03 00 00");
+        assert_eq!(hex("addl", &[Value::Imm(1), Value::Mem(at)]), "83 07 01");
+        assert_eq!(hex("addw", &[Value::Imm(1), Value::Mem(at)]), "66 83 07 01");
+        assert_eq!(hex("addb", &[Value::Imm(1), Value::Mem(at)]), "80 07 01");
+        assert_eq!(hex("subq", &[Value::Imm(8), Value::Mem(at)]), "48 83 2f 08");
+        assert_eq!(hex("cmpq", &[Value::Imm(0), Value::Mem(at)]), "48 83 3f 00");
+        assert_eq!(hex("andl", &[Value::Imm(255), Value::Mem(at)]), "81 27 ff 00 00 00");
+        // The test at the widths the compiler never asks for and against a number, whose immediate
+        // is the full width however small it is.
+        assert_eq!(hex("testq", &[quad(RAX), quad(RAX)]), "48 85 c0");
+        assert_eq!(hex("testl", &[long(RAX), long(RAX)]), "85 c0");
+        assert_eq!(hex("testw", &[word(RAX), word(RAX)]), "66 85 c0");
+        assert_eq!(hex("testq", &[quad(RAX), Value::Mem(at)]), "48 85 07");
+        assert_eq!(hex("testq", &[Value::Mem(at), quad(RAX)]), "48 85 07");
+        assert_eq!(hex("testq", &[Value::Imm(1), quad(R10)]), "49 f7 c2 01 00 00 00");
+        assert_eq!(hex("testq", &[Value::Imm(1), Value::Mem(at)]), "48 f7 07 01 00 00 00");
+        assert_eq!(hex("testb", &[Value::Imm(1), byte(RCX)]), "f6 c1 01");
+        // The one operand group naming an address, which is the same digit column again.
+        let sixteen = Addr { base: Some(R8), disp: 16, ..Addr::default() };
+        assert_eq!(hex("mulq", &[Value::Mem(sixteen)]), "49 f7 60 10");
+        assert_eq!(hex("mull", &[Value::Mem(at)]), "f7 27");
+        assert_eq!(hex("imulq", &[Value::Mem(at)]), "48 f7 2f");
+        assert_eq!(hex("divq", &[Value::Mem(at)]), "48 f7 37");
+        assert_eq!(hex("idivq", &[Value::Mem(at)]), "48 f7 3f");
+        assert_eq!(hex("negq", &[Value::Mem(at)]), "48 f7 1f");
+        assert_eq!(hex("notq", &[Value::Mem(at)]), "48 f7 17");
+        assert_eq!(hex("incq", &[Value::Mem(at)]), "48 ff 07");
+        assert_eq!(hex("decq", &[Value::Mem(at)]), "48 ff 0f");
+        assert_eq!(hex("incb", &[Value::Mem(at)]), "fe 07");
+        let four = Addr { base: Some(RSI), disp: 4, ..Addr::default() };
+        assert_eq!(hex("decl", &[Value::Mem(four)]), "ff 4e 04");
+    }
+
+    /// The shifts and rotates a multiple precision loop is built out of.
+    #[test]
+    fn the_shifts_a_number_wider_than_a_register_needs() {
+        // The two that go through the carry, which is what halving a wide number is done with.
+        assert_eq!(hex("rclq", &[Value::Imm(3), quad(RAX)]), "48 c1 d0 03");
+        assert_eq!(hex("rcrq", &[Value::Imm(3), quad(RAX)]), "48 c1 d8 03");
+        assert_eq!(hex("rclq", &[byte(RCX), quad(RAX)]), "48 d3 d0");
+        assert_eq!(hex("rcrq", &[byte(RCX), quad(RAX)]), "48 d3 d8");
+        // All eight by one place, which is a third opcode and not the constant one written short.
+        assert_eq!(hex("rolq", &[quad(RAX)]), "48 d1 c0");
+        assert_eq!(hex("rorq", &[quad(RAX)]), "48 d1 c8");
+        assert_eq!(hex("rclq", &[quad(RAX)]), "48 d1 d0");
+        assert_eq!(hex("rcrq", &[quad(RAX)]), "48 d1 d8");
+        assert_eq!(hex("shlq", &[quad(RAX)]), "48 d1 e0");
+        assert_eq!(hex("shrq", &[quad(RAX)]), "48 d1 e8");
+        assert_eq!(hex("sarq", &[quad(RAX)]), "48 d1 f8");
+        assert_eq!(hex("shrl", &[long(RAX)]), "d1 e8");
+        assert_eq!(hex("shrb", &[byte(RAX)]), "d0 e8");
+        assert_eq!(hex("shrw", &[word(RAX)]), "66 d1 e8");
+        // The two that name a register to shift in from, whose addressing byte names the argument
+        // at the end and holds the middle one beside it.
+        let five = Value::Imm(5);
+        assert_eq!(hex("shldq", &[five, quad(RSI), quad(RDI)]), "48 0f a4 f7 05");
+        assert_eq!(hex("shrdq", &[five, quad(RSI), quad(RDI)]), "48 0f ac f7 05");
+        assert_eq!(hex("shldl", &[five, long(RSI), long(RDI)]), "0f a4 f7 05");
+        assert_eq!(hex("shldq", &[byte(RCX), quad(RSI), quad(RDI)]), "48 0f a5 f7");
+        assert_eq!(hex("shrdq", &[byte(RCX), quad(RSI), quad(RDI)]), "48 0f ad f7");
+        assert_eq!(hex("shldw", &[byte(RCX), word(RSI), word(RDI)]), "66 0f a5 f7");
+    }
+
+    /// The six conditions a C expression has no way to ask about, and the move that reads memory.
+    #[test]
+    fn the_conditions_a_compiler_never_reaches_and_the_move_that_reads_memory() {
+        assert_eq!(hex("cmovsq", &[quad(RAX), quad(RBX)]), "48 0f 48 d8");
+        assert_eq!(hex("cmovnsq", &[quad(RAX), quad(RBX)]), "48 0f 49 d8");
+        assert_eq!(hex("cmovoq", &[quad(RAX), quad(RBX)]), "48 0f 40 d8");
+        assert_eq!(hex("cmovnoq", &[quad(RAX), quad(RBX)]), "48 0f 41 d8");
+        assert_eq!(hex("cmovpq", &[quad(RAX), quad(RBX)]), "48 0f 4a d8");
+        assert_eq!(hex("cmovnpq", &[quad(RAX), quad(RBX)]), "48 0f 4b d8");
+        assert_eq!(hex("cmovsl", &[long(RAX), long(RBX)]), "0f 48 d8");
+        let at = Addr { base: Some(R8), disp: 16, ..Addr::default() };
+        assert_eq!(hex("cmovbq", &[Value::Mem(at), quad(RBX)]), "49 0f 42 58 10");
+        let plain = Addr { base: Some(RDI), ..Addr::default() };
+        assert_eq!(hex("cmoveq", &[Value::Mem(plain), quad(RAX)]), "48 0f 44 07");
+        assert_eq!(hex("cmovnsw", &[Value::Mem(plain), word(RAX)]), "66 0f 49 07");
+        let four = Addr { base: Some(RSI), disp: 4, ..Addr::default() };
+        assert_eq!(hex("cmovgl", &[Value::Mem(four), long(RDX)]), "0f 4f 56 04");
+        assert_eq!(hex("seto", &[byte(RAX)]), "0f 90 c0");
+        assert_eq!(hex("setno", &[byte(RAX)]), "0f 91 c0");
+        assert_eq!(hex("sets", &[byte(RAX)]), "0f 98 c0");
+        assert_eq!(hex("setns", &[byte(RBX)]), "0f 99 c3");
+        // The six branches that complete the sixteen, whose four bytes of distance are a hole.
+        for (mnemonic, opcode) in
+            [("jo", 0x80), ("jno", 0x81), ("js", 0x88), ("jns", 0x89), ("jp", 0x8A), ("jnp", 0x8B)]
+        {
+            let mut out = Vec::new();
+            let holes = encode(mnemonic, &[Value::Dest], &mut out).expect(mnemonic);
+            assert_eq!(out, vec![0x0F, opcode, 0, 0, 0, 0], "{mnemonic}");
+            assert_eq!(holes.dest, Some(2), "{mnemonic}");
+        }
+    }
+
+    /// The three instructions that touch nothing but the carry, and the copy that steps two
+    /// registers, which is one instruction until a repeat prefix makes it a whole loop.
+    #[test]
+    fn the_flag_and_the_string_instructions_a_compiler_has_no_use_for() {
+        assert_eq!(hex("clc", &[]), "f8");
+        assert_eq!(hex("stc", &[]), "f9");
+        assert_eq!(hex("cmc", &[]), "f5");
+        assert_eq!(hex("movsb", &[]), "a4");
+        assert_eq!(hex("movsw", &[]), "66 a5");
+        assert_eq!(hex("movsl", &[]), "a5");
+        assert_eq!(hex("movsq", &[]), "48 a5");
     }
 
     #[test]
