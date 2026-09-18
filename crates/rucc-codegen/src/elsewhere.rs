@@ -36,6 +36,7 @@ use std::collections::HashSet;
 
 use rucc_base::Symbol;
 use rucc_ir::{Module, Pic};
+use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
 ///
@@ -54,6 +55,9 @@ use rucc_ir::{Module, Pic};
 /// and a name marked hidden or protected, which is the reason `-fPIC -fvisibility=hidden` is the
 /// combination a library that cares about its own speed is built with.
 ///
+/// Both ways in are shut on a format with no such table, which is COFF. See [`Self::table`] for
+/// why the question has a different answer there rather than no answer.
+///
 /// A name this module has never heard of is not in here. Nothing the front end writes produces one,
 /// and treating an unknown name as a function would put the addresses the instrumentation takes of
 /// its own tables through a table of their own for no reason.
@@ -71,17 +75,31 @@ pub struct Elsewhere {
 impl Elsewhere {
     /// The names that link cannot reach from the instruction pointer.
     #[must_use]
-    pub fn of(module: &Module, pic: Pic) -> Self {
+    pub fn of(module: &Module, pic: Pic, format: ObjectFormat) -> Self {
         let threads = module
             .globals()
             .filter(|&id| module[id].tls.is_some())
             .map(|id| module[id].name)
             .collect();
-        Self { threads, ..Self::table(module, pic) }
+        Self { threads, ..Self::table(module, pic, format) }
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
-    fn table(module: &Module, pic: Pic) -> Self {
+    ///
+    /// Empty on a format that has no such table. COFF is the one, and it is not that the question
+    /// goes unanswered there: a name this file only declares is reached from the instruction
+    /// pointer like any other, because whatever supplies it supplies a piece of this image to
+    /// measure to. A name the link resolves out of another object is in the image, and a name that
+    /// comes from a DLL arrives through an import library, which is an archive member holding a
+    /// jump under the plain name, so the name still stands for an address in this image and every
+    /// object that takes it gets the one the linker kept. Measured against gcc 13.2 for
+    /// `x86_64-w64-mingw32`, which writes `leaq other(%rip), %rax` for the address of a function it
+    /// has only seen declared. Asking for a table there instead reached the object writer as a
+    /// relocation it has no way to write, which is what tamnd/rucc#1443 was.
+    fn table(module: &Module, pic: Pic, format: ObjectFormat) -> Self {
+        if format == ObjectFormat::Coff {
+            return Self::default();
+        }
         let funcs = module.funcs().filter(|&id| {
             let func = &module[id];
             func.is_declaration() || pic.replaceable(func.linkage, func.visibility)
@@ -185,7 +203,7 @@ mod tests {
     fn a_variable_every_thread_has_its_own_copy_of_is_one() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         assert!(elsewhere.thread(names.intern("own")));
     }
 
@@ -195,7 +213,7 @@ mod tests {
     fn an_ordinary_variable_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         for name in ["kept", "away", "quiet", "shy", "here"] {
             assert!(!elsewhere.thread(names.intern(name)), "{name} was called thread-local");
         }
@@ -205,7 +223,7 @@ mod tests {
     fn a_function_this_file_only_declares_is_reached_through_the_table() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         assert!(elsewhere.holds(names.intern("exit")));
     }
 
@@ -213,7 +231,7 @@ mod tests {
     fn a_function_this_file_defines_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         assert!(!elsewhere.holds(names.intern("here")));
     }
 
@@ -221,7 +239,7 @@ mod tests {
     fn a_name_the_module_does_not_carry_at_all_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         assert!(!elsewhere.holds(names.intern("nowhere")));
     }
 
@@ -232,7 +250,7 @@ mod tests {
     fn an_executable_pays_for_the_functions_and_for_nothing_else() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         for name in ["kept", "away", "quiet", "shy", "second"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
@@ -244,10 +262,48 @@ mod tests {
     fn a_library_pays_for_every_name_something_else_may_define() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Library);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf);
         for name in ["here", "exit", "kept", "away", "second"] {
             assert!(elsewhere.holds(names.intern(name)), "{name} was not in the table");
         }
+    }
+
+    /// A format with no table asks nothing of anybody, which is not the same as asking and being
+    /// told no. The name of a function this file only declares stands for an address in the image
+    /// on this format whether the link finds it in another object or in an import library, so the
+    /// instruction pointer reaches it and there is nothing left over to put in a table. gcc writes
+    /// the same `leaq other(%rip)` for the same declaration.
+    #[test]
+    fn a_format_with_no_table_puts_nothing_in_one() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff);
+        for name in ["here", "exit", "kept", "away", "quiet", "shy", "second"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
+    }
+
+    /// And the flag that fills the table on the other format does not fill it here either, since
+    /// there is no interposition on this one for it to be about.
+    #[test]
+    fn a_format_with_no_table_does_not_grow_one_under_the_library_flag() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Coff);
+        for name in ["here", "exit", "kept", "away", "second"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
+    }
+
+    /// The other question this type answers is not the table's, so it keeps its answer whatever the
+    /// format. What a target with no thread-local storage does about it is the writer's refusal
+    /// rather than a name quietly left out here.
+    #[test]
+    fn a_format_with_no_table_still_says_which_variable_every_thread_has_a_copy_of() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff);
+        assert!(elsewhere.thread(names.intern("own")));
     }
 
     /// And not for the names nothing outside can reach, which is what makes `-fvisibility=hidden`
@@ -256,7 +312,7 @@ mod tests {
     fn a_library_pays_nothing_for_a_name_nothing_outside_it_can_see() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Library);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf);
         assert!(!elsewhere.holds(names.intern("quiet")));
         assert!(!elsewhere.holds(names.intern("shy")));
     }

@@ -851,9 +851,10 @@ fn generate(
     // calls to the runtime and so can add a name this file does not define.
     //
     // The link that reads the object decides half of what is in it, and the command line is where
-    // that is said, which is why the flag reaches this far down. See #756.
+    // that is said, which is why the flag reaches this far down. See #756. The format decides the
+    // other half, since a table only exists on a format that has one to reach through.
     //
-    let elsewhere = Elsewhere::of(module, replaceable(target, opts));
+    let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format);
 
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
@@ -2335,6 +2336,44 @@ decl #0 x : int object external static defined
 
         // And the same two functions for Linux, so that what the test is measuring is the target
         // rather than the program being one this compiler cannot reach yet.
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
+    /// The address of a name this file only declares, on the format with no table to read it out
+    /// of.
+    ///
+    /// Every such name went into the table on every target, and COFF has no table, so the object
+    /// writer was handed a relocation it has no way to write and refused the whole file. What the
+    /// name stands for on this format is an address in the image whichever way the link supplies
+    /// it, so the instruction pointer reaches it and gcc writes the same. Three shapes here, since
+    /// the one that found it was a callback stored in a table of its own: a function passed as an
+    /// argument, one put in a variable that lives past the call, and one called outright, which
+    /// never needed the table and is here so the test says which of the three changed.
+    #[test]
+    fn the_address_of_a_function_this_file_only_declares_reaches_a_windows_object() {
+        let source = concat!(
+            "void other(void *p);\n",
+            "void takes(void (*f)(void *));\n",
+            "void (*held)(void *);\n",
+            "void pass(void) { takes(other); }\n",
+            "void keep(void) { held = other; }\n",
+            "void call(void) { other(0); }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let bytes = match result.artifact {
+            Artifact::Object { bytes, .. } => bytes,
+            other => panic!("expected an object, got {other:?}"),
+        };
+        assert_eq!(&bytes[..2], b"\x64\x86", "an object that says which machine it is for");
+
+        // And the same source for Linux, which does have a table and still uses it, so what this
+        // measures is the format rather than the program.
         let mut opts = options();
         opts.emit = EmitKind::Object;
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
