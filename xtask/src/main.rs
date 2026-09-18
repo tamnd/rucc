@@ -29,6 +29,7 @@ mod libraries;
 mod pressure;
 mod quad;
 mod real_libc;
+mod repeatable;
 mod runner;
 mod safety;
 mod sides;
@@ -71,6 +72,7 @@ tasks:
   unwind            walk a stack through frames we wrote and count what came back
   wide              compile 128-bit arithmetic with both compilers, run both, compare
   quad              compile binary128 arithmetic with both compilers, run both, compare
+  repeatable        compile tests/repeatable several times over and compare the runs
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   libraries         build real libraries instrumented at -O0 and -O2, run a real workload
@@ -121,6 +123,7 @@ fn main() -> ExitCode {
         Some("unwind") => unwind::unwind(),
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
+        Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),

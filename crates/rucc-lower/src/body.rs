@@ -188,7 +188,14 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // A label is somewhere any `goto` in the function can branch to, so the block one starts
     // gets its last predecessor only when the last statement has been walked. A `case` was
     // sealed by its `switch`, which is why this asks rather than seals.
-    let blocks: Vec<Block> = body.labels.values().copied().collect();
+    //
+    // In the order the blocks were made rather than the order the table hands them over, which is
+    // a hash table's order and is different in every run of the compiler. Sealing a block is what
+    // fills in the values its parameters carry, so the order these are sealed in is the order a
+    // run of parameters is numbered in, and that is read all the way down: a function with two
+    // labels in it came out of the compiler one way in one run and another way in the next.
+    let mut blocks: Vec<Block> = body.labels.values().copied().collect();
+    blocks.sort_by_key(|block| block.index());
     for block in blocks {
         body.seal_once(block);
     }

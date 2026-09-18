@@ -93,9 +93,13 @@ This decision is revisited only if an IDE integration becomes a goal, and it is 
 
 Byte-identical output for byte-identical input, on every host, at every `-j`. This is not a nice-to-have: it is what makes differential testing, reduction and bisection work at all, and it is what reproducible-build distributions require.
 
-The rules. No iteration over a hash map ever influences output; where an unordered collection must be traversed, it is sorted by a stable key first, and `xtask` has a lint for `.iter()` on `HashMap` in the pipeline crates. No addresses, pointer values or allocation order influence any decision. Parallel work is deterministic because each unit of parallel work writes only to its own slot and results are merged in index order, never in completion order. Diagnostics carry `(file_id, byte_offset, sequence)` and are sorted before printing. Timestamps, hostnames, absolute paths and environment variables are excluded from output unless `-g` requires a path, in which case `-fdebug-prefix-map` applies and `SOURCE_DATE_EPOCH` is honored.
+The rules. No iteration over a hash map ever influences output; where an unordered collection must be traversed, it is sorted by a stable key first. No addresses, pointer values or allocation order influence any decision. Parallel work is deterministic because each unit of parallel work writes only to its own slot and results are merged in index order, never in completion order. Diagnostics carry `(file_id, byte_offset, sequence)` and are sorted before printing. Timestamps, hostnames, absolute paths and environment variables are excluded from output unless `-g` requires a path, in which case `-fdebug-prefix-map` applies and `SOURCE_DATE_EPOCH` is honored.
 
 A CI job compiles the corpus twice at `-j1` and `-j16` on two different hosts and diffs the objects.
+
+How the rule is checked. `cargo xtask repeatable` compiles every program under `tests/repeatable` eight times, each one a fresh process, and fails when two runs did not write the same IR. It has to be several processes rather than several calls in one, because Rust gives each process its own hash seed and a difference that depends on the seed is invisible from inside a single run. Each program in that directory is a shape that has been seen to come out differently, kept so that it stays checked.
+
+This is a check on what the compiler does and not a lint on how the code is spelled. A lint for `.iter()` on a hash map was considered and turned down: the spelling does not say what the receiver is, so it reports a `Vec` held in a map's value as readily as the map itself, and a rule that is wrong most of the time it fires is a rule people learn to allow. The compiler either writes the same file twice or it does not, and that is the question worth asking.
 
 ## 3.8 The error model
 
