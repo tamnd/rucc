@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Changed
+
+- Split the row that counts checks the discharge pass could not read the shape of into two, because two different things land there and they want different work. One is a capability that names a pointer the address really was walked off, just further back than the base the walk reaches, which is what a step like `i * 4` leaves behind, since `rucc_safety::origin` shares one capability down a whole derivation chain and the walk stops at the first step it cannot read. The other is a capability about a pointer the address was never walked off at all, which is a different instance and has nothing to do with the walk. On the SQLite amalgamation at `-O2 -fsafety=detect` the bounds row was 6574 checks and comes apart as 4012 for the first and 2562 for the second, and the lifetime row was 6595 and comes apart as 4033 and 2562, so about three fifths of the biggest thing check elimination has left is reachable by relaxing which capability a check may be matched against. Part of tamnd/rucc#1241.
+
 ## 0.10.58
 
 ### Changed

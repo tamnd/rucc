@@ -412,6 +412,16 @@ const LOST_ALIGNMENT: &str =
 /// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
 
+/// Recorded for a bounds check whose capability names neither its address nor the base of it.
+///
+/// The other way [`about`] gives up, and it is a different thing entirely from the row above. The
+/// capability here is readable and it names a value the address really was walked off, just not one
+/// of the two [`its_own`] accepts: `rucc_safety::origin` shares one capability down a whole
+/// derivation chain, and [`normal`] stops walking at the first step it cannot read, so a chain with
+/// a step like `i * 4` in it leaves the capability naming something further back than the base.
+const MIDWAY_CAPABILITY: &str =
+    "bounds check left alone, its capability names a pointer further back than its base";
+
 /// Recorded for a bounds check about a range the program worked out.
 const COMPUTED_EXTENT: &str =
     "bounds check left alone, how many bytes it covers is a number only the program has";
@@ -419,6 +429,10 @@ const COMPUTED_EXTENT: &str =
 /// Recorded for a lifetime check whose operands this pass cannot read.
 const UNKNOWN_SHAPE_LIVE: &str =
     "lifetime check left alone, its pointer is not a base and a constant";
+
+/// The same as [`MIDWAY_CAPABILITY`], for a lifetime check.
+const MIDWAY_CAPABILITY_LIVE: &str =
+    "lifetime check left alone, its capability names a pointer further back than its base";
 
 /// Recorded once for each derivation check taken out.
 const REMOVED_DERIV: &str =
@@ -631,7 +645,11 @@ impl Pass for Discharge {
                             continue;
                         }
                         let Some(asked) = about(func, inst) else {
-                            stats.missed(UNKNOWN_SHAPE);
+                            stats.missed(if midway(func, inst) {
+                                MIDWAY_CAPABILITY
+                            } else {
+                                UNKNOWN_SHAPE
+                            });
                             scope.proved(func, inst);
                             continue;
                         };
@@ -730,7 +748,11 @@ impl Pass for Discharge {
                     }
                     Opcode::CheckLive => {
                         let Some(asked) = alive(func, inst) else {
-                            stats.missed(UNKNOWN_SHAPE_LIVE);
+                            stats.missed(if midway(func, inst) {
+                                MIDWAY_CAPABILITY_LIVE
+                            } else {
+                                UNKNOWN_SHAPE_LIVE
+                            });
                             continue;
                         };
                         // A global is alive as long as the program is, and a frame slot is alive
@@ -1154,6 +1176,38 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128, bool)> {
 /// `rucc_safety::origin` emits now, one capability taken where the object came from and shared by
 /// every address walked off it. A check naming anything else is about some other instance and
 /// nothing here is entitled to read it.
+/// Whether a check this pass could not read names a capability the address really did come off.
+///
+/// Asked only where [`about`] has already answered nothing, so it is never on the path of a check
+/// that goes, and it exists to tell one kind of miss from the rest. `rucc_safety::origin` shares one
+/// capability down a whole derivation chain and [`normal`] stops walking at the first step it cannot
+/// read, so a chain with a step like `i * 4` in it leaves the capability naming something further
+/// back than the base and [`its_own`] refuses it. That is a miss something could be done about. A
+/// capability naming a pointer the address was never walked off is a different instance and there is
+/// nothing to do about one, so it stays in the row it was already in.
+///
+/// The walk here goes through a step of any kind, which is what makes it a different walk from
+/// [`normal`], and it reads nothing but the chain, so it says the two are related and not by how
+/// much.
+fn midway(func: &Func, check: Inst) -> bool {
+    let args = &func[func[check].args];
+    let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else { return false };
+    let Some(named) = named_by(func, capability) else { return false };
+    let (base, _) = normal(func, pointer);
+    let mut value = base;
+    loop {
+        if value == named {
+            return true;
+        }
+        let Def::Result { inst, .. } = func[value].def else { return false };
+        if func[inst].opcode != Opcode::PtrAdd {
+            return false;
+        }
+        let Some(&from) = func[func[inst].args].first() else { return false };
+        value = from;
+    }
+}
+
 fn its_own(named: Value, pointer: Value, base: Value) -> Option<bool> {
     if named == pointer {
         return Some(false);
@@ -1970,6 +2024,23 @@ mod tests {
         build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
     }
 
+    /// A pointer a number of bytes past another one, where the number is not one anybody can read.
+    ///
+    /// The shape an indexed access leaves behind: `p[i]` is a step by `i * 4` and `normal` stops
+    /// walking at it, so the base it reaches is the stepped pointer itself rather than `p`.
+    fn stepped(build: &mut Builder<'_>, pointer: Value, step: Value) -> Value {
+        let args = build.func().push_values(&[pointer, step]);
+        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    }
+
+    /// A `check_live` with its capability taken at `from` rather than at the address it checks.
+    fn living_at(build: &mut Builder<'_>, from: Value, pointer: Value) {
+        let args = build.func().push_values(&[from]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, pointer]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[]);
+    }
+
     /// Puts the flag `crate::extents` writes onto every check in a function.
     ///
     /// The pass reads what the IR says, so what a test has to build is an IR that says it. Working
@@ -2439,7 +2510,9 @@ mod tests {
     fn a_check_whose_capability_is_about_neither_end_of_the_walk_stays() {
         // Two rules and no third. A capability is about the address being checked or about the
         // pointer that address came off, and one about anything else is asking after an instance
-        // this pass has nothing to say about.
+        // this pass has nothing to say about. The capability here is readable and names a
+        // pointer this address was never walked off, which is a different instance and nothing to
+        // be done about, so it stays in the row it was in.
         let mut names = Interner::new();
         let name = names.intern("two");
         let mut func = Func::new(name, Signature::new().with_params(&[Type::PTR, Type::PTR]));
@@ -2454,6 +2527,56 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE), 1);
+    }
+
+    #[test]
+    fn the_two_reasons_a_shape_is_not_read_are_counted_apart() {
+        // One row used to hold both of these and the row said the first thing about both. The
+        // first check walks off the pointer by a step nobody here can read, and its capability
+        // names that pointer, so what stopped it is that the capability is about something
+        // further back than the base a walk this pass can follow reaches. Something could be done
+        // about that one. The second is checked through a capability taken at an unrelated
+        // pointer, which is a different instance and is not the same problem at all.
+        let mut names = Interner::new();
+        let name = names.intern("two");
+        let params = [Type::PTR, Type::PTR, Type::int(64)];
+        let mut func = Func::new(name, Signature::new().with_params(&params));
+        let block = func.create_block();
+        let pointer = func.append_param(block, Type::PTR);
+        let other = func.append_param(block, Type::PTR);
+        let step = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let far = stepped(&mut build, pointer, step);
+        checking_at(&mut build, pointer, far, 4);
+        checking_at(&mut build, other, pointer, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::MIDWAY_CAPABILITY), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_whose_capability_is_further_back_than_its_base_is_counted_apart_too() {
+        // The same split on the other half, because the two rows are close to the same size on
+        // the amalgamation and a relaxation would have to serve both.
+        let mut names = Interner::new();
+        let name = names.intern("two");
+        let params = [Type::PTR, Type::PTR, Type::int(64)];
+        let mut func = Func::new(name, Signature::new().with_params(&params));
+        let block = func.create_block();
+        let pointer = func.append_param(block, Type::PTR);
+        let other = func.append_param(block, Type::PTR);
+        let step = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let far = stepped(&mut build, pointer, step);
+        living_at(&mut build, pointer, far);
+        living_at(&mut build, other, pointer);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::MIDWAY_CAPABILITY_LIVE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE_LIVE), 1);
     }
 
     #[test]
