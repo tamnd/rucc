@@ -264,6 +264,69 @@ impl Fits {
     }
 }
 
+/// Which of the escape sequences a VEX encoded instruction's opcode would have been written behind.
+///
+/// A legacy opcode says which of three tables it is in by how many bytes it puts in front of itself:
+/// nothing, `0F`, `0F 38` or `0F 3A`. VEX carries the same answer as a number in its own bytes, so
+/// the row's opcode is the last byte alone and this says which table to look it up in. That is not
+/// a saving of two bytes dressed up as a field, it is why the two byte form of the prefix exists at
+/// all: that form can only say `0F`, so a row in either of the other two tables is three bytes of
+/// prefix whatever else is true of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Map {
+    /// What `0F` in front of a legacy opcode means.
+    Escape,
+    /// What `0F 38` means, which is where the bit manipulation instructions are.
+    Escape38,
+    /// What `0F 3A` means, which is where the ones carrying an immediate that selects something
+    /// are. Nothing here is in it yet and it is written down because the field has three values
+    /// and a reader should not have to wonder what the third is.
+    Escape3A,
+}
+
+impl Map {
+    /// The number the prefix carries for it, which is the five bit `mmmmm` field.
+    const fn bits(self) -> u8 {
+        match self {
+            Map::Escape => 1,
+            Map::Escape38 => 2,
+            Map::Escape3A => 3,
+        }
+    }
+}
+
+/// What a row needs to say to be VEX encoded rather than written the legacy way.
+///
+/// VEX replaces the prefix bytes and the REX byte with two or three bytes of its own, carrying the
+/// same register extension bits, the same wide bit, which of the mandatory prefixes applies and
+/// which opcode table the opcode is in, and one thing no legacy encoding has anywhere to put: a
+/// third register operand. So a row that has one of these writes none of the legacy prefixes and no
+/// REX byte, and everything those said is said here instead.
+///
+/// The prefix and the wide bit are not in this struct, because [`Size`] already carries both and
+/// says exactly the same thing: a row whose size is [`Size::Word`] is one the legacy encoding would
+/// have put `0x66` in front of and VEX gives `pp` of one, and a row whose size is
+/// [`Size::WordQuad`] is that with the wide bit as well. Repeating them here would be two places to
+/// write the same fact and one of them eventually wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vex {
+    /// Which opcode table the row's opcode is in.
+    pub map: Map,
+    /// The argument that goes in the `vvvv` field, which is the third register operand.
+    ///
+    /// Always a register. The field is four bits and is written inverted, so the number that means
+    /// no operand at all is fifteen, which is what a row with nothing to put here says by leaving
+    /// this [`None`].
+    pub vvvv: Option<u8>,
+    /// Whether the instruction works on the wide half of a vector register, which is the `L` bit.
+    ///
+    /// False for everything here, because an instruction over general purpose registers has no
+    /// wide half and the manual writes `LZ` for exactly that. It is a field rather than a constant
+    /// because the bit is in the prefix either way and a row that wanted it should be able to say
+    /// so rather than the encoder having to grow a second path.
+    pub long: bool,
+}
+
 /// One instruction of the machine, as a processor reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Encoding {
@@ -289,6 +352,10 @@ pub struct Encoding {
     /// the REX byte, which is where a REX byte would be wrong: a prefix reaches the instruction
     /// after it, and the instruction after `fwait` is the one the REX byte is about.
     pub wait: bool,
+    /// Whether the instruction is VEX encoded, and what the prefix has to say if it is.
+    ///
+    /// [`None`] for every row written the legacy way, which is all of them but the three shifts.
+    pub vex: Option<Vex>,
 }
 
 /// One row of the table below, for an instruction that carries no immediate or that carries one
@@ -301,7 +368,34 @@ const fn bytes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm, wait: false }
+    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm, wait: false, vex: None }
+}
+
+/// One row for a VEX encoded instruction, which is where the third register operand goes.
+///
+/// The opcode is the last byte alone rather than the escape bytes and then the opcode, because the
+/// escape is the `map` and is in the prefix. The size says both which of the mandatory prefixes
+/// applies and whether the wide bit is set, the same as it does for a legacy row.
+const fn third(
+    mnemonic: &'static str,
+    args: &'static [Kind],
+    size: Size,
+    map: Map,
+    opcode: &'static [u8],
+    vvvv: u8,
+    fields: Fields,
+) -> Encoding {
+    Encoding {
+        mnemonic,
+        args,
+        fits: Fits::Any,
+        size,
+        opcode,
+        fields,
+        imm: NO_IMM,
+        wait: false,
+        vex: Some(Vex { map, vvvv: Some(vvvv), long: false }),
+    }
 }
 
 /// One row for an instruction whose immediate has to be of a certain size, which is every row
@@ -315,7 +409,7 @@ const fn takes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits, size, opcode, fields, imm, wait: false }
+    Encoding { mnemonic, args, fits, size, opcode, fields, imm, wait: false, vex: None }
 }
 
 /// One row for an x87 instruction written with `fwait` in front of it.
@@ -332,7 +426,17 @@ const fn waits(
     opcode: &'static [u8],
     fields: Fields,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm: NO_IMM, wait: true }
+    Encoding {
+        mnemonic,
+        args,
+        fits: Fits::Any,
+        size,
+        opcode,
+        fields,
+        imm: NO_IMM,
+        wait: true,
+        vex: None,
+    }
 }
 
 /// An addressing byte whose spare three bits finish the opcode.
@@ -899,6 +1003,30 @@ static ENCODINGS: &[Encoding] = &[
     bytes("shrdw", &RRR, Word, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
     bytes("shrdl", &RRR, Long, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
     bytes("shrdq", &RRR, Quad, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
+    // The three shifts that take their count in any register, which are BMI2 and are the only rows
+    // here that are VEX encoded. They exist because the ordinary shift takes its count in `cl` and
+    // nowhere else and writes the flags, so a loop shifting by several different amounts spends
+    // instructions moving things through one register and cannot keep a comparison across the
+    // shift. These take the count from wherever it already is and leave the flags alone, which is
+    // why a file written by hand uses them and why a C expression never compiles to one.
+    //
+    // All three share the opcode `F7` in the `0F 38` table and are told apart by which mandatory
+    // prefix they carry, which is the same way the legacy tables tell instructions apart and is
+    // what lets [`Size`] carry it here: `0x66` is the left shift, `0xF3` the arithmetic right and
+    // `0xF2` the logical right. The `q` rows are those with the wide bit, which is the other half
+    // of what a size says.
+    //
+    // The operand order is the surprising part and it is the manual's, read backwards into AT&T.
+    // Intel writes the destination, then the value being shifted, then the count, so AT&T writes
+    // the count first, then the value, then the destination. The addressing byte therefore names
+    // the middle argument and holds the last one beside it, and the count, which is the operand no
+    // legacy encoding has anywhere to put, goes in the prefix.
+    third("shlxl", &RRR, Word, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shlxq", &RRR, WordQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("sarxl", &RRR, Single, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("sarxq", &RRR, SingleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shrxl", &RRR, Double, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shrxq", &RRR, DoubleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
@@ -1882,26 +2010,23 @@ impl Writer<'_> {
             return Err(Error::Crowded { mnemonic: self.row.mnemonic.to_owned() });
         }
 
-        // `fwait` in front of the three x87 instructions that are written with one, which is in
-        // front of everything because it is an instruction and not a prefix. A prefix reaches the
-        // instruction after it, so a REX byte written here would be about `fwait` rather than
-        // about what follows it.
-        if self.row.wait {
-            out.push(0x9B);
-        }
-        // Group two of the legacy prefixes, in front of everything else because that is where a
-        // segment override goes. It says which storage the address is in, which is a fact about
-        // the address rather than about how wide the operands are, so it is read off the address
-        // rather than off the row.
-        if let Some(prefix) = self.segment() {
-            out.push(prefix);
-        }
-        if let Some(prefix) = self.row.size.prefix() {
-            out.push(prefix);
-        }
-        let rex = if self.row.size.wide() { self.rex | REX_W } else { self.rex };
-        if rex != 0 || (self.forced && !self.banned) {
-            out.push(0x40 | rex);
+        // A VEX encoded instruction takes an early exit from here, because what it writes in front
+        // of the opcode is not a shortening of what a legacy one writes but a different thing in the
+        // same place: the prefix, the REX byte and the escape bytes are all folded into two or three
+        // bytes that also carry an operand. Everything from the opcode onwards is the same, so the
+        // segment override is written first, the prefix goes where the REX byte would have, and the
+        // tail and the immediate fall through to the shared code below.
+        if let Some(vex) = self.row.vex {
+            if let Some(prefix) = self.segment() {
+                out.push(prefix);
+            }
+            let vvvv = match vex.vvvv {
+                Some(at) => self.vvvv(at)?,
+                None => 0,
+            };
+            self.prefix(vex, vvvv, out);
+        } else {
+            self.legacy(out);
         }
         let (last, front) = self.row.opcode.split_last().expect("an opcode is at least one byte");
         out.extend_from_slice(front);
@@ -1930,6 +2055,72 @@ impl Writer<'_> {
             }
         }
         Ok(holes)
+    }
+
+    /// The two or three bytes a VEX encoded instruction carries where a legacy one carries its
+    /// prefixes and its REX byte.
+    ///
+    /// The three register extension bits and the wide bit are the ones REX held, and they are
+    /// written inverted, which is what makes the first byte of either form impossible to confuse
+    /// with the one byte instruction that used to live at `0xC4` and `0xC5` in 32 bit mode. So is
+    /// `vvvv`, which is why a row with no third operand writes fifteen there rather than zero.
+    ///
+    /// The short form is chosen whenever it says the same thing, which is what every assembler does
+    /// and therefore what the bytes have to match. It can only say `0F` for the map and can only
+    /// say zero for the wide bit and for the two extension bits other than `R`, so a row outside
+    /// the first table, or one on a wide operand, or one naming a register numbered eight or above
+    /// in the addressing byte's base or index, is three bytes and there is nothing to choose.
+    fn prefix(&self, vex: Vex, vvvv: u8, out: &mut Vec<u8>) {
+        let wide = self.row.size.wide();
+        // `pp`, which is the mandatory prefix as a number rather than as a byte. The same three
+        // bytes a legacy row would have written, in the order the manual numbers them.
+        let pp = match self.row.size.prefix() {
+            None => 0,
+            Some(0x66) => 1,
+            Some(0xF3) => 2,
+            Some(0xF2) => 3,
+            Some(_) => unreachable!("a size writes one of those three bytes or none"),
+        };
+        let tail = ((!vvvv & 0xF) << 3) | (u8::from(vex.long) << 2) | pp;
+        let short = !wide && vex.map == Map::Escape && self.rex & (REX_X | REX_B) == 0;
+        if short {
+            out.push(0xC5);
+            out.push((u8::from(self.rex & REX_R == 0) << 7) | tail);
+            return;
+        }
+        out.push(0xC4);
+        out.push(
+            (u8::from(self.rex & REX_R == 0) << 7)
+                | (u8::from(self.rex & REX_X == 0) << 6)
+                | (u8::from(self.rex & REX_B == 0) << 5)
+                | vex.map.bits(),
+        );
+        out.push((u8::from(wide) << 7) | tail);
+    }
+
+    /// The prefixes and the REX byte a legacy encoded instruction carries in front of its opcode.
+    fn legacy(&self, out: &mut Vec<u8>) {
+        // `fwait` in front of the three x87 instructions that are written with one, which is in
+        // front of everything because it is an instruction and not a prefix. A prefix reaches the
+        // instruction after it, so a REX byte written here would be about `fwait` rather than
+        // about what follows it.
+        if self.row.wait {
+            out.push(0x9B);
+        }
+        // Group two of the legacy prefixes, in front of everything else because that is where a
+        // segment override goes. It says which storage the address is in, which is a fact about
+        // the address rather than about how wide the operands are, so it is read off the address
+        // rather than off the row.
+        if let Some(prefix) = self.segment() {
+            out.push(prefix);
+        }
+        if let Some(prefix) = self.row.size.prefix() {
+            out.push(prefix);
+        }
+        let rex = if self.row.size.wide() { self.rex | REX_W } else { self.rex };
+        if rex != 0 || (self.forced && !self.banned) {
+            out.push(0x40 | rex);
+        }
     }
 
     /// The prefix that says the address is in a thread's own block, when one of the arguments is
@@ -1976,6 +2167,19 @@ impl Writer<'_> {
                 self.banned = true;
                 Ok(reg.number() + 4)
             }
+            _ => Err(Error::Argument { mnemonic: self.row.mnemonic.to_owned(), at }),
+        }
+    }
+
+    /// The whole number of the register at that index, for the `vvvv` field of a VEX prefix.
+    ///
+    /// Four bits rather than three, and nothing goes in the REX byte, which is the whole difference
+    /// between this and [`Self::number`]. Every other operand's extension bit is in a byte beside
+    /// the one that holds the low three, so the two have to be worked out separately and put in two
+    /// places. This operand's four bits are all in the prefix, which is the only place it appears.
+    fn vvvv(&self, at: u8) -> Result<u8, Error> {
+        match self.values.get(usize::from(at)) {
+            Some(&Value::Reg(reg, _)) | Some(&Value::Xmm(reg)) => Ok(reg.number()),
             _ => Err(Error::Argument { mnemonic: self.row.mnemonic.to_owned(), at }),
         }
     }
@@ -2746,6 +2950,42 @@ mod tests {
         assert_eq!(hex("shldq", &[byte(RCX), quad(RSI), quad(RDI)]), "48 0f a5 f7");
         assert_eq!(hex("shrdq", &[byte(RCX), quad(RSI), quad(RDI)]), "48 0f ad f7");
         assert_eq!(hex("shldw", &[byte(RCX), word(RSI), word(RDI)]), "66 0f a5 f7");
+    }
+
+    /// The three shifts that take their count anywhere, which are the only VEX encoded rows here.
+    ///
+    /// Every string is what `objdump` printed for an object gas made from the same lines, the same
+    /// rule the groups above follow. There is more to check here than usual because the prefix is
+    /// where five separate things are written and four of them are written inverted, so a bit put
+    /// in the wrong place comes out as a different register or a different instruction rather than
+    /// as bytes that decode to nothing.
+    #[test]
+    fn the_shifts_that_take_their_count_in_any_register() {
+        // The three instructions at both widths, with the same three registers throughout, so that
+        // the only thing moving between these six lines is the two bits of the mandatory prefix and
+        // the wide bit. `c4 e2` is the same in all of them: the map is `0F 38` and none of the three
+        // registers is one of the second eight.
+        assert_eq!(hex("shlxq", &[quad(RCX), quad(RSI), quad(RDI)]), "c4 e2 f1 f7 fe");
+        assert_eq!(hex("shlxl", &[long(RCX), long(RSI), long(RDI)]), "c4 e2 71 f7 fe");
+        assert_eq!(hex("sarxq", &[quad(RCX), quad(RSI), quad(RDI)]), "c4 e2 f2 f7 fe");
+        assert_eq!(hex("sarxl", &[long(RCX), long(RSI), long(RDI)]), "c4 e2 72 f7 fe");
+        assert_eq!(hex("shrxq", &[quad(RCX), quad(RSI), quad(RDI)]), "c4 e2 f3 f7 fe");
+        assert_eq!(hex("shrxl", &[long(RCX), long(RSI), long(RDI)]), "c4 e2 73 f7 fe");
+        // The count in the last register the machine has, which is the one that says `vvvv` is four
+        // bits wide. Fifteen inverted is zero, so the whole field goes to zero and the byte reads
+        // `81` where the line above it reads `f9`. Getting this wrong loses the top bit silently and
+        // encodes `r15` as `rdi`, and zstd's decoder shifts by `r15`.
+        assert_eq!(hex("shlxq", &[quad(R15), quad(RAX), quad(RAX)]), "c4 e2 81 f7 c0");
+        assert_eq!(hex("shlxq", &[quad(RAX), quad(RAX), quad(RAX)]), "c4 e2 f9 f7 c0");
+        // The other two operands in the second eight, which are the bits REX held and are inverted
+        // here as well, so the byte that is `e2` everywhere above is `42` when both are set.
+        assert_eq!(hex("shlxq", &[quad(RAX), quad(R8), quad(R8)]), "c4 42 f9 f7 c0");
+        assert_eq!(hex("shrxq", &[quad(R15), quad(R15), quad(R15)]), "c4 42 83 f7 ff");
+        // Nothing here reaches the two byte form, and that is the point of the pair. The short form
+        // can say `0F` for the map and nothing else, and all six rows are in the `0F 38` table, so
+        // the prefix is three bytes however small the registers are.
+        assert_eq!(hex("shlxl", &[long(RAX), long(RAX), long(RAX)]), "c4 e2 79 f7 c0");
+        assert_eq!(hex("sarxl", &[long(RAX), long(RAX), long(RAX)]), "c4 e2 7a f7 c0");
     }
 
     /// The six conditions a C expression has no way to ask about, and the move that reads memory.

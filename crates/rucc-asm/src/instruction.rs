@@ -748,6 +748,27 @@ mod tests {
     }
 
     #[test]
+    fn a_shift_that_takes_its_count_anywhere_says_its_width_the_ordinary_way() {
+        // The three BMI2 shifts are the one group of counted instructions that is not in `COUNTED`,
+        // and that is right rather than an omission. What that list is for is a count in `cl` on a
+        // line whose other operands are wider, and the whole point of these is that the count is a
+        // register of the same width as everything else, so all three operands agree and the width
+        // is read off the line the way it is read off every other one.
+        assert_eq!(bytes("shlx %rdx, %rax, %rax"), bytes("shlxq %rdx, %rax, %rax"));
+        assert_eq!(bytes("shrx %rdx, %rax, %rax"), bytes("shrxq %rdx, %rax, %rax"));
+        assert_eq!(bytes("sarx %edx, %eax, %eax"), bytes("sarxl %edx, %eax, %eax"));
+        // The lines zstd's huffman decoder is built out of, which are what this is all for. The
+        // bytes are pinned in `rucc-target` against gas, so what is being checked here is that the
+        // reader gets to that row at all.
+        assert_eq!(bytes("shrxq %r8, %rax, %rdx"), vec![0xc4, 0xe2, 0xbb, 0xf7, 0xd0]);
+        assert_eq!(bytes("shlx %r15, %rax, %rax"), vec![0xc4, 0xe2, 0x81, 0xf7, 0xc0]);
+        // A count in a byte register is a mistake on one of these rather than the one place it is
+        // not, since there is nothing about `cl` in a shift that reads a whole register.
+        let why = refused("shlx %cl, %rax, %rax");
+        assert!(why.contains("8 bits") && why.contains("64 bits"), "{why}");
+    }
+
+    #[test]
     fn a_displacement_that_is_written_as_a_sum_is_the_sum() {
         // A file written by hand says where a thing is by adding up what it is made of, so
         // `56+8(%rsp)` is the seventh word of a frame rather than a symbol nothing defines. What
