@@ -135,23 +135,40 @@ impl Default for Text {
     }
 }
 
-/// The unwind table, as the bytes of its own section and what the linker has to be told about them.
+/// The unwind table, as the bytes of the section or two it goes in and what the linker has to be
+/// told about them.
 ///
-/// Bytes rather than rows, because what a record is is DWARF's answer and not the object format's,
-/// and the layer that knows what a frame did is the one that can say it in the fewest of them. What
-/// is left for the writer is where the section goes and what its relocations are, which is the part
-/// the three formats disagree about.
+/// Bytes rather than rows, because what a record is is the platform's answer rather than the object
+/// writer's, and the layer that knows what a frame did is the one that can say it in the fewest of
+/// them. What is left for the writer is where the sections go and what their relocations are.
 ///
-/// Each record says where its function is as a distance from the record to the function, which is
-/// a number no compilation knows: a function is at a fixed offset inside its own section and the
-/// section is placed by the linker. So there is one relocation per record and it is the ordinary
-/// instruction pointer relative one, since the distance is between two things in the same file.
+/// Two of them, because the two platforms lay the same facts out differently. ELF writes one section
+/// of records, each a little program an unwinder runs to rebuild the frame at an address, and each
+/// carrying its own codes, so [`Self::info`] is empty there. Windows writes a table of fixed rows
+/// sorted by address, one per function, each pointing at the description of that function's prologue
+/// in a second section, which is what [`Self::info`] holds.
+///
+/// Every record says where its function is, and where a function is is a number no compilation
+/// knows: a function is at a fixed offset inside its own section and the section is placed by the
+/// linker. So there are relocations, and which kind they are is the format's answer too.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Unwind {
-    /// The records, one shared header and one per function.
+    /// The records: one shared header and one per function on ELF, and one row per function on
+    /// Windows.
     pub bytes: Vec<u8>,
-    /// Every place in them that names a function the linker has to place.
+    /// Every place in them that names something the linker has to place, which is the functions
+    /// they are about and, where there is a second section, the description each row points at.
     pub relocs: Vec<Reloc>,
+    /// What those records point at, on the format that keeps the two apart, and nothing at all on
+    /// the one whose records carry their own.
+    pub info: Vec<u8>,
+    /// The names inside [`Self::info`], one per function that has a description there, which are
+    /// what the relocations above ask for.
+    ///
+    /// Names rather than offsets because a relocation names a symbol, and the record and the thing
+    /// it points at are in two different sections, so there is no distance either of them can be
+    /// written with instead.
+    pub labels: Vec<Marker>,
 }
 
 /// Where the room a patcher was promised at the top of a function ended up.
@@ -485,15 +502,31 @@ pub struct Reloc {
     /// bytes between the hole and the end of the instruction, negated. An instruction counts from
     /// where it ends and a relocation counts from where it starts, and this is the difference.
     pub addend: i64,
+    /// How many bytes of the instruction come after the four the linker writes over, which is zero
+    /// for everything except an instruction carrying an immediate behind its displacement.
+    ///
+    /// Already inside [`Self::addend`] and written down again because the two formats disagree about
+    /// which of the two numbers they want. ELF takes the one number and counts from where the hole
+    /// starts, so the difference between that and where the instruction ends is the writer's to fold
+    /// in and nothing after it ever has to be told apart again. COFF counts from where the
+    /// instruction ends and says how far that is in the relocation type itself, which is what
+    /// `IMAGE_REL_AMD64_REL32_1` through `REL32_5` are, so it needs the two apart. A writer cannot
+    /// recover one from the other, since a displacement of minus four and no trailing bytes and a
+    /// displacement of zero and four of them are the same sum.
+    ///
+    /// Zero for a relocation in an image, where there is no instruction and the question does not
+    /// arise.
+    pub after: u8,
 }
 
 /// What kind of thing a relocation is asking the linker for.
 ///
-/// The first three are the distance from the end of an instruction to something, which is what
-/// every reference the code makes is, because this compiler generates position independent code and
-/// nothing else. They are told apart by what the linker is allowed to do about each one. The fourth
-/// is not a distance at all and is the only kind an image asks for, since an initializer holding the
-/// address of something holds the address itself.
+/// The first four are the distance from the end of an instruction to something, which is what every
+/// reference the code makes is, because this compiler generates position independent code and
+/// nothing else. They are told apart by what the linker is allowed to do about each one. The last
+/// two are not distances from an instruction at all and are what a table of data asks for: the
+/// address itself, which is what an initializer holding the address of something holds, and how far
+/// something is from the front of the image, which is what a table the runtime reads holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reference {
     /// A call, which the linker may satisfy with a stub that reaches further than the four bytes
@@ -528,4 +561,17 @@ pub enum Reference {
         /// a narrower relocation for it. `R_X86_64_64` and `R_X86_64_32` on ELF.
         bytes: u8,
     },
+    /// How far the thing is from the front of the loaded image, written into four bytes.
+    ///
+    /// What every field of a Windows unwind table is. The table is read at run time by code that
+    /// already has the image's own address, so four bytes of distance from it reach anything in an
+    /// image a linker will build, which eight bytes of address would have cost twice as much to say
+    /// and a distance from the table itself could not have said at all: a row is looked up by
+    /// address in a sorted table, and a row whose meaning depended on where the row was would not
+    /// sort. `IMAGE_REL_AMD64_ADDR32NB`.
+    ///
+    /// ELF has no relocation of this kind because nothing it writes asks the question. Its unwind
+    /// records are found by walking rather than by binary search, and what they hold is the ordinary
+    /// distance from the record to the function.
+    Image,
 }

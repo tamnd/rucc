@@ -558,7 +558,15 @@ fn instrument(
     if !opts.safety.instruments() {
         return Ok(Instrumented::default());
     }
-    let checks = rucc_safety::run(module, opts.subobject, opts.promise, opts.races);
+    let mut checks = rucc_safety::run(module, opts.subobject, opts.promise, opts.races);
+    // The one check that is about a call rather than about an access, so it is a walk of its own
+    // and it is here rather than in the walk above. `rucc_safety::ending` is why, and the short
+    // version is that deciding it means resolving a name, which takes the interner.
+    //
+    // Before the redirection for the same reason the redirection is before the optimizer: what this
+    // reads is the name the program wrote, and a pass that had already pointed the call somewhere
+    // else would leave it with a name this one has no row for.
+    checks.freed = rucc_safety::ending::checks(module, names);
     // Before the optimizer rather than beside the check lowering, which is what
     // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the
@@ -963,12 +971,15 @@ fn wrote(why: rucc_object::Error) -> Vec<Diagnostic> {
 
 /// What the assembler said, as the kind of news it is.
 ///
-/// Two of these are about a program and the rest are about this compiler. A thread-local variable
-/// and an ifunc are both valid C that the back end does not build yet, and everything else the
-/// assembler refuses is something that should never have reached it.
+/// Three of these are about a program and the rest are about this compiler. A thread-local
+/// variable, an ifunc and a prologue the target's unwind table cannot describe are all valid C that
+/// the back end does not build yet, and everything else the assembler refuses is something that
+/// should never have reached it.
 fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
     match why {
-        rucc_asm::Error::Thread { .. } | rucc_asm::Error::IFunc { .. } => {
+        rucc_asm::Error::Thread { .. }
+        | rucc_asm::Error::IFunc { .. }
+        | rucc_asm::Error::Frame { .. } => {
             vec![unsupported(&why.to_string())]
         }
         _ => vec![internal(&why.to_string())],

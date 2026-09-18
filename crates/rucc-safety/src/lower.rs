@@ -71,6 +71,13 @@ const ACCESS: u8 = 1;
 /// Judgement J2, which is what a derivation check decides.
 const DERIVE: u8 = 2;
 
+/// Judgement J6, which is what the check in front of a free decides.
+///
+/// Numbered apart from J1 because what it is about is the free rather than an access, which is the
+/// distinction document 04 section 4.4 draws between the two and which the reporter's wording for
+/// each of them already reads as.
+const FREE: u8 = 6;
+
 /// Judgement J8, which is what a `restrict` check decides.
 const RESTRICT: u8 = 8;
 
@@ -145,6 +152,7 @@ fn calls(
         match func[inst].opcode {
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
+            Opcode::CheckFree => freed(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
             Opcode::CheckType => typed(func, names, word, numbers, table, inst),
             Opcode::CheckInit => began(func, names, word, table, inst),
@@ -263,7 +271,14 @@ pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> V
 /// missed. Putting something in wrongly means a dead producer resurrected, which is the regression
 /// this exists to prevent.
 pub(crate) fn keeps(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::CheckLive | Opcode::CapStore | Opcode::CapYield | Opcode::CapPublish)
+    matches!(
+        opcode,
+        Opcode::CheckLive
+            | Opcode::CheckFree
+            | Opcode::CapStore
+            | Opcode::CapYield
+            | Opcode::CapPublish
+    )
 }
 
 /// `check_live` becomes `__rucc_check_live(capability, pointer, descriptor)`.
@@ -286,6 +301,30 @@ fn live(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst
     let desc = record(func, names, table, inst, row);
     let params = &[Type::PTR; 3];
     call(func, names, inst, "__rucc_check_live", params, &[], &[capability, pointer, desc]);
+}
+
+/// `check_free` becomes `__rucc_check_free(capability, pointer, descriptor)`.
+///
+/// The same three arguments [`live`] passes and in the same order, because the two checks ask the
+/// version question in the same words. What separates them is the descriptor: this one says J6, so a
+/// refusal reads as a free of something that was not allocated, or not by that allocator, rather
+/// than as an access the planes did not permit. That is the sentence the person whose program
+/// stopped wants, since the line it stopped at is a `free` and nothing was being read.
+///
+/// Two entry points rather than one with a judgement argument, for the reason the descriptor exists
+/// at all: which judgement a check decides is constant data the object file already carries, and
+/// passing it would be putting a number in a register on every free to say something that never
+/// changes. It also keeps the runtime's two answers apart, and they are not the same answer. The
+/// lifetime check refuses an address nobody owns and this one leaves that to the allocator, which
+/// has the header in front of it and more to say.
+fn freed(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
+    let [capability, pointer] = func[func[inst].args] else { return };
+    // No size, for the reason [`live`] has none. How many bytes are at the address is the header's
+    // business and the free is not an access.
+    let row = Descriptor { judgement: FREE, class: 0, size: 0 };
+    let desc = record(func, names, table, inst, row);
+    let params = &[Type::PTR; 3];
+    call(func, names, inst, "__rucc_check_free", params, &[], &[capability, pointer, desc]);
 }
 
 /// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, descriptor)`.

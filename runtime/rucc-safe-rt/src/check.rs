@@ -214,6 +214,57 @@ pub unsafe fn live(addr: *const c_void, capability: *const Cap, descriptor: *con
     unsafe { crate::fail::report(descriptor, Some(addr)) }
 }
 
+/// Judgement J6, the half an allocator cannot decide: the capability being freed still names the
+/// instance that owns `addr`.
+///
+/// `free` takes an address and nothing else, so what the allocator can tell from the header at that
+/// address is whether something live begins there. That answers a double free of a block nobody has
+/// asked for since, and it gets the other shape wrong: once the allocator has handed the same block
+/// back out, a second free of the old pointer finds a live instance and releases somebody else's
+/// object. The program then runs on with a hole in it and the report that eventually comes out names
+/// an innocent access. tamnd/rucc#492 is that, and the version is what tells the two apart, because
+/// the address is the same in both and the instance is not.
+///
+/// So this asks one question and leaves the rest alone. Nobody owning the address is the allocator's
+/// to refuse and it already does, with the header in front of it and more to say than this has:
+/// whether the storage was ever allocated, whether it was this allocator that allocated it, and
+/// whether the pointer is the base of something or the middle of it. An address outside every region
+/// is not ours at all, which is a program mixing allocators and the same answer for the same reason.
+/// What is left is the address of a live instance reached through a capability made for a different
+/// one, which is the case nothing downstream of here can see.
+///
+/// It is asked only of a capability that names an instance, exactly as [`live`] asks it. A bottom
+/// one names none and a recovered one carries whatever the plane said when the boundary lost track,
+/// so neither is evidence that this pointer is the stale one and both let the free through to the
+/// allocator to decide the way it always did.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`live`].
+pub unsafe fn freeing(addr: *const c_void, capability: *const Cap, descriptor: *const Descriptor) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let holder = owner(&region, addr);
+    if !plane::owned(holder) {
+        return;
+    }
+    // SAFETY: this function's own contract about `capability`, passed straight on.
+    if !unsafe { stale(capability, holder) } {
+        return;
+    }
+    // The address is worth naming and the witness is not, for the reason [`live`] gives about the
+    // same pair: the epoch plane holds the last thing anybody did to these bytes, and on a block
+    // that has been handed out again that is the new owner's allocation rather than the free this
+    // pointer outlived.
+    //
+    // SAFETY: as in `bounds`.
+    unsafe { crate::fail::report(descriptor, Some(addr)) }
+}
+
 /// Judgement J2: a pointer computed from another pointer did not leave the object it came from.
 ///
 /// Caught where the arithmetic is rather than at whatever line eventually reads through the
@@ -330,8 +381,10 @@ pub unsafe fn judge(addr: *const c_void, size: usize, ty: TypeId) {
 /// The judgement a copy makes: the bytes at `dst` now say whatever the bytes at `src` say.
 ///
 /// C 6.5 says a copy through `memcpy` or through a character array carries the source's effective
-/// type, so this is what a wrapper in [`crate::wrap`] calls once it knows how much was copied, and
-/// it is what keeps the punning idiom the standard permits from being reported.
+/// type, so this is what the `moves` clause of a wrapper in [`crate::wrap`] calls once it knows how
+/// much was copied, and it is what keeps the punning idiom the standard permits from being
+/// reported. Every other clause that writes records [`types::CHARACTER`] instead, which is what a
+/// wrapper writing bytes really does.
 ///
 /// Two ranges in one region is the case worth having and is what this is written for. A copy whose
 /// ends are in different regions, or whose source is outside every region, records the destination
@@ -736,7 +789,7 @@ unsafe fn stale(capability: *const Cap, holder: Version) -> bool {
     held.ver != holder
 }
 
-/// The fourteen names generated code is compiled against.
+/// The fifteen names generated code is compiled against.
 ///
 /// Separate from the functions above for the reason the allocator's exports are separate from its
 /// logic: these are an ABI and those are Rust. The one difference that matters is that a panic may
@@ -787,6 +840,21 @@ pub mod exports {
     ) {
         // SAFETY: as above, and a null capability is one of the two this takes.
         unsafe { super::live(addr, capability, descriptor) };
+    }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_check_live`], whose two pointer arguments are the two this has and in the same
+    /// order. What differs is where generated code puts the call, which is in front of the free
+    /// rather than in front of an access, and what the descriptor says, which is J6 rather than J1.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_free(
+        capability: *const Cap,
+        addr: *const c_void,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: as above, and a null capability is one of the two this takes.
+        unsafe { super::freeing(addr, capability, descriptor) };
     }
 
     /// # Safety

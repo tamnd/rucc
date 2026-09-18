@@ -142,18 +142,27 @@ impl Origins {
 /// is not a small effect: on the SQLite amalgamation it is nine hundred walks nobody was doing and
 /// eight per cent of the text. [`kept`] is the test, and `crate::lower::keeps` is where the part of
 /// it that will change lives.
+///
+/// Which producers count is asked of `Opcode::capability_names` rather than listed here, and that is
+/// load bearing rather than tidy. It used to be a list written out in this function, and a list
+/// written when `cap_of` was the only producer anything emitted is a list that goes quietly wrong
+/// every time a cheaper one arrives, in the direction that costs the most: a pointer whose
+/// capability got cheaper would stop travelling to the callee, so the callee would recover it, so
+/// the cheap producer would have made the program slower at exactly the pointers it was meant to
+/// help. It had already happened twice by the time it was asked as one question. `cap_load` arrived
+/// with tamnd/rucc#1241 and was never added, and `cap_result` was added here by hand while the
+/// question itself still answered nothing for it, which left the two disagreeing about the same
+/// opcode.
 pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
     let alive = kept(func);
     let mut held = HashMap::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
-            // The three that name the pointer they are about. A `cap_narrow` is a capability as
-            // well but it names another capability rather than a pointer, so there is no pointer
-            // here to key it on, and a `cap_null` is the absence of one spelled out.
-            if !matches!(func[inst].opcode, Opcode::CapOf | Opcode::CapArg | Opcode::CapResult) {
-                continue;
-            }
-            let Some(&pointer) = func[func[inst].args].first() else { continue };
+            // The ones that name a pointer. A `cap_narrow` is a capability as well but it names
+            // another capability rather than a pointer, so there is no pointer here to key it on,
+            // and a `cap_null` is the absence of one spelled out.
+            let Some(at) = func[inst].opcode.capability_names() else { continue };
+            let Some(&pointer) = func[func[inst].args].get(at) else { continue };
             let Some(cap) = func[inst].results().next() else { continue };
             if !alive.contains(&cap) {
                 continue;

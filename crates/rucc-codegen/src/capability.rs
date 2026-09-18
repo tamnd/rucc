@@ -218,6 +218,10 @@ pub static HAND: &[(Opcode, &str)] = &[
         "`rucc_safety::lower`, the same call over the init plane, carrying no type",
     ),
     (Opcode::CheckRace, "`rucc_safety::lower`, the same call over the epoch plane"),
+    (
+        Opcode::CheckFree,
+        "`rucc_safety::lower`, the same call in front of the free rather than the access",
+    ),
     // The five plane writes the same pass emits, which become calls the same way. A judgement
     // decides nothing, so none of the calls carries a descriptor row, and neither do the two
     // edges below them.

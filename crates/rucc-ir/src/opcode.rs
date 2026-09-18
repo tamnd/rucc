@@ -364,6 +364,24 @@ pub enum Opcode {
     /// Two accesses that both only read are not a violation of anything, so what the scope records
     /// is which of them wrote and the check refuses a pair only when at least one did.
     CheckRestrictWrite,
+    /// The capability this free goes through still names the instance that owns the address.
+    ///
+    /// Judgement J6, and the same two operands [`Opcode::CheckLive`] has for the same reason: a
+    /// capability and the pointer it is about, with no payload, because how many bytes are at the
+    /// address is not something a free asks. What separates it from the lifetime check is where it
+    /// goes and what it is about. This one sits in front of a call that ends a storage instance
+    /// rather than in front of an access, and the question it decides is whether the pointer being
+    /// handed over still names the instance it was made for.
+    ///
+    /// It exists because that question has no other way of being asked. `free` takes an address and
+    /// nothing else, so a second free of a block the allocator has already handed back out looks
+    /// like an ordinary free to the allocator and releases somebody else's live object.
+    /// tamnd/rucc#492 is that, and the version the capability carries is what tells the two apart.
+    ///
+    /// Nothing discharges one. A bounds fact says nothing about it and a lifetime fact about an
+    /// access says nothing about a free, so it stays where the pass put it and the cost is one
+    /// check per free rather than one per access.
+    CheckFree,
     /// A storage instance begins here, over a range, with a class.
     ///
     /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
@@ -672,6 +690,7 @@ impl Opcode {
             Self::CheckRace => "check_race",
             Self::CheckRestrictRead => "check_restrict_read",
             Self::CheckRestrictWrite => "check_restrict_write",
+            Self::CheckFree => "check_free",
             Self::MetaBegin => "meta_begin",
             Self::MetaEnd => "meta_end",
             Self::MetaType => "meta_type",
@@ -932,6 +951,7 @@ impl Opcode {
                     | Self::CheckInit
                     | Self::CheckDeriv
                     | Self::CheckRace
+                    | Self::CheckFree
             )
     }
 
@@ -978,6 +998,7 @@ impl Opcode {
             | Self::CheckRace
             | Self::CheckRestrictRead
             | Self::CheckRestrictWrite
+            | Self::CheckFree
             | Self::MetaBegin
             | Self::MetaEnd
             | Self::MetaType
@@ -1026,11 +1047,12 @@ impl Opcode {
 
     /// Which operand of a capability producer names the pointer the capability is about.
     ///
-    /// Four of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
+    /// Five of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
     /// the capability describes the object that pointer is in. Where they differ is only in how the
     /// answer was arrived at, which is a walk of the lifetime plane for `cap_recover`, a read of the
-    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, and whatever
-    /// the back end has at hand for `cap_of`.
+    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, a read of
+    /// the frame the caller published for `cap_result`, and whatever the back end has at hand for
+    /// `cap_of`.
     ///
     /// That is worth stating as one question because the optimizer asks it. A rule that discharges a
     /// check by knowing which pointer the check's capability is about has no business caring which
@@ -1039,14 +1061,22 @@ impl Opcode {
     /// question when tamnd/rucc#1241 started emitting the cheap producers, and a rule that still
     /// asked by name would quietly discharge less the better the code got.
     ///
-    /// The three that answer nothing are the three that are not about a pointer at all. A
-    /// `cap_narrow` is about another capability, a `cap_null` is about nothing by construction, and
-    /// a `cap_result` is about a pointer the callee returned, which is a value this function has
-    /// only as the call's own result and not as an operand.
+    /// The two that answer nothing are the two that are not about a pointer at all. A `cap_narrow`
+    /// is about another capability and a `cap_null` is about nothing by construction.
+    ///
+    /// `cap_result` was in that group and did not belong there. The reasoning was that it is about a
+    /// pointer the callee returned, which sounds like a value this function has only as the call's
+    /// own result, and the opcode carries that pointer as operand zero for the same reason
+    /// `cap_arg` carries one: a callee that wrote nothing leaves the bottom capability in the slot,
+    /// and the pointer is what the runtime falls back to working the answer out from. So the
+    /// operand was there the whole time and this said there was none. It is the same mistake the
+    /// paragraph above is about, made once more in the place that exists to stop it, which is
+    /// exactly how much care this question wants: every producer that names a pointer has to be
+    /// here, and the way to tell is to read the opcode's operands rather than its purpose.
     #[must_use]
     pub const fn capability_names(self) -> Option<usize> {
         match self {
-            Self::CapOf | Self::CapRecover | Self::CapArg => Some(0),
+            Self::CapOf | Self::CapRecover | Self::CapArg | Self::CapResult => Some(0),
             // The third, because the first two are the container's capability and the address of
             // the word, and the pointer this one is about is the value that came out of the word.
             Self::CapLoad => Some(2),
@@ -1275,6 +1305,7 @@ static ALL: &[Opcode] = &[
     Opcode::CheckRace,
     Opcode::CheckRestrictRead,
     Opcode::CheckRestrictWrite,
+    Opcode::CheckFree,
     Opcode::MetaBegin,
     Opcode::MetaEnd,
     Opcode::MetaType,
@@ -1709,17 +1740,17 @@ mod tests {
 
     #[test]
     fn a_producer_says_which_of_its_operands_is_the_pointer_it_is_about() {
-        // Four of the seven, and the one that is not operand zero is the one whose first two
+        // Five of the seven, and the one that is not operand zero is the one whose first two
         // operands are the container and the word rather than the value that came out of it.
         assert_eq!(Opcode::CapOf.capability_names(), Some(0));
         assert_eq!(Opcode::CapRecover.capability_names(), Some(0));
         assert_eq!(Opcode::CapArg.capability_names(), Some(0));
+        assert_eq!(Opcode::CapResult.capability_names(), Some(0));
         assert_eq!(Opcode::CapLoad.capability_names(), Some(2));
 
-        // The three that are about something other than a pointer this function has an operand for.
+        // The two that are about something other than a pointer this function has an operand for.
         assert_eq!(Opcode::CapNarrow.capability_names(), None);
         assert_eq!(Opcode::CapNull.capability_names(), None);
-        assert_eq!(Opcode::CapResult.capability_names(), None);
 
         // Nothing that is not a producer answers, since the question is what a capability describes
         // and those have no capability to describe anything with.
@@ -1737,6 +1768,7 @@ mod tests {
             Opcode::CheckInit,
             Opcode::CheckDeriv,
             Opcode::CheckRace,
+            Opcode::CheckFree,
         ];
         for opcode in checks {
             let name = opcode.name();

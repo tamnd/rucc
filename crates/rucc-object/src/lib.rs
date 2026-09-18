@@ -1,13 +1,14 @@
-//! ELF, Mach-O and COFF object writers.
+//! ELF and COFF object writers.
 //!
 //! Design: `spec/11-asm-objects-debug.md`. Layer rank 9, see `spec/18-package-layout.md`.
 //!
 //! # Status
 //!
-//! ELF, which is what Linux and the freestanding targets want and what M3 needs. A text section,
-//! the symbols that say where each function in it is and how long it is, the names it wanted that
-//! are not in it, the relocations that ask a linker to find them, and the marker whose absence
-//! makes the stack executable. An object this writes links with the system linker and runs.
+//! ELF, which is what Linux and the freestanding targets want and what M3 needs, and COFF, which is
+//! what Windows wants. A text section, the symbols that say where each function in it is and how
+//! long it is, the names it wanted that are not in it, the relocations that ask a linker to find
+//! them, and the marker whose absence makes the stack executable. An object this writes links with
+//! the system linker and runs.
 //!
 //! The variables a file defines are written too: the section each one goes in, the symbol that
 //! says where it is and how long it is, the binding that says who can see it, and the relocations
@@ -29,7 +30,8 @@
 //! the `constructor` and `destructor` attributes produce. ELF has a section type for each of the
 //! three kinds, and a section of the ordinary type under one of those names is gathered by the
 //! linker in the same run and called by nobody, so the type is written out rather than left to the
-//! default.
+//! default. COFF has nothing of the sort under those names, so a file with one is refused for a
+//! Windows target rather than written with its constructors never run.
 //!
 //! [`Property`] is what the file says it was built to have checked, which is what
 //! `-fcf-protection=` asks for. It is written as a note the linker keeps only the agreed part of
@@ -52,21 +54,31 @@
 //! shape from [`Text`] and [`Data`] because a file of assembly says things neither of them can hold:
 //! which section something is in, a name at an offset that no variable covers, and a name that is a
 //! number rather than a place. Both go through the same writer underneath, so there is still one
-//! place that knows how an ELF file is laid out.
+//! place that knows how a file is laid out.
 //!
-//! Mach-O and COFF are not written yet. Both wait on the target that needs them.
+//! An unwind table is written for both, and the two formats want it laid out differently: ELF has
+//! one section of records that each carry their own codes, and Windows has a table of fixed rows in
+//! `.pdata` pointing at the descriptions in `.xdata`. Both come in as bytes and relocations, because
+//! what a record is is the platform's answer and the layer that knows what a frame did is the one
+//! that can say it. Thread-local storage, a reference through a global offset table and a record of
+//! where a patcher's room is are refused for COFF, each being something that format has no way to
+//! write rather than something not written yet.
+//!
+//! Mach-O is not written yet. It waits on the target that needs it.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-object/0.10.53")]
+#![doc(html_root_url = "https://docs.rs/rucc-object/0.10.54")]
 
+mod coff;
 mod elf;
+mod file;
 mod section;
 mod source;
 
-pub use crate::elf::{Error, defines, write};
+pub use crate::file::{Error, defines, write};
 pub use crate::section::{
     Alias, Array, Binding, Data, Extent, FUNC_ALIGN, Marker, Object, Output, Patch, Place,
     Property, Reference, Reloc, Sections, Text, Unwind, Visibility,

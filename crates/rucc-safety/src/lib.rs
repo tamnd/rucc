@@ -91,9 +91,10 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-safety/0.10.53")]
+#![doc(html_root_url = "https://docs.rs/rucc-safety/0.10.54")]
 
 pub mod boundary;
+pub mod ending;
 pub mod frame;
 pub mod handover;
 pub mod lower;
@@ -131,6 +132,13 @@ pub struct Counts {
     pub checked: usize,
     /// Accesses that were given a lifetime check, which is the same set as `checked`.
     pub live: usize,
+    /// Calls that end a storage instance and were given a check in front of them.
+    ///
+    /// Not filled in by [`insert`], which is the one count here that is not. It comes from
+    /// [`mod@ending`], a pass of its own for the reason that module gives, and the driver puts what
+    /// that returns in here so that a check class is reported beside the other check classes rather
+    /// than off to one side.
+    pub freed: usize,
     /// Pointers computed from another pointer that were given a derivation check.
     pub derived: usize,
     /// Accesses that got nothing, because the pointer they go through is not a value this pass
@@ -229,6 +237,7 @@ impl Counts {
     fn add(&mut self, other: Counts) {
         self.checked += other.checked;
         self.live += other.live;
+        self.freed += other.freed;
         self.derived += other.derived;
         self.skipped += other.skipped;
         self.judged += other.judged;

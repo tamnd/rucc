@@ -33,7 +33,7 @@ use object::{
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
-use crate::elf::Error;
+use crate::file::Error;
 use crate::section::{Array, Binding, Reloc, Visibility};
 
 /// One section, as a file of assembly describes one.
@@ -236,6 +236,11 @@ pub struct Assembled {
 
 /// That, as a relocatable ELF object.
 ///
+/// ELF only, where the rest of this crate writes COFF as well. What a [`Part`] carries is the
+/// section type and flags the source wrote in as many words, which are ELF's and which a COFF
+/// section header has no field for, so a file of assembly for a Windows target is refused here
+/// rather than written with the flags guessed back from the name.
+///
 /// # Errors
 ///
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for a
@@ -291,7 +296,7 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
             value,
             size,
             kind: sort_of(name.sort),
-            scope: crate::elf::scope_of(name.binding),
+            scope: crate::file::scope_of(name.binding),
             weak: name.binding == Binding::Weak,
             section,
             flags: SymbolFlags::None,
@@ -563,6 +568,7 @@ mod tests {
             symbol: "message".to_owned(),
             kind: Reference::Address { bytes: 8 },
             addend: 0,
+            after: 0,
         });
         let input = Assembled {
             parts: vec![data],
@@ -596,6 +602,7 @@ mod tests {
             symbol: "nowhere".to_owned(),
             kind: Reference::Address { bytes: 8 },
             addend: 0,
+            after: 0,
         });
         let input = Assembled { parts: vec![data], names: Vec::new() };
         let why = assembled(&input, &target()).expect_err("this cannot be written");

@@ -39,15 +39,29 @@
 //! is passed, which is a local, a global or another allocator's memory, and reporting on one would
 //! be a false positive against a program doing nothing wrong.
 //!
-//! Beside the judgement, a wrapper that writes records what it wrote into the init plane. That is
-//! not a check and refuses nothing, and it is here for the reason section 10.1 gives for modelling
-//! a boundary at all: a plane only some of the writes maintain reports on programs that are
-//! correct. A `memset` the monitor did not hear about would leave its destination looking like
-//! storage nobody ever wrote, and the next read of it would be refused.
+//! Beside the judgement, a wrapper that writes records what it wrote into the init plane and into
+//! the type plane. That is not a check and refuses nothing, and it is here for the reason section
+//! 10.1 gives for modelling a boundary at all: a plane only some of the writes maintain reports on
+//! programs that are correct. A `memset` the monitor did not hear about would leave its destination
+//! looking like storage nobody ever wrote, and the next read of it would be refused.
 //!
-//! [`Kind`] tells a read from a write, and the init plane is the thing that cares about the
-//! difference: a read of a range nobody wrote is document 03's Y6 and a write of one is not a bug
-//! at all. Bounds and lifetime still do not care which direction the bytes were going.
+//! Both planes, because for a long time it was only the init one, and the half that was missing is
+//! what an instrumented sqlite3 aborted on within a few hundred calls. A wrapper writes bytes, which
+//! is a store through a character type, and C 6.5 says storage written that way is storage a later
+//! access may give whatever type it likes. The compiler already gets this right for the loop a
+//! program writes out by hand, so `for (i = 0; i < n; i++) p[i] = 0;` left the destination readable
+//! as anything and `memset(p, 0, n)` left it readable only as whatever was in it before. Any pool
+//! allocator that clears a block and hands it back out for a different structure walked into that,
+//! which is most of them, and sqlite's lookaside is the one that found it.
+//!
+//! `memcpy` is the exception and has a word of its own. C names it: a copy carries the source's
+//! effective type rather than making the destination bytes, which is what keeps the punning idiom
+//! through a character buffer working, so the `moves` clause calls [`crate::check::carry`] and not
+//! the character write the rest of them do.
+//!
+//! [`Kind`] tells a read from a write, and the two recorded planes are the things that care about
+//! the difference: a read of a range nobody wrote is document 03's Y6 and a write of one is not a
+//! bug at all. Bounds and lifetime still do not care which direction the bytes were going.
 //!
 //! # The discovered extent
 //!
@@ -437,6 +451,10 @@ pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32, kind:
         if kind == Kind::Writes {
             // SAFETY: the buffer has just been judged, as in the `writes` clause of a wrapper.
             unsafe { crate::check::wrote(entry.base.cast_const(), entry.len) };
+            // SAFETY: as above, over the type plane, as in the same clause.
+            unsafe {
+                crate::check::judge(entry.base.cast_const(), entry.len, crate::types::CHARACTER);
+            };
         }
         total = total.saturating_add(entry.len);
     }
@@ -743,12 +761,16 @@ macro_rules! __judge {
         // SAFETY: the range has just been judged, so it is inside one live instance or outside
         // this monitor's heap, and the plane write passes over an address no region covers.
         unsafe { $crate::check::wrote($arg.cast(), $len) };
+        // SAFETY: as above, and the type plane covers the same granules the init plane does.
+        unsafe { $crate::check::judge($arg.cast(), $len, $crate::types::CHARACTER) };
     };
     (moves, $name:ident, $dst:ident, $src:ident, $len:tt) => {
         $crate::effects::range($crate::__site!($name, $dst), $dst.cast(), $len);
         $crate::effects::range($crate::__site!($name, $src), $src.cast(), $len);
         // SAFETY: both ranges have just been judged, as in the `writes` arm.
         unsafe { $crate::check::spread($dst.cast(), $src.cast(), $len) };
+        // SAFETY: as above, over the type plane, which is the one C names `memcpy` in.
+        unsafe { $crate::check::carry($dst.cast(), $src.cast(), $len) };
     };
     (copies, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: both pointers are ones the program passed to a string function, which is what
@@ -765,6 +787,10 @@ macro_rules! __judge {
         // The terminator as well, which is the byte the walk judged past the length it returned.
         // SAFETY: the destination has just been judged for every byte of that, as in `writes`.
         unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        // SAFETY: as above, over the type plane, as in `writes`.
+        unsafe {
+            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
+        };
     };
     (appends, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: as the `copies` arm, and the destination is a string as well.
@@ -782,6 +808,10 @@ macro_rules! __judge {
         // wider plane write and says nothing untrue.
         // SAFETY: as the `copies` arm.
         unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        // SAFETY: as the `copies` arm.
+        unsafe {
+            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
+        };
     };
     (appends, $name:ident, $dst:ident, $src:ident, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
@@ -796,6 +826,10 @@ macro_rules! __judge {
         };
         // SAFETY: as the unbounded arm.
         unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        // SAFETY: as the unbounded arm.
+        unsafe {
+            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
+        };
     };
     (scatters, $name:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);

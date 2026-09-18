@@ -350,6 +350,7 @@ static MV: [Kind; 2] = [Kind::Mem, Kind::Vec];
 static VM: [Kind; 2] = [Kind::Vec, Kind::Mem];
 static RV: [Kind; 2] = [Kind::Reg, Kind::Vec];
 static VR: [Kind; 2] = [Kind::Vec, Kind::Reg];
+static IV: [Kind; 2] = [Kind::Imm, Kind::Vec];
 // The x87 stack positions, which are one argument or two and are never anything else. There is no
 // row here mixing one with a register or with an address, because no instruction on this machine
 // names a stack position and a register in the same breath.
@@ -1254,6 +1255,21 @@ static ENCODINGS: &[Encoding] = &[
     // No arguments, so no addressing byte and no REX, and the size is `Long` only because a row
     // has to name one and `Long` is the size that writes no prefix at all.
     bytes("lock", &NO_ARGS, Long, &[0xF0], NO_MODRM, NO_IMM),
+    // The repeat prefixes, which are rows of their own for the same reason the lock prefix is one.
+    // A string instruction behind one of these runs until `rcx` reaches nothing, and the two byte
+    // values are the two answers the comparing forms stop on, which is why the equal spelling and
+    // the plain one are the same byte: the plain one is only ever written in front of an
+    // instruction that does not compare, where there is nothing for the condition to mean.
+    //
+    // A library written by hand also puts one of these in front of an instruction that is not a
+    // string instruction at all, to ask a newer processor for the faster of two answers to the same
+    // question while an older one ignores the byte entirely. That is the same byte in front of the
+    // same instruction either way, so nothing here has to know which of the two it is being asked.
+    bytes("rep", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repe", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repz", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repne", &NO_ARGS, Long, &[0xF2], NO_MODRM, NO_IMM),
+    bytes("repnz", &NO_ARGS, Long, &[0xF2], NO_MODRM, NO_IMM),
     // Compare and exchange, which is the one instruction on this machine that reads a register the
     // program did not name: it compares what is at the address against `rax` and puts what it
     // found there whichever way the comparison went. The byte form is one opcode below the rest,
@@ -1349,6 +1365,103 @@ static ENCODINGS: &[Encoding] = &[
     // `cvtss2sd` and the opposite way round from `cmpl`.
     bytes("ucomiss", &VV, Long, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
     bytes("ucomisd", &VV, Word, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
+    // The integer half of the vector unit, which this compiler has no use for and a library that
+    // moves words around by the pair does nothing else with. A C expression on a `double` is what
+    // everything above reaches, and an instruction that treats a vector register as two sixty four
+    // bit numbers is reached by a person deciding to move two limbs at a time. All of it is behind
+    // `0x66`, which here is not a claim that anything is sixteen bits: an integer vector opcode is
+    // the same byte as a floating point one and the prefix is what tells the two apart, the way
+    // `0xF3` tells a `float` from a vector of them.
+    //
+    // The quadword move first, which is the odd one of the group. A vector register holds two
+    // words, so moving one word between it and memory is neither the whole register nor a scalar
+    // `double`, and the machine gives it two opcodes that are not a pair: the load is `0x7E` behind
+    // `0xF3` and the store is `0xD6` behind `0x66`. Both clear the top half on a load, which is why
+    // a library can use it to read the last limb of an odd length array without touching what is
+    // beside it.
+    bytes("movq", &MV, Single, &[0x0F, 0x7E], pair(0, 1), NO_IMM),
+    bytes("movq", &VM, Word, &[0x0F, 0xD6], pair(1, 0), NO_IMM),
+    // The whole register moved, aligned and unaligned, which is the pair `movaps` is for floats.
+    // `0x6F` towards the register and `0x7F` away from it, with `0x66` for the form that faults on
+    // an address that is not a multiple of sixteen and `0xF3` for the form that does not. A library
+    // reads with the unaligned one and writes with the aligned one, because it aligned the
+    // destination itself and has no say over where the caller's source begins.
+    bytes("movdqa", &VV, Word, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movdqa", &MV, Word, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movdqa", &VM, Word, &[0x0F, 0x7F], pair(1, 0), NO_IMM),
+    bytes("movdqu", &VV, Single, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movdqu", &MV, Single, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movdqu", &VM, Single, &[0x0F, 0x7F], pair(1, 0), NO_IMM),
+    // Putting the low words of two registers together, which is how a pair of limbs read one at a
+    // time becomes one vector, and taking the high words, which is the other half of the same idea.
+    bytes("punpcklqdq", &VV, Word, &[0x0F, 0x6C], pair(0, 1), NO_IMM),
+    bytes("punpcklqdq", &MV, Word, &[0x0F, 0x6C], pair(0, 1), NO_IMM),
+    bytes("punpckhqdq", &VV, Word, &[0x0F, 0x6D], pair(0, 1), NO_IMM),
+    bytes("punpckhqdq", &MV, Word, &[0x0F, 0x6D], pair(0, 1), NO_IMM),
+    // The four logical instructions, which have no width in their names because a bit is a bit
+    // whatever the register is being read as. `pandn` is the one worth reading twice: it complements
+    // the register beside the addressing byte and not the addressed one, so the operands are not
+    // interchangeable the way the other three are.
+    bytes("pand", &VV, Word, &[0x0F, 0xDB], pair(0, 1), NO_IMM),
+    bytes("pand", &MV, Word, &[0x0F, 0xDB], pair(0, 1), NO_IMM),
+    bytes("pandn", &VV, Word, &[0x0F, 0xDF], pair(0, 1), NO_IMM),
+    bytes("pandn", &MV, Word, &[0x0F, 0xDF], pair(0, 1), NO_IMM),
+    bytes("por", &VV, Word, &[0x0F, 0xEB], pair(0, 1), NO_IMM),
+    bytes("por", &MV, Word, &[0x0F, 0xEB], pair(0, 1), NO_IMM),
+    bytes("pxor", &VV, Word, &[0x0F, 0xEF], pair(0, 1), NO_IMM),
+    bytes("pxor", &MV, Word, &[0x0F, 0xEF], pair(0, 1), NO_IMM),
+    // Comparing for equality, which writes all ones or all zeroes into each piece rather than
+    // setting a flag, because there is no one answer to give about sixteen comparisons at once. A
+    // register compared against itself is every piece equal to itself, so `pcmpeqb %xmm3, %xmm3` is
+    // how a file written by hand fills a register with ones without reading a constant from memory.
+    bytes("pcmpeqb", &VV, Word, &[0x0F, 0x74], pair(0, 1), NO_IMM),
+    bytes("pcmpeqb", &MV, Word, &[0x0F, 0x74], pair(0, 1), NO_IMM),
+    bytes("pcmpeqw", &VV, Word, &[0x0F, 0x75], pair(0, 1), NO_IMM),
+    bytes("pcmpeqw", &MV, Word, &[0x0F, 0x75], pair(0, 1), NO_IMM),
+    bytes("pcmpeqd", &VV, Word, &[0x0F, 0x76], pair(0, 1), NO_IMM),
+    bytes("pcmpeqd", &MV, Word, &[0x0F, 0x76], pair(0, 1), NO_IMM),
+    // Adding and subtracting each piece without carrying between them, which is what makes these
+    // different instructions per width rather than one instruction with a prefix. Nothing carries
+    // out of a piece into the piece above it, so a library adding numbers wider than a register
+    // cannot use them for that and uses them for everything else.
+    bytes("paddb", &VV, Word, &[0x0F, 0xFC], pair(0, 1), NO_IMM),
+    bytes("paddw", &VV, Word, &[0x0F, 0xFD], pair(0, 1), NO_IMM),
+    bytes("paddd", &VV, Word, &[0x0F, 0xFE], pair(0, 1), NO_IMM),
+    bytes("paddq", &VV, Word, &[0x0F, 0xD4], pair(0, 1), NO_IMM),
+    bytes("psubb", &VV, Word, &[0x0F, 0xF8], pair(0, 1), NO_IMM),
+    bytes("psubw", &VV, Word, &[0x0F, 0xF9], pair(0, 1), NO_IMM),
+    bytes("psubd", &VV, Word, &[0x0F, 0xFA], pair(0, 1), NO_IMM),
+    bytes("psubq", &VV, Word, &[0x0F, 0xFB], pair(0, 1), NO_IMM),
+    // Shifting each piece, by a count in a second vector register and by a count written down. The
+    // two are different opcodes rather than one opcode with the count in a different place, and the
+    // written down one shares three opcodes between eight instructions the way the general purpose
+    // group shares `0xF7`, with the extension in the addressing byte saying which.
+    //
+    // The count is the whole low sixty four bits of the second register and not its low byte, so a
+    // count of more than the width of a piece is every piece zero rather than a count taken modulo
+    // anything, which is the opposite of what a general purpose shift does and is the point: a
+    // library shifting a number across limb boundaries feeds these a count it worked out and wants
+    // the answer for a count of sixty four to be nothing rather than everything.
+    bytes("psllw", &VV, Word, &[0x0F, 0xF1], pair(0, 1), NO_IMM),
+    bytes("pslld", &VV, Word, &[0x0F, 0xF2], pair(0, 1), NO_IMM),
+    bytes("psllq", &VV, Word, &[0x0F, 0xF3], pair(0, 1), NO_IMM),
+    bytes("psrlw", &VV, Word, &[0x0F, 0xD1], pair(0, 1), NO_IMM),
+    bytes("psrld", &VV, Word, &[0x0F, 0xD2], pair(0, 1), NO_IMM),
+    bytes("psrlq", &VV, Word, &[0x0F, 0xD3], pair(0, 1), NO_IMM),
+    bytes("psraw", &VV, Word, &[0x0F, 0xE1], pair(0, 1), NO_IMM),
+    bytes("psrad", &VV, Word, &[0x0F, 0xE2], pair(0, 1), NO_IMM),
+    bytes("psllw", &IV, Word, &[0x0F, 0x71], ext(1, 6), ImmSize::Ib),
+    bytes("psrlw", &IV, Word, &[0x0F, 0x71], ext(1, 2), ImmSize::Ib),
+    bytes("psraw", &IV, Word, &[0x0F, 0x71], ext(1, 4), ImmSize::Ib),
+    bytes("pslld", &IV, Word, &[0x0F, 0x72], ext(1, 6), ImmSize::Ib),
+    bytes("psrld", &IV, Word, &[0x0F, 0x72], ext(1, 2), ImmSize::Ib),
+    bytes("psrad", &IV, Word, &[0x0F, 0x72], ext(1, 4), ImmSize::Ib),
+    bytes("psllq", &IV, Word, &[0x0F, 0x73], ext(1, 6), ImmSize::Ib),
+    bytes("psrlq", &IV, Word, &[0x0F, 0x73], ext(1, 2), ImmSize::Ib),
+    // And the two that shift the whole register rather than each piece of it, whose count is in
+    // bytes rather than in bits because that is the only thing moving a register sideways can mean.
+    bytes("pslldq", &IV, Word, &[0x0F, 0x73], ext(1, 7), ImmSize::Ib),
+    bytes("psrldq", &IV, Word, &[0x0F, 0x73], ext(1, 3), ImmSize::Ib),
     // The two x87 instructions, which are the same opcode with a different extension in the
     // addressing byte: `0xDB` with five is the load and with seven is the store. One argument
     // each, because the other end of the move is the top of the x87 stack and there is nothing in
@@ -2552,6 +2665,61 @@ mod tests {
         assert_eq!(hex("movsw", &[]), "66 a5");
         assert_eq!(hex("movsl", &[]), "a5");
         assert_eq!(hex("movsq", &[]), "48 a5");
+        // And the prefix that makes the loop, which is one byte with three spellings and a second
+        // byte with two, because the condition the name carries is read by the instruction behind
+        // it rather than by the prefix.
+        assert_eq!(hex("rep", &[]), "f3");
+        assert_eq!(hex("repe", &[]), "f3");
+        assert_eq!(hex("repz", &[]), "f3");
+        assert_eq!(hex("repne", &[]), "f2");
+        assert_eq!(hex("repnz", &[]), "f2");
+    }
+
+    /// The integer half of the vector unit, which is what a library moving two limbs at a time uses
+    /// and what nothing this compiler emits ever reaches.
+    ///
+    /// Same rule as every group before it: each string came out of `objdump` on an object gas made
+    /// from the same line. The one to read carefully is the quadword move, whose load and store are
+    /// not a pair of consecutive opcodes the way every other move here is.
+    #[test]
+    fn the_vector_instructions_that_treat_a_register_as_whole_numbers() {
+        let from = Addr { base: Some(RSI), ..Addr::default() };
+        let to = Addr { base: Some(RDI), ..Addr::default() };
+        // One word each way, which is two opcodes behind two different prefixes.
+        assert_eq!(hex("movq", &[Value::Mem(from), Value::Xmm(xmm(1))]), "f3 0f 7e 0e");
+        assert_eq!(hex("movq", &[Value::Xmm(xmm(0)), Value::Mem(to)]), "66 0f d6 07");
+        // The whole register, aligned and not, which is `movaps` behind a prefix.
+        assert_eq!(hex("movdqu", &[Value::Mem(from), Value::Xmm(xmm(0))]), "f3 0f 6f 06");
+        assert_eq!(hex("movdqa", &[Value::Xmm(xmm(0)), Value::Mem(to)]), "66 0f 7f 07");
+        assert_eq!(hex("movdqa", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f 6f c1");
+        assert_eq!(hex("movdqu", &[Value::Xmm(xmm(9)), Value::Xmm(xmm(8))]), "f3 45 0f 6f c1");
+        // An address with everything in it, which is where a copying loop actually reads from.
+        let along =
+            Addr { base: Some(RSI), index: Some(RDX), scale: 8, disp: -16, ..Addr::default() };
+        assert_eq!(hex("movdqu", &[Value::Mem(along), Value::Xmm(xmm(7))]), "f3 0f 6f 7c d6 f0");
+        // A register compared against itself, which is how a file fills one with ones.
+        assert_eq!(hex("pcmpeqb", &[Value::Xmm(xmm(3)), Value::Xmm(xmm(3))]), "66 0f 74 db");
+        assert_eq!(hex("pcmpeqd", &[Value::Xmm(xmm(0)), Value::Xmm(xmm(1))]), "66 0f 76 c8");
+        // The logicals, and the one of the four whose operands are not interchangeable.
+        assert_eq!(hex("pxor", &[Value::Xmm(xmm(7)), Value::Xmm(xmm(0))]), "66 0f ef c7");
+        assert_eq!(hex("por", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f eb c1");
+        assert_eq!(hex("pand", &[Value::Xmm(xmm(2)), Value::Xmm(xmm(5))]), "66 0f db ea");
+        assert_eq!(hex("pandn", &[Value::Xmm(xmm(2)), Value::Xmm(xmm(5))]), "66 0f df ea");
+        // The shifts, by a count in a register and by a count written down, which are different
+        // opcodes and not one opcode with the count somewhere else.
+        assert_eq!(hex("psllq", &[Value::Xmm(xmm(4)), Value::Xmm(xmm(0))]), "66 0f f3 c4");
+        assert_eq!(hex("psrlq", &[Value::Xmm(xmm(5)), Value::Xmm(xmm(1))]), "66 0f d3 cd");
+        assert_eq!(hex("psrad", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(2))]), "66 0f e2 d1");
+        assert_eq!(hex("psllq", &[Value::Imm(3), Value::Xmm(xmm(0))]), "66 0f 73 f0 03");
+        assert_eq!(hex("psrlw", &[Value::Imm(1), Value::Xmm(xmm(6))]), "66 0f 71 d6 01");
+        assert_eq!(hex("psrldq", &[Value::Imm(8), Value::Xmm(xmm(2))]), "66 0f 73 da 08");
+        assert_eq!(hex("pslldq", &[Value::Imm(8), Value::Xmm(xmm(2))]), "66 0f 73 fa 08");
+        // Putting two low words together, which is a pair of limbs becoming one vector.
+        assert_eq!(hex("punpcklqdq", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f 6c c1");
+        assert_eq!(hex("punpckhqdq", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f 6d c1");
+        // And adding each piece without carrying between them.
+        assert_eq!(hex("paddq", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f d4 c1");
+        assert_eq!(hex("psubb", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f f8 c1");
     }
 
     #[test]
