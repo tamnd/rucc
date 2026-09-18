@@ -5003,6 +5003,90 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call @"), "neither of them is a call: {text}");
     }
 
+    /// Every local of a function that saves a place lives in the frame, and not in a value.
+    ///
+    /// The edge a restore travels is not an edge of the graph, so a local the SSA construction
+    /// renamed would answer the write that reached the read along the edges there are rather than
+    /// the write that last ran. The second function here is the same code without the save, where
+    /// the local is a value and there is no slot at all, which is what makes the first one a rule
+    /// about the save and not about the shape of the code.
+    #[test]
+    fn a_local_of_a_function_that_saves_a_place_gets_a_slot() {
+        let text = ir(concat!(
+            "void *buf[5];\n",
+            "int f(int x) { int a = 0; if (__builtin_setjmp(buf)) return a; a = 1; return x; }\n",
+            "int g(int x) { int a = 0; if (x) return a; a = 1; return x; }\n",
+        ));
+        let (saves, plain) = text.split_once("func @g").expect("both functions");
+        assert_eq!(saves.matches("= alloca").count(), 2, "the parameter and the local: {text}");
+        assert!(saves.contains("store %9 -> %2"), "the local is written through: {text}");
+        assert!(!plain.contains("alloca"), "nothing in the plain one needs a slot: {text}");
+    }
+
+    /// What the save writes and where it leaves control, which is a new block.
+    ///
+    /// Four words: the frame pointer, the address to come back to, the stack pointer, and the
+    /// address of the word the answer arrives in, which is this compiler's own and is why the
+    /// block after the save opens with a load. The frame pointer is kept although the function
+    /// asked for nothing and calls nothing, since the epilogue has to find the caller's frame
+    /// after control has come back, and the frame is grown although there is one word in it,
+    /// since a function control comes back into cannot use the red zone.
+    #[test]
+    fn the_save_writes_four_words_and_carries_on_in_a_new_block() {
+        let text =
+            asm(concat!("void *buf[5];\n", "int f(void) { return __builtin_setjmp(buf); }\n",));
+        let body = text.split_once("\nf:\n").expect("the function").1;
+        assert!(body.contains("\tmovq\t%rsp, %rbp\n"), "a frame pointer whatever: {text}");
+        assert!(body.contains("\tsubq\t$8, %rsp\n"), "no red zone: {text}");
+        assert!(body.contains("\tmovq\t%rbp, (%rax)\n"), "the frame pointer: {text}");
+        assert!(body.contains("\tmovq\t%rsp, 16(%rax)\n"), "the stack pointer: {text}");
+        assert!(body.contains("\tleaq\t.Lf_1(%rip), %rcx\n"), "where to come back to: {text}");
+        assert!(body.contains("\tmovq\t%rcx, 8(%rax)\n"), "and that goes in the buffer: {text}");
+        let back = body.split_once(".Lf_1:\n").expect("the block control comes back to").1;
+        assert!(back.starts_with("\tmovq\t(%rsp), %rax\n"), "the answer is read back: {text}");
+    }
+
+    /// Nothing stays in a register across the save, which is said with a write of every one of
+    /// them and shows up as the callee-saved registers the function saves and restores.
+    ///
+    /// The restore puts back two registers and no others, so a function coming back through one
+    /// finds every other register holding whatever the code between the two put there. The pushes
+    /// are what makes the epilogue right on that path: the values popped are the caller's, off the
+    /// stack the restore put back, rather than whatever is in the registers when control arrives.
+    #[test]
+    fn a_save_destroys_every_register_the_allocator_hands_out() {
+        let text =
+            asm(concat!("void *buf[5];\n", "int f(void) { return __builtin_setjmp(buf); }\n",));
+        for reg in ["%rbx", "%r12", "%r13", "%r14", "%r15"] {
+            assert!(text.contains(&format!("\tpushq\t{reg}\n")), "{reg} is saved: {text}");
+            assert!(text.contains(&format!("\tpopq\t{reg}\n")), "{reg} is restored: {text}");
+        }
+    }
+
+    /// The restore puts both registers back before it goes, at every level.
+    ///
+    /// The jump reads the two of them as well as the address it goes through, which is what keeps
+    /// it behind them. Without that the two instructions write registers nothing reads, and the
+    /// scheduler at `-O2` puts the jump in front of both and the program comes back to a frame
+    /// that is not there.
+    #[test]
+    fn the_restore_puts_the_frame_back_before_it_jumps() {
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let source = "void *buf[5];\nvoid g(void) { __builtin_longjmp(buf, 1); }\n";
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+            let text = result.text().to_owned();
+            let jump = text.find("\tjmp\t*%").unwrap_or_else(|| panic!("an indirect jump: {text}"));
+            let stack = text.find(", %rsp\n").unwrap_or_else(|| panic!("the stack back: {text}"));
+            let frame = text.find(", %rbp\n").unwrap_or_else(|| panic!("the frame back: {text}"));
+            assert!(stack < jump, "the stack goes back first at {level:?}: {text}");
+            assert!(frame < jump, "and so does the frame at {level:?}: {text}");
+        }
+    }
+
     /// The second argument of the restore has one allowed value, which gcc 16.2.0 also insists on.
     ///
     /// This pair does not carry a value back the way the library's `longjmp` does, because what
