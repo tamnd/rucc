@@ -55,7 +55,7 @@ use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
-use crate::short::{Narrowed, ShortInsts, Stepped, Tested, Zeroed};
+use crate::short::{Copied, Narrowed, ShortInsts, Stepped, Tested, Zeroed};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -520,6 +520,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     narrowing: &NARROWER_MOVES,
     testing: &ZERO_COMPARES,
     stepping: &STEPS,
+    copying: &BARE_ADDRESSES,
 };
 
 /// Writing zero into a register without spelling the zero out.
@@ -619,6 +620,22 @@ static STEPS: [Stepped; 16] = [
     Stepped { name: "sub_ri_32", by: 1, into: "dec_r_32" },
     Stepped { name: "sub_ri_64", by: 1, into: "dec_r_64" },
 ];
+
+/// An address that is a register, written as a move rather than as an address computation.
+///
+/// `leaq (%rsp), %rax` works out an address that is a base register, no index and nothing added,
+/// which is the register. `movq %rsp, %rax` puts the same number in the same place. There is one
+/// entry because there is one instruction here that works an address out and keeps it, and what
+/// decides whether the two say the same thing is the addressing mode rather than the width or the
+/// number, so nothing here is written out per width the way the tables above are.
+///
+/// The byte is the addressing mode's rather than the opcode's. An address counted from the stack
+/// pointer needs the byte that says there is no index, which nothing else here needs and which the
+/// move does not, so this is four bytes against three every time the base is that register. It is
+/// also the only rewrite in this file that is worth taking for a reason other than bytes, since the
+/// machine can do a move between registers by renaming and has to do an address computation with an
+/// adder. gcc writes no such address computation anywhere in the SQLite amalgamation.
+static BARE_ADDRESSES: [Copied; 1] = [Copied { name: "lea_64", into: "mov_rr_64" }];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
 ///

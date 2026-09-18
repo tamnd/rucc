@@ -53,6 +53,24 @@
 //! code is hot and is worth the byte where the goal is size. So a target says which instructions
 //! these are and the pass asks the goal before it writes one, which is what tamnd/rucc#741 is about.
 //!
+//! The fifth thing described here is an address computation that computes no address. The
+//! instruction that works an address out and keeps it takes a whole addressing mode, and an
+//! addressing mode naming one register and adding nothing to it is that register. So `leaq (%rsp),
+//! %rax` puts in `rax` what is already in `rsp`, which is what `movq %rsp, %rax` does.
+//!
+//! The byte comes from the shape of the addressing mode rather than from the opcode. An address
+//! counted from the stack pointer cannot be written without the extra byte that says there is no
+//! index, so the address computation is four bytes where the move is three, and the stack pointer
+//! is the register this shape turns up on, because what makes it is taking the address of the local
+//! that happens to sit at the bottom of the frame. It is not only a byte either: a move between
+//! registers is a thing the machine can do by renaming rather than by computing, and an address
+//! computation is arithmetic whatever the numbers in it are.
+//!
+//! Neither instruction touches the condition state, so unlike the exclusive or and the increment
+//! this one asks nothing about what is behind it. What it asks about is the addressing mode, which
+//! is why the entry names the two opcodes and the pass looks at the mode: a description cannot say
+//! which addressing modes an instruction will turn out to have.
+//!
 //! It is here rather than in the pass for the reason [`crate::FlagInsts`] and
 //! [`crate::BranchInsts`] are here. The pass is in a pipeline crate and `spec/10-backend.md`
 //! section 10.8 says a pipeline crate holds no target-specific code, so what the pass knows about
@@ -75,6 +93,9 @@ pub struct ShortInsts {
     /// Every instruction that adds a constant to a register and has a shorter one that carries the
     /// number in its opcode, for the one or two numbers that shorter one is about.
     pub stepping: &'static [Stepped],
+    /// Every instruction that works out an address and keeps it, and the move that says the same
+    /// thing when the address is one register and nothing else.
+    pub copying: &'static [Copied],
 }
 
 impl ShortInsts {
@@ -107,6 +128,16 @@ impl ShortInsts {
             .iter()
             .find(|entry| entry.name == name && entry.by == by)
             .map(|entry| entry.into)
+    }
+
+    /// The move that says the same thing as the address computation of that name.
+    ///
+    /// Only the name is the key, because what makes the two the same is the addressing mode rather
+    /// than anything about the opcode, and the addressing mode is not a thing a table of names could
+    /// hold. The pass is what looks at it.
+    #[must_use]
+    pub fn copied(&self, name: &str) -> Option<&'static str> {
+        self.copying.iter().find(|entry| entry.name == name).map(|entry| entry.into)
     }
 
     /// Whether the instruction of that name is one of the shorter ones that leaves the carry alone.
@@ -193,5 +224,25 @@ pub struct Stepped {
     pub by: i64,
     /// The opcode that adds that number without writing it out. It writes every part of the
     /// condition state the first one writes except the carry, which it leaves alone.
+    pub into: &'static str,
+}
+
+/// One address computation, and the move that says the same thing when the address is a register.
+///
+/// The two are the same instruction only for an addressing mode that names a base and nothing else:
+/// no index, no constant added, no symbol and no label, since each of those is arithmetic the move
+/// does not do. That is a question about the instruction in hand rather than about its name, so the
+/// entry names the pair and the pass asks the mode.
+///
+/// Neither of them writes the condition state, which is what keeps this rewrite out of the walk that
+/// the exclusive or and the increment wait on. It saves a byte where the base is one of the
+/// registers an addressing mode cannot name on its own, and it saves the machine an addition
+/// everywhere, since a move between registers is a rename rather than work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Copied {
+    /// The opcode that takes the addressing mode.
+    pub name: &'static str,
+    /// The opcode that moves one register into another, which writes the register the first one
+    /// wrote and reads the one its addressing mode named.
     pub into: &'static str,
 }
