@@ -8,6 +8,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__SEH__` is defined for `x86_64-windows-gnu`, which is the last predefined macro where this compiler and gcc disagreed on that target. mingw's `setjmp.h` reads it to choose the two argument `_setjmp`, whose second argument is `__builtin_frame_address(0)` and becomes the frame `longjmp` hands to `RtlUnwindEx`, so it has to be the same address the function's own unwind record reports. It is, because the record names the frame pointer with an offset of zero and the prologue leaves that pointer holding the body's stack pointer. The macro was held back until the record existed at all, which was tamnd/rucc#1403. Measured against gcc 13.2 on server3: a program that longjmps out of four frames of recursion back past a `setjmp`, with a variable length array after it, prints the same three answers under wine as the one gcc built, and the call in the object passes `%rbp` where gcc passes `%rbp`. Part of tamnd/rucc#1360.
 
+### Fixed
+
+- The address of a function a file only declares reaches an object on `x86_64-windows-gnu`, which it never did before. Every such name went into the set of names the instruction pointer cannot reach, which is right on ELF and asks for a global offset table COFF does not have, so the object writer was handed a relocation it has no spelling for and refused the whole file. On this format the question does not arise: a name the link resolves out of another object is in the image, and a name that comes from a DLL arrives through an import library holding a jump under the plain name, so gcc 13.2 writes `leaq other(%rip), %rax` there and so does this compiler now. Closes tamnd/rucc#1443.
+
+- The SQLite amalgamation 3.53.4 and its shell compile for `x86_64-pc-windows-gnu` against the sysroot this release pins with no include directory of anybody else's on the command line, link with mingw's `gcc` and run under wine, which is rung 1 of tamnd/rucc#1360 for this target. Every header the build reads comes out of `~/.cache/rucc/sysroots/x86_64-windows-gnu`, and the shell answers `3|6|one,two,three` to a create, an insert and a select. Part of tamnd/rucc#1360.
+
 ## 0.10.60
 
 ### Added
