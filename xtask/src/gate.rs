@@ -295,9 +295,9 @@ fn generated() -> Result<Vec<Step>> {
 /// is still cheapest first, because that is the order the report reads best in when they all pass
 /// and the order the failures arrive in when they do not.
 ///
-/// `sqlite` is last because it is the longest by a wide margin, nine megabytes of C compiled twice,
-/// and because it is the only one of them that does nothing at all on a machine without the
-/// amalgamation on it.
+/// `libraries` is last because it is the longest by a wide margin, nine megabytes of SQLite
+/// compiled twice and then zlib on top of it, and because it is the only one of them that does
+/// nothing at all on a machine without somebody else's sources on it.
 ///
 /// They are also told where the compiler is, so that none of them goes back to cargo for it.
 fn programs() -> Result<Vec<Step>> {
@@ -306,7 +306,7 @@ fn programs() -> Result<Vec<Step>> {
     // happened. The spine built it, so the lane is told where rather than left to find out.
     let built = root().join("target").join("release").join("rucc");
     let built = built.display().to_string();
-    ["unwind", "quad", "wide", "fuzz", "safety", "dso", "accounting", "sqlite"]
+    ["unwind", "quad", "wide", "fuzz", "safety", "dso", "accounting", "libraries"]
         .iter()
         .map(|name| Ok(Step::task(name, &[])?.with("RUCC_XTASK_COMPILER", &built)))
         .collect()

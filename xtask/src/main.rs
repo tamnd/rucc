@@ -25,6 +25,7 @@ mod dso;
 mod fuzz;
 mod gate;
 mod implib;
+mod libraries;
 mod pressure;
 mod quad;
 mod real_libc;
@@ -32,7 +33,6 @@ mod runner;
 mod safety;
 mod sides;
 mod size;
-mod sqlite;
 mod stubs;
 mod unwind;
 mod wide;
@@ -73,8 +73,8 @@ tasks:
   quad              compile binary128 arithmetic with both compilers, run both, compare
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
-  sqlite            build an instrumented SQLite amalgamation at -O0 and -O2, run a real
-                    workload against it, and hold it to its own answers
+  libraries         build real libraries instrumented at -O0 and -O2, run a real workload
+                    against each, and hold it to its own answers and to what was reported
   fuzz              generate C programs with one memory error each and hold both builds to it
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
@@ -122,7 +122,7 @@ fn main() -> ExitCode {
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
         Some("safety") => safety::safety(),
-        Some("sqlite") => sqlite::sqlite(),
+        Some("libraries") => libraries::libraries(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
         Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),
