@@ -281,6 +281,14 @@ pub struct Encoding {
     pub fields: Fields,
     /// The immediate behind the rest of it.
     pub imm: ImmSize,
+    /// Whether the instruction is written with `fwait` in front of it.
+    ///
+    /// Only the x87 instructions that have two names, where the one with the `n` in it is the
+    /// instruction and the one without is that instruction with `fwait` written first. `fwait` is
+    /// an instruction of its own rather than a prefix, so it goes in front of everything including
+    /// the REX byte, which is where a REX byte would be wrong: a prefix reaches the instruction
+    /// after it, and the instruction after `fwait` is the one the REX byte is about.
+    pub wait: bool,
 }
 
 /// One row of the table below, for an instruction that carries no immediate or that carries one
@@ -293,7 +301,7 @@ const fn bytes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm }
+    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm, wait: false }
 }
 
 /// One row for an instruction whose immediate has to be of a certain size, which is every row
@@ -307,7 +315,24 @@ const fn takes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits, size, opcode, fields, imm }
+    Encoding { mnemonic, args, fits, size, opcode, fields, imm, wait: false }
+}
+
+/// One row for an x87 instruction written with `fwait` in front of it.
+///
+/// Three of them have the same operands as the row beside them and differ in that one byte, which
+/// is `fwait` and is an instruction rather than a prefix: it waits for whatever the coprocessor is
+/// doing and then the next instruction runs. So each of the three is here twice, under the name
+/// with the `n` in it and under the name without, rather than once with something reading the
+/// mnemonic, since what a row is looked up by is the name a file wrote.
+const fn waits(
+    mnemonic: &'static str,
+    args: &'static [Kind],
+    size: Size,
+    opcode: &'static [u8],
+    fields: Fields,
+) -> Encoding {
+    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm: NO_IMM, wait: true }
 }
 
 /// An addressing byte whose spare three bits finish the opcode.
@@ -377,8 +402,8 @@ static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
 static ENCODINGS: &[Encoding] = &[
     // Constants. The three narrow ones put the destination in the opcode rather than in an
     // addressing byte, which is one byte shorter and is why `B0` and `B8` are here instead of
-    // `C6 /0` and `C7 /0`. The addressed forms reach memory as well and these do not, and no move
-    // here writes an immediate to memory, so the shorter row is the only row each of them needs.
+    // `C6 /0` and `C7 /0`. The addressed forms reach memory as well and these do not, so where a
+    // register is the destination the shorter row is the only row each of them needs.
     // The sixty four bit move is the one that keeps the addressing byte: its short form carries
     // the whole eight bytes and the addressed one sign extends four, so seven beats ten whenever
     // the number fits, which is nearly always.
@@ -387,6 +412,17 @@ static ENCODINGS: &[Encoding] = &[
     takes("movl", &IR, Fits::Long, Long, &[0xB8], plus(1), ImmSize::Id),
     takes("movq", &IR, Signed32, Quad, &[0xC7], ext(1, 0), ImmSize::Id),
     bytes("movq", &IR, Quad, &[0xB8], plus(1), ImmSize::Io),
+    // The same constants into memory, which is the addressed form and the only form there is when
+    // the destination is an address. This compiler does not write one, since a store it made has
+    // the value in a register by the time it gets here, and a file written by hand writes the
+    // number straight into the slot: `movq $0, -8(%rsp)` in libgmp's `tests/amd64call.asm` clears
+    // the word it is about to read the control register into. There is no row for eight bytes of
+    // immediate, because the instruction has no such form: a number wider than four bytes has to
+    // go through a register whoever is writing it.
+    takes("movb", &IM, Fits::Byte, Byte, &[0xC6], ext(1, 0), ImmSize::Ib),
+    takes("movw", &IM, Fits::Word, Word, &[0xC7], ext(1, 0), ImmSize::Iw),
+    takes("movl", &IM, Fits::Long, Long, &[0xC7], ext(1, 0), ImmSize::Id),
+    takes("movq", &IM, Signed32, Quad, &[0xC7], ext(1, 0), ImmSize::Id),
     // The name a file gives the long form when it wants that form whatever the number is. It is the
     // row above and nothing else, and it is a row of its own rather than a spelling because a
     // lookup here is by mnemonic and a program that writes this has asked for ten bytes.
@@ -1142,6 +1178,12 @@ static ENCODINGS: &[Encoding] = &[
     // the three bits beside the register. Sixty four bits without a prefix saying so, the way a
     // jump and a push are, since there is no form of it that calls a thirty two bit address.
     bytes("call", &R, Long, &[0xFF], ext(0, 2), NO_IMM),
+    // And through an address, which is the jump's other row seen from one place along. This
+    // compiler loads the address into a register and calls the register, so it writes the row
+    // above and never this one, and a file written by hand writes the load and the call as one
+    // instruction because it can: `call *(%rax)` in libgmp's `tests/amd64call.asm` calls whatever
+    // the global offset table entry it just loaded points at.
+    bytes("call", &M, Long, &[0xFF], ext(0, 2), NO_IMM),
     // What a condition and the block layout come to. The test is a comparison against zero that
     // names the same register twice, so both of its arguments are the one operand.
     bytes("testb", &RR, Byte, &[0x84], pair(1, 0), NO_IMM),
@@ -1246,6 +1288,12 @@ static ENCODINGS: &[Encoding] = &[
     // are, and this compiler writes neither because a spill it made has a register in hand.
     bytes("pushq", &M, Long, &[0xFF], ext(0, 6), NO_IMM),
     bytes("popq", &M, Long, &[0x8F], ext(0, 0), NO_IMM),
+    // The same two about the flags rather than about a value, which name what they move in the
+    // mnemonic and take no operand at all. Eight bytes, since there is no other width of them in
+    // long mode. libgmp's `tests/amd64call.asm` pushes the flags and pops them into a register,
+    // which is how a program written in C reads a register C has no name for.
+    bytes("pushfq", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
+    bytes("popfq", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
     // The barrier. Three bytes with no operands, so the last of them is written as part of the
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
@@ -1523,6 +1571,21 @@ static ENCODINGS: &[Encoding] = &[
     // The control word, which is two bytes and is the operand of two more extensions of `0xD9`.
     bytes("fnstcw", &M, Long, &[0xD9], ext(0, 7), NO_IMM),
     bytes("fldcw", &M, Long, &[0xD9], ext(0, 5), NO_IMM),
+    // The three that are also written with `fwait` in front of them, under the name that says so.
+    // A program that writes the waiting name is asking to see whatever the coprocessor has already
+    // decided rather than whatever it had decided when the instruction was issued, which for a
+    // store of the control word or of the whole environment is the difference between reading the
+    // state and racing it. libgmp's `tests/amd64call.asm` writes all three, since what it is doing
+    // is looking at the state a call left behind. `fldcw` has no second name because there is
+    // nothing for it to wait on: it writes the control word rather than reading it.
+    waits("fstcw", &M, Long, &[0xD9], ext(0, 7)),
+    // The whole environment rather than the control word alone, which is the control word, the
+    // status word, the tags and where the last instruction was.
+    bytes("fnstenv", &M, Long, &[0xD9], ext(0, 6), NO_IMM),
+    waits("fstenv", &M, Long, &[0xD9], ext(0, 6)),
+    // Putting it all back the way it starts, which takes no operand and is two constant bytes.
+    bytes("fninit", &NO_ARGS, Long, &[0xDB, 0xE3], NO_MODRM, NO_IMM),
+    waits("finit", &NO_ARGS, Long, &[0xDB, 0xE3], NO_MODRM),
     // The arithmetic, which is the first group of rows here with no addressing byte and no
     // register number anywhere in it. Two opcode bytes each and both of them constant: `0xDE` says
     // the operation works on two values on the stack and pops, the low three bits of the second
@@ -1814,6 +1877,13 @@ impl Writer<'_> {
             return Err(Error::Crowded { mnemonic: self.row.mnemonic.to_owned() });
         }
 
+        // `fwait` in front of the three x87 instructions that are written with one, which is in
+        // front of everything because it is an instruction and not a prefix. A prefix reaches the
+        // instruction after it, so a REX byte written here would be about `fwait` rather than
+        // about what follows it.
+        if self.row.wait {
+            out.push(0x9B);
+        }
         // Group two of the legacy prefixes, in front of everything else because that is where a
         // segment override goes. It says which storage the address is in, which is a fact about
         // the address rather than about how wide the operands are, so it is read off the address

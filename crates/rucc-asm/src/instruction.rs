@@ -268,6 +268,14 @@ fn aliased(word: &str) -> Option<String> {
             return Some(format!("shl{rest}"));
         }
     }
+    // A push and a pop move eight bytes in long mode and there is no other width of either, so the
+    // letter is not a thing a file has to write and mostly is not written. The letter cannot be
+    // worked out from the operands the way every other one is, because an address says nothing
+    // about how wide the access is, so these are named here rather than guessed at. The same for
+    // the two about the flags, whose operand is not written at all.
+    if let Some(known) = ["push", "pop", "pushf", "popf"].iter().find(|&&known| known == word) {
+        return Some(format!("{known}q"));
+    }
     let (prefix, rest) = ["cmov", "set", "j"]
         .iter()
         .find_map(|prefix| word.strip_prefix(prefix).map(|rest| (*prefix, rest)))?;
@@ -805,6 +813,57 @@ mod tests {
         assert_eq!(written.bytes, vec![0x41, 0xff, 0x64, 0xf0, 0x48]);
         // Nothing for a linker to do, since where it goes is a number the machine works out.
         assert!(written.holes.is_empty());
+        // And the call, which is the same row one place along. `call *(%rax)` in libgmp's
+        // `tests/amd64call.asm` calls whatever the table entry it just loaded points at.
+        let written = one("call", &["*(%rax)".to_owned()]).expect("read");
+        assert_eq!(written.bytes, vec![0xff, 0x10]);
+        assert!(written.holes.is_empty());
+    }
+
+    #[test]
+    fn a_constant_written_straight_into_memory() {
+        // `movq $0, -8(%rsp)` in libgmp's `tests/amd64call.asm`, which clears the word it is about
+        // to read the control register into. This compiler writes no such instruction, because a
+        // store it made has the value in a register by the time it reaches here, and a file written
+        // by hand puts the number in the slot and is done.
+        assert_eq!(bytes("movq $0, -8(%rsp)"), vec![0x48, 0xc7, 0x44, 0x24, 0xf8, 0, 0, 0, 0]);
+        assert_eq!(bytes("movl $1, -8(%rsp)"), vec![0xc7, 0x44, 0x24, 0xf8, 1, 0, 0, 0]);
+        assert_eq!(bytes("movw $1, -8(%rsp)"), vec![0x66, 0xc7, 0x44, 0x24, 0xf8, 1, 0]);
+        assert_eq!(bytes("movb $1, -8(%rsp)"), vec![0xc6, 0x44, 0x24, 0xf8, 1]);
+        // There is no form of it that carries eight bytes, so a number that does not fit in four is
+        // said rather than truncated.
+        let why = refused("movq $0x1122334455, -8(%rsp)");
+        assert!(why.contains("movq"), "{why}");
+    }
+
+    #[test]
+    fn a_push_and_a_pop_need_no_letter_because_there_is_only_one_width_of_them() {
+        // Long mode has no other width of either, so the letter says nothing and a file written by
+        // hand mostly leaves it off. It cannot be worked out from the operands the way every other
+        // one is, because an address says nothing about how wide the access is.
+        assert_eq!(bytes("pop 120(%rax)"), vec![0x8f, 0x40, 0x78]);
+        assert_eq!(bytes("push 120(%rcx)"), vec![0xff, 0x71, 0x78]);
+        assert_eq!(bytes("push %rbx"), bytes("pushq %rbx"));
+        // And the two about the flags, which name what they move and take no operand at all.
+        assert_eq!(bytes("pushf"), vec![0x9c]);
+        assert_eq!(bytes("popf"), vec![0x9d]);
+    }
+
+    #[test]
+    fn an_x87_instruction_written_with_a_wait_in_front_of_it() {
+        // The three that have two names, where the one with the `n` in it is the instruction and
+        // the one without is that instruction with `fwait` written first. libgmp's
+        // `tests/amd64call.asm` writes all three of the waiting names, since what it is doing is
+        // looking at the state a call left behind rather than racing it.
+        assert_eq!(bytes("fnstcw -8(%rsp)"), vec![0xd9, 0x7c, 0x24, 0xf8]);
+        assert_eq!(bytes("fstcw -8(%rsp)"), vec![0x9b, 0xd9, 0x7c, 0x24, 0xf8]);
+        assert_eq!(bytes("fnstenv (%rcx)"), vec![0xd9, 0x31]);
+        assert_eq!(bytes("fstenv (%rcx)"), vec![0x9b, 0xd9, 0x31]);
+        assert_eq!(bytes("fninit"), vec![0xdb, 0xe3]);
+        assert_eq!(bytes("finit"), vec![0x9b, 0xdb, 0xe3]);
+        // `fwait` is an instruction rather than a prefix, so a REX byte goes behind it and not in
+        // front: a prefix is about whatever follows it, and what follows the wait is the store.
+        assert_eq!(bytes("fstcw (%r8)"), vec![0x9b, 0x41, 0xd9, 0x38]);
     }
 
     #[test]
