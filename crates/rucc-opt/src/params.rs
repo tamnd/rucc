@@ -35,6 +35,19 @@
 //! one. Writing it on the instruction is also what keeps the claim in one place. A pass reading a
 //! flag cannot accidentally believe half of it.
 //!
+//! # The alignment half
+//!
+//! The same table read for a different question. A function only this module
+//! can call, every call to which passes an address that is a multiple of some number, has a
+//! parameter that is a multiple of that number wherever it is used, and that goes on as
+//! `!aligned(a)`, which is a fact a value carries rather than a flag on a check.
+//!
+//! It is worth the second table because of what the measurement on tamnd/rucc#1385 says. The
+//! largest row the discharge pass counts is a bounds check kept only because nothing in the
+//! function says the address is aligned to what the access assumes, 5881 checks at 1166 functions
+//! on the SQLite amalgamation, and 3701 of those at 985 functions are a pointer the function was
+//! handed. That is the row a fact written from the call sites is for, and it is five sixths of it.
+//!
 //! # Which way the fixed point goes
 //!
 //! Every parameter starts unknown and becomes known only when every call site has an answer, and
@@ -62,15 +75,18 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
 use rucc_ir::{
-    Datum, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type, Value,
+    Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type, Value,
 };
 
-use crate::discharge::{Fact, about, alive, covers, derives, normal};
+use crate::discharge::{Fact, about, alive, covers, derives, normal, settled};
 use crate::extents::extents;
 
-/// Writes [`Flags::HANDED`] onto every check whose bytes are inside an object its callers hand in.
+/// Writes [`Flags::HANDED`] onto every check whose bytes are inside an object its callers hand in,
+/// and `!aligned(a)` onto every parameter its callers all hand an aligned address to.
 ///
-/// Gives back how many checks were marked, which is what the pipeline reports.
+/// Gives back how many checks were marked, which is what the pipeline reports. The facts are not
+/// counted in it, since a fact is not a check and a reader comparing the two numbers would be
+/// comparing two different things.
 pub fn annotate(module: &mut Module, pic: Pic) -> usize {
     let reachable = reachable(module);
     let closed: Vec<FuncId> = module
@@ -85,8 +101,15 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
     if closed.is_empty() {
         return 0;
     }
+    let mut where_defined: HashMap<_, FuncId> = HashMap::new();
+    for &id in &closed {
+        where_defined.insert(module[id].name, id);
+    }
+    let sites = sites(module, &where_defined);
+    let aligns = aligns(module, &closed, &sites);
+    write_aligns(module, &aligns);
     let globals = extents(module, pic);
-    let handed = handed(module, &closed, &globals);
+    let handed = handed(module, &closed, &sites, &globals);
     if handed.is_empty() {
         return 0;
     }
@@ -125,13 +148,9 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
 fn handed(
     module: &Module,
     closed: &[FuncId],
+    sites: &HashMap<FuncId, Vec<(FuncId, Inst)>>,
     globals: &HashMap<Symbol, u64>,
 ) -> HashMap<FuncId, HashMap<u32, u64>> {
-    let mut where_defined: HashMap<_, FuncId> = HashMap::new();
-    for &id in closed {
-        where_defined.insert(module[id].name, id);
-    }
-    let sites = sites(module, &where_defined);
     let mut known: HashMap<FuncId, HashMap<u32, u64>> = HashMap::new();
     loop {
         let mut settled = true;
@@ -230,6 +249,139 @@ fn object(
             }
             _ => None,
         },
+    }
+}
+
+/// What each closed function's pointer parameters are known to be aligned to, in bytes.
+///
+/// The extent table above with the question swapped. The fewest bytes any call leaves in the
+/// object it passes becomes the least alignment any call hands in, the walk to an `alloca` or a
+/// global becomes `crate::discharge`'s own alignment walk, and everything else about the shape,
+/// including which functions are closed and which way the fixed point goes, is the same.
+///
+/// # What a fact may not come from
+///
+/// The declared type of the parameter. The alignment conjunct of judgement J1 is there to catch a
+/// cast that moves a pointer off what its new type assumes, which is row S7 of
+/// `spec/safe-memory/16-rows.md`, so a fact saying a `T *` parameter is aligned to what a `T`
+/// needs would assume exactly the thing the check exists to test, and it would do it at every
+/// function boundary in the program at once. What is read instead is what each caller actually
+/// computed, by the same walk the callee would have used had the value not crossed a boundary. A
+/// caller that hands in `(int *)((char *)p + 1)` contributes one, one is thrown away, and the
+/// parameter is left with no fact, which is the row surviving the call rather than being turned
+/// off by it.
+///
+/// # Why the walk is given no graph and the caller's own answers
+///
+/// No graph because a call site is one value in one function and the walk through a join wants a
+/// module-wide fixed point of its own to be worth building one for. The caller's own answers go in
+/// as the map [`settled`] looks at before it looks at a value's shape, so an argument that is the
+/// caller's own parameter reads what the round before worked out and a chain of static helpers
+/// reaches the slot at the top, in the way the extent half does.
+fn aligns(
+    module: &Module,
+    closed: &[FuncId],
+    sites: &HashMap<FuncId, Vec<(FuncId, Inst)>>,
+) -> HashMap<FuncId, HashMap<u32, u32>> {
+    let mut known: HashMap<FuncId, HashMap<u32, u32>> = HashMap::new();
+    loop {
+        let mut stable = true;
+        for &id in closed {
+            let Some(calls) = sites.get(&id) else { continue };
+            let count = module[id].signature().params.len();
+            let mut alignments = HashMap::new();
+            for index in 0..count {
+                if module[id].signature().params[index].ty != Type::PTR {
+                    continue;
+                }
+                let Some(least) = least_align(module, calls, index, &known) else { continue };
+                alignments.insert(u32::try_from(index).unwrap_or(u32::MAX), least);
+            }
+            if known.get(&id) != Some(&alignments) {
+                known.insert(id, alignments);
+                stable = false;
+            }
+        }
+        if stable {
+            known.retain(|_, alignments| !alignments.is_empty());
+            return known;
+        }
+    }
+}
+
+/// The least alignment any call hands in at that position, when every call has one to give.
+///
+/// `None` the moment one call cannot be read, for [`least`]'s reason: what is claimed holds at
+/// every call or it holds nowhere. One is thrown away with the same answer, since every address in
+/// the program is aligned to one byte and a fact that says so answers nothing and costs a line in
+/// every dump. Anything that is not a power of two is thrown away too, which is the saturated
+/// answer the walk gives for a step too wide to hold, and it is what the verifier's rule for this
+/// fact asks for.
+fn least_align(
+    module: &Module,
+    calls: &[(FuncId, Inst)],
+    index: usize,
+    known: &HashMap<FuncId, HashMap<u32, u32>>,
+) -> Option<u32> {
+    let mut least = None;
+    for &(caller, inst) in calls {
+        let func = &module[caller];
+        let &value = func[func[inst].args].get(index)?;
+        let carried = carried(func, caller, known);
+        let found = u32::try_from(settled(func, None, &carried, value)).ok()?;
+        if found <= 1 || !found.is_power_of_two() {
+            return None;
+        }
+        least = Some(least.map_or(found, |so_far: u32| so_far.min(found)));
+    }
+    least
+}
+
+/// What the round before worked out about one caller's own pointer parameters, keyed by value.
+///
+/// The shape [`settled`] wants, which is the answers checks gave, because a fact from a caller of
+/// the caller is as good an answer about that value as a check standing in front of it.
+fn carried(
+    func: &Func,
+    caller: FuncId,
+    known: &HashMap<FuncId, HashMap<u32, u32>>,
+) -> HashMap<Value, u64> {
+    let mut carried = HashMap::new();
+    let (Some(entry), Some(alignments)) = (func.entry(), known.get(&caller)) else {
+        return carried;
+    };
+    for (&index, &align) in alignments {
+        if let Some(&param) = func[entry].params.get(index as usize) {
+            carried.insert(param, u64::from(align));
+        }
+    }
+    carried
+}
+
+/// Puts `!aligned(a)` on the entry parameters the table has an answer for.
+///
+/// Onto the value rather than onto a check, which is the one place this half differs from the
+/// extent half. Section 6.2.4 of `spec/safe-memory/06-instrumentation.md` has `!aligned(a)` as
+/// something a value carries and the IR has carried it since tamnd/rucc#452, and a fact on the
+/// parameter answers every check in the callee that walks back to it rather than only the ones
+/// this pass thought to go looking at.
+///
+/// The larger of what is there and what was worked out, because a fact is a promise and two
+/// promises about one value are both true. Nothing else writes this fact today, so the case is
+/// this pass running twice over one module.
+fn write_aligns(module: &mut Module, table: &HashMap<FuncId, HashMap<u32, u32>>) {
+    for (&id, alignments) in table {
+        let func = &mut module[id];
+        let Some(entry) = func.entry() else { continue };
+        for (&index, &align) in alignments {
+            let Some(&param) = func[entry].params.get(index as usize) else { continue };
+            if func[param].ty != Type::PTR {
+                continue;
+            }
+            let had = func.facts(param);
+            let align = align.max(had.align.unwrap_or(0));
+            func.set_facts(param, Facts { align: Some(align), ..had });
+        }
     }
 }
 
@@ -592,6 +744,129 @@ mod tests {
         relay(&mut names, &mut module, "g", "h", 16);
         relay(&mut names, &mut module, "h", "g", 16);
         assert_eq!(annotate(&mut module, Pic::Executable), 0);
+    }
+
+    /// What `!aligned(a)` says about the first parameter of `g`, once the pass has run.
+    fn fact(names: &mut Interner, module: &Module) -> Option<u32> {
+        let name = names.intern("g");
+        let id = module.funcs().find(|&id| module[id].name == name).expect("the callee");
+        let func = &module[id];
+        let entry = func.entry().expect("its entry block");
+        let &param = func[entry].params.first().expect("its pointer parameter");
+        func.facts(param).align
+    }
+
+    #[test]
+    fn an_alignment_every_call_hands_in_reaches_the_parameter() {
+        // Nothing inside `g` says anything about the pointer it was handed, and the only call to
+        // it passes a slot aligned to eight, so eight is what the parameter is aligned to wherever
+        // it is used. This is the fact, and it is worked out from what the caller computed rather
+        // than from what the parameter is declared to be.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        caller(&mut names, &mut module, "f", |build| local(build, 32));
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), Some(8));
+    }
+
+    #[test]
+    fn the_least_alignment_any_call_hands_is_what_the_parameter_gets() {
+        // One call passes the slot and the other passes four bytes into it. Four divides by four
+        // and not by eight, so four is what holds at every call and four is what is claimed.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        caller(&mut names, &mut module, "f", |build| local(build, 32));
+        caller(&mut names, &mut module, "h", |build| {
+            let slot = local(build, 32);
+            past(build, slot, 4)
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), Some(4));
+    }
+
+    #[test]
+    fn a_call_that_moves_a_pointer_off_its_alignment_leaves_the_parameter_with_nothing() {
+        // Row S7 crossing a call. One byte past an eight byte aligned slot is an address that is a
+        // multiple of one and nothing else, and a fact that says a value is aligned to one byte
+        // says nothing, so the parameter is left with none and the checks in `g` stay. If this
+        // ever answers, the alignment conjunct is off for every static function in the program.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        caller(&mut names, &mut module, "f", |build| {
+            let slot = local(build, 32);
+            past(build, slot, 1)
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), None);
+    }
+
+    #[test]
+    fn one_call_this_cannot_read_leaves_the_parameter_with_nothing() {
+        // What is claimed holds at every call or it holds nowhere, so a second call passing a
+        // pointer nothing here knows the origin of takes the fact away from the first.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        caller(&mut names, &mut module, "f", |build| local(build, 32));
+        let outside = names.intern("somewhere");
+        caller(&mut names, &mut module, "h", |build| {
+            let extra = Extra::Symbol(outside);
+            let global =
+                build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+            let args = build.func().push_values(&[global]);
+            let info = MemInfo {
+                size: 8,
+                align: 8,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            let extra = Extra::Mem(build.func().add_mem(info));
+            build.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR)
+        });
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), None);
+    }
+
+    #[test]
+    fn a_callee_anything_can_reach_gets_no_alignment_either() {
+        // The visibility test is one test and both halves are behind it. A call this module cannot
+        // see passes an address nobody measured.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        let id = module.funcs().next().expect("the callee");
+        module[id].linkage = Linkage::External;
+        caller(&mut names, &mut module, "f", |build| local(build, 32));
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), None);
+    }
+
+    #[test]
+    fn an_alignment_reaches_down_a_chain_of_static_helpers() {
+        // `f` has the slot, `h` is handed it, `g` is handed what `h` was handed. `h` gets its
+        // answer in the first round and `g` reads it out of `h` in the second, which is the same
+        // thing the extent half iterates for.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        callee(&mut names, &mut module, 16);
+        relay(&mut names, &mut module, "h", "g", 16);
+        let at = names.intern("f");
+        let called = names.intern("h");
+        let mut func = Func::new(at, Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
+        let slot = local(&mut build, 32);
+        build.call(called, signature, &[slot]);
+        build.ret(&[]);
+        module.add_func(func);
+        annotate(&mut module, Pic::Executable);
+        assert_eq!(fact(&mut names, &module), Some(8));
     }
 
     /// A static function taking one pointer, checking `size` bytes at it and handing it on.

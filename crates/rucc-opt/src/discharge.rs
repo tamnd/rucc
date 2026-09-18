@@ -1485,9 +1485,10 @@ const DEEP: u32 = 4;
 /// is given the module this is not, and the flag is the whole of what this asks about one.
 ///
 /// A pointer whose origin this cannot read is answered by a check that already ran on it, which is
-/// [`Scope::proved`] and is the only thing that answers a block parameter, a pointer loaded out of
-/// memory or one handed in. What is left after that is zero, which answers nothing and keeps the
-/// check, and [`UNKNOWN_ALIGNMENT`] counts them.
+/// [`Scope::proved`], or by `!aligned(a)` written on the value, which is the side table
+/// `crate::params` fills from the call sites. Between them those are the only things that answer a
+/// block parameter, a pointer loaded out of memory or one handed in. What is left after that is
+/// zero, which answers nothing and keeps the check, and [`UNKNOWN_ALIGNMENT`] counts them.
 ///
 /// The two answers given before [`settles`] is asked are not arithmetic and so are not a rule's.
 /// An access of one byte assumes nothing about where it starts, so there is nothing to prove about
@@ -1560,7 +1561,17 @@ fn settles(known: u64, claim: u64) -> bool {
 /// smaller, which is why the steps are gathered with a `min` and why they start at the largest
 /// number there is instead of at zero. Zero is the answer and not a step, since an alignment of
 /// zero is not something an access can assume and a claim is never met by one.
-fn settled(func: &Func, cfg: Option<&Cfg>, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
+///
+/// `crate::params` calls this on an argument at a call site, with no graph and with `aligns`
+/// carrying what the round before worked out about the caller's own parameters. Sharing the walk
+/// is the point of doing it that way: what a fact says about a parameter is then exactly what the
+/// callee would have worked out for itself if the value had not crossed a boundary.
+pub(crate) fn settled(
+    func: &Func,
+    cfg: Option<&Cfg>,
+    aligns: &HashMap<Value, u64>,
+    pointer: Value,
+) -> u64 {
     let mut budget = JOINS;
     joined(func, cfg, aligns, pointer, &mut Vec::new(), &mut budget)
 }
@@ -1578,7 +1589,8 @@ const JOINS: u32 = 256;
 /// A block parameter holds whatever its predecessors hand in, so it is aligned to at least the
 /// least of what those are aligned to. That is arithmetic over values this function already has
 /// and it needs nothing written on the function, which is why it is here rather than in the side
-/// table tamnd/rucc#1385 is otherwise about.
+/// table tamnd/rucc#1385 is otherwise about. The side table is read at the top of the loop, beside
+/// the answers the checks in this function gave.
 ///
 /// The care it needs is a parameter that reaches itself round a loop, and the cut is that a value
 /// the walk is already inside of contributes only the steps taken to get back to it. That lands on
@@ -1598,17 +1610,26 @@ fn joined(
     let mut steps = u64::MAX;
     let mut value = pointer;
     loop {
-        // Asked in front of the shape, because the point of it is the values the shape gives up
+        // Asked in front of the shape, because the point of both is the values the shape gives up
         // on: a pointer handed in, a pointer read out of a field, a block parameter. A check that
-        // ran on one of those is as good an answer as an `alloca` and is the only answer there is.
-        if let Some(&proved) = aligns.get(&value) {
-            return steps.min(proved);
+        // ran on one of those is as good an answer as an `alloca`, and `!aligned(a)` is the same
+        // answer about the same value worked out from outside the function, which is what
+        // `crate::params` writes and what section 6.2.4 of
+        // `spec/safe-memory/06-instrumentation.md` has the fact for.
+        //
+        // Whichever of the two says more is the one to take. A fact is a promise and never a
+        // denial, so two promises about one value are both true and the larger is no less true
+        // than the smaller.
+        let proved = aligns.get(&value).copied();
+        let written = func.facts(value).align.map(u64::from);
+        if let Some(known) = proved.max(written) {
+            return steps.min(known);
         }
         let inst = match func[value].def {
             Def::Result { inst, .. } => inst,
-            // A function's parameters are the entry block's, and nothing inside the function says
-            // anything about those. They are the larger half of the row and they are what the side
-            // table is for.
+            // A function's parameter with no fact on it. Nothing inside the function says anything
+            // about one, so this is where the row goes that the side table above is for, and it is
+            // still the larger half of it.
             Def::Param { block, index } => {
                 let Some(cfg) = cfg else { return 0 };
                 if func.entry() == Some(block) {
@@ -2220,7 +2241,7 @@ impl Subject for Question {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        AsmInfo, Block, BlockCallList, Builder, Extra, Flags, Func, Inst, InstData, IntPred,
+        AsmInfo, Block, BlockCallList, Builder, Extra, Facts, Flags, Func, Inst, InstData, IntPred,
         MemInfo, MemOrder, Opcode, Restrict, Signature, Type, Value,
     };
 
@@ -2544,6 +2565,41 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 3, "the one in the arm reaches further, so all three stay");
         assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn an_alignment_written_on_a_pointer_handed_in_answers_a_check_on_it() {
+        // The side table half of tamnd/rucc#1385. The first check assumes a byte, so it covers the
+        // bytes the second reads and says nothing about where either of them starts, and the
+        // second one is left with the alignment conjunct and nothing inside the function to answer
+        // it with. The fact is the answer, and it is the only one there is for a pointer handed in.
+        let (_, mut func, block, pointer) = blank();
+        func.set_facts(pointer, Facts { align: Some(4), ..Facts::NONE });
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 4, 1);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn an_alignment_written_on_a_pointer_answers_no_more_than_it_says() {
+        // The same function with the fact saying two and the access assuming four. Two does not
+        // answer four, so the check stays, and it stays as an address this knows about rather than
+        // as one nothing has heard of, which is the difference between the two rows.
+        let (_, mut func, block, pointer) = blank();
+        func.set_facts(pointer, Facts { align: Some(2), ..Facts::NONE });
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 4, 1);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
