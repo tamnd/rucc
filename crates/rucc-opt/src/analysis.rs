@@ -33,9 +33,11 @@
 //! and the day that lands the map goes away and one of these lives on the stack of the loop.
 
 use std::cell::OnceCell;
+use std::sync::Arc;
 
 use rucc_ir::Func;
 
+use crate::image::Images;
 use crate::machine::Machine;
 use crate::predict::Callees;
 use crate::{
@@ -177,6 +179,7 @@ impl Preserved {
 #[derive(Clone, Debug)]
 pub struct Analyses {
     machine: Machine,
+    images: Arc<Images>,
     cfg: OnceCell<Cfg>,
     doms: OnceCell<Dominators>,
     post: OnceCell<PostDominators>,
@@ -199,6 +202,7 @@ impl Analyses {
     pub fn new(machine: Machine) -> Self {
         Self {
             machine,
+            images: Arc::default(),
             cfg: OnceCell::new(),
             doms: OnceCell::new(),
             post: OnceCell::new(),
@@ -211,6 +215,22 @@ impl Analyses {
         }
     }
 
+    /// The same cache, reading loads out of those images.
+    ///
+    /// Separate from [`Analyses::new`] rather than a second argument to it, because a cache
+    /// without images is a cache that folds one load fewer and a cache without a machine is a
+    /// cache that optimizes for the wrong target. The empty table is the right default and the
+    /// unknown machine is not, so one of the two is worth making every caller say and the other
+    /// is worth letting most of them leave out.
+    ///
+    /// Counted rather than copied. There is one cache per function and one table per module, and
+    /// the table is the size of the module's read only data.
+    #[must_use]
+    pub fn reading(mut self, images: Arc<Images>) -> Self {
+        self.images = images;
+        self
+    }
+
     /// The machine this function is being compiled for.
     ///
     /// Not an analysis, and here because this is the one thing a pass is handed besides the
@@ -218,6 +238,15 @@ impl Analyses {
     #[must_use]
     pub const fn machine(&self) -> Machine {
         self.machine
+    }
+
+    /// What the module's read only globals were initialized to.
+    ///
+    /// Here for the same reason the machine is, which [`crate::image`] sets out: it is a fact
+    /// about the module that a pass handed one function cannot reach any other way.
+    #[must_use]
+    pub fn images(&self) -> &Images {
+        &self.images
     }
 
     /// The control flow graph, computed if it is not already here.
@@ -369,9 +398,10 @@ impl Analyses {
     ///
     /// For the caller that changed the function itself rather than through a pass, and for a
     /// test that wants a cold cache. The machine is not thrown away, because it is not an
-    /// analysis and nothing a pass did to the function changed which target it is for.
+    /// analysis and nothing a pass did to the function changed which target it is for. Neither are
+    /// the images, for the same reason: no pass writes to a `const` global.
     pub fn clear(&mut self) {
-        *self = Self::new(self.machine);
+        *self = Self::new(self.machine).reading(Arc::clone(&self.images));
     }
 
     /// Forgets one analysis and nothing else.

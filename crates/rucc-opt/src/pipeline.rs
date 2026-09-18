@@ -32,13 +32,15 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, nofree, params, pass,
+    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, nofree, params,
+    pass,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -84,6 +86,15 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// that order because folding and the peephole are what make most of the dead code there is to
 /// eliminate, because a constant a fold produced is a branch condition the control flow pass can
 /// then read, and because the comparison that branch was on is dead once it has.
+///
+/// `image` is between the first `fold` and the first `simplify`, and both neighbours are the
+/// position. What it reads is a load from a `const` global at a constant byte offset, and until
+/// `fold` has run there is no constant byte offset: a subscript arrives from the front end as the
+/// index sign extended and multiplied by the element size, so every array and every string in the
+/// program would be a load it could not answer. What it writes is a constant standing where a load
+/// stood, which is arithmetic for the peephole behind it to collapse. Running it here rather than
+/// alongside the summaries before the pipeline is the whole of `crate::image`'s design and that
+/// module says so at length.
 ///
 /// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
 /// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
@@ -194,6 +205,7 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 const O1: &[&str] = &[
     "expect",
     "fold",
+    "image",
     "simplify",
     "narrow",
     "simplify",
@@ -252,6 +264,7 @@ const O1: &[&str] = &[
 const O2: &[&str] = &[
     "expect",
     "fold",
+    "image",
     "simplify",
     "narrow",
     "simplify",
@@ -287,6 +300,7 @@ const O2: &[&str] = &[
 const O3: &[&str] = &[
     "expect",
     "fold",
+    "image",
     "simplify",
     "narrow",
     "simplify",
@@ -342,6 +356,7 @@ const O3: &[&str] = &[
 const OS: &[&str] = &[
     "expect",
     "fold",
+    "image",
     "simplify",
     "narrow",
     "simplify",
@@ -373,6 +388,7 @@ const OS: &[&str] = &[
 const OZ: &[&str] = &[
     "expect",
     "fold",
+    "image",
     "simplify",
     "narrow",
     "simplify",
@@ -677,6 +693,15 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
         params::annotate(module, opts.interposition);
         heap::annotate(module, names);
     }
+    // In the same place and for the same reason, except that this one is read by a pass rather
+    // than by a summary, so it is handed over on the analysis cache instead of written onto the
+    // module. Only when the run has that pass in it, since it is a copy of the module's read only
+    // data and nothing else would ever look at it.
+    let images = if passes.iter().any(|pass| pass.name() == image::NAME) {
+        Arc::new(image::Images::of(module, opts.interposition))
+    } else {
+        Arc::default()
+    };
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -704,7 +729,9 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let an = cached.entry(id).or_insert_with(|| Analyses::new(machine));
+            let an = cached
+                .entry(id)
+                .or_insert_with(|| Analyses::new(machine).reading(Arc::clone(&images)));
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.
@@ -1283,7 +1310,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("4: narrow, "), "{text}");
+        assert!(text.contains("5: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
