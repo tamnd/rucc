@@ -655,7 +655,11 @@ mod tests {
             let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
             let answer = build.icmp(pred, wide_a, wide_b);
             build.ret(&[answer]);
-            Narrow.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+            Narrow.run(
+                &mut func,
+                &mut crate::machine::fixtures::analyses(),
+                &mut Fuel::unlimited(),
+            );
             assert_eq!(predicate(&func, answer), pred.unsigned(), "{pred}");
         }
     }
@@ -671,7 +675,11 @@ mod tests {
             let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
             let answer = build.icmp(pred, wide_a, wide_b);
             build.ret(&[answer]);
-            Narrow.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+            Narrow.run(
+                &mut func,
+                &mut crate::machine::fixtures::analyses(),
+                &mut Fuel::unlimited(),
+            );
             assert_eq!(predicate(&func, answer), pred, "{pred}");
         }
     }
