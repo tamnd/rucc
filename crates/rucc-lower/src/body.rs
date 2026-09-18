@@ -97,6 +97,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         jumps: Vec::new(),
         grows: false,
         cleans: false,
+        saves: false,
         aligned: HashMap::new(),
         restrict: Scopes::default(),
     };
@@ -110,9 +111,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         statics: Vec::new(),
         taken: Vec::new(),
         grows: false,
+        saves: false,
     };
     scan.stmt(root);
-    let Scan { escaped, locals, statics, taken, grows, .. } = scan;
+    let Scan { escaped, locals, statics, taken, grows, saves, .. } = scan;
     // A label whose address is taken and which is never defined was reported by the checking,
     // and there is no block for one, so it is not somewhere a jump can arrive.
     body.taken = taken.iter().filter_map(|&label| tast[label].stmt).collect();
@@ -135,6 +137,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // can be run in front of it. Asked here for the reason the question above it is: a `goto` can
     // be written above every declaration it jumps past.
     body.cleans = locals.iter().any(|&local| tast[local].cleanup.is_some());
+    // And whether the function saves a place for a `__builtin_longjmp` to come back to, which
+    // decides where every one of the locals below lives.
+    body.saves = saves;
     // Before the walk, because it is a question about what the function declares rather than about
     // what it does, and the scan above is where that is already known. What the attribute then
     // costs the function is a slot in its frame and a comparison before each of its returns.
@@ -575,6 +580,9 @@ struct Body<'a, 'u> {
     /// Whether anything the function declares has a handler to run when it goes out of scope,
     /// which is what makes a jump out of a block something to come back to.
     cleans: bool,
+    /// Whether anything in the function is a `__builtin_setjmp`, which is what stops a local
+    /// being kept in a value rather than in the frame. See [`Body::declare`].
+    saves: bool,
     /// What an address is known to be aligned to, for the addresses something worked it out for.
     ///
     /// An access ordinarily assumes the alignment of the type it goes through, because that is
@@ -854,6 +862,21 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// Decides where a local lives and makes its slot when it needs one.
+    ///
+    /// # Why a `__builtin_setjmp` puts them all in the frame
+    ///
+    /// Because the edge a `__builtin_longjmp` travels is not an edge of this function's control
+    /// flow graph, and everything downstream of here reads the graph. A local kept in a value is
+    /// a local the SSA construction renames, and what it renames each read to is the write that
+    /// reaches it along the edges it can see. Control arriving from somewhere else means the last
+    /// write to run was not one of those, so the read answers a value the program overwrote. In
+    /// `gcc.c-torture/execute/pr60003.c` that is a variable set to zero before the save and to
+    /// one inside the loop after it, and the branch the restore comes back to reads the zero.
+    ///
+    /// A slot has no such question in it. A store is a store and the load after the restore reads
+    /// whatever the last store wrote, whichever way control got there. So every automatic object
+    /// in a function that saves a place gets one, which is what gcc does for the same reason and
+    /// is documented as the cost of the pair rather than as an optimization it happens to lose.
     fn declare(&mut self, decl: DeclId, escaped: bool) {
         let tast = self.tast();
         let ty = tast[decl].ty;
@@ -874,7 +897,7 @@ impl<'u> Body<'_, 'u> {
         // Nothing could tell the difference, since no other thread can name a local whose
         // address never leaves the function, and gcc keeps the slot as well rather than
         // reasoning about what a program is able to observe.
-        if !escaped && !self.is_atomic(ty) && value.is_some() {
+        if !escaped && !self.saves && !self.is_atomic(ty) && value.is_some() {
             let var = self.temp();
             self.vars.insert(decl, Local::Value(var));
             return;
@@ -7136,6 +7159,9 @@ struct Scan<'a> {
     /// Whether anything in the body calls `__builtin_alloca`, which is the other way a stack moves
     /// while a function runs and the one that is not visible in what the function declares.
     grows: bool,
+    /// Whether anything in the body is a `__builtin_setjmp`, which decides where every local in
+    /// the function lives. See [`Body::declare`].
+    saves: bool,
 }
 
 impl Scan<'_> {
@@ -7240,10 +7266,15 @@ impl Scan<'_> {
                     self.taken.push(label);
                 }
             }
-            ExprKind::Member { base, .. }
-            | ExprKind::Prefetch { address: base, .. }
-            | ExprKind::Jump { buffer: base, .. } => {
+            ExprKind::Member { base, .. } | ExprKind::Prefetch { address: base, .. } => {
                 self.expr(base);
+            }
+            // The other node that is answered here rather than where it is met, and for a reason
+            // of the same shape as the `alloca` above: what it decides is about the whole
+            // function, and the walk reaches a declaration long before it reaches this.
+            ExprKind::Jump { ask, buffer } => {
+                self.saves |= ask == JumpAsk::Save;
+                self.expr(buffer);
             }
             ExprKind::Subscript { base, index } => {
                 self.expr(base);
