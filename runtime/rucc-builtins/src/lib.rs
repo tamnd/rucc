@@ -60,6 +60,15 @@
 // a call to `memcpy`, which would be this function calling itself forever. This is the attribute
 // that says the names in this crate are the implementations rather than uses.
 #![no_builtins]
+// A 128-bit integer in an `extern "C"` signature was not FFI-safe as far as rustc was concerned
+// until it settled how one is passed, and the floor this workspace builds against is older than
+// that, so the warning is on the oldest compiler and on none of the newer ones. There is nothing
+// here for it to be about. These routines exist because rucc emits calls to them for an `__int128`,
+// and what rucc passes one in is the register pair the psABI names, which is the pair rustc passes
+// it in as well. `atomic`, `convert` and `div` are the modules it lands on. The three modules that
+// carry the same attribute of their own carry it for vector types instead, which is a separate
+// question and one they answer where they ask it.
+#![allow(improper_ctypes_definitions)]
 #![doc(html_root_url = "https://docs.rs/rucc-builtins/0.10.63")]
 
 pub mod atomic;
