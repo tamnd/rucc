@@ -69,18 +69,16 @@ const ROWS: &[(&str, How)] = &[
     ("glibc header tree", How::Elsewhere("bin/glibc-headers in tamnd/rucc-cross")),
     ("musl headers", How::Elsewhere("bin/sysroot in tamnd/rucc-cross")),
     ("Linux uapi headers", How::Elsewhere("bin/kernel-headers in tamnd/rucc-cross")),
-    (
-        "mingw-w64 headers",
-        How::Absent(
-            "nothing touches it, which is worth knowing about the largest row in the table",
-        ),
-    ),
     ("start files", How::Elsewhere("bin/glibc-startfiles in tamnd/rucc-cross")),
     (
         "librucc_builtins.a",
         How::Absent("cargo xtask builtins writes one target's archive and this row is every one"),
     ),
     ("base distribution", How::Total),
+    (
+        "mingw-w64 header tree",
+        How::OutOfBase("section 13.2 fetches it, so it is out of the base and not produced here"),
+    ),
     ("linker (on demand)", How::OutOfBase("document 11.2 keeps it out of the binary")),
     ("Darwin SDK", How::OutOfBase("section 13.4 is why neither is distributed")),
 ];
