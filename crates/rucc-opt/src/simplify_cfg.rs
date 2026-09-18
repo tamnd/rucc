@@ -974,6 +974,37 @@ fn addressed(func: &Func) -> HashSet<Block> {
     taken
 }
 
+/// Merges one block into the block above it, when that is the only way in, and says whether it did.
+///
+/// Step four of this pass asked for one chain at a time over the whole function, which is what it
+/// wants and is the wrong shape for a caller holding two particular blocks. [`crate::short_circuit`]
+/// is that caller. It has just left a head that jumps to a join nothing else reaches any more, and
+/// the jump and the join's parameter between them are what stands in the way of the collapse above
+/// this one: the next `&&` up asks whether its condition is a comparison, and a block parameter is
+/// not one until the block it belongs to has been merged away.
+///
+/// It is this function rather than one written next door for the reason the rest of the sharing in
+/// this module has. Two answers about when a block may be folded into the one above it would be two
+/// compilers, and the conditions are not obvious ones: the entry keeps its own block, a block whose
+/// address is taken is arrived at from somewhere this cannot see, and a block that jumps to itself
+/// is not above anything.
+pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into: Block) -> bool {
+    let cfg = an.cfg(func);
+    let Some(entry) = cfg.entry() else { return false };
+    if into == entry || into == head || cfg.predecessors(into) != [head] {
+        return false;
+    }
+    let Some(term) = func.terminator(head) else { return false };
+    if func[term].opcode != Opcode::Jump || addressed(func).contains(&into) {
+        return false;
+    }
+    let mut forward = HashMap::new();
+    merge(func, head, into, &mut forward);
+    uses::substitute(func, &forward);
+    an.clear();
+    true
+}
+
 /// Moves everything in a block into the head of its chain and takes the block out of the function.
 ///
 /// The jump is what is really being deleted, and the arguments it carried are what the merged

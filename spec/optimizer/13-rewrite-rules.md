@@ -139,6 +139,18 @@ instructions and a register on every wide-integer operation.
 *Tier 5, the comparison rules, roughly 30.* Folding comparisons against constants using ranges
 from document 10, `(x & c) != 0` patterns, comparison chains, `x < 0` on an unsigned type.
 
+The composite comparison is in this tier and is written by hand rather than as rules, because it is
+one statement quantified over the predicates and the rule language has no quantifier. An `and` or an
+`or` of two comparisons of the same two values is one comparison, or it is a constant. Read a
+predicate as the set of answers it accepts rather than as a question, which for two values is below,
+equal, above and, for floating point, neither, and then `&&` is the intersection of two sets, `||`
+is the union, an empty set is false and a full one is true. The sixteen floating point predicates
+are the sixteen subsets of the four, so reading a set back is total. Integers have three, plus the
+complication that `<` is a different question signed and unsigned, so each predicate carries which
+reading it wants, two that disagree do not combine, and `==` and `!=` want neither and take the
+reading of whatever they are combined with. Enumerating this as rules would be hundreds of them
+across predicates, operand orders and widths, all of them the same statement.
+
 *Tier 6, select and control, roughly 20.* `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)`
 to a zero-extended condition, min and max recognition, absolute value recognition.
 

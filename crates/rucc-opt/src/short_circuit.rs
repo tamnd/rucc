@@ -88,6 +88,13 @@
 //! nothing is speculated and the budget has nothing to price. Then the fold is one instruction
 //! against one branch and it happens whatever the estimate says.
 //!
+//! There is a second case with nothing to price, and it is the one that made this pass grow a
+//! variant. When both halves are comparisons of the same two values, the and this writes is a
+//! thing [`crate::simplify`] takes straight back out: two comparisons over one pair of operands are
+//! one comparison, or they are a constant. So the collapse leaves one instruction where there were
+//! two and a branch, which is smaller as well as faster, and the budget and the estimate are both
+//! answering a question that is not being asked.
+//!
 //! Otherwise the estimate has to leave doubt, by the same margin `phiopt` uses and for the same
 //! reason. If the estimate says the branch almost always goes one way, the machine will almost
 //! always get it right, removing it saves nothing, and the price of working out the right operand
@@ -95,11 +102,23 @@
 //!
 //! # Where it runs
 //!
-//! Section 22.5 says `-O2`, and this pass is in the `-O2` and `-O3` lists and not in the `-O1` one.
-//! It is also not in the `-Os` or `-Oz` lists. The reason is that the gate above is a speed gate.
-//! What is bought is a branch the machine no longer has to guess, which is time, and what is paid
-//! is the right operand's instructions running on a path that was skipping them. A level whose cost
-//! model is size has no use for that trade.
+//! Section 22.5 says `-O2`, and the pass is in the `-O2` and `-O3` lists under its own name. The
+//! reason it is not in the others is that the gate above is a speed gate. What is bought is a
+//! branch the machine no longer has to guess, which is time, and what is paid is the right
+//! operand's instructions running on a path that was skipping them. A level whose cost model is
+//! size has no use for that trade, and `-O1` is the level that declines trades by default.
+//!
+//! `short-circuit-free` is the same pass making only the collapses that cost nothing, and it is in
+//! the `-O1`, `-Os` and `-Oz` lists. Nothing about it is a trade, so there is nothing for those
+//! levels to decline, and what they get for it is the composite comparison of section 13.4, which
+//! is a real program's `if (a == b && a != b)` and every shape around it.
+//!
+//! It sits above the second `simplify` in those three lists rather than beside `thread` where the
+//! full pass sits in `-O2`, and the position is the point. What it writes is an and the peephole
+//! pass turns into a constant, and a constant condition is a branch `simplify-cfg` takes away and a
+//! block it takes with it. `-O2` has a `simplify-cfg` after its last `simplify` and can afford to
+//! collapse late. `-O1`, `-Os` and `-Oz` do not, so the collapse goes early enough that both passes
+//! behind it are still to come.
 //!
 //! # What this is not
 //!
@@ -111,7 +130,7 @@
 //! to the rule set.
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Builder, Flags, Func, Imm, Opcode, Type, Value};
+use rucc_ir::{Block, Builder, Def, Flags, Func, Imm, Opcode, Type, Value};
 
 use crate::fold::constant;
 use crate::phiopt::{Diamond, diamond, length, speculatable, unpredictable};
@@ -133,6 +152,9 @@ const RIGHT_MAY_TRAP: &str =
 /// Recorded when the right operand is more work than one branch is worth.
 const TOO_MUCH_WORK: &str = "branch kept, the right operand is more work than one branch is worth";
 
+/// Recorded by the variant that only takes a collapse it gets for nothing.
+const NOT_FREE: &str = "branch kept, collapsing it here would cost the right operand's work";
+
 /// Recorded when the estimate says the branch is one sided enough not to be worth removing.
 const BRANCH_IS_PREDICTED: &str = "branch kept, the estimate says it goes one way nearly always";
 
@@ -144,15 +166,38 @@ const NO_FUEL: &str = "branch kept, the pass ran out of fuel";
 
 /// The pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShortCircuit;
+pub struct ShortCircuit {
+    /// What the pipeline calls it.
+    name: &'static str,
+    /// What it says about itself.
+    describes: &'static str,
+    /// Whether a collapse that leaves the right operand's work speculated may be made at all. The
+    /// free ones are made either way and are the only ones the second variant makes.
+    speculates: bool,
+}
+
+/// The pass as section 22.5 describes it, which is the one `-O2` and `-O3` run.
+pub static ANY: ShortCircuit = ShortCircuit {
+    name: "short-circuit",
+    describes: "an and-and or an or-or works both halves out at once when the right half is safe to",
+    speculates: true,
+};
+
+/// The same pass taking only the collapses that cost nothing, which is what the levels that decline
+/// the trade still want.
+pub static FREE: ShortCircuit = ShortCircuit {
+    name: "short-circuit-free",
+    describes: "an and-and or an or-or whose two halves are one comparison stops being a branch",
+    speculates: false,
+};
 
 impl Pass for ShortCircuit {
     fn name(&self) -> &'static str {
-        "short-circuit"
+        self.name
     }
 
     fn describe(&self) -> &'static str {
-        "an and-and or an or-or works both halves out at once when the right half is safe to"
+        self.describes
     }
 
     fn preserves(&self) -> Preserved {
@@ -166,43 +211,79 @@ impl Pass for ShortCircuit {
         if func.entry().is_none() {
             return stats;
         }
-        for head in func.blocks().collect::<Vec<Block>>() {
-            let cfg = an.cfg(func);
-            if !cfg.reaches(head) {
-                continue;
-            }
-            let Some(shape) = diamond(func, cfg, head) else { continue };
-            let Some(plan) = collapsed(func, &shape) else { continue };
-            if let Some(reason) = refused(func, &shape) {
-                stats.missed(reason);
-                continue;
-            }
-            let work: u32 = shape.arms.iter().flatten().map(|&arm| length(func, arm)).sum();
-            if work > 0 {
-                if work > heuristics::SHORT_CIRCUIT_INSTRUCTIONS {
-                    stats.missed(TOO_MUCH_WORK);
-                    continue;
+        // A head is asked again after it collapses, rather than once. What the collapse leaves is
+        // the join merged into the head, and a chain of three operands is written as a diamond
+        // whose left half is another diamond, so the join that has just arrived is the head of the
+        // next one. Asking once would fold `a || b || c` down to `(a|b) || c` and then walk past
+        // the block the rest of it is now in, since the block list is the one this started with.
+        'heads: for head in func.blocks().collect::<Vec<Block>>() {
+            loop {
+                let cfg = an.cfg(func);
+                if !cfg.reaches(head) {
+                    continue 'heads;
                 }
-                // The first edge out of the head. Which of the two is asked about does not matter,
-                // since the question is whether the number is near even and the other edge is its
-                // complement.
-                if !unpredictable(an.frequencies(func).taken(head, 0)) {
-                    stats.missed(BRANCH_IS_PREDICTED);
-                    continue;
+                let Some(shape) = diamond(func, cfg, head) else { continue 'heads };
+                let Some(plan) = collapsed(func, &shape) else { continue 'heads };
+                if let Some(reason) = refused(func, &shape) {
+                    stats.missed(reason);
+                    continue 'heads;
                 }
+                let work: u32 = shape.arms.iter().flatten().map(|&arm| length(func, arm)).sum();
+                let composite =
+                    crate::simplify::composite(func, plan.joined, shape.cond, plan.right);
+                // The arm has to hold the comparison and nothing else. Anything more is work being
+                // moved up, and the fold below takes the two comparisons away without saying a word
+                // about what fed them, so a collapse with an addition in the arm is the trade again
+                // and is priced as one.
+                let free = work <= 1 && composite.is_some();
+                if !free {
+                    if !self.speculates {
+                        stats.missed(NOT_FREE);
+                        continue 'heads;
+                    }
+                    if work > 0 {
+                        if work > heuristics::SHORT_CIRCUIT_INSTRUCTIONS {
+                            stats.missed(TOO_MUCH_WORK);
+                            continue 'heads;
+                        }
+                        // The first edge out of the head. Which of the two is asked about does not
+                        // matter, since the question is whether the number is near even and the
+                        // other edge is its complement.
+                        if !unpredictable(an.frequencies(func).taken(head, 0)) {
+                            stats.missed(BRANCH_IS_PREDICTED);
+                            continue 'heads;
+                        }
+                    }
+                }
+                if !fuel.take() {
+                    // Where the pass stops rather than where it starts skipping, for the reason
+                    // jump threading gives: a budget that has reached zero will not have anything
+                    // in it at the next block either, and the refusals above are the counts worth
+                    // being true.
+                    stats.missed(NO_FUEL);
+                    break 'heads;
+                }
+                let cond = fold(func, &shape, &plan);
+                // The and that was just written is one `crate::simplify` takes back out again, and
+                // doing it here rather than waiting for that pass is what lets a chain collapse in
+                // one walk. The question asked of the next `||` up is whether both its halves are
+                // comparisons, and until this and has become the one comparison it is worth, the
+                // answer about the half this wrote is no.
+                if let Some(composite) = composite {
+                    if let Def::Result { inst, .. } = func[cond].def {
+                        crate::simplify::fold_composite(func, inst, composite);
+                    }
+                }
+                // The graph was about the function as it was a moment ago, and the manager clears
+                // the cache after the pass returns, which is too late for the next block.
+                an.clear();
+                // The arm was the join's other way in, so the head now jumps to a block nothing
+                // else reaches, and the two are one block with a parameter and a jump in the middle
+                // of it. Taking those out is the other half of what lets a chain collapse all the
+                // way, since a block parameter is not a comparison either.
+                simplify_cfg::merge_below(func, an, shape.head, shape.join);
+                stats.optimized(COLLAPSED);
             }
-            if !fuel.take() {
-                // Where the pass stops rather than where it starts skipping, for the reason jump
-                // threading gives: a budget that has reached zero will not have anything in it at
-                // the next block either, and the refusals above are the counts worth being true.
-                stats.missed(NO_FUEL);
-                break;
-            }
-            fold(func, &shape, &plan);
-            // The graph was about the function as it was a moment ago, and the manager clears the
-            // cache after the pass returns, which is too late for the next block.
-            an.clear();
-            stats.optimized(COLLAPSED);
         }
         stats
     }
@@ -276,14 +357,15 @@ fn refused(func: &Func, shape: &Diamond) -> Option<&'static str> {
     None
 }
 
-/// Moves the right operand's work into the head, joins the two bits and jumps.
+/// Moves the right operand's work into the head, joins the two bits and jumps, and says what the
+/// join is now handed.
 ///
 /// The order matters and is the reason this is one function. The branch goes first, so that the
 /// work can be appended to the head without anything having to be threaded around a terminator. The
 /// and is built after that work has moved, since it reads what the work produced. The jump goes
 /// last because it is the terminator, and the arm goes after that, since removing a block while its
 /// own jump still named the join would be removing an edge that is still being read.
-fn fold(func: &mut Func, shape: &Diamond, plan: &Collapse) {
+fn fold(func: &mut Func, shape: &Diamond, plan: &Collapse) -> Value {
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
     let span = func.span(term);
     func.remove_inst(term);
@@ -304,6 +386,7 @@ fn fold(func: &mut Func, shape: &Diamond, plan: &Collapse) {
     for &arm in shape.arms.iter().flatten() {
         func.remove_block(arm);
     }
+    cond
 }
 
 #[cfg(test)]
@@ -316,13 +399,13 @@ mod tests {
         Restrict, Signature, Type, Value,
     };
 
-    use super::ShortCircuit;
+    use super::{ANY, FREE};
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass with as much fuel as it wants.
     fn collapse(func: &mut Func) -> Stats {
-        ShortCircuit.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+        ANY.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
     }
 
     /// The blocks the function still has, by number.
@@ -485,6 +568,122 @@ mod tests {
         func.append_inst(arm, term);
     }
 
+    /// The same shape with both halves asking about the same two values, which is the case the
+    /// free variant is for and the shape `gcc.c-torture/execute/compare-3.c` is written out of.
+    fn one_pair(settled: bool, pred: IntPred) -> Func {
+        let mut func = short_circuit(settled);
+        let operands: Vec<Value> = func[Block::from_usize(0)].params.to_vec();
+        let arm = Block::from_usize(1);
+        for inst in func.insts(arm).collect::<Vec<_>>() {
+            func.remove_inst(inst);
+        }
+        let mut build = Builder::new(&mut func, arm);
+        let test = build.icmp(pred, operands[0], operands[1]);
+        build.jump(Block::from_usize(2), &[test]);
+        func
+    }
+
+    /// Runs the free variant with as much fuel as it wants.
+    fn collapse_free(func: &mut Func) -> Stats {
+        FREE.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// `(x<y) && (x>=y)`, which is the shape the level that declines the trade still wants, because
+    /// `crate::simplify` turns the and into a constant and the branch was the only thing paying for
+    /// any of it.
+    #[test]
+    fn a_collapse_the_peephole_pass_takes_back_is_made_whatever_it_would_have_cost() {
+        let mut func = one_pair(false, IntPred::Sge);
+        let stats = collapse_free(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
+        // `slt` and `sge` between them cover every way the two values can stand, so the and is a
+        // constant and what is left is one block deciding nothing.
+        assert_eq!(
+            opcodes(&func, 0),
+            vec![Opcode::ICmp, Opcode::IConst, Opcode::ICmp, Opcode::IConst, Opcode::BrIf]
+        );
+        assert_eq!(blocks(&func), vec![0, 3, 4]);
+    }
+
+    /// `(x<y) || (x==y) || (x>y)`, which is true for every pair of integers and is written as a
+    /// diamond whose left half is another diamond.
+    ///
+    /// Both collapses happen in one walk. The inner one leaves one comparison and merges the join
+    /// it was handing a bit into the head, and what that makes the head is the outer `||`, which is
+    /// then asked the same question about two comparisons over the same two values and comes out as
+    /// a constant.
+    #[test]
+    fn a_chain_of_three_comparisons_collapses_all_the_way() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[int, int]));
+        let head = func.create_block();
+        let x = func.append_param(head, int);
+        let y = func.append_param(head, int);
+        let arms = [func.create_block(), func.create_block()];
+        let joins = [func.create_block(), func.create_block()];
+        let bits = joins.map(|join| func.append_param(join, Type::I1));
+        let ends = [func.create_block(), func.create_block()];
+
+        let mut build = Builder::new(&mut func, head);
+        let below = build.icmp(IntPred::Slt, x, y);
+        let already = build.iconst(Type::I1, 1);
+        build.br_if(below, joins[0], &[already], arms[0], &[]);
+        let mut build = Builder::new(&mut func, arms[0]);
+        let same = build.icmp(IntPred::Eq, x, y);
+        build.jump(joins[0], &[same]);
+        let mut build = Builder::new(&mut func, joins[0]);
+        let already = build.iconst(Type::I1, 1);
+        build.br_if(bits[0], joins[1], &[already], arms[1], &[]);
+        let mut build = Builder::new(&mut func, arms[1]);
+        let above = build.icmp(IntPred::Sgt, x, y);
+        build.jump(joins[1], &[above]);
+        let mut build = Builder::new(&mut func, joins[1]);
+        build.br_if(bits[1], ends[0], &[], ends[1], &[]);
+        for block in ends {
+            Builder::new(&mut func, block).ret(&[]);
+        }
+
+        let stats = collapse_free(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 2);
+        assert_eq!(blocks(&func), vec![0, 5, 6]);
+        // Three comparisons, two known bits nothing reads any more, and a branch on a constant,
+        // which is what `dce` and `simplify-cfg` take from here.
+        assert_eq!(opcodes(&func, 0).last(), Some(&Opcode::BrIf));
+        let term = func.terminator(Block::from_usize(0)).expect("the branch");
+        let cond = func[func[term].args][0];
+        let rucc_ir::Def::Result { inst, .. } = func[cond].def else { panic!("not a result") };
+        assert_eq!(func[inst].opcode, Opcode::IConst);
+    }
+
+    /// And two comparisons that are not about one pair of values are the trade again, which this
+    /// variant is the one that declines.
+    #[test]
+    fn a_collapse_that_moves_work_up_is_left_alone_by_the_free_variant() {
+        let mut func = short_circuit(false);
+        let stats = collapse_free(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FREE), 1);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 3, 4]);
+        // And the pass that does make the trade still makes this one.
+        let stats = collapse(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
+    }
+
+    /// A comparison that folds with something else beside it in the arm is still work being moved
+    /// up, because the fold takes the two comparisons away and says nothing about what fed them.
+    #[test]
+    fn a_folding_comparison_with_work_beside_it_is_priced_as_work() {
+        let mut func = one_pair(false, IntPred::Sge);
+        into_the_arm(&mut func, |build| {
+            build.iconst(Type::int(32), 9);
+        });
+
+        let stats = collapse_free(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FREE), 1);
+    }
+
     #[test]
     fn an_and_and_stops_being_a_branch_and_becomes_an_and() {
         let mut func = short_circuit(false);
@@ -492,12 +691,14 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
         // The right operand moved up, the and is what the branch was, and the block it was in has
         // gone. The known bit is left for `dce`, which is the pass that removes what nothing uses.
+        // The join went as well, because the arm was the only other way into it and what was left
+        // was a jump into a block with one way in.
         assert_eq!(
             opcodes(&func, 0),
-            vec![Opcode::ICmp, Opcode::IConst, Opcode::ICmp, Opcode::And, Opcode::Jump]
+            vec![Opcode::ICmp, Opcode::IConst, Opcode::ICmp, Opcode::And, Opcode::BrIf]
         );
-        assert_eq!(goes_to(&func, 0), vec![2]);
-        assert_eq!(blocks(&func), vec![0, 2, 3, 4]);
+        assert_eq!(goes_to(&func, 0), vec![3, 4]);
+        assert_eq!(blocks(&func), vec![0, 3, 4]);
     }
 
     #[test]
@@ -507,10 +708,10 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
         assert_eq!(
             opcodes(&func, 0),
-            vec![Opcode::ICmp, Opcode::IConst, Opcode::ICmp, Opcode::Or, Opcode::Jump]
+            vec![Opcode::ICmp, Opcode::IConst, Opcode::ICmp, Opcode::Or, Opcode::BrIf]
         );
-        assert_eq!(goes_to(&func, 0), vec![2]);
-        assert_eq!(blocks(&func), vec![0, 2, 3, 4]);
+        assert_eq!(goes_to(&func, 0), vec![3, 4]);
+        assert_eq!(blocks(&func), vec![0, 3, 4]);
     }
 
     #[test]
@@ -562,7 +763,7 @@ mod tests {
         let stats = collapse(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
         assert_eq!(stats.count(Kind::Missed, super::BRANCH_IS_PREDICTED), 0);
-        assert_eq!(blocks(&func), vec![0, 2, 3, 4]);
+        assert_eq!(blocks(&func), vec![0, 3, 4]);
     }
 
     #[test]
@@ -743,8 +944,7 @@ mod tests {
     fn fuel_stops_the_fold_where_it_stands() {
         let mut func = short_circuit(false);
         let mut fuel = Fuel::of(0);
-        let stats =
-            ShortCircuit.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
+        let stats = ANY.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(goes_to(&func, 0), vec![1, 2]);

@@ -159,6 +159,17 @@ M4 does the collapse for arithmetic-only right operands, at `-O2`, gated on the 
 unpredictable by document 11's estimate. Loads on the right-hand side are excluded entirely, which
 gives up some of the value and removes the entire class of null-dereference bugs.
 
+**One case is not a trade and is not gated.** When both operands are comparisons of the same two
+values, document 13.4's composite comparison rule turns the and this writes into a single comparison
+or into a constant, so the collapse leaves fewer instructions than it found as well as one fewer
+branch. There is nothing for a size cost model to decline and nothing for the branch estimate to
+weigh, so that case runs at `-O1`, `-Os` and `-Oz` as well, as a restricted form of this pass. It
+is what makes `if (a == b && a != b)` and the shapes around it fold at every level above `-O0`,
+which is what `gcc.c-torture/execute/compare-3.c` and `execute/ieee/compare-fp-3.c` assert by
+calling a function that is deliberately never defined. Collapsing a chain needs the join folded into
+the head as it goes, since the next operand up asks whether its left half is a comparison and a
+block parameter is not one.
+
 ## 22.6 How this is wrong
 
 **A store is introduced on a path that did not have one.** Conditional store replacement without the
