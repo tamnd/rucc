@@ -185,20 +185,24 @@
 //! a second rule, and the pointer it is about nearly always gets a `check_bounds` of its own a few
 //! instructions later that establishes the range properly.
 //!
-//! # Why a call throws the facts away, and which calls do not
+//! # What a call throws away, and which calls throw away nothing
 //!
 //! Section 7.3 says nothing kills a bounds fact except a redefinition of the capability, which in
-//! SSA is never, and this pass is stricter than that: a call, or anything else this pass cannot see
-//! through, drops every fact it is carrying.
+//! SSA is never. This pass is stricter than that about the lifetime half and not about the bounds
+//! half: a call, or anything else this pass cannot see through, drops every lifetime fact it is
+//! carrying, and a call keeps the bounds facts and marks them as having had one run over them.
 //!
-//! The case is a `free` and then an allocation of something smaller at the same address. The range
-//! established before the call is no longer inside one instance after it, and what document 07
-//! leaves that to is the lifetime judgement rather than this one. Whether that is enough is the
-//! next section, and the answer is not yet.
+//! The case a call is about is a `free` and then an allocation of something smaller at the same
+//! address. The range established before the call is no longer inside one instance after it, and
+//! what document 07 leaves that to is the lifetime judgement rather than this one. The next section
+//! is the argument that the lifetime judgement is now enough, and what a mark on a fact buys.
 //!
-//! A `meta_end` and a `meta_transfer` drop the facts as well. Nothing emits either one yet, so
-//! this costs nothing today and is the difference between conservative and wrong on the day the
-//! instrumentation starts ending lifetimes. `crate::nofree` treats them the same way.
+//! A `meta_end` and a `meta_transfer` drop both halves, and so does inline assembly. Nothing emits
+//! either of the first two yet, so most of this costs nothing today and is the difference between
+//! conservative and wrong on the day the instrumentation starts ending lifetimes. `crate::nofree`
+//! treats them the same way. Assembly is with them rather than with the calls because the argument
+//! below rests on the runtime owning the planes, and a block of assembly can write over one without
+//! the runtime having been asked.
 //!
 //! The two facts nobody had to check for go across a call untouched, and neither is an exception to
 //! the paragraph above because neither is in the set being thrown away. A callee cannot free a
@@ -209,26 +213,26 @@
 //! being trusting. `crate::nofree` works the answer out over the whole module before the pipeline
 //! starts and writes it onto the call site as [`Flags::NOFREE`], because the fact belongs to the
 //! callee and a pass is given one function. Reading it here is reading what the IR says, the same
-//! way the pass reads an opcode. Nothing else about a call is believed: the facts still go across
-//! an unmarked call, a call through an address, and inline assembly.
+//! way the pass reads an opcode. Nothing else about a call is believed: the lifetime facts still go
+//! across an unmarked call, a call through an address, and inline assembly.
 //!
 //! What the strictness still costs is measured rather than guessed. A check that a fact would have
 //! covered if a call had not intervened is counted, so `-fopt-info-missed` says per function what
-//! is left to win. On the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect` that is 4651 bounds
-//! checks at 721 sites, 2813 lifetime checks at 650 sites and 2521 derivation checks at 582 sites,
-//! against 29313 bounds checks and 20797 lifetime checks that survive the whole pipeline.
+//! is left to win. On the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect` that is 3978 bounds
+//! checks at 605 sites, 2679 lifetime checks at 596 sites and 2538 derivation checks at 534 sites,
+//! against 28473 bounds checks and 20423 lifetime checks that survive the whole pipeline.
 //!
-//! # What keeping the bounds half would take
+//! # Why keeping the bounds half is allowed
 //!
-//! The eighth box of tamnd/rucc#1241 asks this pass to stop throwing the bounds facts away, on the
-//! grounds that the lifetime check at the access now compares a version and will refuse the case
-//! the paragraph above is about. It is still open and the reason belongs here rather than in the
-//! issue, because what it turns on is what this file does.
+//! The eighth box of tamnd/rucc#1241 asked this pass to stop throwing the bounds facts away, on the
+//! grounds that the lifetime check at the access compares a version and will refuse the case the
+//! paragraph above is about. It is done and the reason belongs here rather than in the issue,
+//! because what it turns on is what this file does.
 //!
-//! The claim to be made is that a bounds fact may cross a call when every access that then uses it
-//! is guarded by a lifetime check that refuses once the instance has changed. Three things have to
-//! hold for that. The first two do since the runtime started reading the version a recovery found
-//! and started moving the aux with the bytes at a copy, and the third is what the box is waiting on.
+//! The claim is that a bounds fact may cross a call when every access that then uses it is guarded
+//! by a lifetime check that refuses once the instance has changed. Three things have to hold for
+//! that. The first two hold since the runtime started reading the version a recovery found and
+//! started moving the aux with the bytes at a copy, and the third is what `Known::since` is for.
 //!
 //! The first holds. `rucc_safety::check` emits the two checks as a pair off one capability, so the
 //! only question is whether this pass took the lifetime half out again, and there are five ways it
@@ -254,14 +258,40 @@
 //! a pointer stored by code this compiler did not build, and an object a foreign writer has touched
 //! is the case `rucc_safe_rt::layout::Meta::HANDED` already stands apart.
 //!
-//! The third is a hazard the relaxation would introduce rather than one it inherits, and it is
-//! written down here so that whoever comes back to this does not have to find it twice. A lifetime
-//! fact is widened by `widened` out of the bounds facts standing at the time, so bounds facts that
-//! survived a call would widen lifetime facts established after it. A bounds fact saying a range is
-//! inside one instance, taken before a `free` and an allocation of something smaller at the same
-//! address, would then widen a lifetime check that passed on the new instance into a claim that the
-//! whole of the old range is alive. Keeping the bounds half means either not widening with a fact
-//! older than the last call or carrying the age along, and neither is free.
+//! The third is a hazard the relaxation introduces rather than one it inherits, and it is what the
+//! mark is for. A lifetime fact is widened by `widened` out of the bounds facts standing at the
+//! time, so bounds facts that survive a call would otherwise widen lifetime facts established after
+//! it. A bounds fact saying a range is inside one instance, taken before a `free` and an allocation
+//! of something smaller at the same address, would then widen a lifetime check that passed on the
+//! new instance into a claim that the whole of the old range is alive, and the far end of that
+//! range is storage the new instance does not own. So `Known::since` marks where the facts a call
+//! has run over end, `widened` reads only the ones after it, and the marked ones answer a bounds
+//! check and nothing else.
+//!
+//! The derivation rule reads only the unmarked ones too, and that one is caution rather than
+//! necessity. What a `check_deriv` asks is whether two addresses share an instance, and a marked
+//! fact answers the question it was established for rather than that one. Letting it read them
+//! would still refuse every case that matters, because the access through a pointer it wrongly let
+//! through has a lifetime check of its own that the version compare refuses, but the report would
+//! arrive at the access as judgement J1 instead of at the derivation as J2, and a derivation
+//! nothing is ever read through would go unreported. So it reads the unmarked ones and the cost is
+//! counted in the `PAST_A_CALL_DERIV` row.
+//!
+//! What it comes to, on the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect`, before against
+//! after. 414 bounds checks go, which is 28887 down to 28473, and the assembly shrinks by 107
+//! kilobytes. 131 derivation checks arrive, 22754 up to 22885, and they are the other half of the
+//! paragraph above: a bounds check that is removed establishes nothing, so a check the marked fact
+//! answered no longer pushes a fact of its own, and the derivation rule was reading that. Lifetime
+//! checks do not move at all, which is the point. Net it is 283 fewer checks in the object.
+//!
+//! Why it is only 414 is worth reading, because it says where the next piece of work is and it is
+//! not here. A bounds check has to pass the alignment guard before any rule may take it out, and
+//! the guard is only asked once a rule has answered, so the row counting what it costs only counts
+//! checks something was ready to remove. That row goes from 8464 checks to 10729. Those 2265 are
+//! bounds checks a fact that crossed a call now answers and the alignment guard then keeps anyway,
+//! and they are five times the number that got out. The alignment question is `settles` and
+//! `aligned` in this file, and it is the binding constraint on the bounds half now rather than the
+//! call is.
 
 use std::collections::{HashMap, HashSet};
 
@@ -548,9 +578,16 @@ impl Pass for Discharge {
         let mut work = vec![(entry, Scope::default())];
         while let Some((block, mut scope)) = work.pop() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
-                if opaque(func, inst) {
-                    scope.forget();
-                    continue;
+                match opaque(func, inst) {
+                    Some(Opaque::Called) => {
+                        scope.called();
+                        continue;
+                    }
+                    Some(Opaque::Everything) => {
+                        scope.forget();
+                        continue;
+                    }
+                    None => {}
                 }
                 match func[inst].opcode {
                     Opcode::CheckBounds => {
@@ -864,6 +901,15 @@ struct Known {
     /// The ones a call threw away, kept only so that the cost of throwing them away is a number
     /// somebody can read rather than a paragraph somebody has to believe.
     lost: Vec<Fact>,
+    /// Where in [`Known::held`] the facts established since the last call begin.
+    ///
+    /// Everything in front of that index is a fact that was true when it was established and has
+    /// had a call run over it since. For the bounds half those facts still answer a bounds check,
+    /// which is what [`Known::crossed`] is about, and there are two questions they may not answer.
+    /// An index rather than a flag on each fact because nothing ever takes one out of the middle:
+    /// the vector is pushed and emptied and never anything else, so the ones from before the call
+    /// are exactly the ones in front of a mark.
+    since: usize,
 }
 
 impl Known {
@@ -877,17 +923,29 @@ impl Known {
         self.held.iter().any(|fact| reaches(fact, asked))
     }
 
+    /// The facts no call has run over, which is the only kind two of the rules may read.
+    fn fresh(&self) -> &[Fact] {
+        let from = self.since.min(self.held.len());
+        &self.held[from..]
+    }
+
+    /// The facts a call has run over, which is what the cost of not reading them is counted from.
+    fn stale(&self) -> impl Iterator<Item = &Fact> {
+        let upto = self.since.min(self.held.len());
+        self.held[..upto].iter().chain(self.lost.iter())
+    }
+
     /// Whether one thing still standing answers both of these ranges.
     ///
     /// One rather than one each, for the reason [`Known::holds_both`] gives, and the reason does
     /// not change when the ends are ranges instead of addresses.
     fn reaches_both(&self, from: &Reach, to: &Reach) -> bool {
-        self.held.iter().any(|fact| reaches(fact, from) && reaches(fact, to))
+        self.fresh().iter().any(|fact| reaches(fact, from) && reaches(fact, to))
     }
 
     /// Whether something would have answered it before a call came along.
     fn covered_before(&self, asked: &Fact) -> bool {
-        self.lost.iter().any(|fact| covers(fact, asked))
+        self.stale().any(|fact| covers(fact, asked))
     }
 
     /// Whether one thing still standing answers both of these.
@@ -896,17 +954,28 @@ impl Known {
     /// two addresses are each inside some instance say nothing about whether it is the same
     /// instance, and that is the only thing a derivation check wants to know.
     fn holds_both(&self, from: &Fact, to: &Fact) -> bool {
-        self.held.iter().any(|fact| covers(fact, from) && covers(fact, to))
+        self.fresh().iter().any(|fact| covers(fact, from) && covers(fact, to))
     }
 
     /// Whether one would have answered both before a call came along.
     fn held_both_before(&self, from: &Fact, to: &Fact) -> bool {
-        self.lost.iter().any(|fact| covers(fact, from) && covers(fact, to))
+        self.stale().any(|fact| covers(fact, from) && covers(fact, to))
     }
 
     /// Gives up everything, because something happened that this pass cannot see through.
     fn forget(&mut self) {
         self.lost.append(&mut self.held);
+        self.since = 0;
+    }
+
+    /// Keeps everything and marks it as having had a call run over it.
+    ///
+    /// The bounds half only, and the module comment's section on what keeping it takes is the whole
+    /// argument for why that is allowed. In one line: the lifetime check beside the access is still
+    /// there, it compares the version the capability carries against the plane's, and a range that
+    /// was inside one instance is inside that instance still or is about to be refused.
+    fn crossed(&mut self) {
+        self.since = self.held.len();
     }
 }
 
@@ -929,27 +998,46 @@ impl Scope {
         self.bounds.forget();
         self.alive.forget();
     }
+
+    /// Gives up the lifetime facts and keeps the bounds ones, marked as a call having run over them.
+    fn called(&mut self) {
+        self.bounds.crossed();
+        self.alive.forget();
+    }
 }
 
-/// Whether this instruction could do something to memory that this pass cannot account for.
+/// What an instruction the pass cannot see through does to the facts the walk is carrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opaque {
+    /// A call that might free. The lifetime facts go and the bounds facts stay, marked.
+    Called,
+    /// Everything else, which gives up both halves.
+    Everything,
+}
+
+/// Whether this instruction could do something to memory that this pass cannot account for, and
+/// what that means for what the walk is carrying.
 ///
-/// A call is the whole of it, in every spelling, and inline assembly with it. A `tail_call` ends
-/// the block and there is nothing after it to protect, and it is here anyway so that the reason a
-/// fact survives is never that the walk did not think of something.
+/// A call is most of it, in every spelling, and inline assembly with it. A `tail_call` ends the
+/// block and there is nothing after it to protect, and it is here anyway so that the reason a fact
+/// survives is never that the walk did not think of something.
 ///
 /// A call carrying [`Flags::NOFREE`] reaches nothing that ends a lifetime, so there is nothing for
 /// it to have done to the bytes an earlier check was passed on. `crate::nofree` is what put the
 /// flag there and what argues for it.
 ///
 /// A `meta_end` and a `meta_transfer` end a lifetime by saying so, which is the plainest way for a
-/// fact to stop being true, and neither is emitted today.
-fn opaque(func: &Func, inst: Inst) -> bool {
+/// fact to stop being true, and neither is emitted today. Inline assembly is with them rather than
+/// with the calls, because the argument for keeping the bounds half rests on the lifetime check at
+/// the access reading a plane the runtime wrote, and a block of assembly is the one thing in the
+/// IR that can write over a plane without the runtime having been asked.
+fn opaque(func: &Func, inst: Inst) -> Option<Opaque> {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
-            !func[inst].flags.contains(Flags::NOFREE)
+            (!func[inst].flags.contains(Flags::NOFREE)).then_some(Opaque::Called)
         }
-        Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => true,
-        _ => false,
+        Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => Some(Opaque::Everything),
+        _ => None,
     }
 }
 
@@ -1301,11 +1389,19 @@ fn allocated_around(
 /// address computed from it and a wider fact answers more later checks. What that gives is a
 /// lifetime check anywhere in a local discharging every later one in the same local, up to the
 /// first call, which is the shape a function that reads several fields of a local struct has.
+///
+/// Only the bounds facts no call has run over, which is the third of the three things the module
+/// comment's section on keeping the bounds half says have to hold. A range that was inside one
+/// instance before a `free` and an allocation of something smaller at the same address is not
+/// inside one instance after it, so widening a lifetime check that passed on the new instance by
+/// that range would claim the whole of the old one is alive. The fact is still good enough to
+/// answer a bounds check, because the lifetime check beside that access refuses the case, and it is
+/// not good enough to be the reason a lifetime check goes away.
 fn widened(func: &Func, bounds: &Known, asked: Fact) -> Fact {
     if let Some(local) = declared(func, asked.base).filter(|local| covers(local, &asked)) {
         return local;
     }
-    bounds.held.iter().find(|fact| covers(fact, &asked)).copied().unwrap_or(asked)
+    bounds.fresh().iter().find(|fact| covers(fact, &asked)).copied().unwrap_or(asked)
 }
 
 /// The value an address was computed from, and how far past it the address is.
@@ -2170,20 +2266,65 @@ mod tests {
     }
 
     #[test]
-    fn a_check_a_call_stands_between_stays_and_is_counted() {
-        // The conservatism the module comment argues for, and the number that says what it costs.
+    fn a_bounds_check_a_call_stands_between_goes_and_its_lifetime_check_stays() {
+        // The eighth box of tamnd/rucc#1241 and the module comment's section on why it is allowed.
+        // The range the first check established is still one range on the far side of the call, or
+        // the lifetime check at the second access is about to refuse, and that check is still here
+        // to do it because the lifetime facts are still dropped.
         let (mut names, mut func, block, pointer) = blank();
         let mut build = Builder::new(&mut func, block);
-        check(&mut build, pointer, 16);
+        access(&mut build, pointer, 16);
         let callee = names.intern("might_free");
         let signature = build.func().add_signature(Signature::new());
         build.call(callee, signature, &[]);
+        access(&mut build, pointer, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1, "the bounds check crossed the call");
+        assert_eq!(lives(&func), 2, "and the lifetime check did not");
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 0);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_LIVE), 1);
+    }
+
+    #[test]
+    fn a_bounds_check_inline_assembly_stands_between_stays_and_is_counted() {
+        // The other half of the split. A call hands the planes to the runtime and a block of
+        // assembly does not, so this one drops both kinds and the row that says what that costs is
+        // still reachable.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        build.inst(InstData::new(Opcode::InlineAsm), &[]);
         check(&mut build, pointer, 4);
         build.ret(&[]);
         let stats = run(&mut func);
         assert!(!stats.changed());
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_is_not_widened_by_a_range_a_call_ran_over() {
+        // The third of the three things the module comment says have to hold. The sixteen bytes
+        // were one instance before the call and the call may have freed them and made something
+        // smaller in their place, so the lifetime check at the pointer says the new instance is
+        // alive and says nothing at all about the byte twelve further on. Widening by the older
+        // range would discharge the second lifetime check, and the access it guards is the one
+        // that would then land in storage the new instance does not own.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 16);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        live(&mut build, pointer);
+        let field = past(&mut build, pointer, 12);
+        live(&mut build, field);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 2, "the second one is not answered by the first");
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
     }
 
     #[test]
