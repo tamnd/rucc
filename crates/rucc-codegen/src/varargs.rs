@@ -70,6 +70,30 @@
 //! that does not exist yet, so it stays an instruction as far as [`crate::lower`], which builds it
 //! out of the frame the way it builds an `alloca`. The spill that fills the save area is written
 //! there for the same reason.
+//!
+//! # The other kind of list
+//!
+//! Windows has none of that. Its convention counts the two register files as one run of positions,
+//! so an argument's position says which register of either file it is in and the two walks above
+//! are one walk. It also gives every argument exactly one eight byte slot whatever it is: anything
+//! that is not one, two, four or eight bytes travels as the address of a copy the caller owns, and
+//! a float beyond the ones the signature names travels in the general purpose register at its
+//! position as well as in the vector one, because a callee with no prototype has no way to know
+//! which file to look in.
+//!
+//! What that comes to is that every argument a variadic callee was passed is already one contiguous
+//! run of words in the caller's argument area, since the first four of them are homed in the thirty
+//! two bytes of shadow space the caller reserved above the return address and the rest follow.
+//! There is nothing to gather and nowhere to gather it to. So a `va_list` is a `char *` pointing at
+//! the next of those words, `va_start` is one `lea` and one store, and `va_arg` is a load and an
+//! eight byte step with no compare, no branch and no second file. The register save area of the
+//! four field list is, on this convention, the caller's shadow space, and the callee's prologue
+//! writes its leftover argument registers into it rather than into a block of its own.
+//!
+//! An argument that travelled by reference costs one more load and that is the whole of the
+//! difference: the slot holds the address of the copy rather than the copy. Which arguments those
+//! are is a question about the size and nothing else, so the classification the front end put on a
+//! `va_object` is not read here at all.
 
 use rucc_base::float::Format;
 use rucc_ir::{
@@ -86,7 +110,7 @@ pub const FP_OFFSET: i64 = 4;
 pub const OVERFLOW: i64 = 8;
 /// Where the pointer to the bottom of the register save area is.
 pub const SAVE_AREA: i64 = 16;
-/// How many bytes one `va_list` is, which is what a `va_copy` moves.
+/// How many bytes the four field `va_list` is, which is what a `va_copy` of one moves.
 pub const SIZE: u64 = 24;
 /// How wide the slot one vector register is saved in is, which is how wide the register is whatever
 /// this actually writes into it.
@@ -111,10 +135,22 @@ pub struct Area {
 
 impl Area {
     /// The save area a variadic callee under that convention needs.
+    ///
+    /// Two shapes, and what tells them apart is the convention's own answer about how it counts
+    /// argument positions. One that counts the two files apart spills all of both into a block of
+    /// the callee's own frame, which is the psABI's register save area and is what the four field
+    /// list walks. One that counts them as one run homes each register argument in the word of the
+    /// caller's argument area that belongs to its position, and that run of words is the area. The
+    /// vector file has nothing in it there: a float beyond the ones the signature names travels in
+    /// the general purpose register at its position as well, so the copy a walk reads is that one.
     #[must_use]
     pub fn of(conv: &CallRegs) -> Self {
         let ints = u32::try_from(conv.int_args.len()).unwrap_or(0);
         let floats = u32::try_from(conv.sse_args.len()).unwrap_or(0);
+        if conv.shared_positions {
+            let size = conv.word * ints;
+            return Self { floats_at: size, size, counts: (ints, 0), word: conv.word };
+        }
         let floats_at = conv.word * ints;
         Self {
             floats_at,
@@ -150,7 +186,7 @@ impl Area {
 
     /// How many registers of a file the area holds.
     #[must_use]
-    fn holds(self, float: bool) -> u32 {
+    pub fn holds(self, float: bool) -> u32 {
         if float { self.counts.1 } else { self.counts.0 }
     }
 
@@ -172,27 +208,24 @@ impl Area {
 /// so none of them needs to know anything about the frame and all three can be done here.
 /// `va_start` is the one that does need the frame, and [`crate::lower`] has it.
 ///
-/// A convention whose list is not the four field one is left alone entirely, and a function using
-/// one is then refused further down with the message about a rule that does not exist. Windows is
-/// the one such convention here: its list is a plain pointer, its callee spills its four register
-/// arguments into the shadow space the caller already reserved rather than into an area of its own,
-/// and none of the three rewrites below is right for any of that.
+/// A convention whose list is a plain pointer gets the walk the module doc's last section
+/// describes instead, which is the same three rewrites over a list of one field.
 pub fn lists(func: &mut Func, conv: &CallRegs) {
-    if conv.shared_positions {
-        return;
-    }
     let area = Area::of(conv);
+    let word = u64::from(conv.word);
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in found {
-        match func[inst].opcode {
-            Opcode::VaArg => next(func, inst, area),
-            Opcode::VaObject => object(func, inst, area),
-            Opcode::VaCopy => copy(func, inst),
+        match (func[inst].opcode, conv.shared_positions) {
+            (Opcode::VaArg, false) => next(func, inst, area),
+            (Opcode::VaArg, true) => value(func, inst, word),
+            (Opcode::VaObject, false) => object(func, inst, area),
+            (Opcode::VaObject, true) => held(func, inst, word),
+            (Opcode::VaCopy, shared) => copy(func, inst, if shared { word } else { SIZE }),
             // Nothing at all, which is what the psABI says it is. The instruction was still worth
             // emitting, because it says the list stops being read here, and here is where that
             // stops being worth saying.
-            Opcode::VaEnd => func.remove_inst(inst),
+            (Opcode::VaEnd, _) => func.remove_inst(inst),
             _ => {}
         }
     }
@@ -714,18 +747,137 @@ fn part(align: u32, offset: u64) -> u32 {
     u32::try_from(1_u64 << offset.trailing_zeros()).unwrap_or(align).min(align)
 }
 
+/// Whether an argument of that size travelled as the address of a copy rather than as itself.
+///
+/// The platform's rule stated as a size and nothing else: an argument that is not one, two, four or
+/// eight bytes is passed as a pointer to a copy the caller made, whatever the argument is made of.
+/// A three byte structure is one and so is a sixteen byte float, and no classification is asked
+/// about either, which is why the slots the front end put on a `va_object` go unread on this side.
+fn by_reference(size: u64) -> bool {
+    !matches!(size, 1 | 2 | 4 | 8)
+}
+
+/// The slot the walk is at, with the list stepped on past it, written in front of an instruction.
+///
+/// One word whatever is in the slot, because this convention gives every argument exactly one and
+/// pays for the ones that do not fit by passing their address instead. So there is nothing to round
+/// up, nothing to ask and nothing to branch on.
+fn slot(func: &mut Func, inst: Inst, list: Value, word: u64) -> Value {
+    let here = read(func, inst, list, Type::PTR, word);
+    let step = field(func, inst, here, i64::try_from(word).unwrap_or(0));
+    let mem = func.add_mem(info(word, u32::try_from(word).unwrap_or(1)));
+    let args = func.push_values(&[step, list]);
+    let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) };
+    let span = func.span(inst);
+    let made = func.create_inst(data, &[], span);
+    func.insert_before(made, inst);
+    here
+}
+
+/// A load written in front of an instruction, at the alignment its own width gives it.
+fn read(func: &mut Func, inst: Inst, from: Value, ty: Type, size: u64) -> Value {
+    let mem = func.add_mem(info(size, u32::try_from(size).unwrap_or(1)));
+    let args = func.push_values(&[from]);
+    let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) };
+    ahead(func, inst, data, ty)
+}
+
+/// How many bytes of a scalar the one field walk moves, or nothing for a type it is not right
+/// about.
+///
+/// A pointer has no width of its own here and is as wide as the convention's word, which is the one
+/// question this has to ask the target rather than the type.
+///
+/// Anything wider than a general purpose register is left alone, which is a `long double`, a
+/// `_Float128` and an `__int128`. The convention travels all three as the address of a copy, and
+/// reading one back that way would be reading through an address nobody wrote: a wide scalar is
+/// passed as itself here today whether or not the signature names it, which is tamnd/rucc#1331 and
+/// is wrong for a named argument first. So they stay as they are and are refused by name further
+/// down, which is where the four field walk leaves the last of them too.
+fn travels(ty: Type, word: u64) -> Option<u64> {
+    if !ty.is_scalar() || !(ty.is_int() || ty.is_float() || ty.is_ptr()) {
+        return None;
+    }
+    if ty.is_ptr() {
+        return Some(word);
+    }
+    (ty.bits() <= 64).then(|| u64::from(ty.bits().div_ceil(8)))
+}
+
+/// One `va_arg` on a convention whose list is a plain pointer, as the load at the slot the walk is
+/// at.
+///
+/// The instruction becomes that load rather than being replaced by one, for the reason the
+/// branching walk gives: the value the rest of the function reads stays the value it already read,
+/// so nothing has to be substituted anywhere. Everything the load needs is written in front of it,
+/// and since nothing here branches the instruction does not move and the block is not cut.
+///
+/// Every scalar [`travels`] answers for is one the convention passes whole, so the slot holds the
+/// value and not an address, and the load is the whole of it. The object walk below is where the
+/// other case is.
+fn value(func: &mut Func, inst: Inst, word: u64) {
+    let Some(result) = func[inst].first_result else { return };
+    let Some(&list) = func[func[inst].args].first() else { return };
+    let ty = func[result].ty;
+    let Some(bytes) = travels(ty, word) else { return };
+
+    let from = slot(func, inst, list, word);
+    let mem = func.add_mem(info(bytes, u32::try_from(bytes).unwrap_or(1)));
+    let args = func.push_values(&[from]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Load;
+    data.args = args;
+    data.extra = Extra::Mem(mem);
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Load));
+}
+
+/// One `va_object` on the same convention, as the address the object can be read from.
+///
+/// The slot itself for an object of a width the convention passes whole, and what the slot holds
+/// for every other one, which is the address of the copy the caller made. That is the same question
+/// [`by_reference`] answers for a scalar and it is asked of the size alone, so an object of three
+/// bytes and an object of a hundred take the two different paths for the one reason.
+///
+/// The address is answered rather than a copy of the object, which is what the instruction is for:
+/// the object is already somewhere addressable either way, and the copy the C standard describes is
+/// the assignment the caller of `va_arg` wrote.
+fn held(func: &mut Func, inst: Inst, word: u64) {
+    let Extra::VaObject(at) = func[inst].extra else { return };
+    let MemInfo { size, .. } = func[func[at].mem];
+    let Some(&list) = func[func[inst].args].first() else { return };
+    if func[inst].first_result.is_none() {
+        return;
+    }
+
+    let here = slot(func, inst, list, word);
+    let from = if by_reference(size) { read(func, inst, here, Type::PTR, word) } else { here };
+    // Through an integer and back, which is what the branching walk's answer is too and is free
+    // either way: the two are the same bits on this machine and nothing is written for the pair.
+    let args = func.push_values(&[from]);
+    let data = InstData { args, ..InstData::new(Opcode::PtrToInt) };
+    let address = ahead(func, inst, data, Type::int(64));
+    let args = func.push_values(&[address]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::IntToPtr;
+    data.args = args;
+    data.extra = Extra::None;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::IntToPtr));
+}
+
 /// One `va_copy`, as the fields of one list moved into another.
 ///
-/// A list is those fields and holds nothing anywhere else, so copying it is copying them, and three
-/// words move as three words rather than as a call to `memcpy`, which is a name this compiler
-/// cannot emit yet and would be the wrong answer for three words in any case.
+/// A list is those fields and holds nothing anywhere else, so copying it is copying them, and a
+/// handful of words move as a handful of words rather than as a call to `memcpy`, which is a name
+/// this compiler cannot emit yet and would be the wrong answer for three words in any case. How
+/// many words there are is the convention's answer: three for the four field list, since the two
+/// offsets share one, and one for the list that is a pointer.
 ///
 /// Every read is built before any write, so that a list copied onto itself, which is legal and
 /// useless, moves what it held rather than what it has just been given.
-fn copy(func: &mut Func, inst: Inst) {
+fn copy(func: &mut Func, inst: Inst, bytes: u64) {
     let [into, from] = func[func[inst].args] else { return };
     let mut moved = Vec::new();
-    for word in 0..SIZE / 8 {
+    for word in 0..bytes / 8 {
         let step = i64::try_from(word * 8).unwrap_or(0);
         let there = field(func, inst, from, step);
         let mem = func.add_mem(info(8, 8));
@@ -745,8 +897,11 @@ fn copy(func: &mut Func, inst: Inst) {
     func.remove_inst(inst);
 }
 
-/// The address of a field of a list, written in front of an instruction, or the list itself for the
-/// field at the front of it.
+/// The address that far past a pointer, written in front of an instruction, or the pointer itself
+/// for no distance at all.
+///
+/// A field of a list for the walk that has four of them, and the slot behind this one for the walk
+/// whose list is a pointer.
 fn field(func: &mut Func, inst: Inst, list: Value, at: i64) -> Value {
     if at == 0 {
         return list;
@@ -1178,15 +1333,79 @@ mod tests {
         }
     }
 
-    /// Windows has a list of a different shape and an algorithm to match, and none of the rewrites
-    /// here is right for any of it. Leaving it alone is what makes the function refused by name
-    /// further down rather than compiled into a walk over an area that was never filled in.
+    /// Windows describes a list as one pointer, and its walk is that pointer stepped on, so there is
+    /// nothing to compare and nowhere else to look: the argument is at the pointer, the pointer
+    /// moves on by a word, and all of it is straight line.
     #[test]
-    fn a_convention_whose_list_is_not_this_one_is_left_alone() {
+    fn a_windows_va_arg_is_the_word_at_the_pointer_and_a_step() {
         let (mut names, mut func) = built(Opcode::VaArg, Type::int(32), 1);
-        let before = printed(&func, &mut names);
         lists(&mut func, &WIN64);
-        assert_eq!(printed(&func, &mut names), before);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_arg"), "the va_arg is gone: {text}");
+        assert!(!text.contains("br_if"), "and nothing was asked: {text}");
+        assert_eq!(func.blocks().count(), 1, "so no block was made: {text}");
+        assert!(text.contains("iconst.i64 8"), "the step is one word: {text}");
+        assert_eq!(text.matches("= load").count(), 2, "the list and the argument: {text}");
+        assert_eq!(text.matches("store").count(), 1, "and the list is written back: {text}");
+    }
+
+    /// A pointer is as wide as the convention says a word is, since a type carries no width for
+    /// one. Reading it as no bytes at all would be every string a `printf` was handed.
+    #[test]
+    fn a_windows_pointer_argument_is_the_whole_word() {
+        let (mut names, mut func) = built(Opcode::VaArg, Type::PTR, 1);
+        lists(&mut func, &WIN64);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches("= load").count(), 2, "the list and the argument: {text}");
+        assert_eq!(text.matches("size 8").count(), 3, "and all three are words: {text}");
+    }
+
+    /// The size is the whole of what says where a Windows argument is, so an object of eight bytes
+    /// is in the slot and the answer is the slot's own address, and one of twenty four is elsewhere
+    /// and the answer is what the slot holds. Neither of them asks about the classification.
+    #[test]
+    fn a_windows_object_is_in_the_slot_or_behind_it_according_to_its_size() {
+        for (size, loads) in [(8, 1), (24, 2)] {
+            let (mut names, mut func) = object(size, 8, &[]);
+            lists(&mut func, &WIN64);
+            valid(&func, &mut names);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("va_object"), "{text}");
+            assert_eq!(func.blocks().count(), 1, "no branch, so no new block: {text}");
+            assert_eq!(text.matches("= load").count(), loads, "{size} bytes: {text}");
+            assert!(!text.contains("iconst.i64 24"), "the step is a word either way: {text}");
+        }
+    }
+
+    /// A list that is one pointer is copied by moving one pointer, and a copy moving three words
+    /// would read two the caller never wrote and write them somewhere it does not own.
+    #[test]
+    fn a_windows_va_copy_moves_the_one_word_a_list_is() {
+        let (mut names, mut func) = built(Opcode::VaCopy, Type::VOID, 2);
+        lists(&mut func, &WIN64);
+        valid(&func, &mut names);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("va_copy"), "{text}");
+        assert_eq!(text.matches("load.i64").count(), 1, "{text}");
+        assert_eq!(text.matches("store").count(), 1, "{text}");
+    }
+
+    /// A scalar wider than a general purpose register is left alone, because the convention travels
+    /// one as the address of a copy and nothing here writes that address yet, which is
+    /// tamnd/rucc#1331. Reading the slot as the value would be reading the low eight bytes of a
+    /// `long double`, and reading it as an address would be following a float.
+    #[test]
+    fn a_wide_scalar_is_left_alone_on_windows() {
+        let wide =
+            [Type::int(128), Type::float(rucc_ir::Float::F80), Type::float(rucc_ir::Float::F128)];
+        for ty in wide {
+            let (mut names, mut func) = built(Opcode::VaArg, ty, 1);
+            let before = printed(&func, &mut names);
+            lists(&mut func, &WIN64);
+            assert_eq!(printed(&func, &mut names), before, "{ty:?}");
+        }
     }
 
     /// A width the algorithm is not right about is left alone for the same reason. An `__int128`

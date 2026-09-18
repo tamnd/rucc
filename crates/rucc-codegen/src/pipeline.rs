@@ -102,7 +102,7 @@ pub struct Machine {
 /// all on the stack, which is tamnd/rucc#913. `rewrite` answers that one by borrowing a register
 /// and putting back what was in it, which costs two memory accesses at the instruction that wanted
 /// it and nothing anywhere else.
-pub(crate) const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
+const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
 /// How many of each class are held back.
 const SCRATCH_COUNT: usize = SCRATCH.len();
@@ -421,10 +421,7 @@ pub fn compile_recording(
         // function that calls it is given one whether or not anything else asked. A function that
         // asked where its own frame is has the same claim on one, and for a plainer reason: the
         // register is the answer.
-        frame_pointer: flags.frame_pointer
-            || profile == Profile::Late
-            || stack.walks_frames
-            || stack.saves_place,
+        frame_pointer: flags.frame_pointer || profile == Profile::Late || stack.walks_frames,
         red_zone: flags.red_zone,
         protect: guard.is_some(),
         // A protected function calls the one that does not come back, on the arm where the check

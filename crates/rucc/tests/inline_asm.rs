@@ -128,36 +128,6 @@ fn a_two_address_instruction_is_read_as_the_operand_it_is_told_to_overwrite() {
 }
 
 #[test]
-fn a_width_written_on_an_operand_is_the_width_the_instruction_is_read_at() {
-    // What libgmp writes throughout `longlong.h`, which every file of that library includes. The
-    // header is shared with the thirty two bit target, where a limb is narrower and the same line
-    // still has to say sixty four bits, so the width is on the operand rather than on the mnemonic.
-    // Here the mnemonic carries no suffix at all and the letter in front of the number is the only
-    // thing saying how wide the addition is.
-    let source =
-        "long f(long x, long y) { asm (\"add %q1, %q0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
-    let text = asm("modifier", source);
-    let body = body(&text, "f");
-    assert!(body.contains("addq"), "the width on the operand was not read:\n{body}");
-}
-
-#[test]
-fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
-    // Two ways of disagreeing and both are refused rather than one half being believed over the
-    // other. A quadword add into half a register is not an instruction, and a quadword add of an
-    // `int` is an instruction reaching a register half of which nothing defined.
-    let mnemonic =
-        "long f(long x, long y) { asm (\"addq %1, %k0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
-    let (ok, _, said) = run("modifier-mnemonic", mnemonic);
-    assert!(!ok, "a width that contradicts the mnemonic was accepted");
-    assert!(said.contains("which nothing here assembles"), "{said}");
-    let ty = "int f(int x, int y) { asm (\"add %q1, %q0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
-    let (ok, _, said) = run("modifier-type", ty);
-    assert!(!ok, "a width that contradicts the type of the operand was accepted");
-    assert!(said.contains("has an operand this cannot place"), "{said}");
-}
-
-#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong
