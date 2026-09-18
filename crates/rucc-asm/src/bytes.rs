@@ -37,7 +37,7 @@
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
-use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
+use rucc_target::{PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
 use rucc_object::{Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
@@ -151,11 +151,11 @@ pub fn assemble(
             patch,
         });
     }
-    // Only where something reads it. The other two formats answer the same question their own way,
-    // and a DWARF table under a name their linker does not know is a section nothing looks at.
-    if unwind && target.object_format == ObjectFormat::Elf {
+    // In whichever of the two shapes the target reads, which is what decides whether a prologue
+    // this cannot describe is a refusal or is nothing at all. See [`unwind::table`].
+    if unwind {
         if let Some(conv) = target.call_regs {
-            text.unwind = unwind::table(&text.funcs, &rows, conv);
+            text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format)?;
         }
     }
     Ok(text)
@@ -356,10 +356,13 @@ impl Assembler<'_> {
                 let at = match kind {
                     Reference::Call => holes.dest,
                     Reference::Data | Reference::Got | Reference::Thread => holes.rip,
-                    // An address written into an image rather than reached by an instruction.
-                    // Nothing above produces one, because every reference an instruction makes
-                    // is a distance from where the instruction ends.
-                    Reference::Address { .. } => unreachable!("an instruction wanting an address"),
+                    // An address written into an image rather than reached by an instruction, and
+                    // how far something is from the front of one, which is what a table of data
+                    // holds. Nothing above produces either, because every reference an instruction
+                    // makes is a distance from where the instruction ends.
+                    Reference::Address { .. } | Reference::Image => {
+                        unreachable!("an instruction wanting an address")
+                    }
                 };
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
                 let addend = disp - i64::try_from(end - at).expect("an instruction this long");

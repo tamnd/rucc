@@ -964,6 +964,22 @@ mod tests {
         assert_eq!(WIN64.dwarf(GPR, RCX), Some(2));
     }
 
+    /// The other way round, which is what a table in the machine's own numbering is written from.
+    /// Every one of the sixteen comes back, and the four the two orders disagree about come back as
+    /// the register that started the round trip rather than as the one with the same number.
+    #[test]
+    fn a_dwarf_number_leads_back_to_the_register_it_was_given_to() {
+        for reg in [RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R15] {
+            let number = SYSV.dwarf(GPR, reg).expect("a general purpose register has a column");
+            assert_eq!(SYSV.machine(GPR, number), Some(reg));
+        }
+        assert_eq!(SYSV.machine(GPR, 1), Some(RDX));
+        assert_eq!(SYSV.machine(GPR, 2), Some(RCX));
+        assert_eq!(SYSV.machine(XMM, 17), Some(xmm(0)));
+        assert_eq!(SYSV.machine(GPR, 16), None, "the return address is not a register here");
+        assert_eq!(SYSV.machine(X87, 0), None, "the x87 stack has no column to come back from");
+    }
+
     #[test]
     fn the_file_gives_no_name_to_two_registers() {
         assert_eq!(REGS.duplicate(), None);

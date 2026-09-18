@@ -41,6 +41,9 @@ use crate::section::Reference;
 /// Nothing for the two table slots. A global offset table is not how this platform reaches a symbol
 /// it does not define, and a thread-local variable is reached through a different mechanism again,
 /// so a file wanting either is a file this cannot write and says so.
+///
+/// The last is the one relocation here that ELF has nothing to match: four bytes holding how far
+/// something is from the front of the image, which is what every field of an unwind table is.
 pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType> {
     Some(match reference {
         Reference::Call | Reference::Data if after <= 5 => {
@@ -48,6 +51,7 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         }
         Reference::Address { bytes: 8 } => pe::IMAGE_REL_AMD64_ADDR64,
         Reference::Address { bytes: 4 } => pe::IMAGE_REL_AMD64_ADDR32,
+        Reference::Image => pe::IMAGE_REL_AMD64_ADDR32NB,
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
         Reference::Address { .. } => return None,
     })
@@ -66,6 +70,22 @@ pub(crate) fn reloc(reference: Reference, after: u8) -> Option<RelocationFlags> 
 /// section headers asked for, so a pointer that needs one lives in ordinary read only data and is
 /// written to anyway, which is where the linker and every other compiler on the platform put it.
 pub(crate) const REL_RO_LOCAL: Option<&str> = None;
+
+/// What the unwind table is called here, and what it is aligned to.
+///
+/// One fixed row per function, which the linker sorts by address so that the runtime can find the
+/// row for a return address by binary search. Four, because a row is three four byte fields.
+///
+/// The name is the platform's and the linker matches on it, so it is not a choice: the directory
+/// entry telling the runtime where the table is is built out of whatever landed in `.pdata`.
+pub(crate) const FUNCTIONS: (&str, u64) = (".pdata", 4);
+
+/// What the second half of the unwind table is called, and what it is aligned to.
+///
+/// What the rows point at, which is the description of each prologue. A second section rather than
+/// more fields, because a row is a fixed size and a description is as long as the prologue it is
+/// about.
+pub(crate) const CODES: (&str, u64) = (".xdata", 4);
 
 /// Nothing, which is what this format says about the stack being executable.
 ///

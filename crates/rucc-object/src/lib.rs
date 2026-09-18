@@ -56,11 +56,13 @@
 //! number rather than a place. Both go through the same writer underneath, so there is still one
 //! place that knows how a file is laid out.
 //!
-//! What a Windows object does not yet carry is the unwind table, which is `.pdata` and `.xdata`
-//! there rather than the `.eh_frame` ELF has, so a file whose functions have unwind records is
-//! refused for COFF. Thread-local storage, a reference through a global offset table and a record
-//! of where a patcher's room is are refused there as well, each being something that format has no
-//! way to write rather than something not written yet.
+//! An unwind table is written for both, and the two formats want it laid out differently: ELF has
+//! one section of records that each carry their own codes, and Windows has a table of fixed rows in
+//! `.pdata` pointing at the descriptions in `.xdata`. Both come in as bytes and relocations, because
+//! what a record is is the platform's answer and the layer that knows what a frame did is the one
+//! that can say it. Thread-local storage, a reference through a global offset table and a record of
+//! where a patcher's room is are refused for COFF, each being something that format has no way to
+//! write rather than something not written yet.
 //!
 //! Mach-O is not written yet. It waits on the target that needs it.
 //!

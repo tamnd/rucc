@@ -134,6 +134,21 @@ pub enum Error {
         /// The name it defines, as the C program spelled it.
         name: String,
     },
+    /// A prologue the target's unwind table has no way to describe.
+    ///
+    /// ELF carries a little program per function and can say anything an instruction did to the
+    /// frame. Windows carries a fixed list of codes instead, each one of a handful of shapes a
+    /// prologue is allowed to have, and a prologue outside that list has no spelling there. The
+    /// one this compiler writes that does not fit is the frame pointer form, which establishes the
+    /// pointer before it takes the frame, so the table is refused rather than written describing a
+    /// frame of the wrong size. A build that does not want a table at all is the way past it, which
+    /// is `-fno-asynchronous-unwind-tables -fno-unwind-tables`.
+    Frame {
+        /// The function it turned up in.
+        func: String,
+        /// What about its prologue, already formatted.
+        why: String,
+    },
     /// A piece of an initializer nothing here can write down.
     Image {
         /// The variable it is part of.
@@ -166,6 +181,9 @@ impl fmt::Display for Error {
             }
             Error::IFunc { name } => {
                 write!(f, "'{name}' is an ifunc, which this compiler does not write yet")
+            }
+            Error::Frame { func, why } => {
+                write!(f, "'{func}' has {why}, which no unwind table here can describe")
             }
             Error::Image { name, why } => {
                 write!(f, "the initializer of '{name}' has {why} in it, which cannot be written")
