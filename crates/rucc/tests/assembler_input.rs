@@ -218,6 +218,52 @@ fn the_shapes_a_hand_written_library_reaches_memory_with_give_the_right_answers(
 }
 
 #[test]
+fn the_ways_a_hand_written_file_says_a_thing_are_read_and_mean_what_they_say() {
+    // The reader's half of the same idea, and the same reason for running it rather than reading
+    // it: each of these is a way of writing something the compiler's own output never writes that
+    // way, so getting one wrong produces an instruction that assembles and is the wrong one.
+    //
+    // `scale` shifts left under the other name of the instruction, with a count in `%cl`, which is
+    // the one place on this machine where two registers of different widths on a line is not a
+    // mistake. `third` reaches the third word of an array through a displacement that says what it
+    // is made of rather than what it comes to. `lowbit` puts a prefix in front of an instruction
+    // with a semicolon between them, which is two statements and one byte in front of the other.
+    // `total` walks an array with numbered local labels, going back to `1:` and on to `2:`, and
+    // `bigger` writes `1:` a second time to show that each writing is its own place. `fetch` reads
+    // a variable through the global offset table, which is a relocation the linker has to satisfy
+    // rather than a distance anything here can work out.
+    let dir = dir("reader");
+    let hot = "\t.data\n\t.globl slot\nslot:\n\t.quad 7\n\t.text\n\t.globl scale\n\t.type scale, \
+               @function\nscale:\n\tmovq %rdi, %rax\n\tmovl %esi, %ecx\n\tsal %cl, %rax\n\tret\n\t\
+               .size scale, .-scale\n\t.globl third\n\t.type third, @function\nthird:\n\tmovq \
+               8+8(%rdi), %rax\n\tret\n\t.size third, .-third\n\t.globl lowbit\n\t.type lowbit, \
+               @function\nlowbit:\n\trep;bsf %rdi, %rax\n\tret\n\t.size lowbit, .-lowbit\n\t.globl \
+               total\n\t.type total, @function\ntotal:\n\txorl %eax, %eax\n\ttestq %rsi, \
+               %rsi\n\tjz 2f\n1:\n\taddq (%rdi), %rax\n\taddq $8, %rdi\n\tdecq %rsi\n\tjnz \
+               1b\n2:\n\tret\n\t.size total, .-total\n\t.globl bigger\n\t.type bigger, \
+               @function\nbigger:\n\tmovq %rdi, %rax\n\tcmpq %rsi, %rax\n\tjae 1f\n\tmovq %rsi, \
+               %rax\n1:\n\tret\n\t.size bigger, .-bigger\n\t.globl fetch\n\t.type fetch, \
+               @function\nfetch:\n\tmovq slot@GOTPCREL(%rip), %rax\n\tmovq (%rax), %rax\n\tret\n\t\
+               .size fetch, .-fetch\n";
+    write(&dir, "hot.s", hot);
+    let main = "#include <stdint.h>\nextern uint64_t slot;\nextern uint64_t scale(uint64_t x, int \
+                by);\nextern uint64_t third(const uint64_t *p);\nextern uint64_t lowbit(uint64_t \
+                x);\nextern uint64_t total(const uint64_t *p, long n);\nextern uint64_t \
+                bigger(uint64_t a, uint64_t b);\nextern uint64_t fetch(void);\nint main(void) {\n  \
+                if (scale(3, 4) != 48) return 1;\n  if (scale(1, 63) != 0x8000000000000000UL) \
+                return 2;\n  uint64_t p[3] = {10, 20, 30};\n  if (third(p) != 30) return 3;\n  if \
+                (lowbit(8) != 3) return 4;\n  if (lowbit(0x100000000UL) != 32) return 5;\n  if \
+                (total(p, 3) != 60) return 6;\n  if (total(p, 0) != 0) return 7;\n  if (bigger(4, \
+                9) != 9) return 8;\n  if (bigger(9, 4) != 9) return 9;\n  if (fetch() != 7) return \
+                10;\n  if (slot != 7) return 11;\n  return 42;\n}\n";
+    write(&dir, "main.c", main);
+    let (ok, said) = run(&dir, &["main.c", "hot.s", "-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
+}
+
+#[test]
 fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line() {
     // Refusing it is the whole design of the reader: an assembler that skipped what it did not
     // recognise would write an object that links, and what would be wrong with it is a run of

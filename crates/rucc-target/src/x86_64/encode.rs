@@ -1254,6 +1254,21 @@ static ENCODINGS: &[Encoding] = &[
     // No arguments, so no addressing byte and no REX, and the size is `Long` only because a row
     // has to name one and `Long` is the size that writes no prefix at all.
     bytes("lock", &NO_ARGS, Long, &[0xF0], NO_MODRM, NO_IMM),
+    // The repeat prefixes, which are rows of their own for the same reason the lock prefix is one.
+    // A string instruction behind one of these runs until `rcx` reaches nothing, and the two byte
+    // values are the two answers the comparing forms stop on, which is why the equal spelling and
+    // the plain one are the same byte: the plain one is only ever written in front of an
+    // instruction that does not compare, where there is nothing for the condition to mean.
+    //
+    // A library written by hand also puts one of these in front of an instruction that is not a
+    // string instruction at all, to ask a newer processor for the faster of two answers to the same
+    // question while an older one ignores the byte entirely. That is the same byte in front of the
+    // same instruction either way, so nothing here has to know which of the two it is being asked.
+    bytes("rep", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repe", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repz", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
+    bytes("repne", &NO_ARGS, Long, &[0xF2], NO_MODRM, NO_IMM),
+    bytes("repnz", &NO_ARGS, Long, &[0xF2], NO_MODRM, NO_IMM),
     // Compare and exchange, which is the one instruction on this machine that reads a register the
     // program did not name: it compares what is at the address against `rax` and puts what it
     // found there whichever way the comparison went. The byte form is one opcode below the rest,
@@ -2552,6 +2567,14 @@ mod tests {
         assert_eq!(hex("movsw", &[]), "66 a5");
         assert_eq!(hex("movsl", &[]), "a5");
         assert_eq!(hex("movsq", &[]), "48 a5");
+        // And the prefix that makes the loop, which is one byte with three spellings and a second
+        // byte with two, because the condition the name carries is read by the instruction behind
+        // it rather than by the prefix.
+        assert_eq!(hex("rep", &[]), "f3");
+        assert_eq!(hex("repe", &[]), "f3");
+        assert_eq!(hex("repz", &[]), "f3");
+        assert_eq!(hex("repne", &[]), "f2");
+        assert_eq!(hex("repnz", &[]), "f2");
     }
 
     #[test]

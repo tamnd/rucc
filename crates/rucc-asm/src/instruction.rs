@@ -56,6 +56,29 @@ pub(crate) enum Sort {
     Branch,
     /// A datum reached from the instruction pointer, which is what `message(%rip)` is.
     Near,
+    /// An entry in the global offset table, which is what `message@GOTPCREL(%rip)` is. The bytes
+    /// hold the distance to a word the linker makes and fills with the address, so the instruction
+    /// loads the address rather than computing it, and what it names has to be relocated even when
+    /// this file defines it, since the entry is somewhere else whatever the name turns out to be.
+    Table,
+    /// The offset of a thread-local variable from the thread pointer, which is what
+    /// `message@GOTTPOFF(%rip)` is and is a relocation for the same reason.
+    Thread,
+}
+
+/// The name in a displacement, and which of the three ways of reaching it the suffix asks for.
+///
+/// A bare name is the datum itself. `@GOTPCREL` and `@GOTTPOFF` are the two suffixes this compiler
+/// writes, and reading them back is what lets a file it emitted be assembled by it.
+fn reached(named: &str) -> Result<(String, Sort), String> {
+    let Some((name, how)) = named.split_once('@') else {
+        return Ok((named.to_owned(), Sort::Near));
+    };
+    match how {
+        "GOTPCREL" => Ok((name.to_owned(), Sort::Table)),
+        "GOTTPOFF" => Ok((name.to_owned(), Sort::Thread)),
+        _ => Err(format!("'@{how}' is not a way of reaching something this compiler reads")),
+    }
 }
 
 /// One instruction, written.
@@ -115,7 +138,18 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             ImmSize::Cb => 1,
             _ => 4,
         };
-        wanted.push(Hole { at, width, name: name.clone(), sort: Sort::Branch });
+        // `@PLT` asks for the stub a call to another object's name may go through, which is the
+        // relocation a branch gets here whether the file asks or not. So the suffix is nothing to
+        // do and it is not part of the name: leaving it on would put a symbol in the table that
+        // nothing anywhere defines and the link would fail on it.
+        let name = match name.split_once('@') {
+            None => name.clone(),
+            Some((name, "PLT")) => name.to_owned(),
+            Some((_, how)) => {
+                return Err(format!("'@{how}' is not a way of reaching somewhere to go"));
+            }
+        };
+        wanted.push(Hole { at, width, name, sort: Sort::Branch });
     }
     if let Some(at) = holes.rip {
         // Only when the source put a name there. `8(%rip)` is a number the machine counts from the
@@ -124,8 +158,9 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             Operand::Mem(_, Some(name)) => Some(name.clone()),
             _ => None,
         });
-        if let Some(name) = named {
-            wanted.push(Hole { at, width: 4, name, sort: Sort::Near });
+        if let Some(named) = named {
+            let (name, sort) = reached(&named)?;
+            wanted.push(Hole { at, width: 4, name, sort });
         }
     }
     Ok(Written { bytes, holes: wanted })
@@ -161,7 +196,7 @@ fn spelled(
             return Ok((name.clone(), row));
         }
     }
-    if let Some(width) = stated(operands)? {
+    if let Some(width) = stated(word, operands)? {
         let letter = match width {
             Width::Byte => 'b',
             Width::Word => 'w',
@@ -214,6 +249,14 @@ const CONDITIONS: &[(&str, &str)] = &[
 /// a prefix and a condition and, for a conditional move, a width letter behind it. Both readings of
 /// the tail are tried because `jnb` ends in a letter that is also a width and is not one.
 fn aliased(word: &str) -> Option<String> {
+    // Shifting left arithmetically and shifting left logically are one instruction under two
+    // names, because the two differ only in what is put back at the bottom and neither puts
+    // anything back at the bottom. gas takes both and the encoder knows one.
+    if let Some(rest) = word.strip_prefix("sal") {
+        if rest.is_empty() || matches!(rest, "b" | "w" | "l" | "q") {
+            return Some(format!("shl{rest}"));
+        }
+    }
     let (prefix, rest) = ["cmov", "set", "j"]
         .iter()
         .find_map(|prefix| word.strip_prefix(prefix).map(|rest| (*prefix, rest)))?;
@@ -227,13 +270,23 @@ fn aliased(word: &str) -> Option<String> {
     })
 }
 
+/// The instructions whose first operand is a count and says nothing about how wide they are.
+///
+/// A shift takes its count in `cl` and nowhere else, so `shr %cl, %rax` names a byte and eight
+/// bytes in one line and is not a mistake: the byte is where the count lives and the instruction is
+/// eight bytes wide. Every other instruction on this machine that names two registers of different
+/// widths says so in the mnemonic, which is why disagreement is an error anywhere but here.
+const COUNTED: &[&str] = &["shl", "shr", "sar", "sal", "rol", "ror", "rcl", "rcr", "shld", "shrd"];
+
 /// How wide the operands say the instruction is, when they say.
 ///
 /// Every register named has to agree, since two that disagree are either a mnemonic that already
-/// carries its width, which was tried before this, or a line no assembler would take.
-fn stated(operands: &[Operand]) -> Result<Option<Width>, String> {
+/// carries its width, which was tried before this, or a shift counted in `cl`, or a line no
+/// assembler would take.
+fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
     let mut width = None;
-    for operand in operands {
+    let counted = COUNTED.contains(&word) && operands.len() > 1;
+    for operand in operands.iter().skip(usize::from(counted)) {
         let said = match operand {
             Operand::Reg(_, width) => *width,
             // A byte and no wider, and the mnemonic that names one never needs a letter, so this
@@ -357,7 +410,7 @@ fn address(text: &str) -> Result<Operand, String> {
     // relocation against a place rather than against a distance and this does not write one.
     let mut named = None;
     if !front.is_empty() {
-        match number(front) {
+        match displacement(front) {
             Ok(value) => {
                 addr.disp = i32::try_from(value).map_err(|_| {
                     format!("'{front}' does not fit in the four bytes of an address")
@@ -422,6 +475,34 @@ fn whole(text: &str) -> Result<PhysReg, String> {
 }
 
 /// A number written the way an assembler writes one.
+/// The displacement of an address, which is numbers added together as often as it is one number.
+///
+/// gas takes a whole expression in front of the bracket and a file written by hand uses that to
+/// write a constant as the things it is made of rather than as the total: `56+8(%rsp)` is an offset
+/// into a frame with the return address that was pushed on top of it counted in, and the reader of
+/// that file is meant to see both halves. Folding them here is the whole of it, since what comes
+/// out is a number either way and only a name in a displacement needs anything more.
+///
+/// Numbers and nothing else. A name here is left alone and refused further along, so the message
+/// about it stays the one about a relocation this does not write.
+fn displacement(text: &str) -> Result<i64, String> {
+    let text = text.trim();
+    let mut total: i64 = 0;
+    let mut sign: i64 = 1;
+    let mut start = 0usize;
+    for (at, ch) in text.char_indices() {
+        // Not at the start of a term, where a sign belongs to the number behind it rather than
+        // joining it to anything.
+        if at == start || !matches!(ch, '+' | '-') {
+            continue;
+        }
+        total = total.wrapping_add(sign.wrapping_mul(number(&text[start..at])?));
+        sign = if ch == '-' { -1 } else { 1 };
+        start = at + 1;
+    }
+    Ok(total.wrapping_add(sign.wrapping_mul(number(&text[start..])?)))
+}
+
 fn number(text: &str) -> Result<i64, String> {
     let text = text.trim();
     let (sign, digits) = match text.strip_prefix('-') {
@@ -596,6 +677,76 @@ mod tests {
         // `setc` is `setb` under its other name, which the conditions table already handled and
         // which the file this was all for uses on the line after the additions.
         assert_eq!(bytes("setc %al"), vec![0x0f, 0x92, 0xc0]);
+    }
+
+    #[test]
+    fn shifting_left_arithmetically_is_shifting_left_and_the_table_knows_one_name_for_it() {
+        // Two names for one instruction, because there is nothing to put back at the bottom and so
+        // nothing for the two to disagree about. GMP writes the arithmetic spelling and gcc writes
+        // the logical one, and both mean the same three bytes.
+        assert_eq!(bytes("sal $11, %eax"), bytes("shl $11, %eax"));
+        assert_eq!(bytes("salq $1, %rdx"), bytes("shlq $1, %rdx"));
+        assert_eq!(bytes("sal %cl, %rax"), bytes("shl %cl, %rax"));
+    }
+
+    #[test]
+    fn a_count_in_a_byte_register_says_nothing_about_how_wide_the_shift_is() {
+        // The one place on this machine where two registers of different widths on one line is not
+        // a mistake: a shift takes its count in `cl` and nowhere else, so the byte says where the
+        // count is and the other operand says how wide the instruction is. Everywhere else the
+        // disagreement is still refused, which the test above this one checks.
+        assert_eq!(bytes("shr %cl, %rax"), bytes("shrq %cl, %rax"));
+        assert_eq!(bytes("shl %cl, %edx"), bytes("shll %cl, %edx"));
+        assert_eq!(bytes("rcr %cl, %rbx"), bytes("rcrq %cl, %rbx"));
+        // And the three operand shifts, whose count is in the same place and whose other two
+        // operands are the pair the window moves across.
+        assert_eq!(bytes("shld %cl, %rsi, %rdi"), bytes("shldq %cl, %rsi, %rdi"));
+    }
+
+    #[test]
+    fn a_displacement_that_is_written_as_a_sum_is_the_sum() {
+        // A file written by hand says where a thing is by adding up what it is made of, so
+        // `56+8(%rsp)` is the seventh word of a frame rather than a symbol nothing defines. What
+        // the reader did before this was take the whole of it as a name and then fail to find one.
+        assert_eq!(bytes("movl 56+8(%rsp), %ecx"), bytes("movl 64(%rsp), %ecx"));
+        assert_eq!(bytes("lea -512+128(%rsp), %rdi"), bytes("lea -384(%rsp), %rdi"));
+        assert_eq!(bytes("movq 8+8+8(%rdi), %rax"), bytes("movq 24(%rdi), %rax"));
+        assert_eq!(bytes("movq 32-8(%rdi), %rax"), bytes("movq 24(%rdi), %rax"));
+    }
+
+    #[test]
+    fn a_name_reached_through_the_global_offset_table_says_which_kind_of_hole_it_is() {
+        let arg = "table@GOTPCREL(%rip)".to_owned();
+        let written = one("movq", &[arg, "%rdx".to_owned()]).expect("read");
+        assert_eq!(written.holes.len(), 1);
+        // The suffix is how the address is reached and not part of what is being reached, so what
+        // goes in the symbol table is the name without it.
+        assert_eq!(written.holes[0].name, "table");
+        assert_eq!(written.holes[0].sort, Sort::Table);
+        assert_eq!(written.holes[0].at, written.bytes.len() - 4);
+        // The other suffix this compiler writes, which is the same shape and a different relocation
+        // because what the slot holds is an offset rather than an address.
+        let arg = "counter@GOTTPOFF(%rip)".to_owned();
+        let written = one("movq", &[arg, "%rax".to_owned()]).expect("read");
+        assert_eq!(written.holes[0].name, "counter");
+        assert_eq!(written.holes[0].sort, Sort::Thread);
+        // And one nobody writes, which is said rather than guessed at.
+        let why = refused("movq away@TPOFF(%rip), %rax");
+        assert!(why.contains("@TPOFF"), "{why}");
+    }
+
+    #[test]
+    fn a_call_through_a_stub_is_the_relocation_a_call_already_gets() {
+        // `@PLT` asks for the thing this was going to do anyway, so it means nothing here and is
+        // not part of the name. GMP writes it on the one call it makes out of assembly, and leaving
+        // it on put a symbol called `__gmpn_invert_limb@PLT` in the table, which nothing defines.
+        let written = one("call", &["work@PLT".to_owned()]).expect("read");
+        assert_eq!(written.holes.len(), 1);
+        assert_eq!(written.holes[0].name, "work");
+        assert_eq!(written.holes[0].sort, Sort::Branch);
+        assert_eq!(written.bytes, one("call", &["work".to_owned()]).expect("read").bytes);
+        let why = refused("call work@GOTPCREL");
+        assert!(why.contains("@GOTPCREL"), "{why}");
     }
 
     #[test]
