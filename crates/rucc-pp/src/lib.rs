@@ -95,7 +95,7 @@ mod trace;
 
 pub use crate::directive::{LineDirective, Preprocessor};
 pub use crate::dump::macros as dump_macros;
-pub use crate::expand::Expander;
+pub use crate::expand::{Condition, Expander};
 pub use crate::hide::{HideSet, HideSets};
 pub use crate::include::{Context, Dependency};
 pub use crate::macros::{Builtin, MacroDef, MacroTable, parse_define};

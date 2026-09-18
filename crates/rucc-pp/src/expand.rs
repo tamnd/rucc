@@ -124,6 +124,34 @@ impl Expander {
         interner: &mut Interner,
         sources: &SourceMap,
     ) -> Vec<Tok> {
+        self.run(tokens, macros, interner, sources, None)
+    }
+
+    /// Expands the tokens of a `#if` or `#elif` line.
+    ///
+    /// The one difference from [`Expander::expand_toks`] is `defined`, which on such a line is an
+    /// operator that happens to be spelled like an identifier, and whose operand is not expanded.
+    /// A line that says `defined(X)` where the caller has already dealt with it never reaches
+    /// here, so what this is for is the `defined` a macro body wrote.
+    pub fn expand_condition(
+        &mut self,
+        tokens: Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Condition,
+    ) -> Vec<Tok> {
+        self.run(tokens, macros, interner, sources, Some(condition))
+    }
+
+    fn run(
+        &mut self,
+        tokens: Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Option<Condition>,
+    ) -> Vec<Tok> {
         let mut run = Run {
             hides: &mut self.hides,
             traces: &mut self.traces,
@@ -135,10 +163,24 @@ impl Expander {
             sources,
             counter: &mut self.counter,
             prefix_map: &self.prefix_map,
+            condition,
             steps: 0,
         };
         run.expand(tokens)
     }
+}
+
+/// What a `#if` line asks of an expansion that an ordinary stretch of a file does not.
+///
+/// Only `defined` is in here, and it carries its own name because the expander has nothing else
+/// to recognise an operator by: by the time a line reaches expansion it is a run of tokens like
+/// any other, and `defined` is an identifier in every one of them.
+#[derive(Debug, Clone, Copy)]
+pub struct Condition {
+    /// What `defined` is called, interned.
+    pub defined: Symbol,
+    /// Whether to report each `defined` an expansion produced, which is `-Wpedantic`.
+    pub report: bool,
 }
 
 /// One expansion, holding the pieces borrowed for its duration.
@@ -164,6 +206,8 @@ struct Run<'a> {
     counter: &'a mut u32,
     /// What `__FILE__` is rewritten by. See [`Expander::prefix_map`].
     prefix_map: &'a PrefixMap,
+    /// What the line being expanded is, when it is a `#if` line and not an ordinary one.
+    condition: Option<Condition>,
     steps: usize,
 }
 
@@ -200,6 +244,16 @@ impl<'a> Run<'a> {
                 out.push(tok);
                 continue;
             };
+            // On a `#if` line `defined` is an operator, and neither it nor the name it asks
+            // about is expanded, however the two of them got here. This is in the loop rather
+            // than done to the line before expansion begins because a macro body is allowed to
+            // write the operator: once the expansion of `defined(X)` has finished, `X` has been
+            // replaced by whatever it is defined as and the question is about the wrong thing,
+            // or about nothing at all when the macro is defined as empty.
+            if self.condition.is_some_and(|c| c.defined == name) {
+                self.defined_operator(tok, &mut pending, &mut out);
+                continue;
+            }
             if self.hides.contains(tok.hides, name) {
                 out.push(tok);
                 continue;
@@ -246,6 +300,44 @@ impl<'a> Run<'a> {
             push_front(&mut pending, replacement, tok);
         }
         out
+    }
+
+    /// Copies a `defined` and the name it asks about through untouched.
+    ///
+    /// The tokens come out in the order they went in and with nothing added, so the line the
+    /// caller resolves `defined` on afterwards is the line the operator was written on. A
+    /// malformed one is therefore still malformed there and the error reported is the error for
+    /// what the user wrote, rather than one about whatever the expansion made of it.
+    ///
+    /// The parentheses are optional and `defined X` is as good as `defined(X)`, so the closing
+    /// one is only taken when an opening one was. Anything else that follows is left where it
+    /// is, since this is not the place that decides the operator is wrong.
+    fn defined_operator(&mut self, tok: Tok, pending: &mut Vec<Tok>, out: &mut Vec<Tok>) {
+        // A macro that expands to `defined` is legal in every compiler and undefined behaviour
+        // in the standard, because the order the two operators run in was never written down.
+        // What the code means here is what it means to GCC and to Clang, and the warning is for
+        // the person who has to build the same file with something else.
+        //
+        // The wording is GCC's, so that a build log filtered on it reads the same either way.
+        // The notes under it are not: they name the macros the operator came out of, which is
+        // the thing the reader has to find and which GCC leaves them to look for.
+        if self.condition.is_some_and(|c| c.report) && tok.trace != TraceId::NONE {
+            let what = "this use of `defined` may not be portable";
+            let d = Diagnostic::warning(what, tok.report_span()).with_code("W0334");
+            let d = self.in_expansions(d, tok.trace, tok.span);
+            self.diagnostics.push(d);
+        }
+        out.push(tok);
+        let parenthesised = pending.last().is_some_and(|t| t.is(Punct::LParen));
+        if parenthesised {
+            out.push(pending.pop().expect("the parenthesis just looked at"));
+        }
+        if let Some(operand) = pending.pop() {
+            out.push(operand);
+        }
+        if parenthesised && pending.last().is_some_and(|t| t.is(Punct::RParen)) {
+            out.push(pending.pop().expect("the parenthesis just looked at"));
+        }
     }
 
     /// What one of the builtin macros stands for at the place it was used.

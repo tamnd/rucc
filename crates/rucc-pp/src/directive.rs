@@ -26,7 +26,7 @@ use rucc_target::TargetInfo;
 
 use crate::cond;
 use crate::embed;
-use crate::expand::Expander;
+use crate::expand::{Condition, Expander};
 use crate::include::{
     Context, Dependency, Frame, Header, Reader, directory_of, header_from_token,
     header_from_tokens, spelling,
@@ -1051,16 +1051,19 @@ impl Preprocessor {
         let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
         // `defined X` is resolved before expansion, so that `#if defined FOO` does not depend
         // on what `FOO` expands to. It is resolved again afterwards because a macro that
-        // expands to `defined(X)` is undefined behaviour that GCC supports and headers use.
-        // It goes first of all because `defined(__has_include)` is a question about the
-        // operator rather than a use of it.
+        // expands to `defined(X)` is undefined behaviour that GCC supports and headers use,
+        // and the expansion below leaves such a one alone for this second pass to answer. It
+        // goes first of all because `defined(__has_include)` is a question about the operator
+        // rather than a use of it.
         let line = self.resolve_defined(line, cx.interner, names);
         // `__has_include` is resolved before expansion too, and for a stronger reason: its
         // operand is a header name, so expanding `<linux/version.h>` would turn `linux` into
         // `1` on a target where that macro is predefined. The rest of the family take an
         // identifier that GCC does expand, so they wait until afterwards.
         let line = self.resolve_has(line, cx, names, Pass::Headers);
-        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+        let condition = Condition { defined: names.defined, report: cx.pedantic };
+        let line =
+            self.expander.expand_condition(line, &self.macros, cx.interner, cx.sources, condition);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         let line = self.resolve_defined(line, cx.interner, names);
         let line = self.resolve_has(line, cx, names, Pass::Rest);
@@ -1953,6 +1956,8 @@ mod tests {
         fs: MemoryFileSystem,
         search: SearchPath,
         pp: Preprocessor,
+        /// What `-Wpedantic` is set to for every context this run builds.
+        pedantic: bool,
     }
 
     impl Run {
@@ -1963,7 +1968,13 @@ mod tests {
                 fs: MemoryFileSystem::new(),
                 search: SearchPath::new(),
                 pp: Preprocessor::new(),
+                pedantic: false,
             }
+        }
+
+        /// The same, under `-Wpedantic`.
+        fn pedantic() -> Run {
+            Run { pedantic: true, ..Run::new() }
         }
 
         /// The same, with the `-fmacro-prefix-map=` rewrites `map` names, oldest first.
@@ -2007,8 +2018,10 @@ mod tests {
         /// The surviving tokens themselves, for a test about a flag rather than a spelling.
         fn raw(&mut self, src: &str) -> Vec<Tok> {
             let file = self.sources.add("/main.c", src.as_bytes().to_vec()).expect("room");
+            let pedantic = self.pedantic;
             let mut cx =
                 Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+            cx.pedantic = pedantic;
             self.pp.run(file, &mut cx)
         }
 
@@ -2026,9 +2039,11 @@ mod tests {
         /// The same, for a test that cares what the main file is called.
         fn go_named(&mut self, path: &str, src: &str) -> String {
             let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
+            let pedantic = self.pedantic;
             let out = {
                 let mut cx =
                     Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                cx.pedantic = pedantic;
                 self.pp.run(file, &mut cx)
             };
             self.spell(&out)
@@ -2126,6 +2141,73 @@ mod tests {
         // `F` expands to 0, but `defined F` is answered before that happens, which is the
         // whole reason `defined` is resolved in a pass of its own.
         assert_eq!(clean("#define F 0\n#if defined F && !F\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_macro_may_write_the_defined_operator_itself() {
+        // What the expansion leaves behind is `defined F`, in both spellings, and the pass
+        // after it answers that. mingw-w64's `<intrin.h>` is built out of this and so is a
+        // good deal of Boost.
+        assert_eq!(clean("#define F 0\n#define D defined F\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define F 0\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define D defined(F)\n#if D\nyes\n#else\nno\n#endif\n"), "no");
+    }
+
+    #[test]
+    fn the_name_a_macro_wrote_the_defined_operator_about_is_not_expanded() {
+        // This is the case that says the operand has to be left alone rather than expanded and
+        // then looked at. `F` is defined as `1`, so an expansion that reached it first would
+        // ask whether `1` is defined and answer no, and the header would take the wrong branch
+        // with nothing to say it had.
+        assert_eq!(clean("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        // The same with the macro defined as nothing at all, which is how mingw-w64 marks an
+        // intrinsic as already declared. Expanding the operand leaves `defined()`, which is an
+        // error rather than an answer.
+        assert_eq!(clean("#define F\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        // And through a paste, which is the spelling `<psdk_inc/intrin-impl.h>` uses.
+        let src = "#define MARK_lrotl\n#define HAVE(n) defined(MARK_ ## n)\n\
+                   #if HAVE(lrotl)\nyes\n#endif\n";
+        assert_eq!(clean(src), "yes");
+    }
+
+    #[test]
+    fn a_defined_a_macro_wrote_is_reported_under_pedantic() {
+        let mut run = Run::pedantic();
+        assert_eq!(run.go("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(run.messages(), vec!["this use of `defined` may not be portable".to_owned()]);
+        // Written where it stands it is ordinary and says nothing, since the order the two
+        // operators run in is only in question when one of them made the other.
+        let mut run = Run::pedantic();
+        assert_eq!(run.go("#define F 1\n#if defined(F)\nyes\n#endif\n"), "yes");
+        assert!(run.messages().is_empty());
+        // And it is off without the flag, which is where every build that is not looking for
+        // portability problems is.
+        assert_eq!(clean("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_defined_a_macro_wrote_badly_is_still_an_error() {
+        // The operator and its operand come out of the expansion in the order they went in, so
+        // the pass that answers them sees a malformed one as malformed and says the same thing
+        // it says about a malformed one written by hand.
+        let mut run = Run::new();
+        run.go("#define D defined\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages(), vec!["`defined` without a macro name".to_owned()]);
+        // A number where the name should be leaves the parentheses behind for the evaluator to
+        // complain about as well, which is the second message and is what GCC does too.
+        let mut run = Run::new();
+        run.go("#define D defined(1)\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages()[0], "`defined` without a macro name");
+        let mut run = Run::new();
+        run.go("#define D defined(F\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages(), vec!["expected `)` after `defined`".to_owned()]);
+        // A name the caller passed as an argument is expanded before it is substituted, so a
+        // macro that asks about its own parameter asks about whatever the caller's macro was
+        // defined as. GCC reports the same error on the same line, and the way a header gets
+        // this right is to paste the name rather than pass it.
+        let mut run = Run::new();
+        run.go("#define F 0\n#define D(x) defined(x)\n#if D(F)\nyes\n#endif\n");
+        assert_eq!(run.messages()[0], "`defined` without a macro name");
     }
 
     #[test]

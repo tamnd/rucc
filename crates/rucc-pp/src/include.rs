@@ -42,6 +42,12 @@ pub struct Context<'a> {
     /// A header that includes itself with no guard is the common way to reach this, and the
     /// alternative to a limit is a stack overflow with no diagnostic at all.
     pub max_include_depth: u32,
+    /// Whether `-Wpedantic` is on, which is the only thing phase 4 asks it about today.
+    ///
+    /// Here rather than on the preprocessor because it is a fact about the command line and the
+    /// command line is what builds this. The parser keeps the same flag in the same place for
+    /// the same reason.
+    pub pedantic: bool,
 }
 
 impl<'a> Context<'a> {
@@ -52,7 +58,15 @@ impl<'a> Context<'a> {
         fs: &'a dyn FileSystem,
         search: &'a SearchPath,
     ) -> Context<'a> {
-        Context { interner, sources, fs, search, lex: Options::new(), max_include_depth: 200 }
+        Context {
+            interner,
+            sources,
+            fs,
+            search,
+            lex: Options::new(),
+            max_include_depth: 200,
+            pedantic: false,
+        }
     }
 }
 
