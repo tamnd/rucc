@@ -507,7 +507,13 @@ fn build(project: &Project, source: &Path) -> Result<PathBuf> {
         for (file, stem) in files(project, source, &driver) {
             let mut command = Command::new(&rucc);
             command
-                .args(["-S", &format!("--target={TRIPLE}"), "-fsafety=detect", level])
+                .args([
+                    "-S",
+                    &format!("--target={TRIPLE}"),
+                    "-fsafety=detect",
+                    level,
+                    crate::VERIFY,
+                ])
                 .arg("-I")
                 .arg(source)
                 .args(

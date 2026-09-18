@@ -247,6 +247,9 @@ pub struct Flags {
     /// a way to say the model is better or worse than it claims without editing the model, and
     /// because the measurement section 38.8 owes is the same corpus compiled both ways.
     pub accurate: Option<bool>,
+    /// Whether the register allocator runs its own checks on a build that has assertions compiled
+    /// out, which `-Zverify-each` asks for. See [`rucc_regalloc::run`].
+    pub verify: bool,
 }
 
 impl Default for Flags {
@@ -266,6 +269,7 @@ impl Default for Flags {
             reuse: false,
             schedule: false,
             accurate: None,
+            verify: false,
         }
     }
 }
@@ -479,7 +483,7 @@ pub fn compile_recording(
         .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
 
     let called = names.resolve(func.name).to_owned();
-    let allocation = rucc_regalloc::run(&mut func, &machine.env, &called);
+    let allocation = rucc_regalloc::run(&mut func, &machine.env, &called, flags.verify);
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing

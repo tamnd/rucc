@@ -175,6 +175,19 @@ const fn exit_of(error: &Error) -> u8 {
 /// must report from a check it must fail on.
 pub(crate) const COULD_NOT_RUN: i32 = 2;
 
+/// The flag every check that compiles C passes, which turns the compiler's own checking on in a
+/// build that has assertions compiled out.
+///
+/// The IR verifier and the register allocator's two checks are on in a debug build and off in a
+/// release one, which is the right default for somebody's build and the wrong one for this: every
+/// check below builds `target/release/rucc`, so without the flag the gate compiles several
+/// megabytes of C with the compiler's own self checking turned off. tamnd/rucc#1404 is what that
+/// costs. It was a back end pass leaving an instruction reading a register nothing writes, which is
+/// the first thing the allocator's checker looks for and says by name, and instead of failing the
+/// pull request it merged and turned up a day later as one segmentation fault in a corpus of five
+/// thousand programs.
+pub(crate) const VERIFY: &str = "-Zverify-each";
+
 /// Anything that stops a task finishing.
 #[derive(Debug)]
 enum Error {

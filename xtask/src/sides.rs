@@ -80,7 +80,7 @@ pub(crate) fn build(task: &'static str, fixture: &Path, script: &str) -> Result<
     for level in LEVELS {
         let object = work.join(format!("ours-O{level}.o"));
         let out = Command::new(&rucc)
-            .args(["-c", &format!("--target={TRIPLE}"), &format!("-O{level}")])
+            .args(["-c", &format!("--target={TRIPLE}"), &format!("-O{level}"), crate::VERIFY])
             .arg("-o")
             .arg(&object)
             .arg(fixture)

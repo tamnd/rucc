@@ -4671,7 +4671,7 @@ mod tests {
             .expect("every instruction has a rule")
             .func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(
             &mut out,
@@ -4708,7 +4708,7 @@ mod tests {
             .expect("every instruction has a rule")
             .func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(
             &mut out,
@@ -4775,7 +4775,7 @@ mod tests {
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
         finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
@@ -4805,7 +4805,7 @@ mod tests {
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
         finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
@@ -5006,7 +5006,7 @@ mod tests {
             .func;
         assert_eq!(crate::split::critical(&mut out), 0, "no edge here is critical");
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(
             &mut out,
@@ -5052,7 +5052,7 @@ mod tests {
             .func;
         assert_eq!(crate::split::critical(&mut out), 1);
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let frame = Frame::of(&out, &allocation, &Layout::new(&SYSV, REGS));
         finish(
             &mut out,
@@ -5181,7 +5181,7 @@ mod tests {
         let layout = lowered.stack.layout(Layout::new(&SYSV, REGS));
         let mut out = lowered.func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let frame = Frame::of(&out, &allocation, &layout);
         finish(
             &mut out,
@@ -5436,7 +5436,7 @@ mod tests {
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
         finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);
@@ -5519,7 +5519,7 @@ mod tests {
         let stack = lowered.stack;
         let mut out = lowered.func;
         let env = env();
-        let allocation = rucc_regalloc::run(&mut out, &env, "test");
+        let allocation = rucc_regalloc::run(&mut out, &env, "test", true);
         let layout = stack.layout(Layout::new(&SYSV, REGS));
         let frame = Frame::of(&out, &allocation, &layout);
         finish(&mut out, &allocation, &frame, &stack, Convention::new(&SYSV, &FRAME), &mut names);

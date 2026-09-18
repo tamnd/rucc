@@ -162,7 +162,7 @@ fn build() -> Result<PathBuf> {
     let source = fixtures.join("deep.c");
     for (flag, name) in [("-c", "deep.o"), ("-S", "deep.s")] {
         let out = Command::new(&rucc)
-            .args([flag, &format!("--target={TRIPLE}"), "-O1"])
+            .args([flag, &format!("--target={TRIPLE}"), "-O1", crate::VERIFY])
             .arg("-o")
             .arg(work.join(name))
             .arg(&source)

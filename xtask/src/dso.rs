@@ -190,7 +190,7 @@ fn build() -> Result<PathBuf> {
     for name in OURS {
         for (how, extension) in [("-S", "s"), ("-c", "o")] {
             let out = Command::new(&rucc)
-                .args([how, &format!("--target={TRIPLE}"), "-fPIC", "-O1"])
+                .args([how, &format!("--target={TRIPLE}"), "-fPIC", "-O1", crate::VERIFY])
                 .arg("-o")
                 .arg(work.join(format!("{name}.{extension}")))
                 .arg(fixtures.join(format!("{name}.c")))

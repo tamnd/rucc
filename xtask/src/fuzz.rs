@@ -633,7 +633,7 @@ fn build(
     let mut problems = Vec::new();
     for program in programs {
         let out = Command::new(&rucc)
-            .args(["-S", &format!("--target={TRIPLE}"), TIER, level])
+            .args(["-S", &format!("--target={TRIPLE}"), TIER, level, crate::VERIFY])
             .args(without)
             .arg("-o")
             .arg(work.join(format!("{}.s", program.name)))

@@ -592,7 +592,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
     problems.extend(libraries(cases, &work)?);
     for case in cases {
         let mut compile = Command::new(&rucc);
-        compile.args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level]);
+        compile.args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level, crate::VERIFY]);
         compile.args(plan.without);
         compile.args(&case.flags);
         let out = compile

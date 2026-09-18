@@ -247,7 +247,7 @@ mod tests {
 
         // Two registers to hand out and three values all wanted at once, so one goes to the stack.
         let env = Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
-        let cost = Cost::of(&rucc_regalloc::run(&mut func, &env, "f"));
+        let cost = Cost::of(&rucc_regalloc::run(&mut func, &env, "f", true));
         assert_eq!(cost.slots, 1);
         assert_eq!(cost.stores, 1);
         assert_eq!(cost.reloads, 1);

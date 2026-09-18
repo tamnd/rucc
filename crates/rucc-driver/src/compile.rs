@@ -800,6 +800,9 @@ fn generate(
         schedule: opts.schedule_insns.unwrap_or_else(|| opts.opt_level.schedules()),
         // Whatever the command line said, and the model's own answer when it said nothing.
         accurate: opts.cycle_accurate_model,
+        // The same flag that turns the IR verifier on in a release build, since what it says is
+        // that this run should check itself and the back end has checks of its own.
+        verify: opts.verify_each,
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
