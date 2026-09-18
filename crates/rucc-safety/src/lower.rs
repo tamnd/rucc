@@ -182,7 +182,7 @@ fn calls(
     crate::slot::frames(func, names, word);
 }
 
-/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, descriptor)`.
+/// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, capability, descriptor)`.
 ///
 /// The size is the payload's for the check the front end wrote and the third operand's for the
 /// hoisted check of section 7.4, which is about a range the program worked out rather than about
@@ -193,6 +193,20 @@ fn calls(
 /// conjunct: the runtime tests it and nothing else here does. A hoisted check passes one, which
 /// says the range it is about assumes nothing, because the range is a span of bytes a loop will
 /// walk rather than one access and the accesses inside it carry their own.
+///
+/// The capability is the first operand, which this used to throw away the way [`live`] used to, and
+/// handing it over is box 6 of tamnd/rucc#1241. It lets the runtime permit the commonest access in a
+/// program with a subtraction and a compare over two words the caller has already got, where it used
+/// to want a region lookup and two plane loads, and it costs nothing to produce, because the
+/// lifetime check beside this one is loading the same capability for the version anyway. That is the
+/// sense in which the issue says this is where the version compare pays for itself. The runtime only
+/// ever permits on it and never refuses on it, and `rucc_safe_rt::check::bounds` is where that
+/// restraint is argued.
+///
+/// Fourth rather than first, which is the other order from the lifetime check. The three in front of
+/// it are the ones the access is about and they were here first, so leaving them alone keeps them in
+/// the registers the caller would have used, and the descriptor stays last the way every check here
+/// has it.
 fn bounds(
     func: &mut Func,
     names: &mut Interner,
@@ -201,7 +215,11 @@ fn bounds(
     inst: Inst,
 ) {
     let args = &func[func[inst].args];
-    let (Some(&pointer), computed) = (args.get(1), args.get(2).copied()) else { return };
+    let (Some(&capability), Some(&pointer), computed) =
+        (args.first(), args.get(1), args.get(2).copied())
+    else {
+        return;
+    };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
 
@@ -219,8 +237,9 @@ fn bounds(
     };
     let claim = if computed.is_some() { 1 } else { i128::from(func[mem].align) };
     let align = konst(func, inst, Imm::int(claim, word), word);
-    let params = &[Type::PTR, word, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_bounds", params, &[], &[pointer, bytes, align, desc]);
+    let params = &[Type::PTR, word, word, Type::PTR, Type::PTR];
+    let args = &[pointer, bytes, align, capability, desc];
+    call(func, names, inst, "__rucc_check_bounds", params, &[], args);
 }
 
 /// The same number in the width the runtime's own declaration asks for.
@@ -248,11 +267,11 @@ pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> V
 
 /// Whether an instruction that reads a capability is still reading one after this pass has run.
 ///
-/// One check of the five, which is [`live`], and that is a statement about how far tamnd/rucc#1241
-/// has got rather than about the design. The other four still become a call that takes an address,
-/// so a capability whose only reader is one of them is dead the moment the rewrite happens and
-/// [`crate::slot`]'s prune takes it out. Box 6 of tamnd/rucc#1241 is what makes `check_bounds` take
-/// one, and this gains a name on the day it lands.
+/// Three checks of the six now: [`live`], [`freed`] and [`bounds`]. The other three still become a
+/// call that takes an address, so a capability whose only reader is one of them is dead the moment
+/// the rewrite happens and [`crate::slot`]'s prune takes it out. That is a statement about how far
+/// tamnd/rucc#1241 has got rather than about the design, and what is left of it is the type check,
+/// the initialization check and the race check, none of which asks anything a capability answers.
 ///
 /// It is a predicate somebody outside can ask rather than something left implied by the arm it
 /// belongs to, and [`crate::origin::existing`] is the somebody, on behalf of [`crate::handover`].
@@ -273,7 +292,8 @@ pub(crate) fn fitted(func: &mut Func, inst: Inst, value: Value, word: Type) -> V
 pub(crate) fn keeps(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::CheckLive
+        Opcode::CheckBounds
+            | Opcode::CheckLive
             | Opcode::CheckFree
             | Opcode::CapStore
             | Opcode::CapYield
@@ -1286,7 +1306,7 @@ mod tests {
                  %2 = global_addr @__rucc_safety_desc_0\n    \
                  %3 = iconst.i64 4\n    \
                  %4 = iconst.i64 4\n    \
-                 call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n    \
+                 call @__rucc_check_bounds(%0, %3, %4, %1, %2) : (ptr, i64, i64, ptr, ptr)\n    \
                  %5 = global_addr @__rucc_safety_desc_1\n    \
                  call @__rucc_check_live(%1, %0, %5) : (ptr, ptr, ptr)\n    \
                  %6 = global_addr @__rucc_safety_desc_2\n    \
@@ -1462,7 +1482,9 @@ mod tests {
         assert!(printed.contains("%3 = iconst.i64 4\n"), "{printed}");
         assert!(printed.contains("%4 = iconst.i64 1\n"), "{printed}");
         assert!(
-            printed.contains("call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n"),
+            printed.contains(
+                "call @__rucc_check_bounds(%0, %3, %4, %1, %2) : (ptr, i64, i64, ptr, ptr)\n"
+            ),
             "{printed}"
         );
     }
@@ -1483,7 +1505,7 @@ mod tests {
              %2 = global_addr @__rucc_safety_desc_0\n    \
              %3 = iconst.i64 4\n    \
              %4 = iconst.i64 4\n    \
-             call @__rucc_check_bounds(%0, %3, %4, %2) : (ptr, i64, i64, ptr)\n    \
+             call @__rucc_check_bounds(%0, %3, %4, %1, %2) : (ptr, i64, i64, ptr, ptr)\n    \
              %5 = global_addr @__rucc_safety_desc_1\n    \
              call @__rucc_check_live(%1, %0, %5) : (ptr, ptr, ptr)\n    \
              %6 = global_addr @__rucc_safety_desc_2\n    \
@@ -1621,9 +1643,11 @@ mod tests {
             print_func(&module, &module[id], &names),
             "func @sweep(ptr, i64), linkage(external) {\n\
              block0(%0: ptr, %1: i64):\n    \
-             %2 = global_addr @__rucc_safety_desc_0\n    \
-             %3 = iconst.i64 1\n    \
-             call @__rucc_check_bounds(%0, %1, %3, %2) : (ptr, i64, i64, ptr)\n    \
+             %2 = alloca, size 32, align 8\n    \
+             call @__rucc_cap_recover(%2, %0) : (ptr, ptr)\n    \
+             %3 = global_addr @__rucc_safety_desc_0\n    \
+             %4 = iconst.i64 1\n    \
+             call @__rucc_check_bounds(%0, %1, %4, %2, %3) : (ptr, i64, i64, ptr, ptr)\n    \
              return\n\
              }\n"
         );
