@@ -195,10 +195,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.2
-      # spec/02-the-goal.md makes byte-identical output a requirement. Right now there is no
-      # compiler output to compare, so this checks that the compiler itself builds twice to
-      # the same bytes, which is the same property one level down and catches the hash-order
-      # and timestamp mistakes early, while they are still cheap to fix.
+      # spec/02-the-goal.md makes byte-identical output a requirement, and there are two halves
+      # to it. The tree's own artefacts have to build twice to the same bytes, which is what the
+      # first step asks, and what the compiler makes out of a C file has to be the same in every
+      # run, which is what the second one asks. The second half is the one that catches hash
+      # order, and it needs several processes to catch it: Rust gives each run its own hash seed,
+      # so a difference that depends on the seed does not show up inside one run.
       - name: build twice and compare
         run: |
           set -euo pipefail
@@ -209,6 +211,10 @@ jobs:
           sha256sum target/release/rucc > second.sha256
           diff <(cut -d' ' -f1 first.sha256) <(cut -d' ' -f1 second.sha256)
           echo "the compiler builds reproducibly"
+      - name: compile the same program several times over
+        run: cargo xtask repeatable
+        env:
+          RUCC_XTASK_COMPILER: ${{ github.workspace }}/target/release/rucc
 
   # spec/11-asm-objects-debug.md section 11.1 says every instruction we encode is read back by a
   # decoder that has never seen our table. An encoding bug is silent, survives every test that
