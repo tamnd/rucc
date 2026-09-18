@@ -291,11 +291,15 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
     // Refusing it is the whole design of the reader: an assembler that skipped what it did not
     // recognise would write an object that links, and what would be wrong with it is a run of
     // missing bytes in the middle of a function, which nothing finds until the program runs.
+    //
+    // The instruction here is one nothing in the compiler writes and nothing in the encoder has a
+    // row for, which is a set that shrinks every time a hand written file needs another one. It was
+    // `bswap` until tamnd/rucc#1329 gave that one bytes, and it is a population count now.
     let dir = dir("unwritten");
-    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\tbswap %rax\n\tret\n");
+    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\tpopcnt %rax, %rdx\n\tret\n");
     let (ok, said) = run(&dir, &["-c", "hot.s"]);
     assert!(!ok, "an instruction with no bytes behind it was accepted:\n{said}");
-    assert!(said.contains("bswap"), "the message does not name the instruction:\n{said}");
+    assert!(said.contains("popcnt"), "the message does not name the instruction:\n{said}");
     assert!(said.contains("hot.s:4"), "the message does not carry the line:\n{said}");
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }

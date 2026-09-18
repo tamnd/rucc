@@ -827,7 +827,10 @@ mod tests {
 
     #[test]
     fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name() {
-        let why = refused("bswap %rax");
-        assert!(why.contains("bswap"), "{why}");
+        // One nothing in the compiler writes and nothing in the encoder has a row for, which is a
+        // set that shrinks every time a hand written file needs another one. It was `bswap` until
+        // tamnd/rucc#1329 gave that one bytes, and it is a population count now.
+        let why = refused("popcnt %rax, %rdx");
+        assert!(why.contains("popcnt"), "{why}");
     }
 }

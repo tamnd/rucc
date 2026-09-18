@@ -2104,9 +2104,9 @@ mod tests {
         // The failure this crate is written to prevent. An assembler that skipped what it did not
         // recognise would write an object that links, and what would be wrong with it is a run of
         // missing bytes in the middle of a function.
-        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tbswap %rax\n\tret\n");
+        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tpopcnt %rax, %rdx\n\tret\n");
         assert_eq!(why.line, 4);
-        assert!(why.why.contains("bswap"), "{why}");
+        assert!(why.why.contains("popcnt"), "{why}");
     }
 
     #[test]

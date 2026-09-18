@@ -354,6 +354,20 @@ mod tests {
         "tzcnt_32", "tzcnt_64",
     ];
 
+    /// The instruction that turns a register round, which a template asks for and nothing else does.
+    ///
+    /// The list above, one step simpler. A search is unselected because what it does with a source
+    /// of zero is not the same on every processor, so a rule that chose one would depend on what ran
+    /// it. A byte reversal has no such case: it means exactly one thing everywhere. What keeps it
+    /// off the rule set is a choice made once, in [`crate::expand`], which builds a reversal out of
+    /// shifts and masks so that the answer is the same on every target this compiler has rather than
+    /// good on the one that happens to have the instruction. tamnd/rucc#310 is where that trade is
+    /// written down, and the day a target grows its own reversal is the day to reopen it.
+    ///
+    /// So the only thing that reaches one is a program that wrote the name in a template, which is
+    /// what libgmp does in `gmp-impl.h` to put a limb the other way round.
+    const SWAP: &[&str] = &["bswap_32", "bswap_64"];
+
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
     /// A rule replaces a term with a term, and a term is the value one instruction computes. A
@@ -672,7 +686,7 @@ mod tests {
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
-            if SEARCH.contains(&opcode) {
+            if SEARCH.contains(&opcode) || SWAP.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {
@@ -763,6 +777,35 @@ mod tests {
         for &(opcode, form) in x86_64::INSTS {
             if form == x86_64::Form::Search {
                 assert!(SEARCH.contains(&opcode), "{opcode} is a search and is not on the list");
+            }
+        }
+    }
+
+    /// The same claim about the byte reversal, read both ways round the way the searches are, and
+    /// with the one thing that is different about it checked as well: this is the instruction of its
+    /// shape that leaves the condition state alone, which is the whole reason it has a form rather
+    /// than being a unary operation, so a description that stopped saying that would stop being the
+    /// reason this list exists.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_only_a_template_turns_a_register_round_is_one()
+    {
+        let written = heads();
+        for &opcode in SWAP {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert_eq!(form, x86_64::Form::Swap, "{opcode} is not a byte reversal");
+            assert!(
+                !(x86_64::FLAGS.writes)(opcode),
+                "{opcode} writes the condition state, so it is a unary operation after all"
+            );
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which only a template asks for",
+                TABLE.source
+            );
+        }
+        for &(opcode, form) in x86_64::INSTS {
+            if form == x86_64::Form::Swap {
+                assert!(SWAP.contains(&opcode), "{opcode} is a reversal and is not on the list");
             }
         }
     }

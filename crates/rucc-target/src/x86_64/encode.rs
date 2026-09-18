@@ -1095,6 +1095,15 @@ static ENCODINGS: &[Encoding] = &[
     bytes("lzcntq", &MR, SingleQuad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
     bytes("tzcntl", &MR, Single, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
     bytes("tzcntq", &MR, SingleQuad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    // Turning a number round, which reverses the bytes of a register in place. The register is in
+    // the low three bits of the second opcode byte rather than in an addressing byte, the way a
+    // push and a pop hold theirs, so there is no `ModRM` here at all.
+    //
+    // No sixteen bit form, and this one is not about what can be spelled. `bswap %ax` assembles and
+    // Intel's own description says the result is undefined, so the instruction exists and means
+    // nothing. A program that wants two bytes the other way round writes a rotate by eight.
+    bytes("bswapl", &R, Long, &[0x0F, 0xC8], plus(0), NO_IMM),
+    bytes("bswapq", &R, Quad, &[0x0F, 0xC8], plus(0), NO_IMM),
     // A copy between registers, which is a store to a register rather than a load from one, so it
     // is written the same way round as the arithmetic above and not as the conversions.
     bytes("movb", &RR, Byte, &[0x88], pair(1, 0), NO_IMM),
@@ -2531,6 +2540,13 @@ mod tests {
         let counted = Addr { base: Some(RBX), ..Addr::default() };
         assert_eq!(hex("lzcntq", &[Value::Mem(counted), quad(RAX)]), "f3 48 0f bd 03");
         assert_eq!(hex("tzcntl", &[Value::Mem(counted), long(RAX)]), "f3 0f bc 03");
+        // Reversing the bytes of a register, whose register is in the opcode and not beside it, so
+        // the high half of the register file moves the prefix rather than a bit of an addressing
+        // byte. `bswapq` on `r12` is the one that shows both at once.
+        assert_eq!(hex("bswapl", &[long(RAX)]), "0f c8");
+        assert_eq!(hex("bswapq", &[quad(RAX)]), "48 0f c8");
+        assert_eq!(hex("bswapl", &[long(RDX)]), "0f ca");
+        assert_eq!(hex("bswapq", &[quad(R12)]), "49 0f cc");
         // The widenings reading memory, which is the shape only `movzbl` had.
         let from = Addr { base: Some(RSI), ..Addr::default() };
         assert_eq!(hex("movzbq", &[Value::Mem(from), quad(RAX)]), "48 0f b6 06");

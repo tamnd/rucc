@@ -44,7 +44,7 @@ use Form::{
     CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem,
     Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -166,6 +166,16 @@ pub enum Form {
     /// that a register holds bits it does not hold and tell the comparison pass that a comparison
     /// made before it is still standing, and either one is a wrong program rather than a slow one.
     Search,
+    /// The bytes of one register turned round, which is one operand read and written in place.
+    ///
+    /// The same operand vector as [`Form::UnaryR`], which is what a negate and a complement are,
+    /// and a separate form for the one thing that is not the same about it: `bswap` leaves the
+    /// condition state exactly as it found it and every other instruction of that shape writes it.
+    /// The default in [`crate::x86_64`] is that an instruction writes the flags, which is the safe
+    /// way round for a description that may miss a name, so calling this a unary operation would
+    /// not have been wrong. It would have been a claim this machine does not make, and the point of
+    /// a form is that it is what the manual says rather than what is convenient.
+    Swap,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
     DivQuo,
     /// The remainder of a division, which comes back in `rdx` and destroys `rax` on the way.
@@ -847,7 +857,7 @@ impl Form {
         match self {
             LoadImm => &LOAD_IMM,
             AluRr => &TWO_ADDRESS_RR,
-            AluRi | AluRm | UnaryR | ShiftRi => &TWO_ADDRESS_RI,
+            AluRi | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi => &ONE_TO_ONE,
@@ -1291,6 +1301,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("lzcnt_64", Search),
     ("tzcnt_32", Search),
     ("tzcnt_64", Search),
+    // The bytes of a register turned round, at the two widths the machine has a defined answer
+    // for. No rule selects either, and the reason is the one the searches have: `rucc_codegen`
+    // builds a byte reversal out of shifts and masks so that every target gets the same answer,
+    // which tamnd/rucc#310 is about. Nothing here reaches one but a template that names it.
+    ("bswap_32", Swap),
+    ("bswap_64", Swap),
     // The address computation the addressing modes are reached through.
     ("lea_64", Lea),
     // Reading and writing memory, at each width the machine has a `mov` for.
@@ -1727,7 +1743,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 482);
+        assert_eq!(described, 484);
     }
 
     #[test]
