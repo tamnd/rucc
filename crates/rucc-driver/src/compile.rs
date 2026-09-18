@@ -963,12 +963,15 @@ fn wrote(why: rucc_object::Error) -> Vec<Diagnostic> {
 
 /// What the assembler said, as the kind of news it is.
 ///
-/// Two of these are about a program and the rest are about this compiler. A thread-local variable
-/// and an ifunc are both valid C that the back end does not build yet, and everything else the
-/// assembler refuses is something that should never have reached it.
+/// Three of these are about a program and the rest are about this compiler. A thread-local
+/// variable, an ifunc and a prologue the target's unwind table cannot describe are all valid C that
+/// the back end does not build yet, and everything else the assembler refuses is something that
+/// should never have reached it.
 fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
     match why {
-        rucc_asm::Error::Thread { .. } | rucc_asm::Error::IFunc { .. } => {
+        rucc_asm::Error::Thread { .. }
+        | rucc_asm::Error::IFunc { .. }
+        | rucc_asm::Error::Frame { .. } => {
             vec![unsupported(&why.to_string())]
         }
         _ => vec![internal(&why.to_string())],

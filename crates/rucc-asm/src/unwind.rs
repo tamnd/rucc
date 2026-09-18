@@ -405,7 +405,7 @@ fn describe(info: &mut Vec<u8>, func: &Extent, rows: &Rows, conv: &CallRegs) -> 
     let prologue = codes.last().map_or(0, |code| code[0]);
     let nodes = codes.iter().map(Vec::len).sum::<usize>() / 2;
     let count = u8::try_from(nodes).map_err(|_| {
-        let why = format!("a prologue of {nodes} unwind slots, which is more than a record holds");
+        let why = format!("a prologue of {nodes} unwind slots, more than a record holds");
         frame(func, why)
     })?;
     info.extend_from_slice(&[1, prologue, count, 0]);
@@ -470,8 +470,7 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
             // pointer and the stack pointer moving no longer changes them. A record without the
             // frame in it is a record that unwinds to the wrong place, so it is refused instead.
             [(_, CfiOp::DefCfaRegister(_))] => {
-                let why = "a frame pointer, which its prologue establishes before it takes the \
-                           frame";
+                let why = "a frame pointer established before the frame is taken";
                 return Err(frame(func, why.to_owned()));
             }
             // The walk that touches every page of a large frame. While it runs, the end of the
@@ -479,8 +478,8 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Vec<Vec<u8>>, Er
             // pointer moves once an iteration and no fixed distance from it is true twice. This
             // format counts from the stack pointer and from a frame register and from nothing else.
             [(_, CfiOp::DefCfa { .. })] => {
-                let why = "a stack walked a page at a time, which counts the frame from a register \
-                           this table has no way to name";
+                let why = "a stack walked a page at a time, whose frame is counted from a scratch \
+                           register";
                 return Err(frame(func, why.to_owned()));
             }
             _ => return Err(frame(func, "a prologue row this cannot read".to_owned())),
@@ -527,7 +526,7 @@ fn word_size(conv: &CallRegs) -> i64 {
 /// thread's stack is not four gigabytes.
 fn large(func: &Extent, at: u8, size: i64, word: i64) -> Result<Vec<u8>, Error> {
     if size <= 0 || size % word != 0 {
-        let why = format!("a frame of {size} bytes, which is not a whole number of slots");
+        let why = format!("a frame of {size} bytes, not a whole number of slots");
         return Err(frame(func, why));
     }
     let mut out = vec![at, ALLOC_LARGE];
@@ -536,7 +535,7 @@ fn large(func: &Extent, at: u8, size: i64, word: i64) -> Result<Vec<u8>, Error> 
         return Ok(out);
     }
     let bytes = u32::try_from(size).map_err(|_| {
-        frame(func, format!("a frame of {size} bytes, which is larger than a record can say"))
+        frame(func, format!("a frame of {size} bytes, larger than a record can say"))
     })?;
     out[1] |= 1 << 4;
     out.extend_from_slice(&bytes.to_le_bytes());
@@ -561,7 +560,7 @@ fn slot(
         return Err(frame(func, why));
     }
     let bytes = u32::try_from(above).map_err(|_| {
-        frame(func, format!("a register saved {above} bytes up, which is further than a record says"))
+        frame(func, format!("a register saved {above} bytes up, further than a record reaches"))
     })?;
     let vector = conv.machine(conv.int_class, reg).is_none();
     let (near, far, step) = if vector {
@@ -593,7 +592,7 @@ fn machine(func: &Extent, conv: &CallRegs, reg: u16) -> Result<u8, Error> {
         .map(|reg| reg.number())
         .filter(|number| *number < 16);
     found.ok_or_else(|| {
-        frame(func, format!("a saved register the unwinder has no number {reg} for"))
+        frame(func, format!("a register saved under DWARF number {reg}, which this machine has none of"))
     })
 }
 

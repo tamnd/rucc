@@ -183,7 +183,7 @@ impl fmt::Display for Error {
                 write!(f, "'{name}' is an ifunc, which this compiler does not write yet")
             }
             Error::Frame { func, why } => {
-                write!(f, "'{func}' has {why}, which no unwind table on this platform can say")
+                write!(f, "'{func}' has {why}, which no unwind table here can describe")
             }
             Error::Image { name, why } => {
                 write!(f, "the initializer of '{name}' has {why} in it, which cannot be written")
