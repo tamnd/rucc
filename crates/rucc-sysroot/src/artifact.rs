@@ -30,12 +30,18 @@
 //! forever, which is a promise about somebody else's file server. A row per target costs three
 //! strings and says only what is true.
 //!
-//! # Why it is empty
+//! # What is in it
 //!
-//! Because nothing has published a sysroot artifact yet. The producer is in `tamnd/rucc-cross`, per
-//! document 08.7, and the table cannot honestly name a URL and a hash before there is a file at one
-//! with the other. So [`PINNED`] has no rows today, every `--fetch` says so by name, and the test at
-//! the bottom of this file is what the first row will be held to when it is added.
+//! Three rows, which are the three windows-gnu targets. `bin/mingw-headers` in `tamnd/rucc-cross`
+//! installs mingw-w64 14.0.0's headers, `bin/artifact` packs the tree, and the release
+//! `sysroots-2026-09-18` is where the files are. Each archive is 8.4 MiB of the same 1702 headers,
+//! 84 MiB installed, and the three differ only in the `target` line of the manifest inside them,
+//! because mingw-w64 has no per architecture split and [`crate::Sysroot::splits_by_arch`] says so.
+//!
+//! Every other target is still unpublished, which is a statement about producers rather than about
+//! this table: `--fetch` of one says so by name, and the day a tree for it is published is the day a
+//! row for it is added here. The rows that are here are the first thing `--fetch` has ever had
+//! anything to move, so they are also what the fetch and the install are tested against.
 
 use std::path::{Path, PathBuf};
 
@@ -76,9 +82,26 @@ impl Pinned {
 
 /// Every artifact this release pins, in tuple order.
 ///
-/// Empty, for the reason the module documentation gives. A row is three strings and the test below
-/// says what they have to be.
-pub const PINNED: &[Pinned] = &[];
+/// A row is three strings and the test below says what they have to be. The order is the tuple's
+/// rather than the order they were published in, so that a row is found by reading down the column
+/// and two releases of this file diff as what changed between them.
+pub const PINNED: &[Pinned] = &[
+    Pinned {
+        tuple: "aarch64-windows-gnu",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-18/rucc-sysroot-aarch64-windows-gnu.tar.gz",
+        sha256: "037b839abe565493360d320d833b5bfa048884eed445b51d41aafb59acfbac84",
+    },
+    Pinned {
+        tuple: "i686-windows-gnu",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-18/rucc-sysroot-i686-windows-gnu.tar.gz",
+        sha256: "e66deb5e67e35e12d2299d136a0d150168568e2b8aa7aab0c2b6cc8254b0cb53",
+    },
+    Pinned {
+        tuple: "x86_64-windows-gnu",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-18/rucc-sysroot-x86_64-windows-gnu.tar.gz",
+        sha256: "8774d78560c196f182b8cf865e9fe57e2937779fdcf14b7f7b3f321de2cf4488",
+    },
+];
 
 /// The artifact this release pins for `tuple`, if it pins one.
 ///
@@ -95,8 +118,8 @@ pub fn pinned_targets() -> Vec<&'static str> {
     PINNED.iter().map(|what| what.tuple).collect()
 }
 
-/// The same lookup over a table that is passed in, so the cases are testable while [`PINNED`] has no
-/// rows in it.
+/// The same lookup over a table that is passed in, so what the lookup does is tested against rows
+/// that are written for it rather than against whatever [`PINNED`] happens to hold this release.
 fn look<'a>(table: &'a [Pinned], tuple: &str) -> Option<&'a Pinned> {
     table.iter().find(|what| what.tuple == tuple)
 }
@@ -147,7 +170,7 @@ mod tests {
         );
     }
 
-    /// What every row of [`PINNED`] has to be, which passes today because there are none.
+    /// What every row of [`PINNED`] has to be.
     ///
     /// Left as a test rather than as a comment above the table, because the day somebody adds a row
     /// is the day the rules stop being obvious, and a pasted hash with a capital letter in it or a
