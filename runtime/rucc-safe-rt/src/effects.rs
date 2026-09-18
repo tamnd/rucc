@@ -59,6 +59,12 @@
 //! through a character buffer working, so the `moves` clause calls [`crate::check::carry`] and not
 //! the character write the rest of them do.
 //!
+//! It has a third recorded plane for the same reason. A copy moves whatever pointers were in the
+//! source along with the bytes, and what says where a pointer points lives in the aux slot beside
+//! the word rather than in the word, so a copy that moved the words and left the aux would leave
+//! the destination's pointers described by whatever the destination was carrying before. The
+//! `moves` clause calls [`crate::check::relocate`] to move the slots across with the bytes.
+//!
 //! [`Kind`] tells a read from a write, and the two recorded planes are the things that care about
 //! the difference: a read of a range nobody wrote is document 03's Y6 and a write of one is not a
 //! bug at all. Bounds and lifetime still do not care which direction the bytes were going.
@@ -771,6 +777,8 @@ macro_rules! __judge {
         unsafe { $crate::check::spread($dst.cast(), $src.cast(), $len) };
         // SAFETY: as above, over the type plane, which is the one C names `memcpy` in.
         unsafe { $crate::check::carry($dst.cast(), $src.cast(), $len) };
+        // SAFETY: as above, over the aux, which holds the capability of every pointer being moved.
+        unsafe { $crate::check::relocate($dst.cast(), $src.cast(), $len) };
     };
     (copies, $name:ident, $dst:ident, $src:ident) => {
         // SAFETY: both pointers are ones the program passed to a string function, which is what

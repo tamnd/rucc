@@ -832,6 +832,85 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_of_a_structure_brings_the_capabilities_in_it_along() {
+        let _turn = turn();
+        // The shape sqlite's `whereLoopXfer` has: a structure with a pointer in it copied whole
+        // into another structure. The word arrives by `memcpy` and what says where it points has
+        // to arrive with it, or the destination describes the pointer with whatever slot it was
+        // carrying before, which is the previous tenant's if the storage was used before.
+        let source = alloc(64);
+        let target = alloc(64);
+        let pointee = alloc(128);
+        let other = alloc(128);
+        let (from, into) = (of(source), of(target));
+        let (held, stale) = (of(pointee), of(other));
+
+        // SAFETY: real capabilities in this test's own storage.
+        unsafe { store(from, at(source, 24), pointee, held) };
+        // The destination is carrying somebody else's answer, which is what gets overwritten.
+        // SAFETY: as above.
+        unsafe { store(into, at(target, 24), other, stale) };
+
+        // SAFETY: two instances this test owns, of sixty four bytes each, and the copy is of all
+        // of the first into all of the second.
+        unsafe {
+            core::ptr::copy_nonoverlapping(source.cast::<u8>(), target.cast::<u8>(), 64);
+            crate::check::relocate(target, source, 64);
+        }
+
+        // SAFETY: the word is in an instance this test owns and holds the pointer just copied.
+        let back = unsafe { load(into, at(target, 24), pointee) };
+        assert_eq!(back.lo, pointee as u64, "the copy brought the pointee's base with it");
+        assert_eq!(back.ext, 128);
+        assert_eq!(back.ver, held.ver, "and the version, which is the half a stale slot gets wrong");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(source);
+            dealloc(target);
+            dealloc(pointee);
+            dealloc(other);
+        }
+    }
+
+    #[test]
+    fn a_copy_that_only_half_covers_a_word_leaves_no_capability_there() {
+        let _turn = turn();
+        // Half a pointer is not a pointer. A slot left beside a word whose bytes have just changed
+        // underneath it would describe something that is no longer in the word, so the answer is
+        // to clear it and refuse the first access through whatever the word now holds.
+        let source = alloc(64);
+        let target = alloc(64);
+        let pointee = alloc(128);
+        let into = of(target);
+        // SAFETY: real capabilities in this test's own storage.
+        unsafe { store(into, at(target, 16), pointee, of(pointee)) };
+
+        // Twenty bytes starting at offset twenty, so the word at sixteen gets its top half
+        // rewritten and its bottom half left, which is the case with no honest answer to keep.
+        // SAFETY: both ranges are inside instances this test owns.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source.cast::<u8>().add(20),
+                target.cast::<u8>().add(20),
+                20,
+            );
+            crate::check::relocate(at(target, 20), at(source, 20), 20);
+        }
+
+        // SAFETY: the word is in an instance this test owns.
+        let back = unsafe { load(into, at(target, 16), pointee) };
+        assert!(back.is_bottom(), "the slot beside a word half the copy rewrote says nothing");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(source);
+            dealloc(target);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
     fn the_exported_names_are_the_functions_beside_them() {
         let _turn = turn();
         // The ABI rather than the Rust, since generated code reaches these and not the pair above.
@@ -846,7 +925,11 @@ mod tests {
             exports::__rucc_cap_store(&raw const dest, word, pointee, &raw const cap);
             exports::__rucc_cap_load(&raw mut out, &raw const dest, word, pointee);
         }
-        assert_eq!(out, cap);
+        // Everything the capability said, plus the one bit the slot adds on the way back out. A
+        // short object's bounds are rebuilt from a displacement rather than read whole, and
+        // `Meta::REBUILT` is the answer saying so about itself.
+        let rebuilt = cap.meta.with_flags(cap.meta.flags() | Meta::REBUILT);
+        assert_eq!(out, Cap::new(cap.lo, cap.ext, cap.ver, rebuilt));
 
         // SAFETY: the addresses `alloc` handed back.
         unsafe {
