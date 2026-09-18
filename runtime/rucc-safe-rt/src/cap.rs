@@ -877,6 +877,34 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_block_hands_out_empty_slots_rather_than_the_last_tenant_s() {
+        let _turn = turn();
+        // An instance beginning is what makes its storage nobody's but the program's, and the aux
+        // is part of that storage. Without this a block the allocator hands back out answers a
+        // word the new program has never stored to with a capability for whatever the old one
+        // pointed at, which is somebody else's bounds and somebody else's version.
+        let pointee = alloc(128);
+        let first = alloc(64);
+        // SAFETY: real capabilities in this test's own storage.
+        unsafe { store(of(first), at(first, 24), pointee, of(pointee)) };
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(first) };
+
+        let again = alloc(64);
+        assert_eq!(again, first, "the allocator is expected to hand the same block back");
+        // SAFETY: the word is in an instance this test owns. The pointer it is read against is the
+        // one the old tenant stored, which is the reading that would come back wrong.
+        let back = unsafe { load(of(again), at(again, 24), pointee) };
+        assert!(back.is_bottom(), "a word nothing has stored to says nothing");
+
+        // SAFETY: the addresses in hand.
+        unsafe {
+            dealloc(again);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
     fn growing_a_buffer_brings_the_capabilities_in_it_along() {
         let _turn = turn();
         // `realloc` is always a copy here and never a resize in place, so it has the problem an

@@ -103,11 +103,35 @@ impl Arena {
     /// The address returned points at the payload, so the program never sees the header or the
     /// aux and never has to know they are there. That is what keeps `sizeof(void *)` alone and is
     /// the reason this design links against code built by another compiler at all.
+    ///
+    /// A block off a free list gets its aux cleared and a block off the bump does not, which is the
+    /// one thing here that is a decision rather than bookkeeping. `crate::alloc` does the same for
+    /// the three planes, and the reason it does it for all of a block and this does it for half of
+    /// them is that the planes live outside the block and the aux lives in it: storage the bump has
+    /// not reached yet is a fresh mapping and reads as zero, and zero is the empty slot.
     pub fn begin(&mut self, n: usize) -> usize {
         let size = Self::sized(n);
         let block = match self.take(size) {
             0 => self.bump(size),
-            reused => reused,
+            reused => {
+                // The aux is the previous tenant's and has to go. It runs first in the block, so
+                // this is the front of what `take` handed back, and what it holds is a capability
+                // for every word that tenant stored a pointer in. Leaving it would hand the new
+                // instance storage whose slots describe somebody else's objects, and a load of a
+                // word the program has not stored to yet would answer with one of them instead of
+                // saying nothing.
+                //
+                // Only here, and not after `bump`. A block the bump served has never been anyone's,
+                // and the storage behind the bump is a fresh mapping, which reads as zero, which is
+                // `crate::aux_slot::Slot::EMPTY`. That is the same thing the aux already relies on
+                // for an allocation nothing ever stored a pointer into.
+                //
+                // SAFETY: `take` returned a block of this class, so the aux of that class is the
+                // front of it and is storage this arena owns. The free list entry it was on has
+                // already been unlinked.
+                unsafe { core::ptr::write_bytes(reused as *mut u8, 0, layout::aux(size)) };
+                reused
+            }
         };
         if block == 0 {
             return 0;
