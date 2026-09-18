@@ -544,6 +544,15 @@ impl Writer<'_> {
         self.func[last].opcode == indirect
     }
 
+    /// Whether the block already ends in a jump on the condition state, which an `asm` template
+    /// wrote and this pass did not.
+    fn jumps_already(&mut self, block: mir::Block) -> bool {
+        let Some(last) = self.func.terminator(block) else { return false };
+        let opcode = self.func[last].opcode;
+        let conditional = self.insts.conditional;
+        conditional.iter().any(|name| self.opcode(name) == opcode)
+    }
+
     /// A block that goes to one place, which either follows it or has to be jumped to.
     fn one(&mut self, block: mir::Block, next: Option<mir::Block>) {
         if Some(self.func[block].succs[0].block) == next {
@@ -560,6 +569,14 @@ impl Writer<'_> {
     /// makes this safe to run after allocation: it writes no register that was not already
     /// written and it asks for none that was not already asked for.
     fn two(&mut self, block: mir::Block, next: Option<mir::Block>) -> Option<mir::Block> {
+        // A block whose jump is already there, which is one an `asm` template wrote itself. Its
+        // arms are in the order the jump means, so all that is left is the block the second arm
+        // needs when it is not the one laid out next.
+        if self.jumps_already(block) {
+            let second = self.func[block].succs[1].block;
+            return (next != Some(second)).then(|| self.bridge(block));
+        }
+
         // Asked before the branch is taken out, because what it looks at is the instruction in
         // front of the branch and taking the branch out would make that the last one.
         let fused = self.fused(block);

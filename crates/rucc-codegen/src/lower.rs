@@ -2992,7 +2992,7 @@ impl<'a> Lowering<'a> {
             })
             .collect();
         let template = self.names.resolve(info.template).to_string();
-        let lines = if template.trim().is_empty() {
+        let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
             x86_64::read(&template, &widths)
@@ -3010,7 +3010,8 @@ impl<'a> Lowering<'a> {
         // not one of those.
         let mut writes = vec![0usize; list.len()];
         let mut held = vec![false; list.len()];
-        for line in &lines {
+        for step in &steps {
+            let x86_64::Step::Line(line) = step else { continue };
             if let Some(x86_64::Piece::Operand { index, .. }) = line.at.and_then(|at| at.base) {
                 *held.get_mut(index).ok_or_else(refused)? = true;
             }
@@ -3085,12 +3086,187 @@ impl<'a> Lowering<'a> {
         // is where there is nothing for it to go on.
         let clobbers = self.names.resolve(info.clobbers).to_string();
         let clobbered =
-            if lines.is_empty() { Vec::new() } else { Self::clobbered(inst, &clobbers)? };
+            if steps.is_empty() { Vec::new() } else { Self::clobbered(inst, &clobbers)? };
 
-        for line in &lines {
+        // A template with a label in it is not one run of instructions, and what it is instead is
+        // in [`Self::woven`]. Every other template is what it has always been, which is every
+        // instruction of it written into the block the statement stands in.
+        if steps.iter().any(|step| !matches!(step, x86_64::Step::Line(_))) {
+            return self.woven(inst, &steps, &mut places, &list, &clobbered, &writes);
+        }
+        for step in &steps {
+            let x86_64::Step::Line(line) = step else { continue };
             self.instruction(inst, line, &places, &list, &clobbered)?;
         }
         Ok(())
+    }
+
+    /// A template with labels in it, as the blocks its jumps leave and arrive at.
+    ///
+    /// A statement is an instruction of the IR and stands inside one block, so a template that
+    /// jumps has to stop being one thing. Each label becomes a block, each jump ends the block it
+    /// stands in and gives it two arms, and whatever follows the statement goes into whichever
+    /// block the walk finished in, which is what [`Self::block`] already reads off `self.at` and
+    /// what [`Self::saves_place`] already does for the same reason.
+    ///
+    /// # What is carried between them
+    ///
+    /// The machine IR here is in the form where a register is written once, so an operand written
+    /// inside a loop and read again at the top of it cannot be one register. What arrives at the
+    /// top is a parameter of that block, and every jump to it carries whichever register held the
+    /// operand where the jump stands. That is the whole of the bookkeeping: every block a label
+    /// made takes one parameter for each operand that is in a register at all, in one order, so an
+    /// arm's arguments and a block's parameters are the same list read twice.
+    ///
+    /// Which register an operand is in at each point is kept in the read half of its place, since
+    /// that is what the instructions below read it out of. An instruction that writes an operand
+    /// leaves it in the register it wrote, and a jump below carries that one. The block an
+    /// untaken jump falls into is arrived at one way only and so takes no parameters, and nothing
+    /// about where the operands are changes there.
+    ///
+    /// An operand written by the template and filled by nothing is written as a zero first, for
+    /// the reason [`Self::undefined`] gives and one more: a jump may carry it before the
+    /// instruction that fills it has run, and an argument has to be a register something wrote.
+    ///
+    /// # The condition state
+    ///
+    /// Nothing carries it and nothing has to. The instruction that sets it and the jump that reads
+    /// it are both written here, next to each other in one block, and what the allocator may put
+    /// between them is a move, which on this machine leaves the condition state alone. The edge
+    /// into a block a loop goes back to is a critical edge and `crate::split` gives it a block of
+    /// its own, so the moves an arm turns into land behind the jump rather than in front of it.
+    fn woven(
+        &mut self,
+        inst: Inst,
+        steps: &[x86_64::Step],
+        places: &mut [Place],
+        list: &[AsmOperand],
+        clobbered: &[PhysReg],
+        writes: &[usize],
+    ) -> Result<(), Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let span = self.source.span(inst);
+
+        // Which operands are carried, which is every one that is in a register at all. An operand
+        // the template never puts in one, such as a constant it names only as the distance into an
+        // address, is in the instruction and has nowhere to be carried from.
+        let mut carried: Vec<(usize, RegClass)> = Vec::new();
+        for (index, operand) in list.iter().enumerate() {
+            if places[index].read.is_none() && places[index].write.is_none() {
+                continue;
+            }
+            let value = operand.result.or(operand.value).ok_or_else(refused)?;
+            let ty = self.source[value].ty;
+            if on_x87(ty) {
+                return Err(refused());
+            }
+            carried.push((index, self.class_of(ty)));
+        }
+
+        // What each of them holds where the template starts.
+        for &(index, class) in &carried {
+            if places[index].read.is_some() {
+                continue;
+            }
+            if writes[index] == 0 {
+                places[index].read = places[index].write;
+                continue;
+            }
+            if class != self.gpr {
+                return Err(refused());
+            }
+            let block = self.at.expect("a block is being filled");
+            let reg = self.out.new_vreg(class);
+            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
+            self.out.build(block, put).at(span).def(reg, class).imm(0).finish();
+            places[index].read = Some(reg);
+        }
+
+        // The blocks, made before the walk because a jump forwards names a label the walk has not
+        // reached yet.
+        let mut labels: Vec<(&str, mir::Block, Vec<mir::Reg>)> = Vec::new();
+        for step in steps {
+            let x86_64::Step::Label(name) = step else { continue };
+            let block = self.out.create_block();
+            let mut params = Vec::with_capacity(carried.len());
+            for &(_, class) in &carried {
+                params.push(self.out.append_param(block, class));
+            }
+            labels.push((name.as_str(), block, params));
+        }
+
+        for step in steps {
+            match step {
+                x86_64::Step::Label(name) => {
+                    let (block, params) = Self::went(&labels, name).ok_or_else(refused)?;
+                    let from = self.at.expect("a block is being filled");
+                    let args = Self::held(places, &carried).ok_or_else(refused)?;
+                    *self.out.succs_mut(from) = vec![mir::BlockCall::with(block, args)];
+                    self.at = Some(block);
+                    for (at, &(index, _)) in carried.iter().enumerate() {
+                        places[index].read = params.get(at).copied();
+                    }
+                }
+                x86_64::Step::Jump { opcode, to } => {
+                    let (block, _) = Self::went(&labels, to).ok_or_else(refused)?;
+                    let from = self.at.expect("a block is being filled");
+                    let args = Self::held(places, &carried).ok_or_else(refused)?;
+                    let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{opcode}")));
+                    self.out.build(from, opcode).at(span).finish();
+                    let next = self.out.create_block();
+                    *self.out.succs_mut(from) =
+                        vec![mir::BlockCall::with(block, args), mir::BlockCall::to(next)];
+                    self.at = Some(next);
+                }
+                x86_64::Step::Line(line) => {
+                    self.instruction(inst, line, places, list, clobbered)?;
+                    let form = x86_64::form(line.opcode).ok_or_else(refused)?;
+                    for (desc, piece) in form.operands().iter().zip(&line.operands) {
+                        if !desc.role.is_def() {
+                            continue;
+                        }
+                        let index = match *piece {
+                            x86_64::Piece::Operand { index, .. } => index,
+                            x86_64::Piece::Implicit { reg } => match bound(list, reg, desc.role) {
+                                Some(index) => index,
+                                None => continue,
+                            },
+                            x86_64::Piece::Reg { .. } => continue,
+                        };
+                        let place = places.get_mut(index).ok_or_else(refused)?;
+                        if place.write.is_some() {
+                            place.read = place.write;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Where the walk left each output, which is the parameter of the block a label made when
+        // the template ends in one and the register an instruction wrote when it does not.
+        for (index, operand) in list.iter().enumerate() {
+            let Some(result) = operand.result else { continue };
+            if let Some(reg) = places[index].read {
+                self.regs[result.index()] = Some(reg);
+            }
+        }
+        Ok(())
+    }
+
+    /// The block one of the template's labels made, and the parameters it takes.
+    fn went<'a>(
+        labels: &'a [(&str, mir::Block, Vec<mir::Reg>)],
+        name: &str,
+    ) -> Option<(mir::Block, &'a [mir::Reg])> {
+        labels
+            .iter()
+            .find(|(had, ..)| *had == name)
+            .map(|(_, block, params)| (*block, params.as_slice()))
+    }
+
+    /// The register each carried operand is in, which is what an arm to a label carries.
+    fn held(places: &[Place], carried: &[(usize, RegClass)]) -> Option<Vec<mir::Reg>> {
+        carried.iter().map(|&(index, _)| places.get(index)?.read).collect()
     }
 
     /// The registers a clobber list names, in the order it named them.
