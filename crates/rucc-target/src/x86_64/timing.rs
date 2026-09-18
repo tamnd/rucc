@@ -133,6 +133,12 @@ fn plain(form: Form) -> Timing {
         // costs. Where the second source came from is not something the machine spends a cycle on
         // once the address is known, and a constant is on the instruction.
         AluMi => (1 + LOAD, Unit::Store),
+        // A comparison reading its right hand side out of memory, with and without the byte
+        // behind it. Each is its register form plus a load, and the unit is the address unit for
+        // the reason it is above: the comparison itself is a cycle on a unit there are four of and
+        // the load is the part there is not.
+        CmpRm => (1 + LOAD, Unit::Load),
+        CmpSetRm => (2 + LOAD, Unit::Load),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
         DivQuo | DivRem => (26, Unit::Div),

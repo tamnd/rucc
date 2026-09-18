@@ -130,7 +130,22 @@
 //! because the first is the one the destination is tied to. Where the load feeds the first instead,
 //! the two sources are swapped first, which is a change to the instruction and not to what it
 //! computes as long as the operation commutes. Five of the six here do and subtraction does not,
-//! which is what [`Fold::commutes`] says.
+//! which is what [`Fold::swapped`] says.
+//!
+//! # Which comparisons
+//!
+//! The comparisons are in [`FOLDS`] too, and they are the reason that field is a name rather than
+//! a flag. A comparison writes a byte neither source has a claim on, so both of its sources are
+//! free the way an addition's second one is, and it still does not commute: the machine reads the
+//! right hand side out of memory and subtracts it from the left. What saves the other arrangement
+//! is that reading the two sides backwards asks the same question backwards, so a load feeding the
+//! left hand side becomes the same instruction with the condition turned over, and `*p < x` is
+//! `x > *p`. Equality and inequality turn over into themselves and the other eight go in pairs.
+//!
+//! A comparison against a constant has no second register and so no row. The instruction that
+//! compares memory against a constant is a real one and folding into it is a separate piece of
+//! work, because what would be folded is the load on the left and the constant is already on the
+//! instruction.
 //!
 //! # What a `volatile` access gets
 //!
@@ -256,8 +271,20 @@ pub struct Fold {
     pub into: &'static str,
     /// The load that would have filled that register, which has to be of the same width.
     pub load: &'static str,
-    /// Whether the two sources may be swapped, which is what lets the load feed either of them.
-    pub commutes: bool,
+    /// The same arithmetic reading its first source out of memory, where there is one.
+    ///
+    /// [`None`] where the two sources may not be swapped at all, which is subtraction: the
+    /// instruction that reads memory reads it as the right hand side and there is no encoding
+    /// that puts it on the left, so a load feeding the left hand side stays where it is.
+    ///
+    /// The same name as `into` for an operation that commutes, since writing the two sources in
+    /// either order computes the same answer and one instruction covers both.
+    ///
+    /// A different name for a comparison, which is the reason this is a name rather than a flag.
+    /// A comparison does not commute and is still foldable on either side: reading the two sides
+    /// the other way round asks the same question backwards, so the condition turns over with
+    /// them and `a < b` with the load on the left is `b > a`.
+    pub swapped: Option<&'static str>,
 }
 
 /// The arithmetic a load can move into on this machine.
@@ -265,30 +292,275 @@ pub struct Fold {
 /// Every two-address integer operation the target has, at every width it has one, except the eight
 /// bit multiply the module documentation gives the reason for. Subtraction is the one that does not
 /// commute.
+///
+/// And then the comparisons, which are not arithmetic and fold the same way. What one writes is a
+/// byte rather than one of its sources, so the row reads the same and the instruction it names has
+/// a destination neither side has a claim on. The forty rows are ten conditions at four widths and
+/// each names two instructions, because which side the memory is is a condition of its own.
 pub static FOLDS: &[Fold] = &[
-    Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", commutes: true },
-    Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", commutes: true },
-    Fold { from: "add_rr_32", into: "add_rm_32", load: "mov_rm_32", commutes: true },
-    Fold { from: "add_rr_64", into: "add_rm_64", load: "mov_rm_64", commutes: true },
-    Fold { from: "sub_rr_8", into: "sub_rm_8", load: "mov_rm_8", commutes: false },
-    Fold { from: "sub_rr_16", into: "sub_rm_16", load: "mov_rm_16", commutes: false },
-    Fold { from: "sub_rr_32", into: "sub_rm_32", load: "mov_rm_32", commutes: false },
-    Fold { from: "sub_rr_64", into: "sub_rm_64", load: "mov_rm_64", commutes: false },
-    Fold { from: "and_rr_8", into: "and_rm_8", load: "mov_rm_8", commutes: true },
-    Fold { from: "and_rr_16", into: "and_rm_16", load: "mov_rm_16", commutes: true },
-    Fold { from: "and_rr_32", into: "and_rm_32", load: "mov_rm_32", commutes: true },
-    Fold { from: "and_rr_64", into: "and_rm_64", load: "mov_rm_64", commutes: true },
-    Fold { from: "or_rr_8", into: "or_rm_8", load: "mov_rm_8", commutes: true },
-    Fold { from: "or_rr_16", into: "or_rm_16", load: "mov_rm_16", commutes: true },
-    Fold { from: "or_rr_32", into: "or_rm_32", load: "mov_rm_32", commutes: true },
-    Fold { from: "or_rr_64", into: "or_rm_64", load: "mov_rm_64", commutes: true },
-    Fold { from: "xor_rr_8", into: "xor_rm_8", load: "mov_rm_8", commutes: true },
-    Fold { from: "xor_rr_16", into: "xor_rm_16", load: "mov_rm_16", commutes: true },
-    Fold { from: "xor_rr_32", into: "xor_rm_32", load: "mov_rm_32", commutes: true },
-    Fold { from: "xor_rr_64", into: "xor_rm_64", load: "mov_rm_64", commutes: true },
-    Fold { from: "imul_rr_16", into: "imul_rm_16", load: "mov_rm_16", commutes: true },
-    Fold { from: "imul_rr_32", into: "imul_rm_32", load: "mov_rm_32", commutes: true },
-    Fold { from: "imul_rr_64", into: "imul_rm_64", load: "mov_rm_64", commutes: true },
+    Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", swapped: Some("add_rm_8") },
+    Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", swapped: Some("add_rm_16") },
+    Fold { from: "add_rr_32", into: "add_rm_32", load: "mov_rm_32", swapped: Some("add_rm_32") },
+    Fold { from: "add_rr_64", into: "add_rm_64", load: "mov_rm_64", swapped: Some("add_rm_64") },
+    Fold { from: "sub_rr_8", into: "sub_rm_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "sub_rr_16", into: "sub_rm_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "sub_rr_32", into: "sub_rm_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "sub_rr_64", into: "sub_rm_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "and_rr_8", into: "and_rm_8", load: "mov_rm_8", swapped: Some("and_rm_8") },
+    Fold { from: "and_rr_16", into: "and_rm_16", load: "mov_rm_16", swapped: Some("and_rm_16") },
+    Fold { from: "and_rr_32", into: "and_rm_32", load: "mov_rm_32", swapped: Some("and_rm_32") },
+    Fold { from: "and_rr_64", into: "and_rm_64", load: "mov_rm_64", swapped: Some("and_rm_64") },
+    Fold { from: "or_rr_8", into: "or_rm_8", load: "mov_rm_8", swapped: Some("or_rm_8") },
+    Fold { from: "or_rr_16", into: "or_rm_16", load: "mov_rm_16", swapped: Some("or_rm_16") },
+    Fold { from: "or_rr_32", into: "or_rm_32", load: "mov_rm_32", swapped: Some("or_rm_32") },
+    Fold { from: "or_rr_64", into: "or_rm_64", load: "mov_rm_64", swapped: Some("or_rm_64") },
+    Fold { from: "xor_rr_8", into: "xor_rm_8", load: "mov_rm_8", swapped: Some("xor_rm_8") },
+    Fold { from: "xor_rr_16", into: "xor_rm_16", load: "mov_rm_16", swapped: Some("xor_rm_16") },
+    Fold { from: "xor_rr_32", into: "xor_rm_32", load: "mov_rm_32", swapped: Some("xor_rm_32") },
+    Fold { from: "xor_rr_64", into: "xor_rm_64", load: "mov_rm_64", swapped: Some("xor_rm_64") },
+    Fold { from: "imul_rr_16", into: "imul_rm_16", load: "mov_rm_16", swapped: Some("imul_rm_16") },
+    Fold { from: "imul_rr_32", into: "imul_rm_32", load: "mov_rm_32", swapped: Some("imul_rm_32") },
+    Fold { from: "imul_rr_64", into: "imul_rm_64", load: "mov_rm_64", swapped: Some("imul_rm_64") },
+    Fold {
+        from: "cmp_set_e_8",
+        into: "cmp_set_e_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_e_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_e_16",
+        into: "cmp_set_e_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_e_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_e_32",
+        into: "cmp_set_e_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_e_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_e_64",
+        into: "cmp_set_e_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_e_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_ne_8",
+        into: "cmp_set_ne_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_ne_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_ne_16",
+        into: "cmp_set_ne_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_ne_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_ne_32",
+        into: "cmp_set_ne_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_ne_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_ne_64",
+        into: "cmp_set_ne_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_ne_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_l_8",
+        into: "cmp_set_l_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_g_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_l_16",
+        into: "cmp_set_l_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_g_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_l_32",
+        into: "cmp_set_l_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_g_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_l_64",
+        into: "cmp_set_l_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_g_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_le_8",
+        into: "cmp_set_le_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_ge_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_le_16",
+        into: "cmp_set_le_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_ge_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_le_32",
+        into: "cmp_set_le_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_ge_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_le_64",
+        into: "cmp_set_le_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_ge_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_g_8",
+        into: "cmp_set_g_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_l_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_g_16",
+        into: "cmp_set_g_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_l_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_g_32",
+        into: "cmp_set_g_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_l_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_g_64",
+        into: "cmp_set_g_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_l_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_ge_8",
+        into: "cmp_set_ge_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_le_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_ge_16",
+        into: "cmp_set_ge_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_le_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_ge_32",
+        into: "cmp_set_ge_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_le_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_ge_64",
+        into: "cmp_set_ge_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_le_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_b_8",
+        into: "cmp_set_b_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_a_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_b_16",
+        into: "cmp_set_b_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_a_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_b_32",
+        into: "cmp_set_b_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_a_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_b_64",
+        into: "cmp_set_b_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_a_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_be_8",
+        into: "cmp_set_be_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_ae_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_be_16",
+        into: "cmp_set_be_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_ae_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_be_32",
+        into: "cmp_set_be_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_ae_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_be_64",
+        into: "cmp_set_be_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_ae_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_a_8",
+        into: "cmp_set_a_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_b_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_a_16",
+        into: "cmp_set_a_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_b_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_a_32",
+        into: "cmp_set_a_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_b_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_a_64",
+        into: "cmp_set_a_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_b_rm_64"),
+    },
+    Fold {
+        from: "cmp_set_ae_8",
+        into: "cmp_set_ae_rm_8",
+        load: "mov_rm_8",
+        swapped: Some("cmp_set_be_rm_8"),
+    },
+    Fold {
+        from: "cmp_set_ae_16",
+        into: "cmp_set_ae_rm_16",
+        load: "mov_rm_16",
+        swapped: Some("cmp_set_be_rm_16"),
+    },
+    Fold {
+        from: "cmp_set_ae_32",
+        into: "cmp_set_ae_rm_32",
+        load: "mov_rm_32",
+        swapped: Some("cmp_set_be_rm_32"),
+    },
+    Fold {
+        from: "cmp_set_ae_64",
+        into: "cmp_set_ae_rm_64",
+        load: "mov_rm_64",
+        swapped: Some("cmp_set_be_rm_64"),
+    },
 ];
 
 /// One arithmetic instruction that could work on memory rather than on a register, and the load
@@ -944,13 +1216,16 @@ fn joined(
     }
     let operands = func[func[inst].operands].to_vec();
     let [answer, first, second] = operands[..] else { return None };
-    // The second source is the one the memory operand replaces, because the answer is tied to the
-    // first. Where the load feeds the first source instead and the operation commutes, the two are
-    // swapped, which leaves the instruction computing what it computed.
-    let kept = if second.reg == carried.reg {
-        first
-    } else if fold.commutes && first.reg == carried.reg {
-        second
+    // The second source is the one the memory operand replaces, which for arithmetic is because
+    // the answer is tied to the first and for a comparison is because that is the side the
+    // instruction subtracts. Where the load feeds the first source instead, the row says which
+    // instruction reads the two the other way round, and that one is written instead: for
+    // arithmetic that commutes it is the same instruction, and for a comparison it is the same
+    // question with the condition turned over.
+    let (kept, into) = if second.reg == carried.reg {
+        (first, fold.into)
+    } else if first.reg == carried.reg {
+        (second, fold.swapped?)
     } else {
         return None;
     };
@@ -962,7 +1237,7 @@ fn joined(
     // load, so every position the mode holds moves along by one.
     amode.base = amode.base.map(|at| at + 1);
     amode.index = amode.index.map(|at| at + 1);
-    let into = names.intern(&format!("{}{}", machine.prefix, fold.into));
+    let into = names.intern(&format!("{}{}", machine.prefix, into));
     Some(Plan {
         opcode: Opcode::new(into),
         operands: [answer, kept].into_iter().chain(address).collect(),
@@ -1020,6 +1295,22 @@ mod tests {
             .uses(second, GPR)
             .finish();
         answer
+    }
+
+    /// A comparison of those two registers in that order, which keeps its answer in a byte the
+    /// two sources have no claim on and is what makes it not two-address.
+    fn compare(
+        func: &mut Func,
+        names: &mut Interner,
+        block: mir::Block,
+        name: &str,
+        first: Reg,
+        second: Reg,
+    ) -> Reg {
+        let byte = func.new_vreg(GPR);
+        let opcode = op(names, name);
+        func.build(block, opcode).def(byte, GPR).uses(first, GPR).uses(second, GPR).finish();
+        byte
     }
 
     /// What every instruction in a block came to, as opcodes.
@@ -1865,6 +2156,78 @@ mod tests {
         assert_eq!(addresses, [(inst, 3usize)], "the entry names the instruction that took it");
     }
 
+    /// A comparison whose right hand side came out of a load, which is `if (x < *p)`. The load is
+    /// the side the instruction reads out of memory already, so the condition is the one that was
+    /// written and only the opcode's shape changes.
+    #[test]
+    fn a_comparison_against_a_word_that_was_just_loaded_becomes_one_instruction() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        compare(&mut func, &mut names, block, "cmp_set_l_64", other, word);
+
+        assert_eq!(combine(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.cmp_set_l_rm_64"]);
+        let inst = func.insts(block).next().expect("the comparison");
+        let mem = func[inst].mem.expect("it reads memory");
+        assert_eq!(func[mem].disp, 16, "the address came from the load");
+        assert_eq!(func[mem].base, Some(2), "and names the operand behind the byte and the source");
+        assert_eq!(func[func[inst].operands][1].reg, other, "the side it kept");
+        assert_eq!(func[func[inst].operands][2].reg, base, "the address");
+    }
+
+    /// The same comparison the other way round, which is `if (*p < x)`. The machine reads the
+    /// right hand side out of memory and nothing else, so what comes out is the question asked
+    /// backwards, and less than on the left is greater than on the right.
+    #[test]
+    fn a_comparison_whose_left_hand_side_was_just_loaded_turns_the_condition_over() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        compare(&mut func, &mut names, block, "cmp_set_l_64", word, other);
+
+        assert_eq!(combine(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.cmp_set_g_rm_64"]);
+        let inst = func.insts(block).next().expect("the comparison");
+        assert_eq!(func[func[inst].operands][1].reg, other, "the side it kept");
+    }
+
+    /// Equality on the left, which is the case the turning over has to leave alone. Two values are
+    /// equal in whichever order they are read, so the row for it names itself on both sides and a
+    /// table that had reached for the opposite condition would have written inequality here.
+    #[test]
+    fn an_equality_folded_on_either_side_is_the_same_comparison() {
+        for (first, second) in [(true, false), (false, true)] {
+            let (mut names, mut func, block) = empty();
+            let base = func.new_vreg(GPR);
+            let other = func.new_vreg(GPR);
+            let word = load(&mut func, &mut names, block, base);
+            let left = if first { word } else { other };
+            let right = if second { word } else { other };
+            compare(&mut func, &mut names, block, "cmp_set_e_64", left, right);
+
+            assert_eq!(combine(&mut func, &mut names), 1);
+            assert_eq!(shape(&func, &names, block), ["x64.cmp_set_e_rm_64"]);
+        }
+    }
+
+    /// A comparison against a constant, which has no register for a load to fill. There is no row
+    /// for it and nothing to fold, and the load stays where it is.
+    #[test]
+    fn a_comparison_against_a_constant_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let opcode = op(&mut names, "cmp_set_l_ri_64");
+        func.build(block, opcode).def(byte, GPR).uses(word, GPR).imm(7).finish();
+
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64", "x64.cmp_set_l_ri_64"]);
+    }
+
     /// Every row of the table names instructions this target has, and names a load and an
     /// arithmetic whose widths agree. A row that got one of the three wrong would propose an
     /// instruction the change framework turns down, which is a fold that silently never happens.
@@ -1879,16 +2242,55 @@ mod tests {
             assert_eq!(width(fold.from), width(fold.load), "{} loads another width", fold.from);
             assert!((MACHINE.takes_mem)(fold.into), "{} reads no memory", fold.into);
             assert!(!(MACHINE.takes_mem)(fold.from), "{} already reads memory", fold.from);
+            let Some(swapped) = fold.swapped else { continue };
+            assert!(MACHINE.has(swapped), "{swapped} is not an instruction");
+            assert_eq!(width(fold.from), width(swapped), "{} changes width", fold.from);
+            assert!((MACHINE.takes_mem)(swapped), "{swapped} reads no memory");
         }
     }
 
-    /// One row per arithmetic instruction the target has that could take one. The count is here so
-    /// that an instruction added to the target without a row shows up as a number rather than as a
-    /// fold nobody noticed was missing.
+    /// One row per arithmetic instruction the target has that could take one, and one per
+    /// comparison. The counts are here so that an instruction added to the target without a row
+    /// shows up as a number rather than as a fold nobody noticed was missing.
     #[test]
-    fn the_table_covers_the_arithmetic_this_target_has() {
-        assert_eq!(FOLDS.len(), 23, "six operations at four widths, less the eight bit multiply");
-        let commuting = FOLDS.iter().filter(|fold| fold.commutes).count();
-        assert_eq!(commuting, 19, "everything but the four subtractions");
+    fn the_table_covers_the_arithmetic_and_the_comparisons_this_target_has() {
+        let compares = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_set_")).count();
+        assert_eq!(compares, 40, "ten conditions at four widths");
+        let arithmetic = FOLDS.len() - compares;
+        assert_eq!(arithmetic, 23, "six operations at four widths, less the eight bit multiply");
+        let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
+        assert_eq!(swapped, 59, "everything but the four subtractions");
+    }
+
+    /// What a comparison folded on its left hand side comes out as.
+    ///
+    /// Reading the two sides the other way round turns the question over, so the row has to name
+    /// the opposite ordering rather than the opposite answer. Less than and greater than are the
+    /// pair, and equality and inequality are the two that come back to themselves, which is what
+    /// makes this worth a test of its own: a row that had turned equality into inequality would be
+    /// wrong in a way no width check and no name check would catch.
+    #[test]
+    fn a_comparison_folded_on_its_left_hand_side_asks_the_same_question_backwards() {
+        let turned = |condition: &str| match condition {
+            "e" => "e",
+            "ne" => "ne",
+            "l" => "g",
+            "g" => "l",
+            "le" => "ge",
+            "ge" => "le",
+            "b" => "a",
+            "a" => "b",
+            "be" => "ae",
+            "ae" => "be",
+            other => panic!("{other} is not a condition this machine has"),
+        };
+        let compares = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_set_"));
+        for fold in compares {
+            let (front, width) = fold.from.rsplit_once('_').expect("a name ending in a width");
+            let condition = front.strip_prefix("cmp_set_").expect("a name with a condition");
+            assert_eq!(fold.into, format!("cmp_set_{condition}_rm_{width}"));
+            let wanted = format!("cmp_set_{}_rm_{width}", turned(condition));
+            assert_eq!(fold.swapped, Some(wanted.as_str()), "{} turns over wrongly", fold.from);
+        }
     }
 }
