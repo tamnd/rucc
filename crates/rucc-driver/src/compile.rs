@@ -6187,6 +6187,54 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(run(&opts, address).messages, [warning]);
     }
 
+    /// A pointer to an array, where the qualifiers are on the element and the comparison is not.
+    ///
+    /// 6.7.3p10 says the qualifiers in an array declaration belong to the element, so `const int
+    /// [4]` is an unqualified array of `const int` and not a qualified array of `int`. Compatibility
+    /// then reads the element types, finds one `const` and one not, and calls the two arrays
+    /// incompatible, which makes `const int (*)[4] = p` an incompatible pointer rather than a
+    /// pointer that gained a qualifier. That is what the wording said before C23 and it is not what
+    /// any compiler does: gcc and clang take it, C23 wrote the rule the way they read it, and the
+    /// two directions are told apart the way they are everywhere else, which is that adding a
+    /// qualifier is silent and dropping one is worth a word.
+    ///
+    /// Found in libwebp, where `src/enc/vp8l_enc.c` takes the address of a `HistogramBuckets` out of
+    /// a structure into a `const HistogramBuckets *const`, and a whole file of a real library did
+    /// not compile for it.
+    #[test]
+    fn a_pointer_to_an_array_gains_a_qualifier_the_same_way_a_pointer_to_anything_else_does() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let prefix = "typedef unsigned int B[4];\nstruct H { B category[2]; };\n";
+
+        // Adding it, which is the direction the library writes and the one nothing is owed for.
+        let adding = format!("{prefix}const B *f(struct H *h) {{ return &h->category[0]; }}\n");
+        assert_eq!(run(&opts, &adding).messages, [] as [String; 0]);
+
+        // And the same thing written out rather than through the typedef, since the typedef is a
+        // spelling and the rule is about the array.
+        let plain = concat!(
+            "const unsigned int (*f(unsigned int (*p)[4]))[4] { return p; }\n",
+            "const unsigned int (*g(unsigned int (*p)[2][3]))[2][3] { return p; }\n",
+        );
+        assert_eq!(run(&opts, plain).messages, [] as [String; 0]);
+
+        // Dropping it, which is the direction that is worth a word, and the word is the one every
+        // other pointer target gets rather than a complaint about the types not matching.
+        let dropping = format!("{prefix}B *f(const B *p) {{ return p; }}\n");
+        let warning =
+            "/main.c:3:27: warning: return discards 'const' qualifier from pointer target type \
+             [E0514]";
+        assert_eq!(run(&opts, &dropping).messages, [warning]);
+
+        // A pointer to an array of something else is still an incompatible pointer, because
+        // nothing here is about the element being a different type.
+        let wrong = "const unsigned int (*f(unsigned short (*p)[4]))[4] { return p; }\n";
+        let error = "/main.c:1:61: error: returning 'unsigned short (*)[4]' from a function with \
+             incompatible return type 'const unsigned int (*)[4]' [E0512]";
+        assert_eq!(run(&opts, wrong).messages, [error]);
+    }
+
     /// A definition that names its parameters and then declares them under the list.
     ///
     /// The declarations say what the types are, 6.9.1p6, and what the function takes is those

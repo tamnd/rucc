@@ -506,6 +506,40 @@ impl Types {
         self.intern(Type::new(ty.kind))
     }
 
+    /// The qualifiers an object of `id` carries, which for an array are its element's.
+    ///
+    /// [`Self::quals`] answers what the node holds, and [`Self::qualified`] has just put an array's
+    /// qualifiers on its element rather than on the array, so the node holds nothing and an object
+    /// of the type is still `const`. That gap is only visible in one place, which is a pointer to an
+    /// array: `const int (*)[4]` points at something nobody may write to and asking the array node
+    /// says otherwise.
+    #[must_use]
+    pub fn object_quals(&self, id: TypeId) -> Qualifiers {
+        let ty = self.get(id);
+        match ty.kind {
+            TypeKind::Array { elem, .. } => ty.quals.with(self.object_quals(elem)),
+            _ => ty.quals,
+        }
+    }
+
+    /// `id` with the qualifiers of an object of it removed, which for an array are its element's.
+    ///
+    /// [`Self::unqualified`] taken through an array for the same reason [`Self::object_quals`] is,
+    /// so that the two agree about where an array keeps its qualifiers. What it is for is the
+    /// comparison in a pointer assignment: C's own compatibility says `const int [4]` and `int [4]`
+    /// are different types, because the element types are, so `const int (*)[4] = p` would be an
+    /// incompatible pointer rather than a qualifier being added. Every compiler takes it, C23 says
+    /// so outright, and taking the qualifiers off both sides before comparing is what makes the
+    /// assignment rule read the array the way it reads everything else.
+    pub fn unqualified_object(&mut self, id: TypeId) -> TypeId {
+        let ty = self.get(id);
+        if let TypeKind::Array { elem, len } = ty.kind {
+            let elem = self.unqualified_object(elem);
+            return self.intern(Type::new(TypeKind::Array { elem, len }));
+        }
+        self.unqualified(id)
+    }
+
     /// The id for `ty`, making one if this is the first time it has been asked for.
     fn intern(&mut self, ty: Type) -> TypeId {
         if let Some(&id) = self.map.get(&ty) {
