@@ -423,7 +423,8 @@ pub fn write(
     // names, so the two paths put the same entries in whether or not anything refers to one.
     let weak: HashSet<&str> = data.weak.iter().map(String::as_str).collect();
     let wanted = text.relocs.iter().map(|reloc| &reloc.symbol);
-    let wanted = wanted.chain(data.objects.iter().flat_map(|object| &object.relocs).map(|r| &r.symbol));
+    let wanted =
+        wanted.chain(data.objects.iter().flat_map(|object| &object.relocs).map(|r| &r.symbol));
     let wanted: Vec<&String> = wanted.chain(data.weak.iter()).collect();
     for name in wanted {
         if symbols.contains_key(name) {
@@ -1503,7 +1504,8 @@ mod tests {
         let named = Place::Named(".init_array".to_owned());
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes =
-            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections).expect("object");
+            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections)
+                .expect("object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let m = file.symbols().find(|s| s.name() == Ok("m")).expect("the tentative one");
         assert!(m.is_common(), "still the linker's to merge and not in a section at all");
@@ -1533,7 +1535,8 @@ mod tests {
         };
         let objects = vec![variable("first", Place::Written), pointer];
         let bytes =
-            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections).expect("object");
+            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections)
+                .expect("object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".data.p").expect("the pointer's own section");
         let (offset, reloc) = section.relocations().next().expect("one relocation");
@@ -1553,8 +1556,10 @@ mod tests {
     #[test]
     fn every_variable_that_wants_the_local_relocated_section_shares_one() {
         let place = Place::RelocReadOnly { local: true };
-        let data =
-            Data { weak: Vec::new(), objects: vec![variable("first", place.clone()), variable("second", place)] };
+        let data = Data {
+            weak: Vec::new(),
+            objects: vec![variable("first", place.clone()), variable("second", place)],
+        };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1651,7 +1656,8 @@ mod tests {
             addend: -4,
             after: 0,
         });
-        let data = Data { weak: vec!["hook".to_owned(), "never_called".to_owned()], objects: vec![] };
+        let data =
+            Data { weak: vec!["hook".to_owned(), "never_called".to_owned()], objects: vec![] };
         let bytes = write(&text, &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
 
@@ -1915,7 +1921,10 @@ mod tests {
     #[test]
     fn a_variable_the_loader_writes_into_is_read_only_data_here() {
         for local in [false, true] {
-            let data = Data { weak: Vec::new(), objects: vec![variable("p", Place::RelocReadOnly { local })] };
+            let data = Data {
+                weak: Vec::new(),
+                objects: vec![variable("p", Place::RelocReadOnly { local })],
+            };
             let bytes = write(&Text::default(), &data, &[], &windows(), Output::default())
                 .expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
