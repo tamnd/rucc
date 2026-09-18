@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and two rewrites written out by hand below them.
+//! instruction and are where anything new goes, and three rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -65,13 +65,13 @@
 //! that same rewrite in place with one operand instead of two, and it is its own case because a
 //! conversion is the one instruction whose operand is not the width of its result.
 //!
-//! ## The two written by hand
+//! ## The three written by hand
 //!
-//! Both are about comparisons, and both are here rather than in `rules/` for the same reason: what
-//! they are is one statement quantified over the predicates, and the rule language has no way to
-//! say that, so writing either as rules would mean writing out every predicate, every operand
-//! order and every width by hand and keeping the enumeration in step with the two predicate sets
-//! forever.
+//! All three are about comparisons, and all three are here rather than in `rules/` for the same
+//! reason: what each one is, is one statement quantified over the predicates, and the rule language
+//! has no way to say that, so writing any of them as rules would mean writing out every predicate,
+//! every operand order and every width by hand and keeping the enumeration in step with the two
+//! predicate sets forever.
 //!
 //! ### A negation of a comparison
 //!
@@ -117,6 +117,29 @@
 //! `or` and a comparison. That is what `gcc.c-torture/execute/ieee/compare-fp-3.c` needs and it
 //! costs nothing to get.
 //!
+//! ### A comparison one operand's sign bit settles
+//!
+//! `fabs (x) < 0.0` is false whatever `x` holds. That is `gcc.c-torture/execute/20020720-1.c`, and
+//! it asserts it the way the two above do, by calling a function it never defines.
+//!
+//! The same buckets answer it. A magnitude is a positive zero, a positive number, a positive
+//! infinity or a NaN, so a pair made of one and a constant that is not positive is never in the
+//! bucket where the magnitude is below, and against a negative constant it is never in the one
+//! where the two are equal either. Narrow the predicate's set by the buckets the pair can be in and
+//! read the answer back: nothing left is false, and anything left is a shorter question than the
+//! one that was asked. `fabs (x) <= 0.0` comes out as `fabs (x) == 0.0` that way, which is not a
+//! constant and is still worth having.
+//!
+//! What it does not come out as is true. The narrowing only ever takes buckets away and always
+//! takes at least one, so `fabs (x) >= 0.0` is left exactly as it was written, which is the right
+//! answer rather than a missed one: a NaN has its sign bit cleared like anything else and is not
+//! above, below or equal to anything at all.
+//!
+//! `fabs` is not a call by the time this runs. The front end knows the plain library name as well
+//! as the prefixed one and lowers both to the bits, because the magnitude of a value is that value
+//! with its sign bit cleared and there is nothing to call. So what the pattern looks for is a
+//! bitcast of an `and` against a mask whose top bit is clear, which is what that lowering leaves.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -131,12 +154,15 @@
 //! is the question the dead code eliminator answers for the whole function at once.
 //!
 //! The composite rewrite leaves two of them rather than one, and in the case that comes out
-//! constant it leaves both comparisons and computes nothing at all. Same litter, same reason, same
-//! pass takes it out.
+//! constant it leaves both comparisons and computes nothing at all. The sign rewrite leaves the
+//! four instructions the magnitude was built out of. Same litter, same reason, same pass takes it
+//! out.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use rucc_base::float::Float;
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{
     Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
@@ -157,6 +183,13 @@ const COMPOSITE: &str = "two comparisons over the same operands combined into on
 
 /// Recorded for a pair that would have folded if there had been fuel for it.
 const NO_FUEL_COMPOSITE: &str = "pair of comparisons left alone, the pass ran out of fuel";
+
+/// Recorded once for each comparison the sign of one operand settles on its own.
+const MAGNITUDE: &str = "comparison against a value whose sign bit is clear settled by the sign";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_MAGNITUDE: &str =
+    "comparison against a magnitude left alone, the pass ran out of fuel";
 
 /// Recorded for a rule that would have fired if there had been fuel for it.
 const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
@@ -253,8 +286,8 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, the strength reductions, the canonicalisations, and a negated comparison \
-         as the opposite one"
+        "the identities, the strength reductions, the canonicalisations, and the three comparison \
+         rewrites written by hand"
     }
 
     fn preserves(&self) -> Preserved {
@@ -326,6 +359,15 @@ impl Pass for Simplify {
                     }
                     fold_composite(func, inst, composite);
                     stats.optimized(COMPOSITE);
+                    continue;
+                }
+                if let Some(settled) = magnitude_comparison(func, inst) {
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL_MAGNITUDE);
+                        continue;
+                    }
+                    fold_composite(func, inst, settled);
+                    stats.optimized(MAGNITUDE);
                     continue;
                 }
                 let Some((rewrite, pattern)) = identity(func, inst) else { continue };
@@ -1014,10 +1056,122 @@ pub(crate) fn composite(func: &Func, opcode: Opcode, lhs: Value, rhs: Value) -> 
     }))
 }
 
-/// Writes what the pair came to over the `and` or the `or` that held it.
+/// Whether the sign bit of this value is known to be clear, which is what `fabs` leaves behind.
 ///
-/// In place, which keeps the result value, so every reader of the pair is already reading the one
-/// answer and the two comparisons are left where they were for [`crate::dce`].
+/// `fabs` is not a call by the time anything here runs. The front end knows the plain library name
+/// as well as the prefixed one and lowers both to the bits, because there is nothing to call: the
+/// magnitude of a value is that value with its sign bit cleared, payload and all for a NaN and sign
+/// and all for a negative zero, and a rewriting into `x < 0 ? -x : x` would be wrong for both. So
+/// what reaches this pass is a bitcast of an `and` of a bitcast, and the `and` is against a mask
+/// whose top bit is clear.
+///
+/// Any such mask and not the one `fabs` writes. A constant with its top bit clear leaves the top
+/// bit of the answer clear whatever the rest of it does, the top bit of an integer as wide as a
+/// floating point value is that value's sign bit in every format the compiler has, and asking for
+/// the exact mask would mean this stopped working the day a rule ahead of it narrowed one.
+fn magnitude(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    let data = &func[inst];
+    if data.opcode != Opcode::Bitcast {
+        return false;
+    }
+    let Some(&bits) = func[data.args].first() else { return false };
+    let Def::Result { inst: masked, .. } = func[bits].def else { return false };
+    let data = &func[masked];
+    if data.opcode != Opcode::And {
+        return false;
+    }
+    func[data.args].iter().any(|&arg| clears_the_sign(func, arg))
+}
+
+/// Whether this value is an integer constant whose top bit is clear.
+fn clears_the_sign(func: &Func, value: Value) -> bool {
+    let ty = func[value].ty;
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    let data = &func[inst];
+    let Extra::Imm(at) = data.extra else { return false };
+    data.opcode == Opcode::IConst && ty.is_int() && func[at].signed(ty) >= 0
+}
+
+/// The buckets a pair made of a magnitude on the left and this constant on the right can fall in.
+///
+/// A magnitude is a positive zero, a positive number, a positive infinity or a NaN, so against a
+/// constant that is not positive it is never the one below. Against a negative constant it is never
+/// the one equal either, since every value a magnitude can be is above every negative number.
+///
+/// Nothing for a constant that is positive, where the answer is every bucket and there would be
+/// nothing to narrow, and nothing for a NaN, where [`Float::compare`] has no ordering to report and
+/// the pair is unordered whatever the other side holds. That second case folds already, as a
+/// comparison of two constants when both sides are or as nothing at all when only one is, and
+/// answering it here would be a second opinion about it.
+fn against(func: &Func, value: Value) -> Option<u8> {
+    use bucket::{EQ, GT, UN};
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if data.opcode != Opcode::FConst {
+        return None;
+    }
+    let Extra::Imm(at) = data.extra else { return None };
+    let format = func[value].ty.format()?.encoding();
+    let number = Float::from_bits(format, func[at].bits());
+    match number.compare(Float::zero(format, false))? {
+        Ordering::Less => Some(GT | UN),
+        Ordering::Equal => Some(GT | EQ | UN),
+        Ordering::Greater => None,
+    }
+}
+
+/// Whether this comparison is one the sign bit of an operand settles, and what it becomes if it is.
+///
+/// `fabs (x) < 0.0` is false whatever `x` holds, including a NaN, and that is what
+/// `gcc.c-torture/execute/20020720-1.c` asserts by calling a function it never defines. The
+/// arithmetic is [`bucket`] again: a magnitude compared against a constant that is not positive
+/// cannot be the one below, so the buckets the predicate accepts are narrowed by the ones the pair
+/// can be in, and what is left is false, or is a shorter question than the one that was asked.
+///
+/// There is no answer of every bucket here, which is why this has no case for one. The narrowing
+/// only ever takes buckets away and it always takes at least the one below, so a set that survives
+/// it is never the full one and a comparison this fires on is never true.
+///
+/// A predicate the narrowing leaves alone is declined rather than rewritten, or the pass would
+/// report having optimized `fabs (x) >= 0.0` into itself once per run until the fuel ran out.
+fn magnitude_comparison(func: &Func, inst: Inst) -> Option<Composite> {
+    let data = &func[inst];
+    let Extra::FloatPred(pred) = data.extra else { return None };
+    if data.opcode != Opcode::FCmp {
+        return None;
+    }
+    let args = &func[data.args];
+    let lhs = *args.first()?;
+    let rhs = *args.get(1)?;
+    let possible = if magnitude(func, lhs) {
+        against(func, rhs)?
+    } else if magnitude(func, rhs) {
+        turned(against(func, lhs)?)
+    } else {
+        return None;
+    };
+    let asked = float_buckets(pred);
+    let buckets = asked & possible;
+    if buckets == asked {
+        return None;
+    }
+    if buckets == 0 {
+        return Some(Composite::Always(false));
+    }
+    Some(Composite::Pred(Flip {
+        opcode: Opcode::FCmp,
+        flags: data.flags,
+        extra: Extra::FloatPred(float_pred(buckets)?),
+        lhs,
+        rhs,
+    }))
+}
+
+/// Writes what a set of buckets came to over the instruction it was worked out from.
+///
+/// In place, which keeps the result value, so every reader of that instruction is already reading
+/// the one answer and whatever it used to read is left where it was for [`crate::dce`].
 pub(crate) fn fold_composite(func: &mut Func, inst: Inst, composite: Composite) {
     match composite {
         Composite::Always(answer) => become_constant(func, inst, answer.into()),
@@ -2356,6 +2510,163 @@ mod tests {
         assert!(simplify(&mut func));
         assert_eq!(came_from(&func, first).1, Extra::FloatPred(FloatPred::Uge));
         assert_ne!(number(&func, whole), 0);
+    }
+
+    /// One `f64` parameter, which every magnitude test below takes the magnitude of.
+    fn a_float() -> (Func, Block, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let float = Type::float(Float::F64);
+        let signature = Signature::new().with_params(&[float]).with_returns(&[Type::int(1)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let x = func.append_param(block, float);
+        (func, block, x)
+    }
+
+    /// `fabs (x)` as the lowering writes it, which is the sign bit cleared over the bits.
+    fn magnitude_of(build: &mut Builder<'_>, x: Value) -> Value {
+        let bits = Type::int(64);
+        let number = build.unary(Opcode::Bitcast, x, bits);
+        let mask = build.iconst(bits, i128::from(i64::MAX));
+        let cleared = build.binary(Opcode::And, number, mask, Flags::NONE);
+        build.unary(Opcode::Bitcast, cleared, Type::float(Float::F64))
+    }
+
+    /// `fabs (x) < 0.0`, which is what `gcc.c-torture/execute/20020720-1.c` asserts is false by
+    /// calling a function it never defines.
+    #[test]
+    fn a_magnitude_is_never_below_zero() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let below = build.fcmp(FloatPred::Olt, p, zero, Flags::NONE);
+        build.ret(&[below]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, below), 0);
+    }
+
+    /// The same question with the operands the other way round. `0.0 > fabs (x)` is the same claim
+    /// and is a different instruction, and the buckets have to be turned round to see it.
+    #[test]
+    fn zero_is_never_above_a_magnitude() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let above = build.fcmp(FloatPred::Ogt, zero, p, Flags::NONE);
+        build.ret(&[above]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, above), 0);
+    }
+
+    /// `fabs (x) <= 0.0` is not a constant and is still shorter than it was: the only way a
+    /// magnitude is at or below zero is by being zero, so the answer is an equality.
+    #[test]
+    fn a_magnitude_at_or_below_zero_is_a_magnitude_equal_to_it() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let atmost = build.fcmp(FloatPred::Ole, p, zero, Flags::NONE);
+        build.ret(&[atmost]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, atmost).1, Extra::FloatPred(FloatPred::Oeq));
+    }
+
+    /// A negative constant takes the equal bucket with it, because every value a magnitude can be
+    /// is above every negative number, so the comparison is false rather than shorter.
+    #[test]
+    fn a_magnitude_is_never_at_or_below_a_negative_number() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let minus_one = build.fconst(Type::float(Float::F64), 0xbff0_0000_0000_0000);
+        let atmost = build.fcmp(FloatPred::Ole, p, minus_one, Flags::NONE);
+        build.ret(&[atmost]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, atmost), 0);
+    }
+
+    /// `fabs (x) >= 0.0` is left alone, and a reader who expects it to be true is the reason this
+    /// test is here rather than the reason it fails: a NaN has its sign bit cleared like anything
+    /// else and is not above, below or equal to anything, so the comparison is false for one.
+    #[test]
+    fn a_magnitude_at_or_above_zero_is_still_a_question_about_a_nan() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let atleast = build.fcmp(FloatPred::Oge, p, zero, Flags::NONE);
+        build.ret(&[atleast]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, atleast).1, Extra::FloatPred(FloatPred::Oge));
+    }
+
+    /// A positive constant narrows nothing, so the comparison stands as it was written.
+    #[test]
+    fn a_magnitude_against_a_positive_number_is_left_alone() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let one = build.fconst(Type::float(Float::F64), 0x3ff0_0000_0000_0000);
+        let below = build.fcmp(FloatPred::Olt, p, one, Flags::NONE);
+        build.ret(&[below]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
+    }
+
+    /// A mask with its top bit set says nothing about the sign of what comes out of it, so the
+    /// bitcast under it is not a magnitude and the comparison stands.
+    #[test]
+    fn a_mask_that_keeps_the_sign_bit_is_not_a_magnitude() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let bits = Type::int(64);
+        let number = build.unary(Opcode::Bitcast, x, bits);
+        let mask = build.iconst(bits, -2);
+        let cleared = build.binary(Opcode::And, number, mask, Flags::NONE);
+        let p = build.unary(Opcode::Bitcast, cleared, Type::float(Float::F64));
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let below = build.fcmp(FloatPred::Olt, p, zero, Flags::NONE);
+        build.ret(&[below]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
+    }
+
+    /// A NaN on the other side is left to the comparison folder, which has an answer for it that
+    /// does not depend on either operand being a magnitude.
+    #[test]
+    fn a_magnitude_against_a_nan_is_left_alone() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let nan = build.fconst(Type::float(Float::F64), 0x7ff8_0000_0000_0000);
+        let below = build.fcmp(FloatPred::Olt, p, nan, Flags::NONE);
+        build.ret(&[below]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
+    }
+
+    /// The fold spends fuel like the other two and stopping it stops the transforming rather than
+    /// the walking.
+    #[test]
+    fn fuel_stops_the_magnitude_fold_and_not_the_walk() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let p = magnitude_of(&mut build, x);
+        let zero = build.fconst(Type::float(Float::F64), 0);
+        let below = build.fcmp(FloatPred::Olt, p, zero, Flags::NONE);
+        let also = build.fcmp(FloatPred::Olt, p, zero, Flags::NONE);
+        let both = build.binary(Opcode::Or, below, also, Flags::NONE);
+        build.ret(&[both]);
+        let stats =
+            Simplify.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
+        assert_eq!(stats.count(Kind::Optimized, super::MAGNITUDE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_MAGNITUDE), 1);
+        assert_eq!(number(&func, below), 0);
+        assert_eq!(came_from(&func, also).0, Opcode::FCmp);
     }
 
     /// A fast math promise is a promise about one comparison, and a set built out of two that were
