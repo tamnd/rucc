@@ -40,12 +40,12 @@ use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
     Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
-    Call, Cmov, Cmp, CmpRi, CmpRm, CmpSet, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87,
-    CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87,
-    DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec,
-    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec,
-    RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov,
-    Trap, UnaryR, UnaryX87,
+    Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi, CmpSetRm, CmpSetVec,
+    CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec,
+    ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing, Lea, Load,
+    LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret,
+    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store,
+    StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -144,6 +144,21 @@ pub enum Form {
     /// asks the same question backwards, so a load that fed the left hand side becomes this form
     /// with the condition turned over, and `a < b` folded on the left is `b > a`.
     CmpSetRm,
+    /// The same reading its left hand side out of memory and its right off the instruction.
+    ///
+    /// [`Form::CmpSetRi`] with the register moved to an addressing mode, which is the change
+    /// [`Form::AluMi`] is to [`Form::AluRi`]. The constant cannot be anywhere but on the
+    /// instruction, so there is one arrangement here rather than two and the memory is always the
+    /// left hand side, which is the side the machine subtracts from. Nothing about the condition
+    /// changes, because nothing about the order of the two sides changes.
+    ///
+    /// Nothing but the byte is a register, so the description is the one a bare set has, and the
+    /// address registers go behind it in the operand vector the way they do for every other form
+    /// that names a place.
+    ///
+    /// No lowering rule produces one. `rucc_codegen::combine` writes one, out of a comparison
+    /// against a constant whose register came from a load nothing else read.
+    CmpSetMi,
     /// A comparison that keeps nothing but the flags.
     ///
     /// The same instruction as the first half of [`Form::CmpSet`] with the second half gone. It
@@ -163,6 +178,12 @@ pub enum Form {
     /// names have to come down with the operands. That is the layout's business and the reason it
     /// is written here is that this is the only form it has to do it for.
     CmpRm,
+    /// The same against a constant, which is [`Form::CmpSetMi`] with the byte gone.
+    ///
+    /// Written by the block layout the way [`Form::CmpRm`] is. The byte was the only operand in
+    /// front of the address, so what is left names nothing but the place, and the positions the
+    /// addressing mode holds come down by one along with it.
+    CmpMi,
     /// The byte a comparison sets, with the comparison gone.
     ///
     /// The other half of [`Form::CmpSet`], and it exists for the mirror of the reason [`Form::Cmp`]
@@ -962,6 +983,8 @@ impl Form {
             CmpSetRi | CmpSetRm => &ONE_TO_ONE,
             Cmp => &CMP,
             CmpRi | CmpRm => &CMP_RI,
+            CmpSetMi => &ONE_WRITTEN,
+            CmpMi => &ALU_MI,
             Set => &ONE_WRITTEN,
             Convert | Search => &ONE_TO_ONE,
             CpuId => &CPU_ID,
@@ -1011,7 +1034,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | AluRi | AluMi | ShiftRi | CmpSetRi | CmpRi)
+        matches!(self, LoadImm | AluRi | AluMi | ShiftRi | CmpSetRi | CmpRi | CmpSetMi | CmpMi)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -1025,6 +1048,8 @@ impl Form {
                 | AluMi
                 | CmpSetRm
                 | CmpRm
+                | CmpSetMi
+                | CmpMi
                 | Store
                 | LoadVec
                 | StoreVec
@@ -1066,6 +1091,8 @@ impl Form {
                 | AluMi
                 | CmpSetRm
                 | CmpRm
+                | CmpSetMi
+                | CmpMi
                 | Store
                 | LoadVec
                 | StoreVec
@@ -1436,6 +1463,46 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ae_rm_16", CmpSetRm),
     ("cmp_set_ae_rm_32", CmpSetRm),
     ("cmp_set_ae_rm_64", CmpSetRm),
+    ("cmp_set_e_mi_8", CmpSetMi),
+    ("cmp_set_e_mi_16", CmpSetMi),
+    ("cmp_set_e_mi_32", CmpSetMi),
+    ("cmp_set_e_mi_64", CmpSetMi),
+    ("cmp_set_ne_mi_8", CmpSetMi),
+    ("cmp_set_ne_mi_16", CmpSetMi),
+    ("cmp_set_ne_mi_32", CmpSetMi),
+    ("cmp_set_ne_mi_64", CmpSetMi),
+    ("cmp_set_l_mi_8", CmpSetMi),
+    ("cmp_set_l_mi_16", CmpSetMi),
+    ("cmp_set_l_mi_32", CmpSetMi),
+    ("cmp_set_l_mi_64", CmpSetMi),
+    ("cmp_set_le_mi_8", CmpSetMi),
+    ("cmp_set_le_mi_16", CmpSetMi),
+    ("cmp_set_le_mi_32", CmpSetMi),
+    ("cmp_set_le_mi_64", CmpSetMi),
+    ("cmp_set_g_mi_8", CmpSetMi),
+    ("cmp_set_g_mi_16", CmpSetMi),
+    ("cmp_set_g_mi_32", CmpSetMi),
+    ("cmp_set_g_mi_64", CmpSetMi),
+    ("cmp_set_ge_mi_8", CmpSetMi),
+    ("cmp_set_ge_mi_16", CmpSetMi),
+    ("cmp_set_ge_mi_32", CmpSetMi),
+    ("cmp_set_ge_mi_64", CmpSetMi),
+    ("cmp_set_b_mi_8", CmpSetMi),
+    ("cmp_set_b_mi_16", CmpSetMi),
+    ("cmp_set_b_mi_32", CmpSetMi),
+    ("cmp_set_b_mi_64", CmpSetMi),
+    ("cmp_set_be_mi_8", CmpSetMi),
+    ("cmp_set_be_mi_16", CmpSetMi),
+    ("cmp_set_be_mi_32", CmpSetMi),
+    ("cmp_set_be_mi_64", CmpSetMi),
+    ("cmp_set_a_mi_8", CmpSetMi),
+    ("cmp_set_a_mi_16", CmpSetMi),
+    ("cmp_set_a_mi_32", CmpSetMi),
+    ("cmp_set_a_mi_64", CmpSetMi),
+    ("cmp_set_ae_mi_8", CmpSetMi),
+    ("cmp_set_ae_mi_16", CmpSetMi),
+    ("cmp_set_ae_mi_32", CmpSetMi),
+    ("cmp_set_ae_mi_64", CmpSetMi),
     // The conversions between widths.
     ("movzx_8_16", Convert),
     ("movzx_8_32", Convert),
@@ -1582,6 +1649,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_rm_16", CmpRm),
     ("cmp_rm_32", CmpRm),
     ("cmp_rm_64", CmpRm),
+    ("cmp_mi_8", CmpMi),
+    ("cmp_mi_16", CmpMi),
+    ("cmp_mi_32", CmpMi),
+    ("cmp_mi_64", CmpMi),
     // And the other half of the same pair, which is the byte with the comparison gone. There is
     // one per condition and not one per width, because what a `setcc` writes is a byte whatever
     // the comparison in front of it was comparing.
@@ -1929,7 +2000,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 540);
+        assert_eq!(described, 584);
     }
 
     #[test]
@@ -1979,6 +2050,7 @@ mod tests {
                             | Cmp
                             | CmpRi
                             | CmpRm
+                            | CmpMi
                             | Jcc
                             | Jmp
                             | JmpReg
@@ -2152,8 +2224,9 @@ mod tests {
         // Nothing else here has an empty operand list and an address, and the two halves of that
         // are worth saying separately. A call has an empty list and no address, and almost every
         // instruction that carries an address has an operand for the end of it that is a register.
-        // Arithmetic against a constant in memory is the one exception the other way round: it has
-        // an address and an empty list, because everything it reads is either a register the
+        // Arithmetic against a constant in memory is the exception the other way round, and so is
+        // a comparison of memory against a constant once the byte it set has gone: each has an
+        // address and an empty list, because everything it reads is either a register the
         // addressing mode brought or the constant on the instruction.
         for &(name, shape) in INSTS {
             assert!(
@@ -2165,6 +2238,7 @@ mod tests {
                             | Ret
                             | Barrier
                             | AluMi
+                            | CmpMi
                             | Landing
                             | Nop
                             | Spin

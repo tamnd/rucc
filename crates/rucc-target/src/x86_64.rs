@@ -326,7 +326,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
 /// them a comparison that had a load folded into it would be a comparison the layout walks past,
 /// and the branch behind it would keep the byte and the test that reads it, which would make
 /// folding the load a saving of one instruction and a cost of two.
-static FUSED: [Fusion; 120] = [
+static FUSED: [Fusion; 160] = [
     Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -447,6 +447,46 @@ static FUSED: [Fusion; 120] = [
     Fusion { set: "cmp_set_ae_rm_16", cmp: "cmp_rm_16", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_rm_32", cmp: "cmp_rm_32", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_rm_64", cmp: "cmp_rm_64", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_e_mi_8", cmp: "cmp_mi_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_mi_16", cmp: "cmp_mi_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_mi_32", cmp: "cmp_mi_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_e_mi_64", cmp: "cmp_mi_64", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmp_set_ne_mi_8", cmp: "cmp_mi_8", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_mi_16", cmp: "cmp_mi_16", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_mi_32", cmp: "cmp_mi_32", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_ne_mi_64", cmp: "cmp_mi_64", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmp_set_l_mi_8", cmp: "cmp_mi_8", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_mi_16", cmp: "cmp_mi_16", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_mi_32", cmp: "cmp_mi_32", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_l_mi_64", cmp: "cmp_mi_64", if_true: "jcc_l", if_false: "jcc_ge" },
+    Fusion { set: "cmp_set_le_mi_8", cmp: "cmp_mi_8", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_mi_16", cmp: "cmp_mi_16", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_mi_32", cmp: "cmp_mi_32", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_le_mi_64", cmp: "cmp_mi_64", if_true: "jcc_le", if_false: "jcc_g" },
+    Fusion { set: "cmp_set_g_mi_8", cmp: "cmp_mi_8", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_mi_16", cmp: "cmp_mi_16", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_mi_32", cmp: "cmp_mi_32", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_g_mi_64", cmp: "cmp_mi_64", if_true: "jcc_g", if_false: "jcc_le" },
+    Fusion { set: "cmp_set_ge_mi_8", cmp: "cmp_mi_8", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_mi_16", cmp: "cmp_mi_16", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_mi_32", cmp: "cmp_mi_32", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_ge_mi_64", cmp: "cmp_mi_64", if_true: "jcc_ge", if_false: "jcc_l" },
+    Fusion { set: "cmp_set_b_mi_8", cmp: "cmp_mi_8", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_mi_16", cmp: "cmp_mi_16", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_mi_32", cmp: "cmp_mi_32", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_b_mi_64", cmp: "cmp_mi_64", if_true: "jcc_b", if_false: "jcc_ae" },
+    Fusion { set: "cmp_set_be_mi_8", cmp: "cmp_mi_8", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_mi_16", cmp: "cmp_mi_16", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_mi_32", cmp: "cmp_mi_32", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_be_mi_64", cmp: "cmp_mi_64", if_true: "jcc_be", if_false: "jcc_a" },
+    Fusion { set: "cmp_set_a_mi_8", cmp: "cmp_mi_8", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_mi_16", cmp: "cmp_mi_16", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_mi_32", cmp: "cmp_mi_32", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_a_mi_64", cmp: "cmp_mi_64", if_true: "jcc_a", if_false: "jcc_be" },
+    Fusion { set: "cmp_set_ae_mi_8", cmp: "cmp_mi_8", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_mi_16", cmp: "cmp_mi_16", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_mi_32", cmp: "cmp_mi_32", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "cmp_set_ae_mi_64", cmp: "cmp_mi_64", if_true: "jcc_ae", if_false: "jcc_b" },
 ];
 
 /// What each x86-64 instruction leaves in the condition state.
@@ -523,13 +563,14 @@ fn writes_flags(name: &str) -> bool {
 /// nothing, so the eighty and the eight meet in the middle: a program that compares and keeps the
 /// byte, and then compares the same two registers and branches, is two rows here that agree.
 ///
-/// The forty comparisons against memory are not here and are meant not to be, which is the one
+/// The eighty comparisons against memory are not here and are meant not to be, which is the one
 /// place this table is shorter than [`FUSED`]. What makes two rows the same question is the name
 /// on the left and the registers and constants the two instructions read, and a comparison against
-/// memory reads neither of its sides out of a register: the address is the operands it has and two
-/// addresses off one base at two displacements would come out equal. Memory can also have changed
-/// between the two, which no amount of comparing operands would say. Leaving them out costs a
-/// saving that is not taken and keeps the pass from taking one that is not there.
+/// memory does not read the side it takes from memory out of a register: the address is the
+/// operands it has and two addresses off one base at two displacements would come out equal.
+/// Memory can also have changed between the two, which no amount of comparing operands would say.
+/// Leaving them out costs a saving that is not taken and keeps the pass from taking one that is
+/// not there.
 static COMPARES: [Compare; 88] = [
     Compare { name: "cmp_set_e_8", asks: "cmp_rr_8", kept: Some("set_e") },
     Compare { name: "cmp_set_e_16", asks: "cmp_rr_16", kept: Some("set_e") },
@@ -628,7 +669,7 @@ static COMPARES: [Compare; 88] = [
 /// conditional moves with no comparison and the ten jumps are the rest. The two that are about the
 /// carry and the zero together are filed under the carry, since an entry says which part has to be
 /// right and both of theirs do.
-static READERS: [Reader; 170] = [
+static READERS: [Reader; 210] = [
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -749,6 +790,46 @@ static READERS: [Reader; 170] = [
     Reader { name: "cmp_set_ae_rm_16", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_rm_32", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_rm_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_e_mi_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_mi_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_mi_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_e_mi_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_mi_8", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_mi_16", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_mi_32", reads: Reads::Zero },
+    Reader { name: "cmp_set_ne_mi_64", reads: Reads::Zero },
+    Reader { name: "cmp_set_l_mi_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_mi_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_mi_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_l_mi_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_mi_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_mi_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_mi_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_le_mi_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_mi_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_mi_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_mi_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_g_mi_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_mi_8", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_mi_16", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_mi_32", reads: Reads::Signed },
+    Reader { name: "cmp_set_ge_mi_64", reads: Reads::Signed },
+    Reader { name: "cmp_set_b_mi_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_mi_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_mi_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_b_mi_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_mi_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_mi_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_mi_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_be_mi_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_mi_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_mi_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_mi_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_a_mi_64", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_mi_8", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_mi_16", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_mi_32", reads: Reads::Unsigned },
+    Reader { name: "cmp_set_ae_mi_64", reads: Reads::Unsigned },
     Reader { name: "set_e", reads: Reads::Zero },
     Reader { name: "set_ne", reads: Reads::Zero },
     Reader { name: "set_l", reads: Reads::Signed },
@@ -1178,7 +1259,9 @@ mod tests {
         let described = |name: &str| INSTS.iter().any(|&(opcode, _)| opcode == name);
         let sets: Vec<&str> = INSTS
             .iter()
-            .filter(|&&(_, shape)| matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm))
+            .filter(|&&(_, shape)| {
+                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm | Form::CmpSetMi)
+            })
             .map(|&(opcode, _)| opcode)
             .collect();
         let entries: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.set).collect();
@@ -1240,7 +1323,8 @@ mod tests {
             if matches!(back, "8" | "16" | "32" | "64") { front } else { name }
         });
         let name = name.strip_suffix("_ri").unwrap_or(name);
-        name.strip_suffix("_rm").unwrap_or(name)
+        let name = name.strip_suffix("_rm").unwrap_or(name);
+        name.strip_suffix("_mi").unwrap_or(name)
     }
 
     /// Every comparison this target has is one the pass knows what to do with.
@@ -1309,7 +1393,7 @@ mod tests {
     #[test]
     fn a_comparison_against_memory_is_one_the_pass_stops_at() {
         for &(name, shape) in INSTS {
-            if matches!(shape, Form::CmpSetRm | Form::CmpRm) {
+            if matches!(shape, Form::CmpSetRm | Form::CmpRm | Form::CmpSetMi | Form::CmpMi) {
                 assert!(COMPARES.iter().all(|entry| entry.name != name), "{name} has an entry");
                 assert!(writes_flags(name), "{name} is said to leave the state alone");
             }
@@ -1322,7 +1406,7 @@ mod tests {
     /// does not see, and the instruction it belongs to would be left reading the bits of whatever
     /// the pass decided to keep instead, so the list is again taken from the descriptions. That
     /// each entry names the right part is checked against the condition in the opcode's own name,
-    /// which is a hundred and seventy rows that cannot be hand checked and three groups that can.
+    /// which is two hundred and ten rows that cannot be hand checked and three groups that can.
     #[test]
     fn every_condition_says_which_part_of_the_state_it_is_about() {
         let readers: Vec<&str> = INSTS
@@ -1333,6 +1417,7 @@ mod tests {
                     Form::CmpSet
                         | Form::CmpSetRi
                         | Form::CmpSetRm
+                        | Form::CmpSetMi
                         | Form::Set
                         | Form::Cmov
                         | Form::Jcc

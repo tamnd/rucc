@@ -993,6 +993,45 @@ mod tests {
         assert_eq!(func[func[compare].operands].len(), 2, "the value and the base of the address");
     }
 
+    /// The same thing again for a comparison of memory against a constant, which is the shape with
+    /// the fewest operands there is.
+    ///
+    /// The byte is the only operand in front of the address here, so taking it off leaves the base
+    /// at the very front and the instruction reading nothing but the address it was given. A mode
+    /// that had not come down would be pointing one past the end of a vector with a single operand
+    /// in it, which is the way this goes wrong on the narrowest shape rather than on the widest.
+    #[test]
+    fn a_comparison_of_memory_against_a_constant_keeps_its_address_when_the_byte_comes_off() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.cmp_set_l_mi_32"));
+        func.build(made[0], opcode)
+            .def(byte, GPR)
+            .mem(Mem { disp: 24, ..Mem::at(Operand::read(Reg::physical(RCX), GPR)) })
+            .imm(7)
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(made[0], opcode).operand(Operand::read(byte, GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert_eq!(
+            text,
+            [
+                "block0:",
+                "x64.cmp_mi_32 [$rcx + 24], 7",
+                "x64.jcc_ge block2, block1",
+                "block1:",
+                "block2:",
+            ]
+        );
+        let compare = func.insts(made[0]).next().expect("the comparison");
+        let mem = func[compare].mem.expect("it reads memory");
+        assert_eq!(func[mem].base, Some(0), "the base came down to the front");
+        assert_eq!(func[func[compare].operands].len(), 1, "the base of the address on its own");
+    }
+
     /// The same comparison with something else reading its answer, which keeps everything.
     ///
     /// Folding the byte away when a second instruction wants it would be deleting a value the

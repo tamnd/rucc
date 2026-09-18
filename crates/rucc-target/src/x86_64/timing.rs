@@ -139,6 +139,8 @@ fn plain(form: Form) -> Timing {
         // the load is the part there is not.
         CmpRm => (1 + LOAD, Unit::Load),
         CmpSetRm => (2 + LOAD, Unit::Load),
+        CmpMi => (1 + LOAD, Unit::Load),
+        CmpSetMi => (2 + LOAD, Unit::Load),
         // The multiply that keeps both halves of its product, on the one multiplier. Four cycles
         // rather than the three a multiply that keeps the low half costs, because the high half is
         // a cycle behind the low one on every core in this family and the number here is what
