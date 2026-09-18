@@ -36,8 +36,7 @@ use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
     compatible, is_arithmetic, is_array, is_atomic, is_complete, is_complex, is_function,
-    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, pointee_as_written,
-    real_part,
+    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, pointee_as_written, real_part,
 };
 
 use crate::check::expr::typeop::Measure;
