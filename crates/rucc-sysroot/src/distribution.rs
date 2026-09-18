@@ -200,8 +200,11 @@ mod tests {
             ["target", "x86_64-windows-msvc", "wall", "microsoft-sdk"]
         );
         // And the Windows target that is ours to ship is not behind either of them, which is the
-        // distinction the file exists to carry.
-        assert_eq!(row("x86_64-windows-gnu"), ["target", "x86_64-windows-gnu", "unpublished"]);
+        // distinction the file exists to carry. It is published now, so the proof of that is a URL
+        // and a hash where the wall would have named a licence.
+        let ours = row("x86_64-windows-gnu");
+        assert_eq!(&ours[..3], ["target", "x86_64-windows-gnu", "pinned"]);
+        assert!(ours[3].starts_with("https://"), "{ours:?}");
     }
 
     #[test]
@@ -210,8 +213,8 @@ mod tests {
         assert_eq!(row("x86_64-linux-gnu")[2], "unpublished");
     }
 
-    /// What a row looks like once the producer has published something, which is the state the file
-    /// is written for and the one no row is in today.
+    /// What a row looks like once the producer has published something, written against a row of its
+    /// own so that what is checked is the shape of the line rather than today's table.
     #[test]
     fn a_pinned_target_carries_the_url_and_the_hash_it_is_held_to() {
         static PINNED_ROW: Pinned = Pinned {
@@ -232,13 +235,17 @@ mod tests {
         assert_eq!(fields[4], pinned.sha256);
     }
 
-    /// Today's table has no rows, so every target that is ours to ship is unpublished and the file
-    /// says that rather than going quiet.
+    /// Both states are in the file at once, which is the state the release is in and will be in for
+    /// as long as there are targets nobody has produced a tree for.
     #[test]
-    fn nothing_is_pinned_yet_and_the_file_does_not_pretend_otherwise() {
-        assert!(PINNED.is_empty(), "a row landed, so this test is the one to update");
+    fn a_published_target_says_pinned_and_one_nobody_has_produced_still_says_unpublished() {
+        assert!(!PINNED.is_empty(), "the windows-gnu rows are pinned, so the file has to say so");
         let text = render("0.0.0");
-        assert!(!text.contains("\tpinned"), "{text}");
+        for what in PINNED {
+            assert!(text.contains(&format!("target\t{}\tpinned\t{}\t", what.tuple, what.url)));
+        }
+        // And the file goes on saying so for the rest, rather than going quiet about a target it has
+        // nothing to offer for.
         assert!(text.contains("\tunpublished\n"), "{text}");
     }
 

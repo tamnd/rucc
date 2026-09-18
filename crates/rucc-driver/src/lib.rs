@@ -1934,7 +1934,7 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
     Ok(Action::Fetch { what, target, cache: cache::dir() })
 }
 
-/// Why there is nothing to fetch for a target, which is a different sentence while the table is
+/// Why there is nothing to fetch for a target, which is a different sentence when the table is
 /// empty.
 ///
 /// A release that pins nothing and a release that pins eleven targets and not this one are two
@@ -3220,14 +3220,15 @@ mod tests {
         assert!(e.message.contains("assembler-with-cpp"), "{}", e.message);
     }
 
-    /// What `--fetch` says while the table in [`artifact`] has no rows in it, which is what every
-    /// run of it says today and is the reason the message distinguishes the two cases.
+    /// What `--fetch` says for a target this release pins nothing for, which is every target except
+    /// the three windows-gnu ones today.
     #[test]
     fn a_fetch_of_a_target_nothing_is_pinned_for_says_so_rather_than_reaching_the_network() {
         let e = parse_args(&args(&["--fetch", "x86_64-linux-musl"])).unwrap_err();
         assert!(e.message.contains("pins no sysroot for x86_64-linux-musl"), "{}", e.message);
-        // And where one comes from, because the answer is not on this machine.
-        assert!(e.message.contains("tamnd/rucc-cross"), "{}", e.message);
+        // And what it does pin, because a release with some rows in the table and a release with
+        // none are two situations and the second sentence is what tells them apart.
+        assert!(e.message.contains("x86_64-windows-gnu"), "{}", e.message);
         // The joined spelling is the same flag.
         let joined = parse_args(&args(&["--fetch=x86_64-linux-musl"])).unwrap_err();
         assert_eq!(joined, e);
@@ -3249,9 +3250,11 @@ mod tests {
         assert!(e.message.contains("redistributed"), "{}", e.message);
         // The way out of this one is a target rather than a download, and it is the default already.
         assert!(e.message.contains("mingw-w64"), "{}", e.message);
-        // And the mingw-w64 target next to it is an ordinary unpinned target.
-        let e = parse_args(&args(&["--fetch", "x86_64-windows-gnu"])).unwrap_err();
-        assert!(e.message.contains("pins no sysroot"), "{}", e.message);
+        // And the mingw-w64 target next to it is ours to ship and published, so the same flag has
+        // something to get rather than a licence to explain.
+        let action = parse_args(&args(&["--fetch", "x86_64-windows-gnu"])).expect("it is pinned");
+        let Action::Fetch { what, .. } = action else { panic!("{action:?}") };
+        assert_eq!(what.tuple, "x86_64-windows-gnu");
     }
 
     /// An Apple target on a machine with no SDK, which is section 8.6's other host.

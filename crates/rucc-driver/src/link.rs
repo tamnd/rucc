@@ -1513,8 +1513,8 @@ mod tests {
     }
 
     /// The other half of the same message, which is what a target this release does pin an artifact
-    /// for is told. Built by hand rather than through `preflight`, because what decides it is the
-    /// table in `crate::artifact` and that table has no rows in it yet.
+    /// for is told. Built by hand rather than through `preflight`, because what is being checked is
+    /// the message and not which targets `rucc_sysroot::artifact` happens to pin this release.
     #[test]
     fn a_sysroot_that_could_be_fetched_is_told_what_to_run() {
         let said = Error::Sysroot {
