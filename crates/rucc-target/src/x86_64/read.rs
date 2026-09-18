@@ -18,8 +18,8 @@
 //! # What is read and what is not
 //!
 //! One instruction per line, separated by newlines or semicolons, in AT&T syntax. An argument is a
-//! register the template named, an operand of the statement written `%0` or `%q0`, a number written `$5`,
-//! or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
+//! register the template named, an operand of the statement written `%0` or `%q0`, a number
+//! written `$5`, or an address written `8(%rbp)` with an optional `%fs:` or `%gs:` in front of it.
 //!
 //! Everything else is nothing at all rather than a guess, and the caller turns that into a refusal
 //! that names the statement. Labels are not read, because a label inside a function is a place
@@ -50,11 +50,19 @@
 //! the program overriding the type rather than reading it: `%b0`, `%w0`, `%k0` and `%q0` are the
 //! byte, the word, the long and the quad of the same register.
 //!
-//! A program writes one when the type it has is not the width it means. libgmp writes `%q0`
-//! everywhere in `longlong.h` because that header is shared with the thirty two bit target, where
-//! the same operand is a `long` and the same line has to say sixty four bits anyway. Once one
-//! argument says a width the mnemonic no longer has to, so these are read before the suffix is
-//! worked out and they are what it is worked out from.
+//! A program writes one when the header it is in is read on more than one target. libgmp writes
+//! `%q0` all through `longlong.h`, which every file of that library includes, and it writes it
+//! because the same header is read on the thirty two bit target where a limb is a `long` and the
+//! same line still has to say sixty four bits. On this target the type already says sixty four, so
+//! the modifier is the program saying it twice, and what it costs to leave unread is the whole
+//! library.
+//!
+//! Once an argument says a width the mnemonic no longer has to, so these are read before the suffix
+//! is worked out and they are what it is worked out from. What they do not do is override the type.
+//! An operand is placed at the width the opcode uses and the caller checks that against the type it
+//! has, so a template saying `%q0` of an `int` is refused where it is placed rather than here: the
+//! top half of that register is something nothing defined, and handing it to an instruction is a
+//! program that assembles into something other than what it says.
 //!
 //! Four of them and not the rest. gcc has a dozen more letters in that position and they do other
 //! things: print a constant without its sigil, print the suffix on its own, print an address. Those
@@ -715,10 +723,12 @@ mod tests {
         }
     }
 
-    /// The modifier is where the width comes from when there is one, which is what lets a template
-    /// leave the suffix off the mnemonic and still say sixty four bits about an operand whose type
-    /// says thirty two. That is the arrangement `longlong.h` is in, since the same header is read
-    /// on the thirty two bit target.
+    /// The modifier is where the width comes from when there is one, so a template that wrote one
+    /// has said what an assembler needs and the mnemonic may carry no suffix at all. The types the
+    /// caller passed in are not consulted for an operand that carries its own width, which is what
+    /// lets a template name an operand whose type is no width this machine has. Whether the two
+    /// agree is asked where the operand is placed rather than here, since that is where the type
+    /// is.
     #[test]
     fn a_width_written_on_an_operand_is_what_the_suffix_is_worked_out_from() {
         let lines = read("add %q1, %q0", &[Some(Width::Long); 2]).expect("an addition");
