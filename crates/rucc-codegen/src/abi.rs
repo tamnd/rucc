@@ -102,11 +102,6 @@ pub enum Missing {
     /// third register file, it is not one the allocator has, and no instruction in the
     /// description touches it.
     OnX87,
-    /// It is a float passed to a callee that takes arguments beyond the ones its signature names,
-    /// on a convention that puts such a float in a vector register and in the general purpose
-    /// register at the same position at once. Which arguments are the ones beyond the signature is
-    /// what decides whether the second copy is needed, and a call does not carry that yet.
-    InBothFiles,
     /// It is a width no pseudo covers, which is anything a machine register does not hold.
     Width,
     /// It is a value that comes back in more registers than the convention returns in. A structure
@@ -129,7 +124,6 @@ impl Missing {
     pub fn why(self) -> &'static str {
         match self {
             Missing::OnX87 => "is on the x87 stack",
-            Missing::InBothFiles => "is a float passed to a variadic callee on this convention",
             Missing::Width => "is a width no argument register holds",
             Missing::NoRoom => "takes more registers than this convention has for it",
             Missing::TooBig => "is more bytes than a copy into the argument area unrolls to",
@@ -221,9 +215,16 @@ pub struct Arrived {
     /// signature does not name is the one after the last it does, so where each of the two walks
     /// stopped is where `va_start` has to say the next argument begins.
     pub took: (usize, usize),
-    /// How many bytes of the caller's argument area the parameters took, which is where the first
-    /// argument the signature does not name begins for the same reason.
-    pub used: u32,
+    /// How far up the caller's argument area the first argument the signature does not name is.
+    ///
+    /// However much of that area the named parameters took, on a convention that counts the two
+    /// register files apart, because there the area holds only the arguments no register was left
+    /// for. On one that counts them as one run it is not the same number: that area begins with the
+    /// shadow space the caller reserved, every argument owns one word of it whether it also arrived
+    /// in a register or not, and the named ones own the first few of those words. So it is where
+    /// the walk over the registers stopped, which is a position rather than a size, until the named
+    /// parameters have used every register and the two agree again.
+    pub beyond: u32,
     /// The argument registers left over for the arguments the signature does not name, as the
     /// register each was bound into and how far up the save area its slot is.
     ///
@@ -284,12 +285,19 @@ pub fn entry(
         }
         where_from.push((ty, at, abi));
     }
-    let mut arrived = Arrived {
-        regs: Vec::with_capacity(params.len()),
-        took: (places.integers(), places.floats()),
-        used: places.size(),
-        ..Arrived::default()
+    let took = (places.integers(), places.floats());
+    // Where the first argument the signature does not name is, which is the two sentences on
+    // [`Arrived::beyond`] written out. The run of words is contiguous from the bottom of the area on
+    // a convention that homes its register arguments, so a position multiplied by a word is the
+    // answer there until the positions run out and the named parameters start taking room of their
+    // own, at which point what they took is the answer again.
+    let reached = took.0 + took.1;
+    let beyond = match conv.shared_positions && reached < conv.int_args.len() {
+        true => conv.word * u32::try_from(reached).unwrap_or(0),
+        false => places.size(),
     };
+    let mut arrived =
+        Arrived { regs: Vec::with_capacity(params.len()), took, beyond, ..Arrived::default() };
 
     // Every pseudo first and everything else after, which is not a preference. A pseudo says a
     // register holds an argument and defines nothing before it, so as far as the allocator can see
@@ -343,6 +351,12 @@ pub fn entry(
 /// One pseudo each and nothing else, for the reason the loop above them gives: what these do is say
 /// the register holds something, and the stores that put it in the save area are written by
 /// [`crate::lower`] once it has an address to store to, which is after every pseudo in the block.
+///
+/// Where each file's walk stopped is the file's own count on a convention that keeps two, and the
+/// sum of both on one that counts the files as a single run of positions, since there an argument
+/// of either kind steps the one counter. A file the area holds no slots of is skipped entirely,
+/// which is the vector file on the second kind: a variadic float travels in the general purpose
+/// register at its position as well, so the copy the walk reads is already the one being spilled.
 fn spare(
     out: &mut mir::Func,
     block: mir::Block,
@@ -353,12 +367,17 @@ fn spare(
 ) -> Vec<(mir::Reg, RegClass, u32)> {
     let word = Type::int(64);
     let double = Type::float(rucc_ir::Float::F64);
-    let files = [(conv.int_args, took.0, word, false), (conv.sse_args, took.1, double, true)];
+    let reached = |own: usize| if conv.shared_positions { took.0 + took.1 } else { own };
+    let files = [
+        (conv.int_args, reached(took.0), word, false),
+        (conv.sse_args, reached(took.1), double, true),
+    ];
     let mut spare = Vec::new();
     for (regs, taken, ty, float) in files {
+        let held = usize::try_from(area.holds(float)).unwrap_or(0);
         let Some(head) = head_of(ty) else { continue };
         let class = class_of(ty, conv);
-        for (index, &arrived_in) in regs.iter().enumerate().skip(taken) {
+        for (index, &arrived_in) in regs.iter().enumerate().take(held).skip(taken) {
             let reg = out.new_vreg(class);
             let opcode = mir::Opcode::new(names.intern(head));
             let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
@@ -461,6 +480,13 @@ pub struct Calling<'a> {
     /// Whether the callee takes arguments beyond the ones its signature names, which is what says
     /// whether it reads the count of vector registers the call passed arguments in.
     pub variadic: bool,
+    /// How many of the arguments the signature does name, so that the ones past it can be told
+    /// apart from the ones before it.
+    ///
+    /// A convention that passes a variadic float in both register files needs that, because which
+    /// arguments get the second copy is exactly the ones the callee has no prototype for. Every
+    /// other convention treats the two the same and never asks.
+    pub named: usize,
 }
 
 /// Builds one call: what it passes, what comes back, and what it destroys.
@@ -482,7 +508,7 @@ pub fn call(
     conv: &CallRegs,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
-    let &Calling { callee, args, returns, variadic } = made;
+    let &Calling { callee, args, returns, variadic, named } = made;
     // Where everything goes, worked out before anything is built, so that a call this cannot make
     // leaves no half of one behind.
     let mut places = Places::new(conv);
@@ -497,6 +523,16 @@ pub fn call(
     // empty too, and never at the same time as a register: an object in the argument area is in
     // the argument area whatever is left of the register files.
     let mut as_bytes = Vec::new();
+    // The arguments beyond the ones the signature names that travel in a vector register and have
+    // to travel in a general purpose one at the same time, as the register each is in and the
+    // general purpose register its copy belongs in. Empty on every convention but the one that says
+    // so, and on that one this is what makes `printf("%f", x)` read the right register.
+    let mut in_both = Vec::new();
+    // Which argument position the next one that gets a register is at, which is only the same as
+    // the index when nothing ahead of it went to memory. A convention that counts the two register
+    // files as one run is what needs it: the general purpose register a variadic float's second
+    // copy goes in is the one at that position.
+    let mut position = 0usize;
     for (index, &Passing { ty, reg, abi }) in args.iter().enumerate() {
         let refused = |missing| Refused { argument: Some(index), missing };
         // An eighty bit float is bytes in the argument area whatever the classification said, for
@@ -524,15 +560,6 @@ pub fn call(
         if let Some(missing) = refuses(ty) {
             return Err(refused(missing));
         }
-        // Windows passes a float to a variadic callee in the vector register and in the general
-        // purpose register at the same position, both at once, because the callee has no
-        // prototype to tell it which file to look in. Doing that needs to know which arguments are
-        // the ones the signature does not name, and a call carries whether the callee is variadic
-        // rather than how many arguments it names, so this is turned down rather than passed in
-        // one file and read from the other.
-        if ty.is_float() && variadic && conv.shared_positions {
-            return Err(refused(Missing::InBothFiles));
-        }
         let class = class_of(ty, conv);
         match at {
             Where::Reg(at) => {
@@ -540,8 +567,18 @@ pub fn call(
                 // to memory is one the callee reads from memory whatever this says.
                 if class == conv.sse_class {
                     vectors += 1;
+                    // Windows passes a float the callee has no prototype for in the vector register
+                    // and in the general purpose register at the same position, both at once,
+                    // because the callee has no way to know which file to look in and its walk over
+                    // the arguments reads the second one. An argument the signature does name needs
+                    // no second copy, since the callee's parameter says where it is.
+                    let both = conv.shared_positions && variadic && index >= named;
+                    if let Some(&also) = conv.int_args.get(position).filter(|_| both) {
+                        in_both.push((reg, also));
+                    }
                 }
                 passed.push((reg, at, class));
+                position += 1;
             }
             Where::Stack(up) => {
                 let store = store_of(ty).ok_or(refused(Missing::Width))?;
@@ -603,6 +640,18 @@ pub fn call(
             let build = out.build(block, mir::Opcode::new(store));
             build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(up + at)).finish();
         }
+    }
+
+    // And the second copy of each float the callee has no prototype for, which is one `movq` out of
+    // the vector register it is already in. What the callee reads out of the general purpose
+    // register is the sixty four bits and not a value of any type, so the bits are what move, and
+    // the copy joins the arguments rather than being a thing of its own: it is passed in a register
+    // the convention names, which is what every other argument here is.
+    for (from, into) in in_both {
+        let word = out.new_vreg(conv.int_class);
+        let movq = mir::Opcode::new(names.intern("x64.movq_from_xmm"));
+        out.build(block, movq).def(word, conv.int_class).uses(from, conv.sse_class).finish();
+        passed.push((word, into, conv.int_class));
     }
 
     // The definitions first and the reads after, which is the order every operand vector in the
@@ -1074,9 +1123,25 @@ mod tests {
     }
 
     /// One call to `g`, with a register for each argument arriving in the block that makes it.
+    ///
+    /// A variadic call here names none of its arguments, which is the shape that asks the most of a
+    /// convention. [`made_naming`] is for the tests that care where the line between the named ones
+    /// and the rest actually falls.
     fn make(
         args: &[Type],
         returns: &[Type],
+        variadic: bool,
+        conv: &CallRegs,
+    ) -> (Interner, mir::Func, Result<Made, Refused>) {
+        let named = if variadic { 0 } else { args.len() };
+        made_naming(args, returns, named, variadic, conv)
+    }
+
+    /// The same, for a callee whose signature names that many of the arguments.
+    fn made_naming(
+        args: &[Type],
+        returns: &[Type],
+        named: usize,
         variadic: bool,
         conv: &CallRegs,
     ) -> (Interner, mir::Func, Result<Made, Refused>) {
@@ -1092,7 +1157,7 @@ mod tests {
             })
             .collect();
         let callee = Callee::Named(names.intern("g"));
-        let what = Calling { callee, args: &passed, returns, variadic };
+        let what = Calling { callee, args: &passed, returns, variadic, named };
         let made = call(&mut out, block, &what, conv, &mut names);
         (names, out, made)
     }
@@ -1192,19 +1257,49 @@ mod tests {
         assert!(mir::print_func(&func, &names, &REGS).contains("x64.mov_ri_32 2"));
     }
 
-    /// Windows passes a float to a variadic callee in both files at once, and which arguments are
-    /// the ones the signature does not name is not something a call carries, so it is turned down
-    /// rather than passed in one file and read from the other.
+    /// Windows passes a float the callee has no prototype for in both files at once, because the
+    /// callee has no way to know which file to look in and its walk over the arguments reads the
+    /// general purpose one. This is the whole of what `printf("%f", x)` needs from the caller.
     #[test]
-    fn a_float_passed_to_a_variadic_callee_on_windows_is_reported() {
+    fn a_float_a_variadic_callee_has_no_prototype_for_travels_in_both_files_on_windows() {
         let f64 = Type::float(rucc_ir::Float::F64);
-        assert_eq!(
-            make(&[Type::int(32), f64], &[], true, &WIN64).2,
-            Err(Refused { argument: Some(1), missing: Missing::InBothFiles })
-        );
-        // The same call to a callee whose signature names both arguments is fine, because there is
-        // no second copy to make.
-        assert!(make(&[Type::int(32), f64], &[], false, &WIN64).2.is_ok());
+        let (names, func, made) = made_naming(&[Type::int(32), f64], &[], 1, true, &WIN64);
+        made.expect("an integer and a float both fit in registers");
+
+        // The float is the second argument, so its position is one and both of its registers are
+        // the second of their file. `rdx` holds the bits and nothing converts them, which is what
+        // the `movq` is: the callee reads bits out of it and not a value of any type.
+        assert_eq!(operands(&func).1, ["rcx", "xmm1", "rdx"]);
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.movq_from_xmm %1"), "{text}");
+    }
+
+    /// An argument the signature does name needs no second copy, since the callee's parameter says
+    /// where it is, and neither does one on a convention that keeps the two files apart.
+    #[test]
+    fn an_argument_the_signature_names_travels_in_one_file() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (names, func, made) = made_naming(&[Type::int(32), f64], &[], 2, true, &WIN64);
+        made.expect("both are named");
+        assert_eq!(operands(&func).1, ["rcx", "xmm1"]);
+        assert!(!mir::print_func(&func, &names, &REGS).contains("movq_from_xmm"));
+
+        let (names, func, made) = made_naming(&[Type::int(32), f64], &[], 1, true, &SYSV);
+        made.expect("an integer and a float");
+        assert!(!mir::print_func(&func, &names, &REGS).contains("movq_from_xmm"));
+    }
+
+    /// A float past the position the registers run out at is in the argument area and nowhere else,
+    /// which is where the second copy stops being a thing there is room for. The callee reads it
+    /// out of memory whichever file it would have been in.
+    #[test]
+    fn a_float_the_registers_ran_out_before_gets_no_second_copy() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (names, func, made) = made_naming(&[f64; 6], &[], 0, true, &WIN64);
+        made.expect("four in registers and two in memory");
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("movq_from_xmm").count(), 4, "{text}");
+        assert!(text.contains("x64.movsd_mr %4, [$rsp + 32]"), "{text}");
     }
 
     #[test]
@@ -1221,6 +1316,7 @@ mod tests {
             args: &passed,
             returns: &[i32],
             variadic: false,
+            named: passed.len(),
         };
         call(&mut out, block, &what, &SYSV, &mut names).expect("one integer fits in a register");
 
@@ -1278,7 +1374,8 @@ mod tests {
             abi: Abi::Plain,
         });
         let callee = Callee::Named(names.intern("g"));
-        let what = Calling { callee, args: &args, returns: &[], variadic: false };
+        let what =
+            Calling { callee, args: &args, returns: &[], variadic: false, named: args.len() };
         let made = call(&mut out, block, &what, conv, &mut names);
         (names, out, made)
     }

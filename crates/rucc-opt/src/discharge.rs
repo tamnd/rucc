@@ -193,8 +193,10 @@
 //!
 //! The case is a `free` and then an allocation of something smaller at the same address. The range
 //! established before the call is no longer inside one instance after it, and what document 07
-//! leaves that to is the lifetime judgement rather than this one. Whether that is enough is the
-//! next section, and the answer is not yet.
+//! leaves that to is the lifetime judgement rather than this one. Today's lifetime check is about
+//! the address rather than about the version the capability was taken at, so it would not refuse
+//! the access either, and a rate this pass reports is worth less than a hole it opens. The strict
+//! version is what is written first.
 //!
 //! A `meta_end` and a `meta_transfer` drop the facts as well. Nothing emits either one yet, so
 //! this costs nothing today and is the difference between conservative and wrong on the day the
@@ -214,52 +216,7 @@
 //!
 //! What the strictness still costs is measured rather than guessed. A check that a fact would have
 //! covered if a call had not intervened is counted, so `-fopt-info-missed` says per function what
-//! is left to win. On the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect` that is 4651 bounds
-//! checks at 721 sites, 2813 lifetime checks at 650 sites and 2521 derivation checks at 582 sites,
-//! against 29313 bounds checks and 20797 lifetime checks that survive the whole pipeline.
-//!
-//! # What keeping the bounds half would take
-//!
-//! The eighth box of tamnd/rucc#1241 asks this pass to stop throwing the bounds facts away, on the
-//! grounds that the lifetime check at the access now compares a version and will refuse the case
-//! the paragraph above is about. It is still open and the reason belongs here rather than in the
-//! issue, because what it turns on is what this file does.
-//!
-//! The claim to be made is that a bounds fact may cross a call when every access that then uses it
-//! is guarded by a lifetime check that refuses once the instance has changed. Three things have to
-//! hold for that and one of them does not.
-//!
-//! The first holds. `rucc_safety::check` emits the two checks as a pair off one capability, so the
-//! only question is whether this pass took the lifetime half out again, and there are five ways it
-//! does. `REMOVED_LIVE_STATIC` is a global, `REMOVED_LIVE_LOCAL` is a frame slot of this
-//! function, and `REMOVED_LIVE_HANDED` is an object every caller hands in, which `crate::params`
-//! only ever says of a caller's frame slot or of a global this module vouches for. None of those
-//! three can be freed by anybody, so a bounds fact about one does not go stale in the first place.
-//! `REMOVED_LIVE` comes out of `Scope::alive`, which is thrown away at the call, so it cannot
-//! fire on the far side of one. `REMOVED_LIVE_RANGE` is the frame slot rule or `Scope::alive`
-//! widened, so it is those two again. On the far side of a call the lifetime check is therefore
-//! either still standing or about an object no callee can end.
-//!
-//! The second does not hold. A lifetime check that is still standing refuses a changed instance
-//! only when the capability it reads names one, and `rucc_safe_rt::check`'s `stale` takes the
-//! weaker reading for a bottom capability and for a recovered one, because a recovery reads the
-//! plane at the address and that is an answer about the address rather than about the pointer. A
-//! `cap_of` lowers to `__rucc_cap_recover` for every pointer that did not come straight out of an
-//! allocator, so the pointers this would win the most on, which are the ones a function was handed
-//! and the ones it loaded out of memory, are exactly the pointers whose capability keeps the weaker
-//! reading. Turning the strictness off today would not trade a rate for a gate, it would trade a
-//! rate for nothing. The second box of tamnd/rucc#1241 is what this waits on, which is `cap_of`
-//! lowering to something that names an instance, and not the version compare, which landed with the
-//! fourth box and is not the part that was missing.
-//!
-//! The third is a hazard the relaxation would introduce rather than one it inherits, and it is
-//! written down here so that whoever comes back to this does not have to find it twice. A lifetime
-//! fact is widened by `widened` out of the bounds facts standing at the time, so bounds facts that
-//! survived a call would widen lifetime facts established after it. A bounds fact saying a range is
-//! inside one instance, taken before a `free` and an allocation of something smaller at the same
-//! address, would then widen a lifetime check that passed on the new instance into a claim that the
-//! whole of the old range is alive. Keeping the bounds half means either not widening with a fact
-//! older than the last call or carrying the age along, and neither is free.
+//! is left to win.
 
 use std::collections::{HashMap, HashSet};
 
@@ -962,7 +919,7 @@ pub(crate) fn about(func: &Func, check: Inst) -> Option<Fact> {
 ///
 /// One byte, because that is the whole of what the check says: the instance holding this address
 /// is alive, and nothing about the address next door. The widening to a range that makes the fact
-/// useful is `widened`, and it needs a bounds fact to do it.
+/// useful is [`widened`], and it needs a bounds fact to do it.
 pub(crate) fn alive(func: &Func, check: Inst) -> Option<Fact> {
     let (base, offset, whole) = addressed(func, check)?;
     hull(base, offset, 1, whole)
@@ -2734,27 +2691,6 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(lives(&func), 0);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 2);
-    }
-
-    #[test]
-    fn a_lifetime_check_inside_a_local_goes_across_a_call() {
-        // The last of the five ways a lifetime check is taken out, pinned here because the
-        // argument in the module comment about keeping bounds facts across a call is an argument
-        // about all five. Three of them survive a call and none of the three is about storage a
-        // callee could free, which is what makes them harmless to a bounds fact that crossed. This
-        // is the frame slot one, and the other two already have a test each.
-        let (mut names, mut func, block, _) = blank();
-        let mut build = Builder::new(&mut func, block);
-        let slot = local(&mut build, 16);
-        let callee = names.intern("might_free");
-        let signature = build.func().add_signature(Signature::new());
-        build.call(callee, signature, &[]);
-        live(&mut build, slot);
-        build.ret(&[]);
-        let stats = run(&mut func);
-        assert_eq!(lives(&func), 0);
-        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 1);
-        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_LIVE), 0);
     }
 
     #[test]

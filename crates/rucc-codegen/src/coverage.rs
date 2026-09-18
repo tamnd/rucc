@@ -93,6 +93,12 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#226",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
+    (
+        Opcode::SetjmpMarker,
+        "a call that returns twice, which the allocator has to be told about",
+        "tamnd/rucc#223",
+    ),
+    (Opcode::LongjmpMarker, "the same", "tamnd/rucc#223"),
     (Opcode::TailCall, "a terminator nothing writes and nothing lowers", "tamnd/rucc#365"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
