@@ -758,7 +758,7 @@ mod tests {
             let reach = reach(&self.func, &self.addresses, locals, &FRAME, &mut self.names);
             let env =
                 Env::new().with(GPR, &SYSV.int_order[..registers], &SYSV.int_order[registers..]);
-            let allocation = rucc_regalloc::run(&mut self.func, &env, "test");
+            let allocation = rucc_regalloc::run(&mut self.func, &env, "test", true);
             (reach, allocation)
         }
     }

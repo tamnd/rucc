@@ -626,7 +626,7 @@ mod tests {
         for &reg in &regs {
             func.build(block, opcode).uses(reg, GPR).finish();
         }
-        let allocation = rucc_regalloc::run(&mut func, &env(conv, count), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(conv, count), "test", true);
         (func, allocation)
     }
 
@@ -730,7 +730,7 @@ mod tests {
         // An instruction that names the frame pointer register outright, which is what a lowering
         // rule for something that has to use it produces.
         func.build(block, opcode).operand(Operand::write(Reg::physical(RBP), GPR)).finish();
-        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test", true);
         let base = Layout::new(&SYSV, REGS);
 
         let kept = Frame::of(&func, &allocation, &Layout { frame_pointer: true, ..base });

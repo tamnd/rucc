@@ -1212,7 +1212,7 @@ mod tests {
         for &reg in &regs {
             func.build(block, opcode).uses(reg, GPR).finish();
         }
-        let allocation = rucc_regalloc::run(&mut func, &env(conv, count), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(conv, count), "test", true);
         (func, allocation, names)
     }
 
@@ -1266,7 +1266,7 @@ mod tests {
             .finish();
         let nop = Opcode::new(names.intern("x64.nop"));
         func.build(block, nop).finish();
-        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test", true);
         (func, allocation, names, Stack { grown: vec![took], ..Stack::default() })
     }
 
@@ -1458,7 +1458,7 @@ mod tests {
         *func.succs_mut(head) = vec![BlockCall::to(left), BlockCall::to(right)];
         func.build(left, opcode).finish();
         func.build(right, opcode).finish();
-        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test", true);
         let base = Layout::new(&SYSV, REGS);
         let layout = Layout { leaf: false, ..base };
         let lines = written(&mut func, &allocation, &layout, &mut names);
@@ -1724,7 +1724,7 @@ mod tests {
         // An instruction that writes one of the vector registers Windows preserves, which is what
         // a rule for something that has to use it produces.
         func.build(block, opcode).operand(Operand::write(Reg::physical(xmm(6)), XMM)).finish();
-        let allocation = rucc_regalloc::run(&mut func, &env(&WIN64, 4), "test");
+        let allocation = rucc_regalloc::run(&mut func, &env(&WIN64, 4), "test", true);
         let lines = written(&mut func, &allocation, &Layout::new(&WIN64, REGS), &mut names);
 
         // No machine here pushes a vector register, so it is stored into the frame rather than

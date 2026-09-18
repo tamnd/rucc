@@ -67,31 +67,40 @@ pub struct Allocation {
 /// Panics on a function the caller was told not to hand it, which is one with a critical edge or
 /// one whose entry block has parameters. See [`rewrite::rewrite`].
 ///
-/// In a debug build it also panics on an assignment [`check`] finds a problem with, which is a bug
-/// in this crate rather than anything the caller did. `spec/10-backend.md` section 10.4 asks for
-/// that check in debug and CI builds, and it runs before the rewrite because the assignment is the
-/// decision and the rewrite only writes it down.
+/// It also panics on an assignment [`check`] finds a problem with, which is a bug in this crate or
+/// in whatever produced the function rather than anything the caller did. `spec/10-backend.md`
+/// section 10.4 asks for that check in debug and CI builds, and it runs before the rewrite because
+/// the assignment is the decision and the rewrite only writes it down.
 ///
-/// A debug build panics on a rewrite [`trace`] finds a value missing from as well. That one runs
-/// afterwards, since a transcription can only be read once it has been made, and it is the check
+/// It panics on a rewrite [`trace`] finds a value missing from as well. That one runs afterwards,
+/// since a transcription can only be read once it has been made, and it is the check
 /// `spec/optimizer/39-register-allocation.md` section 39.6 asks for.
+///
+/// `verify` is what turns both of those on in a build that has assertions compiled out. A debug
+/// build runs them whatever it says, since that is where a broken pass should be caught, and a
+/// release build runs them when the caller asks, which is what `-Zverify-each` is for and what
+/// section 10.4 means by a CI build. It is a parameter rather than a `cfg!` because the thing
+/// worth catching is a pass that writes a function nothing defines a register in, the gate
+/// compiles release, and a check the gate never runs is a check that finds the bug after the merge
+/// rather than on the pull request. tamnd/rucc#1411.
 ///
 /// `called` is what to call the function in that message. It is passed in rather than read off the
 /// function because the name there is a symbol and resolving one wants the interner, which this
 /// crate has no reason to be handed otherwise. Without it the message is a pair of register numbers
 /// and nothing that says where, and finding the function it was about in a file the size of the
 /// SQLite amalgamation means bisecting by hand.
-pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str) -> Allocation {
+pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str, verify: bool) -> Allocation {
+    let checking = verify || cfg!(debug_assertions);
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
     let mut assignment = assign::assign(func, &order, &live, env);
-    if cfg!(debug_assertions) {
+    if checking {
         let problems = check::check(func, &order, &live, &assignment);
         assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
     }
     // What the rewrite is about to lose, taken while it is still there. Only in a build that is
     // going to read it, since the snapshot is a copy of every operand list in the function.
-    let shape = cfg!(debug_assertions).then(|| trace::shape(func));
+    let shape = checking.then(|| trace::shape(func));
     let edits = rewrite::rewrite(func, &mut assignment, env);
     if let Some(shape) = shape {
         let faults = trace::trace(func, &shape, &assignment, &edits);
@@ -134,7 +143,7 @@ mod tests {
         // goes to the stack and the instruction that reads it gets a reload. This is also where
         // the checker runs, since a debug build asserts on what it says.
         let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
-        let allocation = run(&mut func, &env, "test");
+        let allocation = run(&mut func, &env, "test", true);
 
         assert_eq!(allocation.assignment.spilled(), 1);
         assert_eq!(allocation.edits.len(), 2);
