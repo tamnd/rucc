@@ -349,6 +349,7 @@ pub(crate) fn crossed(opcode: Opcode, kind: Opcode) -> bool {
                 | Opcode::CheckRace
                 | Opcode::CheckRestrictRead
                 | Opcode::CheckRestrictWrite
+                | Opcode::CheckFree
                 // The epoch plane, which neither of these two writes and which does not read them.
                 | Opcode::MetaEpoch
         )

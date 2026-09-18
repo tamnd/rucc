@@ -364,6 +364,24 @@ pub enum Opcode {
     /// Two accesses that both only read are not a violation of anything, so what the scope records
     /// is which of them wrote and the check refuses a pair only when at least one did.
     CheckRestrictWrite,
+    /// The capability this free goes through still names the instance that owns the address.
+    ///
+    /// Judgement J6, and the same two operands [`Opcode::CheckLive`] has for the same reason: a
+    /// capability and the pointer it is about, with no payload, because how many bytes are at the
+    /// address is not something a free asks. What separates it from the lifetime check is where it
+    /// goes and what it is about. This one sits in front of a call that ends a storage instance
+    /// rather than in front of an access, and the question it decides is whether the pointer being
+    /// handed over still names the instance it was made for.
+    ///
+    /// It exists because that question has no other way of being asked. `free` takes an address and
+    /// nothing else, so a second free of a block the allocator has already handed back out looks
+    /// like an ordinary free to the allocator and releases somebody else's live object.
+    /// tamnd/rucc#492 is that, and the version the capability carries is what tells the two apart.
+    ///
+    /// Nothing discharges one. A bounds fact says nothing about it and a lifetime fact about an
+    /// access says nothing about a free, so it stays where the pass put it and the cost is one
+    /// check per free rather than one per access.
+    CheckFree,
     /// A storage instance begins here, over a range, with a class.
     ///
     /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
@@ -672,6 +690,7 @@ impl Opcode {
             Self::CheckRace => "check_race",
             Self::CheckRestrictRead => "check_restrict_read",
             Self::CheckRestrictWrite => "check_restrict_write",
+            Self::CheckFree => "check_free",
             Self::MetaBegin => "meta_begin",
             Self::MetaEnd => "meta_end",
             Self::MetaType => "meta_type",
@@ -932,6 +951,7 @@ impl Opcode {
                     | Self::CheckInit
                     | Self::CheckDeriv
                     | Self::CheckRace
+                    | Self::CheckFree
             )
     }
 
@@ -978,6 +998,7 @@ impl Opcode {
             | Self::CheckRace
             | Self::CheckRestrictRead
             | Self::CheckRestrictWrite
+            | Self::CheckFree
             | Self::MetaBegin
             | Self::MetaEnd
             | Self::MetaType
@@ -1275,6 +1296,7 @@ static ALL: &[Opcode] = &[
     Opcode::CheckRace,
     Opcode::CheckRestrictRead,
     Opcode::CheckRestrictWrite,
+    Opcode::CheckFree,
     Opcode::MetaBegin,
     Opcode::MetaEnd,
     Opcode::MetaType,
@@ -1737,6 +1759,7 @@ mod tests {
             Opcode::CheckInit,
             Opcode::CheckDeriv,
             Opcode::CheckRace,
+            Opcode::CheckFree,
         ];
         for opcode in checks {
             let name = opcode.name();

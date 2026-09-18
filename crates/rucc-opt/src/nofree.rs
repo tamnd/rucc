@@ -659,6 +659,7 @@ fn holds(opcode: Opcode) -> bool {
             | Opcode::CheckRace
             | Opcode::CheckRestrictRead
             | Opcode::CheckRestrictWrite
+            | Opcode::CheckFree
     )
 }
 
@@ -752,7 +753,7 @@ const WRAPPER_PREFIX: &str = "__rucc_wrap_";
 /// memory of the runtime's own and not storage the program was ever given, and the four edges move a
 /// clock that lives beside the thread, which is the same answer for the same reason.
 ///
-/// These nineteen and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
+/// These twenty and no more. The rest of what the runtime exports is the allocator's own bookkeeping,
 /// `__rucc_alloc_purge` and the frame calls and the rest, and those are exactly the things that do
 /// end a lifetime. Nothing generated calls them, so leaving them out costs nothing, and a name
 /// added here without reading what it does would be a hole in the safety this compiler is for.
@@ -762,6 +763,7 @@ const RUNTIME_NEVER_FREES: &[&str] = &[
     "__rucc_cap_witness",
     "__rucc_check_bounds",
     "__rucc_check_deriv",
+    "__rucc_check_free",
     "__rucc_check_init",
     "__rucc_check_live",
     "__rucc_check_race",

@@ -1638,10 +1638,14 @@ impl<'a> Verifier<'a> {
                 }
             }
 
-            // The checks. Five of them ask about one pointer and the sixth asks whether a
+            // The checks. Six of them ask about one pointer and the seventh asks whether a
             // second one stayed inside the first one's capability, so that is the only
             // difference in shape between them.
-            Opcode::CheckLive | Opcode::CheckType | Opcode::CheckInit | Opcode::CheckRace => {
+            Opcode::CheckLive
+            | Opcode::CheckType
+            | Opcode::CheckInit
+            | Opcode::CheckRace
+            | Opcode::CheckFree => {
                 if self.takes(opcode, arity, 2) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
