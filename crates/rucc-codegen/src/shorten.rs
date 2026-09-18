@@ -5,11 +5,21 @@
 //! about the back end never learning what it is compiling for, and names this rewrite as one of the
 //! ones that is free before any of that is settled.
 //!
-//! One rewrite so far. A move of zero into a register becomes an exclusive or of the register with
-//! itself. `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes; `xorl
-//! %eax, %eax` says it without spelling it and is two. At sixty-four bits it is seven against
-//! three. The processor knows the idiom, so the shorter one is no slower, and this is not a trade
-//! of speed for size and does not wait for a size goal to arrive.
+//! Two rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
+//! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
+//! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
+//! goal to arrive.
+//!
+//! And a move of a number into a sixty-four bit register becomes the thirty-two bit move where the
+//! number is one that fits, because the narrow instruction clears the half of the register it does
+//! not write rather than leaving it alone. `movq $7, %rax` is seven bytes and `movl $7, %eax` is
+//! five, and for a number above two to the thirty-first it is ten against five, since the wide move
+//! cannot reach one by sign extending and writes all eight bytes of it out.
+//!
+//! The two meet on a zero, and the order they are asked in is the order they are worth: a zero
+//! whose condition state is free becomes the exclusive or, and a zero whose state is not becomes
+//! the narrow move, which is two bytes off rather than five but costs nothing to say.
 //!
 //! The numbers over the corpus at `-Os` before this pass existed: rucc wrote a move of zero into a
 //! register 21,304 times and GCC 16 wrote it 9 times, and GCC wrote the exclusive or 23,729 times
@@ -27,6 +37,13 @@
 //! is where the answer comes from, the same description [`crate::compare`] asks, and it answers
 //! that a name it does not know writes the state, so an opcode added to a rule set and not to that
 //! table makes this find less rather than making it wrong.
+//!
+//! The narrower move is a different answer to the same question. That one an encoder could do
+//! without asking anything, since neither instruction touches the condition state and the register
+//! holds the same number afterwards either way. It is not done there because an encoder handed a
+//! sixty-four bit move and writing the bytes of a thirty-two bit one would be writing bytes the
+//! listing beside them does not say, and the listing and the bytes agreeing is worth more than the
+//! two bytes. Choosing the instruction is this pass and spelling the one it chose is the encoder.
 //!
 //! # Why it runs last
 //!
@@ -52,6 +69,10 @@
 //! buys is that if some later pass starts writing that shape, this pass stops rather than starts
 //! being wrong.
 //!
+//! Down for the exclusive or alone. The narrower move reads no condition state and writes none, so
+//! nothing about where a state is alive is a question it has to ask, and a function this turns down
+//! is still one it gets.
+//!
 //! # A template a program wrote
 //!
 //! An `asm` statement is not opaque to this. `rucc_target::x86_64::read` turns the text of a
@@ -67,11 +88,14 @@
 //!
 //! # What it will not do
 //!
-//! A move whose condition state anything reads before anything writes. That is the rule and it is
-//! most of the cost: the zero going into a register right before a comparison of something else
-//! stays a move. Of the 1,232 moves of zero left over the corpus at `-Os`, 1,162 are this and the
-//! other 70 are the eight bit rule below, so what is left on the table is almost all one question
-//! about the instructions behind rather than anything about the instruction itself.
+//! Turn a move into the exclusive or when anything reads its condition state before anything
+//! writes. That is the rule and it is most of the cost: the zero going into a register right before
+//! a comparison of something else stays a move, and the most the other rewrite can do for it is
+//! make it a narrower one. Of the 1,232 moves of zero left over the corpus at `-Os`, 1,162 are this
+//! and the other 70 are the eight bit rule below, so what is left on the table is almost all one
+//! question about the instructions behind rather than anything about the instruction itself. They
+//! are the same 1,232 as before the second rewrite and not one of them is sixty-four bits wide any
+//! more.
 //!
 //! Eight bits. `movb $0, %al` and `xorb %al, %al` are both two bytes, so the exchange buys nothing
 //! and would spend the condition state on it. The target's table is where that is written down.
@@ -92,30 +116,28 @@ pub fn shorter(
     machine: &MachineInsts,
     names: &mut Interner,
 ) -> usize {
-    if carried(func, flags, names) {
-        return 0;
-    }
-    // Every name the rewrite could want, before the walk rather than inside it, because the walk
+    // Every name a rewrite could want, before the walk rather than inside it, because the walk
     // holds a name it read out of the interner while it edits the function and interning a new one
     // there would be the same interner borrowed twice. The same reason [`crate::compare`] has.
-    let opcodes: Vec<(&'static str, mir::Opcode)> = short
-        .zeroing
-        .iter()
-        .map(|entry| {
-            let name = mir::Opcode::new(names.intern(&format!("{}{}", short.prefix, entry.into)));
-            (entry.into, name)
-        })
+    let wanted = short.zeroing.iter().map(|entry| entry.into);
+    let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
+    let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
+        .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
         .collect();
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut took = 0;
+    // Whether the rewrite that spends the condition state may be asked for at all. The narrower
+    // instruction neither reads the state nor writes it, so it is not asked this and a function
+    // this turns down still gets that one.
+    let free = !carried(func, flags, names);
     for block in func.blocks().collect::<Vec<_>>() {
         // Backwards, because the question each instruction asks is about the ones behind it. The
         // state is dead at the end of a block, which is the invariant [`carried`] has just held the
         // function to.
         let mut live = false;
         for inst in func.insts(block).collect::<Vec<_>>().into_iter().rev() {
-            if !live {
+            if free && !live {
                 let into = shorter_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|op| zeroed(func, &mut counts, machine, names, inst, op)) {
                     took += 1;
@@ -123,6 +145,14 @@ pub fn shorter(
                     // nothing about what the instructions in front of it may do has changed.
                     continue;
                 }
+            }
+            // The zero that could not become an exclusive or can still be written in fewer bytes,
+            // which is why this is asked after that one and not instead of it.
+            let into = narrower_form(func, short, names, &opcodes, inst);
+            if into.is_some_and(|op| narrowed(func, &mut counts, machine, names, inst, op)) {
+                took += 1;
+                // What stands there now is the same instruction at half the width, which is a
+                // move either way, so what it does to the state is what it did before: nothing.
             }
             let Some(name) = opcode(func, flags, names, inst) else {
                 // A name the description does not cover may have read the state and may have
@@ -185,6 +215,49 @@ fn shorter_form(
         return None;
     }
     opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// The narrower instruction this one has, when it has one and the number it carries is one that
+/// instruction holds.
+///
+/// A number the narrower instruction cannot hold is every negative one and everything above what
+/// fits in the bits it writes, since what it does to the rest of the register is clear it. So the
+/// question is not whether the number fits in that many bits the way the program meant it, which is
+/// a question about a type, but whether the bits the wide instruction would leave in the register
+/// are the bits the narrow one leaves there, which is a question about the number.
+fn narrower_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let narrow = short.narrowed(name)?;
+    let held = u64::try_from(func[func[inst].imm?].0).ok()?;
+    if narrow.writes >= u64::BITS || held >= 1u64 << narrow.writes {
+        return None;
+    }
+    opcodes.iter().find(|&&(at, _)| at == narrow.into).map(|&(_, opcode)| opcode)
+}
+
+/// Rewrites the move into the narrower move, which is the same instruction with a different name.
+///
+/// So the operands are the ones it had, where the exclusive or below needs its own built: the two
+/// moves take a register they write and a number, and the number is the one that was already there.
+/// A description where that is not so is one [`Changes`] turns down, and a rewrite it turns down is
+/// one this reports as not taken rather than one that goes in anyway.
+fn narrowed(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
 }
 
 /// Rewrites the move into the exclusive or, which names the one register the move wrote in every
@@ -294,6 +367,11 @@ mod tests {
         func[func[inst].operands].iter().map(|operand| operand.reg).collect()
     }
 
+    /// The number an instruction carries, for an instruction that carries one.
+    fn imm(func: &mir::Func, inst: mir::Inst) -> Option<i64> {
+        func[inst].imm.map(|at| func[at].0)
+    }
+
     /// The shape the pass is for: a move of zero with nothing reading the condition state after it
     /// becomes the exclusive or, which names the register it writes in all three of its operands and
     /// carries no constant.
@@ -311,16 +389,91 @@ mod tests {
     }
 
     /// Sixty-four bits is the same rewrite and the biggest one, since the long way of writing a zero
-    /// there is seven bytes.
+    /// there is seven bytes. The instruction it becomes is the thirty-two bit one, which clears the
+    /// half of the register it does not write and so leaves the same sixty-four bit zero in one
+    /// byte less.
     #[test]
-    fn sixty_four_bits_is_the_same_rewrite() {
+    fn sixty_four_bits_is_the_same_rewrite_at_half_the_width() {
         let (mut names, mut func, block) = empty();
         let into = func.new_vreg(GPR);
         let zero = op(&mut names, "mov_ri_64");
         func.build(block, zero).def(into, GPR).imm(0).finish();
 
         assert_eq!(takes(&mut func, &mut names), 1);
-        assert_eq!(shape(&func, &names, block), ["xor_rr_64"]);
+        assert_eq!(shape(&func, &names, block), ["xor_rr_32"]);
+    }
+
+    /// The other rewrite. A number that is not zero has nothing shorter than a move, and the move
+    /// that writes half the register is shorter than the one that writes all of it.
+    #[test]
+    fn a_number_a_narrower_move_holds_is_written_by_the_narrower_move() {
+        for value in [1, 7, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
+            let (mut names, mut func, block) = empty();
+            let into = func.new_vreg(GPR);
+            let wide = op(&mut names, "mov_ri_64");
+            let inst = func.build(block, wide).def(into, GPR).imm(value).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{value}");
+            assert_eq!(shape(&func, &names, block), ["mov_ri_32"], "{value}");
+            assert_eq!(imm(&func, inst), Some(value), "{value}");
+            assert_eq!(regs(&func, inst), [into], "{value}");
+        }
+    }
+
+    /// A number the narrower move does not hold, which is everything above what fits in the bits it
+    /// writes and every negative number, since what it does to the rest of the register is clear it
+    /// rather than fill it with the sign.
+    #[test]
+    fn a_number_the_narrower_move_does_not_hold_stays_wide() {
+        for value in [-1, -7, 0x1_0000_0000, i64::MIN, i64::MAX] {
+            let (mut names, mut func, block) = empty();
+            let into = func.new_vreg(GPR);
+            let wide = op(&mut names, "mov_ri_64");
+            func.build(block, wide).def(into, GPR).imm(value).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 0, "{value}");
+            assert_eq!(shape(&func, &names, block), ["mov_ri_64"], "{value}");
+        }
+    }
+
+    /// A zero the condition state is not free for, which the first rewrite has to leave alone. The
+    /// second one has nothing to do with the state and takes it, so the instruction that stays is
+    /// five bytes rather than seven.
+    #[test]
+    fn a_zero_the_state_is_not_free_for_is_narrowed_instead() {
+        let (mut names, mut func, block) = empty();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let cmp = op(&mut names, "cmp_rr_32");
+        let zero = op(&mut names, "mov_ri_64");
+        let set = op(&mut names, "set_e");
+        func.build(block, cmp).uses(left, GPR).uses(right, GPR).finish();
+        let inst = func.build(block, zero).def(into, GPR).imm(0).finish();
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_ri_32", "set_e"]);
+        assert_eq!(imm(&func, inst), Some(0));
+    }
+
+    /// A function the state carried across an edge turns down, which is the first rewrite's rule
+    /// and not the second one's. The narrower move writes no state and reads none, so a function
+    /// that rule turns down still gets it.
+    #[test]
+    fn a_function_the_carried_state_turns_down_is_still_narrowed() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let wide = op(&mut names, "mov_ri_64");
+        let set = op(&mut names, "set_e");
+        func.build(first, wide).def(into, GPR).imm(7).finish();
+        func.build(second, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, first), ["mov_ri_32"]);
     }
 
     /// A move of anything else. The shorter instruction writes zero, so it says the same thing only

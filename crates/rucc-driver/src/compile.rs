@@ -2751,8 +2751,10 @@ decl #0 x : int object external static defined
 
         assert!(!text.contains("memset"), "nothing calls the library: {text}");
         // Either spelling of a zero in a register, the move of one or the exclusive or of the
-        // register with itself that `rucc_codegen::shorten` writes instead where it is free.
-        assert!(text.contains("\tmovq\t$0, ") || text.contains("\txorq\t"), "the zero: {text}");
+        // register with itself that `rucc_codegen::shorten` writes instead where it is free. The
+        // exclusive or is the thirty-two bit one whatever the width of the word, since the half of
+        // the register it does not write is cleared rather than left alone.
+        assert!(text.contains("\tmovq\t$0, ") || text.contains("\txorl\t"), "the zero: {text}");
     }
 
     /// A copy too large to be worth unrolling is a call to the runtime, which is the C library on

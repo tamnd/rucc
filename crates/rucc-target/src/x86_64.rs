@@ -55,7 +55,7 @@ use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
-use crate::short::{ShortInsts, Zeroed};
+use crate::short::{Narrowed, ShortInsts, Zeroed};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -514,14 +514,20 @@ pub static FLAGS: FlagInsts = FlagInsts {
 };
 
 /// The shorter spellings x86-64 has for the same answer.
-pub static SHORT: ShortInsts = ShortInsts { prefix: "x64.", zeroing: &SHORTER_ZEROS };
+pub static SHORT: ShortInsts =
+    ShortInsts { prefix: "x64.", zeroing: &SHORTER_ZEROS, narrowing: &NARROWER_MOVES };
 
 /// Writing zero into a register without spelling the zero out.
 ///
 /// `movl $0, %eax` is five bytes, one for the opcode and four for a number every one of whose bits
 /// is the same. `xorl %eax, %eax` is two and the processor knows the idiom, so it is shorter and no
-/// slower. The same trade at sixty-four bits is seven bytes against three and at sixteen is four
-/// against three.
+/// slower. The same trade at sixteen bits is four bytes against three.
+///
+/// Sixty-four bits is written with the thirty-two bit exclusive or, which is where the number the
+/// program asked for ends up either way: writing the low half of a register on this machine clears
+/// the high half rather than leaving it alone, so `xorl %eax, %eax` is a sixty-four bit zero and is
+/// two bytes where `xorq %rax, %rax` is three. That is the sentence [`NARROWER_MOVES`] is about as
+/// well, and it is here rather than there because there is no number on this one to check.
 ///
 /// Eight bits is not here and the reason is arithmetic rather than a rule: `movb $0, %al` is two
 /// bytes and `xorb %al, %al` is two, so the exchange buys nothing and would cost the condition
@@ -529,8 +535,22 @@ pub static SHORT: ShortInsts = ShortInsts { prefix: "x64.", zeroing: &SHORTER_ZE
 static SHORTER_ZEROS: [Zeroed; 3] = [
     Zeroed { name: "mov_ri_16", into: "xor_rr_16" },
     Zeroed { name: "mov_ri_32", into: "xor_rr_32" },
-    Zeroed { name: "mov_ri_64", into: "xor_rr_64" },
+    Zeroed { name: "mov_ri_64", into: "xor_rr_32" },
 ];
+
+/// Writing a number into a register with the instruction that writes half of it.
+///
+/// Because the other half is cleared rather than left alone, so a number that is not negative and
+/// fits in thirty-two bits is in the register the same way whichever of the two put it there. The
+/// thirty-two bit move is the shorter: it carries no prefix byte saying how wide it is, which is one
+/// byte, and a number between two to the thirty-first and two to the thirty-second is written out
+/// whole by the wide move because it cannot be reached by sign extending, which is another five.
+///
+/// Sixteen bits is not here for the reason eight bits is not above. `movw $7, %ax` is four bytes and
+/// `movl $7, %eax` is five, so the narrower instruction is the longer one, which is what the prefix
+/// byte in front of a sixteen bit instruction costs.
+static NARROWER_MOVES: [Narrowed; 1] =
+    [Narrowed { name: "mov_ri_64", into: "mov_ri_32", writes: 32 }];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
 ///
