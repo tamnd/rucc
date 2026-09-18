@@ -191,3 +191,13 @@ The measurement in document 42: how many values SCCP proves constant that the e-
 folding did not, on the corpus. If that number is small, this pass is not earning its slot at `-O2`
 and only `__builtin_constant_p` justifies it at `-O1`. That would be a surprising result, and it is
 exactly the sort of thing spec 9.10's rule exists to find out.
+
+## 14.8 Where floating point sits in the folding
+
+`crates/rucc-opt/src/fold.rs` stays away from floating point arithmetic, and the reason is not that the arithmetic is hard. `rucc_base::float` computes every operation exactly, in integer arithmetic, correctly rounded. What is missing is the environment: which rounding mode the fold should assume, and what a signalling NaN should do when the answer is computed at translation time rather than raised at run time. Under `-frounding-math` the mode is not the compiler's to assume at all, per document 41's table, and under `-ftrapping-math` the exception is part of what the program does. Those are decisions about the floating point model and they belong with the rest of that work rather than with the first pass in the pipeline.
+
+A conversion from floating point to an integer is inside that boundary rather than an exception to it, and it is folded. 6.3.1.4 says the conversion discards the fractional part, so the rounding is fixed by the language and no dynamic mode reaches it. That leaves two cases where the value is not a number: a result the destination type has no room for, and a NaN. Both are undefined rather than wrong, so any answer would be a valid refinement of poison, and the pass declines to fold either for the same reason it declines to fold an add that overflows under `nsw`. Picking the wrapping answer quietly would hide a program that has stepped outside the language from the sanitizer that should be reporting it.
+
+The conversion in the other direction is not folded and should not be until the model is settled. An integer wider than the significand rounds on the way into a float, so `sitofp` of a large `long` depends on the mode in a way the truncating conversion does not. `fptrunc` is the same case. `fpext` from a narrower IEEE format to a wider one is exact and could be folded on its own terms, and is not worth a special case ahead of the model.
+
+What makes the conversion fold reachable at all is the separate question of what a load from an object nothing can write to evaluates to. The front end has already folded everything C calls a constant expression, so a floating constant meeting a conversion in the middle end is almost always a `const` object somebody read, and neither fold is worth much without the other.

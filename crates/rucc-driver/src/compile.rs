@@ -2500,6 +2500,20 @@ decl #0 x : int object external static defined
         assert!(text.matches("\tcmp").count() > 1, "{text}");
     }
 
+    /// A conversion whose operand the optimizer turned into a constant, which is the whole of what
+    /// `rucc_opt::fold` does with floating point.
+    ///
+    /// The cast is not a constant expression, so the front end leaves it alone and the pipeline is
+    /// what has to see it. Load forwarding turns the local back into the constant that was stored
+    /// into it, and the conversion then has an `fconst` in front of it. What came out before was
+    /// the sixty four bit pattern moved into a register, moved into an `xmm`, and a `cvttsd2si`.
+    #[test]
+    fn a_conversion_from_a_constant_double_is_the_number_it_converts_to() {
+        let text = optimized("int f(void) { double d = 2.75; return (int) d; }\n");
+        assert!(text.contains("movl\t$2, %eax"), "{text}");
+        assert!(!text.contains("cvttsd2si"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
