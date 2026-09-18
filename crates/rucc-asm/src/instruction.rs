@@ -28,9 +28,9 @@
 //! A branch is four bytes of distance whether it needs them or not. Choosing the two byte form
 //! where it fits is relaxation, which is a pass over the whole section rather than a decision one
 //! instruction makes, and until it is written the bytes are correct and longer than gas would have
-//! written. A numbered local label, `1:` and `1b` and `1f`, is not read. A symbol as an immediate
-//! is not read, nor a symbol as the displacement of an address that names a register, because both
-//! want a relocation this does not write yet and a wrong guess about either is silent.
+//! written. A symbol as an immediate is not read, nor a symbol as the displacement of an address
+//! that names a register, because both want a relocation this does not write yet and a wrong guess
+//! about either is silent.
 
 use rucc_target::x86_64::{Addr, Encoding, ImmSize, Value, Width, encode, encoding, gpr_named};
 use rucc_target::{PhysReg, Segment};
@@ -44,6 +44,8 @@ pub(crate) struct Hole {
     pub width: u8,
     /// The name that goes there, as the source spelled it.
     pub name: String,
+    /// What the file added to the name, which is nothing at all nearly every time.
+    pub addend: i64,
     /// What the linker is being asked for, which the shape of the instruction decides.
     pub sort: Sort,
 }
@@ -90,6 +92,15 @@ pub(crate) struct Written {
     pub holes: Vec<Hole>,
 }
 
+/// A name written in a displacement, with whatever was added to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Named {
+    /// The name as the source spelled it, suffix and all.
+    name: String,
+    /// What the file added to it, which is nothing at all nearly every time.
+    addend: i64,
+}
+
 /// One operand, read off the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operand {
@@ -100,7 +111,7 @@ enum Operand {
     /// A vector register.
     Xmm(PhysReg),
     /// An address, and the name in its displacement when it has one.
-    Mem(Addr, Option<String>),
+    Mem(Addr, Option<Named>),
     /// A number the instruction carries.
     Imm(i64),
     /// A name to jump or call to.
@@ -149,18 +160,18 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
                 return Err(format!("'@{how}' is not a way of reaching somewhere to go"));
             }
         };
-        wanted.push(Hole { at, width, name, sort: Sort::Branch });
+        wanted.push(Hole { at, width, name, addend: 0, sort: Sort::Branch });
     }
     if let Some(at) = holes.rip {
         // Only when the source put a name there. `8(%rip)` is a number the machine counts from the
         // end of the instruction and there is nothing for a linker to do about it.
         let named = operands.iter().find_map(|op| match op {
-            Operand::Mem(_, Some(name)) => Some(name.clone()),
+            Operand::Mem(_, Some(named)) => Some(named.clone()),
             _ => None,
         });
         if let Some(named) = named {
-            let (name, sort) = reached(&named)?;
-            wanted.push(Hole { at, width: 4, name, sort });
+            let (name, sort) = reached(&named.name)?;
+            wanted.push(Hole { at, width: 4, name, addend: named.addend, sort });
         }
     }
     Ok(Written { bytes, holes: wanted })
@@ -410,13 +421,16 @@ fn address(text: &str) -> Result<Operand, String> {
     // relocation against a place rather than against a distance and this does not write one.
     let mut named = None;
     if !front.is_empty() {
-        match displacement(front) {
-            Ok(value) => {
+        let (value, name) = parted(front)?;
+        match name {
+            // The number goes with the name rather than into the bytes, because what the bytes end
+            // up holding is the linker's business and it is told the whole sum at once.
+            Some(name) => named = Some(Named { name, addend: value }),
+            None => {
                 addr.disp = i32::try_from(value).map_err(|_| {
                     format!("'{front}' does not fit in the four bytes of an address")
                 })?;
             }
-            Err(_) => named = Some(front.to_owned()),
         }
     }
 
@@ -474,35 +488,57 @@ fn whole(text: &str) -> Result<PhysReg, String> {
     }
 }
 
-/// A number written the way an assembler writes one.
-/// The displacement of an address, which is numbers added together as often as it is one number.
+/// The displacement of an address, which is terms added together as often as it is one term.
 ///
 /// gas takes a whole expression in front of the bracket and a file written by hand uses that to
-/// write a constant as the things it is made of rather than as the total: `56+8(%rsp)` is an offset
-/// into a frame with the return address that was pushed on top of it counted in, and the reader of
-/// that file is meant to see both halves. Folding them here is the whole of it, since what comes
-/// out is a number either way and only a name in a displacement needs anything more.
+/// write a displacement as the things it is made of rather than as the total. `56+8(%rsp)` is an
+/// offset into a frame with the return address that was pushed on top of it counted in, and the
+/// reader of that file is meant to see both halves. `-512+table(%rip)` is a lookup that reaches
+/// its table from the middle, because the value it indexes by starts at two fifty six rather than
+/// at zero, and the number is as much a part of what the linker is asked for as the name is.
 ///
-/// Numbers and nothing else. A name here is left alone and refused further along, so the message
-/// about it stays the one about a relocation this does not write.
-fn displacement(text: &str) -> Result<i64, String> {
+/// So what comes back is the numbers folded together and the name if there was one. At most one
+/// term may be a name and it may not be the subtracted one, since the distance back from something
+/// is not a thing a relocation says.
+fn parted(text: &str) -> Result<(i64, Option<String>), String> {
     let text = text.trim();
     let mut total: i64 = 0;
     let mut sign: i64 = 1;
     let mut start = 0usize;
+    let mut named: Option<String> = None;
+    let mut fold = |term: &str, sign: i64, named: &mut Option<String>| match number(term) {
+        Ok(value) => {
+            total = total.wrapping_add(sign.wrapping_mul(value));
+            Ok(())
+        }
+        Err(why) => {
+            if named.is_some() {
+                return Err(
+                    "two names added together, which is not a place a linker can find".to_owned()
+                );
+            }
+            if sign < 0 {
+                return Err(why);
+            }
+            *named = Some(term.trim().to_owned());
+            Ok(())
+        }
+    };
     for (at, ch) in text.char_indices() {
         // Not at the start of a term, where a sign belongs to the number behind it rather than
         // joining it to anything.
         if at == start || !matches!(ch, '+' | '-') {
             continue;
         }
-        total = total.wrapping_add(sign.wrapping_mul(number(&text[start..at])?));
+        fold(&text[start..at], sign, &mut named)?;
         sign = if ch == '-' { -1 } else { 1 };
         start = at + 1;
     }
-    Ok(total.wrapping_add(sign.wrapping_mul(number(&text[start..])?)))
+    fold(&text[start..], sign, &mut named)?;
+    Ok((total, named))
 }
 
+/// A number written the way an assembler writes one.
 fn number(text: &str) -> Result<i64, String> {
     let text = text.trim();
     let (sign, digits) = match text.strip_prefix('-') {

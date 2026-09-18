@@ -264,6 +264,29 @@ fn the_ways_a_hand_written_file_says_a_thing_are_read_and_mean_what_they_say() {
 }
 
 #[test]
+fn a_name_with_a_number_added_to_it_reaches_where_the_two_together_say() {
+    // GMP's reciprocal lookup writes `-512+table(%rip)`, because the value it indexes by starts at
+    // two hundred and fifty six rather than at zero, so the address it wants is the table shifted
+    // back by half a kilobyte and nothing ever loads from that address itself. A reader that takes
+    // the number for part of the name asks the linker for something nothing anywhere defines, and
+    // one that throws the number away links and then reads the wrong entry, so this is run rather
+    // than read.
+    let dir = dir("addend");
+    let hot = "\t.data\n\t.globl tab\ntab:\n\t.quad 100\n\t.quad 200\n\t.quad 300\n\t.text\n\t\
+               .globl entry\n\t.type entry, @function\nentry:\n\tleaq -8+tab(%rip), %rax\n\tmovq \
+               8(%rax,%rdi,8), %rax\n\tret\n\t.size entry, .-entry\n";
+    write(&dir, "hot.s", hot);
+    let main = "#include <stdint.h>\nextern uint64_t entry(long i);\nint main(void) {\n  if \
+                (entry(0) != 100) return 1;\n  if (entry(1) != 200) return 2;\n  if (entry(2) != \
+                300) return 3;\n  return 42;\n}\n";
+    write(&dir, "main.c", main);
+    let (ok, said) = run(&dir, &["main.c", "hot.s", "-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    assert_eq!(out.status.code(), Some(42), "the number beside the name was not counted");
+}
+
+#[test]
 fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line() {
     // Refusing it is the whole design of the reader: an assembler that skipped what it did not
     // recognise would write an object that links, and what would be wrong with it is a run of
