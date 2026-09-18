@@ -198,6 +198,33 @@
 //! waiting on comes off the list when the run is joined, since the store is already waiting on the
 //! same one.
 //!
+//! # The condition state, which the three has and the pair does not
+//!
+//! The arithmetic in the middle of the run is not where it was afterwards. The run collapses onto
+//! the store, so the load moves down and so does the arithmetic, and the arithmetic writes the
+//! condition state where the load writes nothing. That makes the state a question here and not in
+//! [`loads`], where the arithmetic stays exactly where it is and only a load passes anything.
+//!
+//! Two ways it goes wrong, and both are about the instructions between the arithmetic and the
+//! store. An instruction there that reads the state read what the arithmetic left, and after the
+//! move it reads whatever was there before the arithmetic instead. An instruction there that writes
+//! the state was the last writer before the store, and after the move the arithmetic is, so
+//! anything further down that reads the state reads a different answer. So neither is allowed, and
+//! `quiet` is the question. It is asked from the arithmetic rather than from the load, because
+//! between the load and the arithmetic nothing has moved and the state is nobody's business.
+//!
+//! This is what tamnd/rucc#1424 was. libgmp's `mpn_mulmod_bnm1` adds a limb into a place and then
+//! reads the carry out of that addition with `adcq %rdx, %rdx`, which is how this back end gets a
+//! carry into a register, and the addition and the store it fed were a run with the carry reader
+//! sitting between them. Folding them moved the addition below the reader, so the carry that went
+//! into the next limb was the one a `subq` three instructions earlier had left, and the library
+//! computed a product that was wrong in one limb. It came back as a division that never finished,
+//! a long way from here.
+//!
+//! [`rucc_target::FlagInsts`] is where the answer comes from, the same description
+//! [`crate::compare`] and [`crate::shorten`] ask, and a name it does not cover counts as both a
+//! read and a write, which is the answer that finds fewer runs rather than the one that is wrong.
+//!
 //! # The window
 //!
 //! A load is carried forward at most [`WINDOW`] instructions and then dropped. The bound is what
@@ -251,7 +278,7 @@
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg};
-use rucc_target::MachineInsts;
+use rucc_target::{FlagInsts, MachineInsts};
 
 use crate::changes::{Changes, Plan, Reads};
 use crate::fold::Pending;
@@ -994,6 +1021,7 @@ struct Bumped {
 pub fn stores(
     func: &mut Func,
     machine: &MachineInsts,
+    flags: &FlagInsts,
     names: &mut Interner,
     pending: &mut Pending<'_>,
 ) -> usize {
@@ -1002,14 +1030,14 @@ pub fn stores(
     for block in func.blocks().collect::<Vec<_>>() {
         let insts: Vec<Inst> = func.insts(block).collect();
         for at in 0..insts.len() {
-            let found = match run(func, &reads, machine, names, &insts, at) {
+            let found = match run(func, &reads, machine, flags, names, &insts, at) {
                 Some(found) => Some((
                     found.load,
                     found.alu,
                     found.store,
                     updated(func, machine, names, &found),
                 )),
-                None => constant(func, &reads, machine, names, &insts, at).map(|found| {
+                None => constant(func, &reads, machine, flags, names, &insts, at).map(|found| {
                     (found.load, found.alu, found.store, bumped(func, machine, names, &found))
                 }),
             };
@@ -1045,6 +1073,7 @@ fn run(
     func: &Func,
     reads: &Reads,
     machine: &MachineInsts,
+    flags: &FlagInsts,
     names: &Interner,
     insts: &[Inst],
     at: usize,
@@ -1064,6 +1093,9 @@ fn run(
     let alu = (earliest..at).rev().find(|&k| writes(func, insts[k], value.reg))?;
     let bare = machine.bare(names.resolve(func[insts[alu]].opcode.name())).to_owned();
     let update = UPDATES.iter().find(|row| row.from == bare && row.store == stored)?;
+    if !quiet(func, flags, names, insts, (alu, at)) {
+        return None;
+    }
     let operands = func[func[insts[alu]].operands].to_vec();
     let [_, first, second] = operands[..] else { return None };
     // The left source is the one the memory takes the place of, because the answer is left where
@@ -1121,6 +1153,7 @@ fn constant(
     func: &Func,
     reads: &Reads,
     machine: &MachineInsts,
+    flags: &FlagInsts,
     names: &Interner,
     insts: &[Inst],
     at: usize,
@@ -1142,6 +1175,9 @@ fn constant(
     let alu = (earliest..at).rev().find(|&k| writes(func, insts[k], value.reg))?;
     let bare = machine.bare(names.resolve(func[insts[alu]].opcode.name())).to_owned();
     let bump = BUMPS.iter().find(|row| row.from == bare && row.store == stored)?;
+    if !quiet(func, flags, names, insts, (alu, at)) {
+        return None;
+    }
     let operands = func[func[insts[alu]].operands].to_vec();
     let [_, source] = operands[..] else { return None };
     let imm = func[func[insts[alu]].imm?].0;
@@ -1232,6 +1268,38 @@ fn clear(
         !func[func[inst].operands]
             .iter()
             .any(|operand| operand.role.is_def() && wanted.contains(&operand.reg))
+    })
+}
+
+/// Whether the condition state between the arithmetic and the store belongs to nobody.
+///
+/// The arithmetic moves down the block to where the store is and it writes the condition state, so
+/// everything it passes has to have no opinion about that state. An instruction that reads it was
+/// reading what the arithmetic left and would be reading what was there before the arithmetic
+/// instead. An instruction that writes it was the last writer before the store and would stop being
+/// it, which changes what anything further down reads. Neither is allowed and there is nothing to
+/// weigh: this is the shape tamnd/rucc#1424 was, where the reader in the middle was the `adc` that
+/// takes the carry out of the addition above it into a register.
+///
+/// Asked from the arithmetic rather than from the load, which is what [`clear`] is asked from.
+/// Between the load and the arithmetic nothing moves except the load, and a load has nothing to say
+/// about the condition state.
+///
+/// A name the description does not cover counts as both, for the reason [`FlagInsts::writes`] gives
+/// about a name this target does not have.
+fn quiet(
+    func: &Func,
+    flags: &FlagInsts,
+    names: &Interner,
+    insts: &[Inst],
+    span: (usize, usize),
+) -> bool {
+    let (alu, to) = span;
+    insts[alu + 1..to].iter().all(|&inst| {
+        let Some(name) = names.resolve(func[inst].opcode.name()).strip_prefix(flags.prefix) else {
+            return false;
+        };
+        flags.reads(name).is_none() && !(flags.writes)(name)
     })
 }
 
@@ -1353,7 +1421,7 @@ fn joined(
 #[cfg(test)]
 mod tests {
     use rucc_mir::{self as mir, Constraint, Mem, Operand};
-    use rucc_target::x86_64::{GPR, MACHINE};
+    use rucc_target::x86_64::{FLAGS, GPR, MACHINE};
 
     use super::*;
 
@@ -1475,7 +1543,7 @@ mod tests {
         let mut dynamic = Vec::new();
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
-        stores(func, &MACHINE, names, &mut pending)
+        stores(func, &MACHINE, &FLAGS, names, &mut pending)
     }
 
     /// The shape the second walk is for, which is what `*p += x` is.
@@ -1669,7 +1737,7 @@ mod tests {
         let mut dynamic = Vec::new();
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
-        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 0);
+        assert_eq!(stores(&mut func, &MACHINE, &FLAGS, &mut names, &mut pending), 0);
     }
 
     /// The one local, which is the same place twice and folds. The entry the load was waiting on
@@ -1694,7 +1762,7 @@ mod tests {
         let mut dynamic = Vec::new();
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
-        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 1);
+        assert_eq!(stores(&mut func, &MACHINE, &FLAGS, &mut names, &mut pending), 1);
 
         let inst = func.insts(block).next().expect("the addition");
         assert_eq!(addresses, [(inst, 3usize)], "one entry, on the instruction that is left");
@@ -1716,6 +1784,61 @@ mod tests {
         store(&mut func, &mut names, block, base, sum);
 
         assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The shape tamnd/rucc#1424 was, which is a run with the carry reader in the middle of it.
+    /// Joining it would put the addition below the `adc` and the carry the `adc` takes would be
+    /// whatever was there before the addition ran.
+    #[test]
+    fn a_run_with_something_reading_the_condition_state_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let carry = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        alu(&mut func, &mut names, block, "adc_rr_64", carry, carry);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// The other half of the same question, which is something in the middle that writes the state
+    /// rather than reads it. Joining the run would make the addition the last writer before the
+    /// store instead of the subtraction, so whatever reads the state further down would read a
+    /// different answer.
+    #[test]
+    fn a_run_with_something_writing_the_condition_state_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        alu(&mut func, &mut names, block, "sub_rr_64", left, right);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
+    /// And the same run with an instruction in the middle that has no opinion about the state,
+    /// which is what keeps the two above from being a rule against anything in the middle at all.
+    #[test]
+    fn a_run_with_a_move_in_the_middle_is_still_one_instruction() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let from = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu(&mut func, &mut names, block, "add_rr_64", word, other);
+        let copy = op(&mut names, "mov_rr_64");
+        func.build(block, copy).def(into, GPR).uses(from, GPR).finish();
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rr_64", "x64.add_mr_64"]);
     }
 
     /// Every row of the table names four instructions this target has, all of one width.
@@ -1918,6 +2041,21 @@ mod tests {
         assert_eq!(update(&mut func, &mut names), 0);
     }
 
+    /// The constant run passes the condition state the same way the register run does, because the
+    /// arithmetic moves down to the store here too.
+    #[test]
+    fn a_constant_run_with_a_carry_reader_in_the_middle_stays_three_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let carry = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let sum = alu_imm(&mut func, &mut names, block, "add_ri_64", word, 1);
+        alu(&mut func, &mut names, block, "adc_rr_64", carry, carry);
+        store(&mut func, &mut names, block, base, sum);
+
+        assert_eq!(update(&mut func, &mut names), 0);
+    }
+
     /// The local, which is the same place twice and folds, and whose frame entry comes off the
     /// list for the reason the register run's does.
     #[test]
@@ -1938,7 +2076,7 @@ mod tests {
         let mut dynamic = Vec::new();
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
-        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 1);
+        assert_eq!(stores(&mut func, &MACHINE, &FLAGS, &mut names, &mut pending), 1);
 
         let inst = func.insts(block).next().expect("the addition");
         assert_eq!(addresses, [(inst, 3usize)], "one entry, on the instruction that is left");
@@ -1964,7 +2102,7 @@ mod tests {
         let mut dynamic = Vec::new();
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
-        assert_eq!(stores(&mut func, &MACHINE, &mut names, &mut pending), 0);
+        assert_eq!(stores(&mut func, &MACHINE, &FLAGS, &mut names, &mut pending), 0);
     }
 
     /// Every row of the constant table names four instructions this target has, all of one width.

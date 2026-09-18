@@ -253,6 +253,8 @@ A conditional move is the same arrangement one step along. A select is a test an
 
 Folding an address into a memory operand is the other. The fold is arithmetic on two addressing modes rather than a case analysis, and the thing it produces is not a term either, so it is a pass over machine IR in `crates/rucc-codegen/src/fold.rs`. Section 37.4 of `spec/optimizer/37-machine-level-optimization.md` says what is left of it.
 
+Replacing a load, an arithmetic instruction and a store with the one instruction that does all three is a third thing on the list of things the flags decide, and it is the one that is easiest to miss, because the flags are nowhere in the run. The three instructions become one where the store was, so the arithmetic moves down the block, and the arithmetic writes the condition state where the load and the store write none of it. Anything it passes that reads the state would read what was there before it, and anything it passes that writes the state stops being the last writer, so the pass asks the same flag description a conditional move asks and refuses a run with either in the middle of it. The question is asked from the arithmetic rather than from the load, since between the load and the arithmetic nothing has moved. Missing it is how tamnd/rucc#1424 gave libgmp a product that was wrong in one limb, which came back as a division that never finished.
+
 ## 10.10 What the backend does not do
 
 No global scheduling across basic blocks, no software pipelining, no trace scheduling. No register allocation across function boundaries. No machine outliner before 1.0, except in `-Oz` where it is the single largest size win and is therefore reconsidered in document 19.

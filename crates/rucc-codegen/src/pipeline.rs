@@ -424,7 +424,7 @@ pub fn compile_recording(
     // The run that reads a place, computes on it and writes it back goes first, because it is three
     // instructions the selector wrote and taking the load out of the middle one first would leave
     // the same run written a second way.
-    combine::stores(&mut func, machine.shapes, names, &mut pending);
+    combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
 
     // Whether this function carries a canary is the front end's answer, because what
