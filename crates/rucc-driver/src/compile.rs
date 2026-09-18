@@ -558,7 +558,15 @@ fn instrument(
     if !opts.safety.instruments() {
         return Ok(Instrumented::default());
     }
-    let checks = rucc_safety::run(module, opts.subobject, opts.promise, opts.races);
+    let mut checks = rucc_safety::run(module, opts.subobject, opts.promise, opts.races);
+    // The one check that is about a call rather than about an access, so it is a walk of its own
+    // and it is here rather than in the walk above. `rucc_safety::ending` is why, and the short
+    // version is that deciding it means resolving a name, which takes the interner.
+    //
+    // Before the redirection for the same reason the redirection is before the optimizer: what this
+    // reads is the name the program wrote, and a pass that had already pointed the call somewhere
+    // else would leave it with a name this one has no row for.
+    checks.freed = rucc_safety::ending::checks(module, names);
     // Before the optimizer rather than beside the check lowering, which is what
     // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the

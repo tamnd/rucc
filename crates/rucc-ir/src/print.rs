@@ -1029,6 +1029,9 @@ mod tests {
         check(Opcode::CheckInit, Some(MemInfo { align: 1, ..four }), &[of, p]);
         check(Opcode::CheckDeriv, None, &[of, p, derived, len]);
         check(Opcode::CheckRace, Some(MemInfo { align: 1, ..four }), &[of, p]);
+        // The one check that is not about an access, which is why it carries no payload even
+        // though the two beside it here do.
+        check(Opcode::CheckFree, None, &[of, p]);
         // The two `restrict` checks, which take the pointer alone and carry the two numbers saying
         // which pointer of which scope it is. One of each, since read and write are the whole of
         // what separates them.

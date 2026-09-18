@@ -130,6 +130,11 @@ pub struct Summary {
     pub bounds: Class,
     /// Lifetime checks, the other half of J1.
     pub lifetime: Class,
+    /// Checks in front of a call that ends a storage instance, judgement J6.
+    ///
+    /// Far fewer than `lifetime`, because it is one per free rather than one per access, and the
+    /// only class here that is not about an access at all. `crate::ending` is where that is argued.
+    pub free: Class,
     /// Derivation checks, judgement J2.
     pub derivation: Class,
     /// Type checks, which is the effective type rule of C 6.5 asked of the type plane.
@@ -207,6 +212,7 @@ impl Summary {
         out.push_str("  \"checks\": {\n");
         out.push_str(&format!("    \"bounds\": {},\n", class(self.bounds)));
         out.push_str(&format!("    \"lifetime\": {},\n", class(self.lifetime)));
+        out.push_str(&format!("    \"free\": {},\n", class(self.free)));
         out.push_str(&format!("    \"derivation\": {},\n", class(self.derivation)));
         out.push_str(&format!("    \"type\": {},\n", class(self.effective_type)));
         out.push_str(&format!("    \"init\": {},\n", class(self.initialization)));
@@ -269,6 +275,7 @@ pub fn summarize(
         tier,
         bounds: Class { emitted: emitted.checked, remaining: 0 },
         lifetime: Class { emitted: emitted.live, remaining: 0 },
+        free: Class { emitted: emitted.freed, remaining: 0 },
         derivation: Class { emitted: emitted.derived, remaining: 0 },
         effective_type: Class { emitted: emitted.asked, remaining: 0 },
         initialization: Class { emitted: emitted.filled, remaining: 0 },
@@ -303,6 +310,7 @@ pub fn summarize(
             match func[inst].opcode {
                 Opcode::CheckBounds => summary.bounds.remaining += 1,
                 Opcode::CheckLive => summary.lifetime.remaining += 1,
+                Opcode::CheckFree => summary.free.remaining += 1,
                 Opcode::CheckDeriv => summary.derivation.remaining += 1,
                 Opcode::CheckType => summary.effective_type.remaining += 1,
                 Opcode::CheckInit => summary.initialization.remaining += 1,
@@ -553,6 +561,7 @@ mod tests {
             tier: "detect",
             bounds: Class { emitted: 12, remaining: 5 },
             lifetime: Class { emitted: 12, remaining: 11 },
+            free: Class { emitted: 2, remaining: 2 },
             derivation: Class { emitted: 3, remaining: 3 },
             effective_type: Class { emitted: 7, remaining: 7 },
             initialization: Class { emitted: 9, remaining: 8 },
