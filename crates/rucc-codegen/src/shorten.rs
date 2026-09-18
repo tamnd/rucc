@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Four rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Five rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -32,6 +32,18 @@
 //! opcode. `addl $1, %eax` is three bytes, one for the opcode, one saying which register and one
 //! for the number, and `incl %eax` is two. A subtraction of one becomes the instruction that takes
 //! one away, and each of the two is also what the other one written against minus one becomes.
+//!
+//! And an address computation whose address is a register becomes a move of that register. `leaq
+//! (%rsp), %rax` works out an address that is a base and nothing else, which is what is already in
+//! the base, and `movq %rsp, %rax` puts the same number in the same place in three bytes rather than
+//! four. The byte is the one an address counted from the stack pointer has to spend saying it has no
+//! index, and the stack pointer is the register this turns up on, because what makes it is taking
+//! the address of whichever local sits at the bottom of the frame.
+//!
+//! That fifth one is the only one here worth taking for something other than bytes. A move between
+//! registers is a thing the machine can do by renaming, so it is off the critical path, and an
+//! address computation is an addition however small the numbers in it are. gcc writes no address
+//! computation of that shape anywhere in the SQLite amalgamation and rucc wrote 444 of them.
 //!
 //! That fourth one is the only one here that is not free, and it is the only one that reads the
 //! goal. An addition writes the carry and an increment leaves the carry as it found it, so the
@@ -97,9 +109,9 @@
 //! most of the functions in it that have anything for this pass to do.
 //!
 //! Down for the exclusive or and the increment. The narrower move reads no condition state and
-//! writes none and the test writes the same state the comparison it replaces wrote, so where a
-//! state is alive is not a question either of them has to ask, and a function this turns down still
-//! gets both.
+//! writes none, the test writes the same state the comparison it replaces wrote, and neither an
+//! address computation nor a move touches any state at all, so where a state is alive is not a
+//! question those three have to ask, and a function this turns down still gets all of them.
 //!
 //! What the walk carries for the increment is a second answer beside the first, which is whether
 //! anything behind reads the carry rather than whether anything behind reads the state. The two are
@@ -143,6 +155,12 @@
 //!
 //! Add or take away anything but one. The machine has an opcode for one and for nothing else, so a
 //! constant of two is already as short as it is going to be written.
+//!
+//! Turn an address computation into a move when the address is anything more than a register. An
+//! index is a multiplication, a constant is an addition and a symbol is an address the assembler
+//! fills in, and a move does none of those. That is what most address computations are for, so this
+//! last rewrite is about the ones that were not computing anything rather than about address
+//! computation in general.
 
 use rucc_base::Interner;
 use rucc_cost::Goal;
@@ -169,6 +187,7 @@ pub fn shorter(
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.copying.iter().map(|entry| entry.into));
     let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
         .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
         .collect();
@@ -216,6 +235,13 @@ pub fn shorter(
             // has seen behind it.
             let into = tested_form(func, short, names, &opcodes, inst);
             if into.is_some_and(|op| tested(func, &mut counts, machine, names, inst, op)) {
+                took += 1;
+            }
+            // An address that is a register, written as the move it is. Nothing about the condition
+            // state comes into it either, since neither instruction writes any, so this is asked of
+            // every instruction the same way the narrower move is.
+            let into = copied_form(func, short, names, &opcodes, inst);
+            if into.is_some_and(|op| copied(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
             }
             // Adding one with the one in the opcode, which is the only rewrite here that is a
@@ -411,6 +437,58 @@ fn tested(
 ) -> bool {
     let mut set = Changes::new();
     set.rewrite(inst, Plan { opcode, imm: None, ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
+}
+
+/// The move this address computation is, when the address it works out is a register.
+///
+/// Which is an addressing mode naming a base and nothing else. An index is a multiplication and an
+/// addition, a constant is an addition, and a symbol or a label is an address the assembler fills in
+/// later, so any of those is work the move does not do. What is left is a mode that says to take
+/// what is in one register, and taking what is in one register is the move.
+///
+/// The width is not asked about, unlike the narrower move above. An address on this machine is
+/// sixty four bits wide whatever is at it, so an address computation that keeps its answer keeps all
+/// of it, and the move the description names beside it is the move of that width.
+fn copied_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let into = short.copied(name)?;
+    let amode = func[inst].mem.map(|at| func[at])?;
+    if amode.base.is_none() || amode.index.is_some() || amode.disp != 0 {
+        return None;
+    }
+    if amode.symbol.is_some() || amode.block.is_some() || amode.segment.is_some() {
+        return None;
+    }
+    opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// Rewrites the address computation into the move, which keeps the operands and drops the mode.
+///
+/// The operands are already the move's. An instruction with an addressing mode carries the registers
+/// that mode names in its operand vector, behind the ones it writes, so an address computation whose
+/// mode is one base is an instruction that writes one register and reads one register, in that
+/// order, which is the move's shape. What goes is the mode itself, since the move has none.
+///
+/// A description where those two are not the same shape is one [`Changes`] turns down, and this
+/// reports a rewrite it turned down as not taken, which is how an address computation with more in
+/// its operand vector than the mode accounted for is left alone rather than guessed at.
+fn copied(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, amode: None, ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
 }
 
@@ -1098,5 +1176,96 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_ri_32", ""]);
+    }
+
+    /// The fifth rewrite. An address that is a base register and nothing else is that register, so
+    /// the instruction that works it out and keeps it is the move, which keeps both registers in the
+    /// order it had them and drops the addressing mode it no longer has a place for.
+    #[test]
+    fn an_address_that_is_a_register_becomes_a_move() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let lea = op(&mut names, "lea_64");
+        let mem = mir::Mem::at(mir::Operand::read(base, GPR));
+        let inst = func.build(block, lea).def(into, GPR).mem(mem).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64"]);
+        assert_eq!(regs(&func, inst), [into, base]);
+        assert!(func[inst].mem.is_none());
+    }
+
+    /// A constant added to the address, which is the shape most address computations have. The move
+    /// adds nothing, so there is nothing here for it to say.
+    #[test]
+    fn an_address_with_a_constant_added_stays() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let lea = op(&mut names, "lea_64");
+        let mem = mir::Mem { disp: 8, ..mir::Mem::at(mir::Operand::read(base, GPR)) };
+        func.build(block, lea).def(into, GPR).mem(mem).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["lea_64"]);
+    }
+
+    /// An index, which is the other half of what an address computation is for. It is a
+    /// multiplication and an addition and the move is neither.
+    #[test]
+    fn an_address_with_an_index_stays() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let lea = op(&mut names, "lea_64");
+        let mem = mir::Mem {
+            index: Some(mir::Operand::read(index, GPR)),
+            scale: 4,
+            ..mir::Mem::at(mir::Operand::read(base, GPR))
+        };
+        func.build(block, lea).def(into, GPR).mem(mem).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["lea_64"]);
+    }
+
+    /// The address of a global, which names no register at all. What it works out is a number the
+    /// assembler fills in rather than a number that is already somewhere, so there is nothing for a
+    /// move to move.
+    #[test]
+    fn an_address_of_a_symbol_stays() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let lea = op(&mut names, "lea_64");
+        let mem = mir::Mem::of(names.intern("table"));
+        func.build(block, lea).def(into, GPR).mem(mem).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["lea_64"]);
+    }
+
+    /// And it does not wait on the condition state. Neither the address computation nor the move
+    /// writes any, so a byte reading a comparison from in front of it reads the same comparison
+    /// afterwards, and the rewrite is taken in the one function the first rewrite has to turn down.
+    #[test]
+    fn an_address_is_copied_whatever_the_state_behind_it_is() {
+        let (mut names, mut func, block) = empty();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let base = func.new_vreg(GPR);
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let cmp = op(&mut names, "cmp_rr_32");
+        let lea = op(&mut names, "lea_64");
+        let set = op(&mut names, "set_e");
+        let mem = mir::Mem::at(mir::Operand::read(base, GPR));
+        func.build(block, cmp).uses(left, GPR).uses(right, GPR).finish();
+        func.build(block, lea).def(into, GPR).mem(mem).finish();
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_rr_64", "set_e"]);
     }
 }
