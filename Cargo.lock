@@ -134,6 +134,7 @@ name = "rucc-codegen"
 version = "0.10.59"
 dependencies = [
  "rucc-base",
+ "rucc-cost",
  "rucc-diag",
  "rucc-ir",
  "rucc-mir",
@@ -169,6 +170,7 @@ dependencies = [
  "rucc-asm",
  "rucc-base",
  "rucc-codegen",
+ "rucc-cost",
  "rucc-diag",
  "rucc-ir",
  "rucc-lex",

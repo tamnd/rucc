@@ -652,10 +652,15 @@ static ENCODINGS: &[Encoding] = &[
     bytes("notl", &R, Long, &[0xF7], ext(0, 2), NO_IMM),
     bytes("notq", &R, Quad, &[0xF7], ext(0, 2), NO_IMM),
     // Adding one and taking one away, which are two of the eight that share `0xFF` and are not what
-    // this compiler writes for `++`: an addition of one sets the carry flag and these leave it
-    // alone, so the two are different instructions and the addition is the one a C program means.
-    // Hand written assembly counts loops with these precisely because they leave the flag alone,
-    // which is the whole reason a carry can be carried across an iteration at all.
+    // a rule writes for `++`: an addition of one sets the carry flag and these leave it alone, so
+    // the two are different instructions and the addition is the one a C program means. Hand
+    // written assembly counts loops with these precisely because they leave the flag alone, which
+    // is the whole reason a carry can be carried across an iteration at all.
+    //
+    // What does write one is `rucc_codegen::shorten`, at a level that asked for small code and at
+    // an instruction where it has looked behind and found nothing reading the carry. That is the
+    // same trade gcc makes, and it is a trade rather than a free win because the flag these leave
+    // alone is a flag the next instruction to write the condition state has to merge with.
     bytes("incb", &R, Byte, &[0xFE], ext(0, 0), NO_IMM),
     bytes("incw", &R, Word, &[0xFF], ext(0, 0), NO_IMM),
     bytes("incl", &R, Long, &[0xFF], ext(0, 0), NO_IMM),

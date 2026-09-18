@@ -55,7 +55,7 @@ use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
-use crate::short::{Narrowed, ShortInsts, Tested, Zeroed};
+use crate::short::{Narrowed, ShortInsts, Stepped, Tested, Zeroed};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -519,6 +519,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     zeroing: &SHORTER_ZEROS,
     narrowing: &NARROWER_MOVES,
     testing: &ZERO_COMPARES,
+    stepping: &STEPS,
 };
 
 /// Writing zero into a register without spelling the zero out.
@@ -578,6 +579,45 @@ static ZERO_COMPARES: [Tested; 4] = [
     Tested { name: "cmp_ri_16", into: "test_rr_16" },
     Tested { name: "cmp_ri_32", into: "test_rr_32" },
     Tested { name: "cmp_ri_64", into: "test_rr_64" },
+];
+
+/// Adding one and taking one away with the number in the opcode.
+///
+/// `addl $1, %eax` is three bytes: the opcode, the byte saying which register, and the number.
+/// `incl %eax` is two, because the number is what the opcode means rather than something written
+/// after it. One byte at every width, the same saving [`ZERO_COMPARES`] makes and for the same
+/// reason, which is that the byte a small constant is written in is one byte however wide the
+/// registers are.
+///
+/// Sixteen entries, four widths by four spellings of the same two numbers. An addition of one and a
+/// subtraction of minus one both add one and both become the increment, and an addition of minus
+/// one and a subtraction of one both take one away and both become the decrement. All four turn up:
+/// a loop counting down is written either way round in C and the middle end does not put them in a
+/// normal form, since at the level above this the two are the same number of instructions.
+///
+/// This is the one table here whose two sides do not leave the same condition state. The addition
+/// writes the carry and the increment leaves it alone, so what the pass has to find is that nothing
+/// reads a carry between the instruction and the next thing that writes one. It is also the one
+/// whose saving is not free: leaving part of the state alone means the next instruction to write
+/// the state has to merge with what was left, which the machine does and does not do for nothing.
+/// gcc writes the addition at `-O2` and the increment at `-Os`, and this compiler does the same.
+static STEPS: [Stepped; 16] = [
+    Stepped { name: "add_ri_8", by: 1, into: "inc_r_8" },
+    Stepped { name: "add_ri_16", by: 1, into: "inc_r_16" },
+    Stepped { name: "add_ri_32", by: 1, into: "inc_r_32" },
+    Stepped { name: "add_ri_64", by: 1, into: "inc_r_64" },
+    Stepped { name: "add_ri_8", by: -1, into: "dec_r_8" },
+    Stepped { name: "add_ri_16", by: -1, into: "dec_r_16" },
+    Stepped { name: "add_ri_32", by: -1, into: "dec_r_32" },
+    Stepped { name: "add_ri_64", by: -1, into: "dec_r_64" },
+    Stepped { name: "sub_ri_8", by: -1, into: "inc_r_8" },
+    Stepped { name: "sub_ri_16", by: -1, into: "inc_r_16" },
+    Stepped { name: "sub_ri_32", by: -1, into: "inc_r_32" },
+    Stepped { name: "sub_ri_64", by: -1, into: "inc_r_64" },
+    Stepped { name: "sub_ri_8", by: 1, into: "dec_r_8" },
+    Stepped { name: "sub_ri_16", by: 1, into: "dec_r_16" },
+    Stepped { name: "sub_ri_32", by: 1, into: "dec_r_32" },
+    Stepped { name: "sub_ri_64", by: 1, into: "dec_r_64" },
 ];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
