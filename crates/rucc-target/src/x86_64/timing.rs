@@ -148,7 +148,7 @@ fn plain(form: Form) -> Timing {
         MulWide => (4, Unit::Mul),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
-        DivQuo | DivRem => (26, Unit::Div),
+        DivQuo | DivRem | DivWide => (26, Unit::Div),
         // A load, and a store. A store's latency is not a number anything reads, since nothing in
         // a register waits on it, but it does take the one store unit while it runs.
         Load => (LOAD, Unit::Load),

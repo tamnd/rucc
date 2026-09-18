@@ -852,13 +852,36 @@ mod tests {
         assert_eq!(read("rep nop, %0", &[]), None, "a prefix on an instruction with an argument");
     }
 
+    /// The multiply and the divide that work on a pair of registers, which are the two mnemonics a
+    /// template reaches that no rule in this compiler selects. Both read back as the one instruction
+    /// they are rather than as the two instruction sequence the same stem is spelled as at a width
+    /// the program cannot ask for on its own.
+    #[test]
+    fn a_multiply_or_a_divide_on_a_pair_of_registers_reads_back_as_the_one_instruction_it_is() {
+        let cases = [
+            ("mulq %3", "mul_wide_64", 4),
+            ("imull %3", "imul_wide_32", 4),
+            ("divq %4", "div_wide_64", 5),
+            ("idivw %4", "idiv_wide_16", 5),
+        ];
+        for (template, opcode, operands) in cases {
+            let widths = [Some(Width::Quad); 5];
+            let lines = read(template, &widths).unwrap_or_else(|| panic!("{template} is a pair"));
+            assert_eq!(lines.len(), 1, "{template} is one instruction");
+            assert_eq!(lines[0].opcode, opcode, "{template}");
+            assert_eq!(lines[0].operands.len(), operands, "{template}");
+        }
+    }
+
     /// Every refusal in the module documentation, held here so that a later change that starts
-    /// guessing at one of them has to say so.
+    /// guessing at one of them has to say so. The divide left in the list is the byte one, since
+    /// that is the width whose dividend and both its answers live in one register and so is the one
+    /// the pair forms above do not have.
     #[test]
     fn what_cannot_be_placed_is_refused_rather_than_guessed_at() {
         assert_eq!(read("hcf", &[]), None, "a mnemonic this machine does not have");
         assert_eq!(read("movq %0", &[]), None, "an instruction with the wrong number of arguments");
-        assert_eq!(read("idivq %0", &[]), None, "an opcode the machine writes as more than one");
+        assert_eq!(read("idivb %0", &[]), None, "an opcode the machine writes as more than one");
         assert_eq!(read("again:", &[]), None, "a label");
         assert_eq!(read(".byte 0", &[]), None, "a directive");
         assert_eq!(read("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");

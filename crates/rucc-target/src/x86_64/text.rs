@@ -289,6 +289,13 @@ static DIVISOR_16: [Arg; 1] = [Reg(3, Word)];
 static DIVISOR_32: [Arg; 1] = [Reg(3, Long)];
 static DIVISOR_64: [Arg; 1] = [Reg(3, Quad)];
 
+// The divisor again, one place further along, for the division a program writes out for itself.
+// That one reads both halves of its dividend as operands instead of filling one of them first, so
+// there is an operand in front of the divisor that the two above do not have.
+static WIDE_DIVISOR_16: [Arg; 1] = [Reg(4, Word)];
+static WIDE_DIVISOR_32: [Arg; 1] = [Reg(4, Long)];
+static WIDE_DIVISOR_64: [Arg; 1] = [Reg(4, Quad)];
+
 // An unsigned division divides a pair of registers by one, so the high half of the pair has to be
 // zero before it runs, and a signed one sign extends into it instead, which is what `cltd` and the
 // three like it are for. Which operand the high half is depends on which answer the opcode gives
@@ -496,6 +503,16 @@ static TEXT: &[(&str, &[Written])] = &[
     ("div_rem_16", &[spell("xorl", &CLEAR_FOR_REMAINDER), spell("divw", &DIVISOR_16)]),
     ("div_rem_32", &[spell("xorl", &CLEAR_FOR_REMAINDER), spell("divl", &DIVISOR_32)]),
     ("div_rem_64", &[spell("xorl", &CLEAR_FOR_REMAINDER), spell("divq", &DIVISOR_64)]),
+    // The division a program writes out for itself, which is one instruction where the six above are
+    // two. There is nothing to write in front of it: the program put both halves of the dividend
+    // where the machine reads them, which is the whole of what the clear and the sign extension up
+    // there are for.
+    ("div_wide_16", &[spell("divw", &WIDE_DIVISOR_16)]),
+    ("div_wide_32", &[spell("divl", &WIDE_DIVISOR_32)]),
+    ("div_wide_64", &[spell("divq", &WIDE_DIVISOR_64)]),
+    ("idiv_wide_16", &[spell("idivw", &WIDE_DIVISOR_16)]),
+    ("idiv_wide_32", &[spell("idivl", &WIDE_DIVISOR_32)]),
+    ("idiv_wide_64", &[spell("idivq", &WIDE_DIVISOR_64)]),
     // Shifts by a constant.
     ("shl_ri_8", &[spell("shlb", &[Imm, Reg(0, Byte)])]),
     ("shl_ri_16", &[spell("shlw", &[Imm, Reg(0, Word)])]),
@@ -1448,7 +1465,9 @@ mod tests {
     /// of its answers in the opcode, so all it is given is the divisor. The multiply that keeps
     /// both halves of its product is the same thing again with one word changed: one multiplicand
     /// and both halves of the answer are fixed registers the opcode carries, so all it is given is
-    /// the other multiplicand. A compare and exchange is
+    /// the other multiplicand, and the division that keeps both of its answers is the same again
+    /// with one operand more, since the program filled both halves of the dividend. A compare and
+    /// exchange is
     /// the second kind: what it compares against and where it leaves what it found are both `rax`,
     /// which the instruction reads and writes without being told.
     ///
@@ -1469,6 +1488,7 @@ mod tests {
                 || matches!(
                     form,
                     Form::MulWide
+                        | Form::DivWide
                         | Form::DivQuo
                         | Form::DivRem
                         | Form::CmpXchg

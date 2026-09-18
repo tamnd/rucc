@@ -42,10 +42,10 @@ use Form::{
     Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
     Call, Cmov, Cmp, CmpRi, CmpRm, CmpSet, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87,
     CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87,
-    DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, MulWide,
-    Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR,
-    UnaryX87,
+    DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec,
+    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec,
+    RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov,
+    Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -221,6 +221,28 @@ pub enum Form {
     DivQuo,
     /// The remainder of a division, which comes back in `rdx` and destroys `rax` on the way.
     DivRem,
+    /// A division of a dividend twice the width of its divisor, which keeps both of its answers.
+    ///
+    /// [`Form::MulWide`] undone, and the same thing the two above are with the halves the program
+    /// does not care about put back. The dividend is `rdx` and `rax` read as one number, the divisor
+    /// is the one place the text names, the quotient comes back in `rax` and the remainder in `rdx`.
+    /// Five operands, which makes it the widest description here that is not the question put to the
+    /// processor.
+    ///
+    /// What tells it from the two above is which way the high half of the dividend travels. Those
+    /// two are each two instructions, because a division in C divides a number by a number of its
+    /// own width and this machine divides a pair, so the compiler fills the high half itself and
+    /// then divides, and the filling is why `rdx` is written early there. Here the program filled
+    /// it. It is an operand this reads rather than a register something clobbered on the way in,
+    /// and saying so is the whole difference: an early definition would tell the allocator the
+    /// register is gone before the operands are read, which would be a lie about the one register
+    /// that carries half the dividend.
+    ///
+    /// Nothing here checks that the quotient fits, on this form or on the two above, because the
+    /// machine offers no way to: a quotient too wide for the register it lands in raises on the
+    /// spot. A program that writes one of these has promised that the divisor is larger than the
+    /// high half of the dividend, and libgmp writes that promise in the comment over `udiv_qrnnd`.
+    DivWide,
     /// An address computation, whose registers are in an addressing mode rather than in the
     /// operand vector, and which the builder puts there.
     Lea,
@@ -752,6 +774,23 @@ static DIV_REM: [OperandDesc; 4] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
+// The division a program writes out for itself, whose dividend is the pair of registers rather than
+// one of them widened. Both answers are kept, the quotient in `rax` and the remainder in `rdx`, and
+// both halves of the dividend are read out of the same two registers the answers land in.
+//
+// Neither definition is early, which is the one thing that is not the same as the two above. Early
+// says the register is gone before the operands are read, and it is true up there because the
+// instruction that fills the high half of the dividend runs first. Nothing runs in front of this
+// one: the program put both halves where they are, so `rdx` holds an operand this reads rather than
+// a register something has already destroyed, and calling it early would be a lie about the half of
+// the dividend that lives there.
+static DIV_WIDE: [OperandDesc; 5] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RDX)),
+    OperandDesc::read(GPR),
+];
 // A compare and exchange, whose first two entries are the two values it produces and whose last
 // two are the value it compares against and the value it puts there. `rax` is fixed at both ends
 // because the machine reads the expected value out of it and leaves what it found in it, and the
@@ -929,6 +968,7 @@ impl Form {
             MulWide => &MUL_WIDE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
+            DivWide => &DIV_WIDE,
             Lea => &ADDRESS,
             Load => &LOAD,
             AluMr | Store => &STORE,
@@ -1229,6 +1269,22 @@ pub static INSTS: &[(&str, Form)] = &[
     ("div_rem_16", DivRem),
     ("div_rem_32", DivRem),
     ("div_rem_64", DivRem),
+    // The division a program writes out for itself, which divides a pair of registers and keeps
+    // both of its answers. No rule selects one, for the reason no rule selects the multiply above:
+    // a division in C divides a number by a number of its own width, so the term a rule would match
+    // is one of the two just above and the wide dividend is not a term at all. What reaches one is
+    // `udiv_qrnnd` in libgmp's `longlong.h`, which is how that library does long division a limb at
+    // a time.
+    //
+    // Three widths and not four, for the reason the multiply has three. The eight bit form divides
+    // the whole of `ax` and leaves the quotient in `al` and the remainder in `ah`, so both of its
+    // answers are in one register and it reads one where these read two.
+    ("div_wide_16", DivWide),
+    ("div_wide_32", DivWide),
+    ("div_wide_64", DivWide),
+    ("idiv_wide_16", DivWide),
+    ("idiv_wide_32", DivWide),
+    ("idiv_wide_64", DivWide),
     // Shifts by a constant.
     ("shl_ri_8", ShiftRi),
     ("shl_ri_16", ShiftRi),
@@ -1873,7 +1929,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 534);
+        assert_eq!(described, 540);
     }
 
     #[test]
