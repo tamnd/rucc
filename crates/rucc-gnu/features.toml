@@ -2803,6 +2803,41 @@ used_by = ["linux", "sqlite"]
 tests = ["rucc-driver::a_barrier_is_one_instruction_at_the_strongest_ordering_and_none_below_it"]
 notes = "The one member of the __sync family that is not type generic, which is why it is the one with a signature here."
 
+# The three x86 fence instructions under the names gcc gives them, which are the same node as the
+# barrier above at the same ordering. A header writes one of these when it wants the instruction
+# and not the ordering, and mingw-w64's psdk_inc/intrin-impl.h writes the store one inside
+# __faststorefence, which is how every Windows program that includes windows.h reaches it.
+
+[[feature]]
+name = "__builtin_ia32_sfence"
+kind = "builtin"
+gcc_version = "3.1"
+status = "implemented"
+signature = "void(void)"
+used_by = []
+tests = ["rucc-driver::the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives"]
+notes = "A store fence. Lowered as the full barrier, which is stronger than the instruction and so is a safe answer, for the reason the shipped xmmintrin.h gives at _mm_sfence."
+
+[[feature]]
+name = "__builtin_ia32_lfence"
+kind = "builtin"
+gcc_version = "3.1"
+status = "implemented"
+signature = "void(void)"
+used_by = []
+tests = ["rucc-driver::the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives"]
+notes = "A load fence, and the same answer as the store one for the same reason."
+
+[[feature]]
+name = "__builtin_ia32_mfence"
+kind = "builtin"
+gcc_version = "3.1"
+status = "implemented"
+signature = "void(void)"
+used_by = []
+tests = ["rucc-driver::the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives"]
+notes = "A fence over both, which is what the full barrier already is, so this is the one of the three that is exact."
+
 [[feature]]
 name = "__sync_fetch_and_add"
 kind = "builtin"

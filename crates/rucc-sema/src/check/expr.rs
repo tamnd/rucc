@@ -729,6 +729,12 @@ impl Checker<'_> {
         if let Some(value) = self.sync_builtin_value(function, span) {
             return value;
         }
+        // The three x86 fence instructions under gcc's names, which are that same barrier. Beside
+        // it in `check/builtin/atomic.rs`, with why two of the three are answered with more than
+        // they asked for and which Windows header writes one.
+        if let Some(value) = self.ia32_fence_builtin(function, span) {
+            return value;
+        }
         // The two questions about the target rather than about an object, which are constants and
         // are in `check/builtin/atomic.rs` beside the family they belong to. They get here for the
         // same reason the barrier does, which is that they carry a prototype.

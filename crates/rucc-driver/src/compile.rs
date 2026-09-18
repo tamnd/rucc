@@ -4310,6 +4310,29 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         }
     }
 
+    /// The three x86 fences under gcc's names are that same barrier at that same ordering.
+    ///
+    /// Exact for `mfence` and stronger than asked for the other two, which is a safe answer: a
+    /// program that wanted its stores ordered gets that and more. Narrowing the two is worth doing
+    /// once an instruction can be named from there, which is the note the shipped `xmmintrin.h`
+    /// already carries at `_mm_sfence`.
+    ///
+    /// Each carries a signature, so an argument written on one is reported like an argument
+    /// written on any other call, which is the whole reason they have one.
+    #[test]
+    fn the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives() {
+        for name in ["__builtin_ia32_sfence", "__builtin_ia32_lfence", "__builtin_ia32_mfence"] {
+            let source = format!("void f(void) {{ {name}(); }}\n");
+            assert!(asm(&source).contains("mfence"), "{name} is a barrier");
+            let text = body(&source);
+            assert!(text.contains("fence seq_cst"), "{name}: {text}");
+        }
+
+        let result = run(&options(), "void f(void) { __builtin_ia32_sfence(1); }\n");
+        assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("too many arguments"), "{:?}", result.messages);
+    }
+
     /// The four compare and exchange names are one IR instruction producing two values.
     ///
     /// Which of the two the expression answers is the difference between three of the four names,

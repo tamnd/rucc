@@ -169,6 +169,16 @@ const SET: i128 = 1;
 /// The one name of the older family that is not type generic.
 const SYNCHRONIZE: &str = "__sync_synchronize";
 
+/// The three x86 fence instructions under the names gcc gives them.
+///
+/// All three are the barrier above, which is exact for `mfence` and stronger than asked for the
+/// other two, and stronger is a safe answer: a program that asked for its stores to be ordered
+/// gets that and more. It is also slower, and narrowing the two is worth doing once an instruction
+/// can be named from here, which is the same note the shipped `xmmintrin.h` carries at
+/// `_mm_sfence`. They take no ordering, so there is no argument to read and nothing to warn about.
+const FENCES: &[&str] =
+    &["__builtin_ia32_sfence", "__builtin_ia32_lfence", "__builtin_ia32_mfence"];
+
 /// The two names that ask about the target rather than about an object.
 ///
 /// They are one answer here, which is a decision rather than an oversight and is written out where
@@ -429,10 +439,38 @@ impl Checker<'_> {
         if !spelled.starts_with("__sync_") || spelled != SYNCHRONIZE {
             return None;
         }
+        Some(self.full_barrier(span))
+    }
+
+    /// The three x86 fence instructions under gcc's names for them, which are the same barrier.
+    ///
+    /// Answers nothing for every other call in the program, so the test that costs a byte goes
+    /// first, and these get here for the same reason the barrier above does: each carries a
+    /// signature in the table, so the call is checked against a prototype and an argument written
+    /// on one is reported in the ordinary words rather than in words invented here.
+    ///
+    /// mingw-w64's `<psdk_inc/intrin-impl.h>` writes the store one inside `__faststorefence`, and
+    /// `<winnt.h>` reaches that file on its twenty seventh line, so every Windows program that
+    /// includes `<windows.h>` asks for it whether it ever meant to or not.
+    pub(in crate::check) fn ia32_fence_builtin(
+        &mut self,
+        function: Option<rucc_base::Symbol>,
+        span: Span,
+    ) -> Option<ExprId> {
+        let name = function?;
+        let spelled = self.text(name);
+        if !spelled.starts_with("__builtin_ia32_") || !FENCES.contains(&spelled) {
+            return None;
+        }
+        Some(self.full_barrier(span))
+    }
+
+    /// The node every name that is a barrier and nothing else becomes.
+    fn full_barrier(&mut self, span: Span) -> ExprId {
         let ty = self.types.void();
         let args = self.tast.add_expr_refs(&[]);
         let kind = ExprKind::Atomic { op: AtomicOp::Fence, order: Ordering::SeqCst, args };
-        Some(self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span))
+        self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span)
     }
 
     /// `__atomic_always_lock_free(size, p)` and `__atomic_is_lock_free(size, p)`, which are
