@@ -363,7 +363,13 @@ impl Assembler<'_> {
                 };
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
                 let addend = disp - i64::try_from(end - at).expect("an instruction this long");
-                self.text.relocs.push(Reloc { at, symbol, kind, addend });
+                // How many bytes of the instruction come after the four the linker writes over,
+                // which is what is left of the distance from the hole to the end of it. Already in
+                // the addend and written down again because COFF wants the two apart, and there is
+                // nowhere else it can be worked out: by the time a writer sees the relocation the
+                // instruction it is in is bytes like any others.
+                let after = u8::try_from(end - at - 4).expect("an instruction this long");
+                self.text.relocs.push(Reloc { at, symbol, kind, addend, after });
             } else if let Some((to, disp)) = labelled {
                 // The address of a label, which is the four bytes an address counted from the
                 // instruction pointer leaves and is patched where a jump is patched rather than
@@ -593,7 +599,13 @@ mod tests {
         assert_eq!(hex(&text.bytes), "e8 00 00 00 00");
         assert_eq!(
             text.relocs,
-            [Reloc { at: 1, symbol: "puts".to_owned(), kind: Reference::Call, addend: -4 }]
+            [Reloc {
+                at: 1,
+                symbol: "puts".to_owned(),
+                kind: Reference::Call,
+                addend: -4,
+                after: 0
+            }]
         );
     }
 
@@ -616,7 +628,13 @@ mod tests {
         // from where it ends, and the addend is what makes up the difference.
         assert_eq!(
             text.relocs,
-            [Reloc { at: 3, symbol: "counter".to_owned(), kind: Reference::Data, addend: 4 }]
+            [Reloc {
+                at: 3,
+                symbol: "counter".to_owned(),
+                kind: Reference::Data,
+                addend: 4,
+                after: 0
+            }]
         );
     }
 
@@ -691,7 +709,13 @@ mod tests {
         assert_eq!(hex(&text.bytes), "48 8b 05 00 00 00 00");
         assert_eq!(
             text.relocs,
-            [Reloc { at: 3, symbol: "away".to_owned(), kind: Reference::Got, addend: -4 }]
+            [Reloc {
+                at: 3,
+                symbol: "away".to_owned(),
+                kind: Reference::Got,
+                addend: -4,
+                after: 0
+            }]
         );
     }
 
