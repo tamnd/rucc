@@ -2672,6 +2672,26 @@ decl #0 x : int object external static defined
         assert!(text.contains("4096"), "the size travels: {text}");
     }
 
+    /// And an object passed by value with more words in it than that is the same call again,
+    /// written in front of the call the object is an argument of.
+    ///
+    /// The copy is one the caller owes the callee, since the callee is free to write to what it
+    /// was handed, so it is not an optimization that the size decides but the only way the call
+    /// can be made at all.
+    #[test]
+    fn a_structure_too_large_to_unroll_is_copied_into_the_argument_area_by_the_runtime() {
+        let decl = "struct huge { char a[4096]; };\nint take(struct huge);\n";
+        let text = asm(&format!("{decl}int f(struct huge *p) {{ return take(*p); }}\n"));
+
+        let copy = text.find("call\tmemcpy").expect("the copy");
+        let call = text.find("call\ttake").expect("the call");
+        assert!(copy < call, "the copy comes first: {text}");
+        // Into the bottom of the outgoing area, which is where the stack pointer already is, and
+        // with the size in the register the convention passes the third argument in.
+        assert!(text.contains("leaq\t(%rsp), %rdi"), "the destination: {text}");
+        assert!(text.contains("$4096, %edx"), "the size: {text}");
+    }
+
     /// A frame that had to force its own alignment cannot say how far away the caller's stack
     /// pointer was, so it reaches back through the frame pointer instead.
     #[test]
