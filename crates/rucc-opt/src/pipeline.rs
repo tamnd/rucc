@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, load, nofree,
-    outside, params, pass,
+    outside, params, pass, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -71,7 +71,7 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
-const READS_OUTSIDE: &[&str] = &[load::NAME];
+const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME];
 
 /// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -308,6 +308,7 @@ const O2: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "redundant-load",
     "fold",
     "simplify",
     "hoist",
@@ -345,6 +346,7 @@ const O3: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "redundant-load",
     "fold",
     "simplify",
     "hoist",
