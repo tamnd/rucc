@@ -207,6 +207,14 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// what makes the function smaller rather than shorter by one instruction. It is in every level
 /// except `-O0`, which keeps every check on purpose: document 14 measures against a build where
 /// nothing was discharged, and that build is `-O0`.
+///
+/// `short-circuit-free` is the collapse of section 22.5 restricted to the cases that cost nothing,
+/// which are the ones where both halves of the `&&` ask about the same two values, so that what it
+/// writes is one comparison or a constant and not an and on top of two comparisons. The full
+/// version of that pass is a speed for size trade and belongs to `-O2`. This version is not a trade
+/// at all, so there is nothing here to decline. It sits where `-O2` puts the full pass, which is
+/// immediately above `thread`, and that pass is the reason: threading turns the shape this matches
+/// into one it does not.
 const O1: &[&str] = &[
     "expect",
     "fold",
@@ -215,6 +223,7 @@ const O1: &[&str] = &[
     "simplify",
     "narrow",
     "simplify",
+    "short-circuit-free",
     "thread",
     "phiopt",
     "prune",
@@ -242,7 +251,9 @@ const O1: &[&str] = &[
 /// level comes from. It folds the two branches of an `a && b` into one, which costs the right
 /// operand's work on the path that was skipping it and buys a branch the machine no longer has to
 /// guess. That is a trade worth making when the aim is speed and the branch is hard to call, and
-/// it is not one to make by default, which is what `-O1` is.
+/// it is not one to make by default, which is what `-O1` is. What `-O1` has in its place is
+/// `short-circuit-free`, which is the same pass taking only the collapses that cost nothing, so
+/// this one is the trade and not the transformation.
 ///
 /// It runs before `thread` and `phiopt` rather than after, and the order is not arbitrary. Both of
 /// those look at edges, and the collapse removes a block and turns two edges into one, so running
@@ -349,12 +360,17 @@ const O3: &[&str] = &[
 /// `short-circuit` is the pass this level drops from `-O2`, for the mirror of that reason. What it
 /// removes is a branch, which is time, and what it adds is the right operand's instructions on a
 /// path that did not run them and an and on top. The code comes out no smaller and usually a byte
-/// or two larger, so a level whose cost model is size has nothing to gain from it.
+/// or two larger, so a level whose cost model is size has nothing to gain from it. What it keeps is
+/// `short-circuit-free` below.
 ///
 /// `hoist` is dropped here as well, and the reason is the same trade read the other way.
 /// It takes a check out of a loop body and puts one in the preheader, plus the address arithmetic
 /// the new check needs, so the loop runs faster and the function is a few instructions larger. That
 /// is a speed transformation with a size cost, which is what `-Os` and `-Oz` are for declining.
+///
+/// `short-circuit-free` is here for the reason the `-O1` list gives, and the reason reads the same
+/// at a level whose cost model is size. The collapse it is restricted to takes a branch and a block
+/// away and adds nothing, so declining it would be declining something smaller.
 ///
 /// `header-copy-small` is the same pass `-O1` and above run under section 26.6's smaller budget.
 /// The copy is code growth and this level pays for it once per loop, so five instructions is what
@@ -370,6 +386,7 @@ const OS: &[&str] = &[
     "narrow",
     "simplify",
     "switch-conv",
+    "short-circuit-free",
     "thread",
     "phiopt",
     "prune",
@@ -403,6 +420,7 @@ const OZ: &[&str] = &[
     "narrow",
     "simplify",
     "switch-conv",
+    "short-circuit-free",
     "thread",
     "phiopt",
     "prune",

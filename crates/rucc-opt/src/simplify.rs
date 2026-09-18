@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and one rewrite written out by hand below them.
+//! instruction and are where anything new goes, and two rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -65,7 +65,15 @@
 //! that same rewrite in place with one operand instead of two, and it is its own case because a
 //! conversion is the one instruction whose operand is not the width of its result.
 //!
-//! ## The one written by hand
+//! ## The two written by hand
+//!
+//! Both are about comparisons, and both are here rather than in `rules/` for the same reason: what
+//! they are is one statement quantified over the predicates, and the rule language has no way to
+//! say that, so writing either as rules would mean writing out every predicate, every operand
+//! order and every width by hand and keeping the enumeration in step with the two predicate sets
+//! forever.
+//!
+//! ### A negation of a comparison
 //!
 //! An exclusive or of a comparison with an `i1` of all ones is that comparison with the opposite
 //! predicate. That is issue 379, and it is worth more than the instruction it saves.
@@ -82,6 +90,33 @@
 //! the same saving, and leaving it out because the coverage report did not complain about it would
 //! be picking the rewrite by what measures it rather than by what it does.
 //!
+//! ### Two comparisons over one pair of operands
+//!
+//! An `and` or an `or` of two comparisons about the same two values is one comparison, or it is a
+//! constant. `(x == y) && (x != y)` is false whatever `x` and `y` are, `(x >= y) || (x < y)` is
+//! true, and `(x < y) || (x == y)` is `x <= y`, which is one instruction where there were three.
+//!
+//! The way to see all of that at once is to stop reading a predicate as a question and read it as
+//! the set of answers it accepts. Two values are below, equal to or above one another, and two
+//! floating point values can also be neither, so there are four cases, exactly one of them holds,
+//! and a predicate is the subset it says yes to. `&&` is then the intersection of two subsets and
+//! `||` is the union, an empty result is false, a full one is true, and anything else is whichever
+//! predicate spells that subset. That is the whole rewrite, and the reason it is a paragraph
+//! rather than a table is that the sixteen floating point predicates are the sixteen subsets of
+//! the four cases, so the map back from a subset is total and has nothing to special case.
+//!
+//! Integers have three cases rather than four, and a complication the floating point side does not
+//! have: `<` is two different questions depending on whether the operands are read signed or
+//! unsigned, and a subset built out of one of each would be a subset about no reading in
+//! particular. So each integer predicate carries which reading it wants, two that disagree refuse
+//! to combine, and `==` and `!=` want neither and go with whatever the other one wanted.
+//!
+//! Nesting falls out of rewriting in place. A three way condition arrives as an `or` of an `or` and
+//! a comparison, the walk reaches the inner one first and leaves a single comparison where it was,
+//! and by the time the outer one is looked at it has a pair of comparisons under it rather than an
+//! `or` and a comparison. That is what `gcc.c-torture/execute/ieee/compare-fp-3.c` needs and it
+//! costs nothing to get.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -94,12 +129,18 @@
 //! instruction it fired on reads what it always read and nothing reads it, so it is dead, and
 //! taking it out here would mean deciding whether its operands are still read by anything, which
 //! is the question the dead code eliminator answers for the whole function at once.
+//!
+//! The composite rewrite leaves two of them rather than one, and in the case that comes out
+//! constant it leaves both comparisons and computes nothing at all. Same litter, same reason, same
+//! pass takes it out.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
+use rucc_ir::{
+    Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
+};
 
 use crate::rules::{Match, Piece, Table, canonical, compare, identities, strength, width};
 use crate::uses::{count, substitute};
@@ -110,6 +151,12 @@ const FLIPPED: &str = "comparison negated by an exclusive or rewritten as the op
 
 /// Recorded for a negation that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "negated comparison left alone, the pass ran out of fuel";
+
+/// Recorded once for each pair of comparisons over one operand pair folded into one answer.
+const COMPOSITE: &str = "two comparisons over the same operands combined into one";
+
+/// Recorded for a pair that would have folded if there had been fuel for it.
+const NO_FUEL_COMPOSITE: &str = "pair of comparisons left alone, the pass ran out of fuel";
 
 /// Recorded for a rule that would have fired if there had been fuel for it.
 const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
@@ -270,6 +317,15 @@ impl Pass for Simplify {
                     data.args = args;
                     data.extra = flip.extra;
                     stats.optimized(FLIPPED);
+                    continue;
+                }
+                if let Some(composite) = composite_comparison(func, inst) {
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL_COMPOSITE);
+                        continue;
+                    }
+                    fold_composite(func, inst, composite);
+                    stats.optimized(COMPOSITE);
                     continue;
                 }
                 let Some((rewrite, pattern)) = identity(func, inst) else { continue };
@@ -627,7 +683,7 @@ fn become_constant(func: &mut Func, inst: Inst, number: i128) {
 }
 
 /// What an instruction should become, when it is a comparison written as a negation.
-struct Flip {
+pub(crate) struct Flip {
     /// `ICmp` or `FCmp`, whichever the comparison underneath was.
     opcode: Opcode,
     /// The flags of the comparison, which is where a fast math promise lives.
@@ -678,6 +734,302 @@ fn negated_comparison(func: &Func, inst: Inst) -> Option<Flip> {
         lhs: *args.first()?,
         rhs: *args.get(1)?,
     })
+}
+
+/// Where a pair of operands can stand in relation to each other, as one bit each.
+///
+/// Every comparison either of the IR's two families can make is a set of these and nothing else,
+/// which is the whole idea. Two values are below, equal to or above one another, and two floating
+/// point values can also be neither, so a predicate is a question about which of four buckets the
+/// pair falls in and the answer is the subset it accepts. `olt` accepts one bucket, `ole` accepts
+/// two, `une` accepts three and `uno` accepts the fourth on its own.
+///
+/// Once a predicate is a set, `&&` of two of them over the same pair of operands is the
+/// intersection and `||` is the union, because the buckets do not overlap and exactly one of them
+/// is the case. An empty answer is a combination nothing satisfies and a full one is a combination
+/// everything does, which is what the two torture cases this is for are asking about.
+mod bucket {
+    /// The left operand is below the right one.
+    pub(super) const LT: u8 = 1;
+    /// The two are equal.
+    pub(super) const EQ: u8 = 2;
+    /// The left operand is above the right one.
+    pub(super) const GT: u8 = 4;
+    /// Neither, which only a floating point pair can be and only when one of them is a NaN.
+    pub(super) const UN: u8 = 8;
+    /// Every bucket an integer pair can be in, which is the answer no integer comparison can fail.
+    pub(super) const ALL_INT: u8 = LT | EQ | GT;
+    /// Every bucket a floating point pair can be in.
+    pub(super) const ALL_FLOAT: u8 = LT | EQ | GT | UN;
+}
+
+/// Which ordering an integer predicate reads its operands under.
+///
+/// Equality is under neither, and that is not a technicality: `x == y` and `x < y` have an answer
+/// in common whichever way the second one reads its operands, so an equality can be combined with
+/// a signed comparison and with an unsigned one. Two orderings that disagree cannot be combined at
+/// all, because `slt` and `ult` are not the same question and a set that mixed them would be a set
+/// about no ordering in particular.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reading {
+    /// The predicate compares signed.
+    Signed,
+    /// The predicate compares unsigned.
+    Unsigned,
+    /// The predicate is an equality and says nothing about an ordering.
+    Neither,
+}
+
+impl Reading {
+    /// The reading two predicates have in common, if they have one.
+    const fn shared(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Neither, same) | (same, Self::Neither) => Some(same),
+            (Self::Signed, Self::Signed) => Some(Self::Signed),
+            (Self::Unsigned, Self::Unsigned) => Some(Self::Unsigned),
+            (Self::Signed, Self::Unsigned) | (Self::Unsigned, Self::Signed) => None,
+        }
+    }
+}
+
+/// The buckets an integer predicate accepts, and the ordering it read them under.
+const fn int_buckets(pred: IntPred) -> (u8, Reading) {
+    use bucket::{EQ, GT, LT};
+    match pred {
+        IntPred::Eq => (EQ, Reading::Neither),
+        IntPred::Ne => (LT | GT, Reading::Neither),
+        IntPred::Slt => (LT, Reading::Signed),
+        IntPred::Sle => (LT | EQ, Reading::Signed),
+        IntPred::Sgt => (GT, Reading::Signed),
+        IntPred::Sge => (GT | EQ, Reading::Signed),
+        IntPred::Ult => (LT, Reading::Unsigned),
+        IntPred::Ule => (LT | EQ, Reading::Unsigned),
+        IntPred::Ugt => (GT, Reading::Unsigned),
+        IntPred::Uge => (GT | EQ, Reading::Unsigned),
+    }
+}
+
+/// The integer predicate that accepts exactly this set of buckets under this ordering.
+///
+/// Nothing for the empty set or the full one, which are the two answers that are not a comparison
+/// at all and are dealt with before this is asked. Nothing either for a set that wants an ordering
+/// from a pair that had none, which is a set neither `eq` nor `ne` can spell: two equalities
+/// combine into an equality or into one of those two extremes and never into an ordering, so the
+/// case does not arise and answering it would mean choosing an ordering out of nowhere.
+const fn int_pred(buckets: u8, reading: Reading) -> Option<IntPred> {
+    use bucket::{EQ, GT, LT};
+    match (buckets, reading) {
+        (EQ, _) => Some(IntPred::Eq),
+        (b, _) if b == LT | GT => Some(IntPred::Ne),
+        (LT, Reading::Signed) => Some(IntPred::Slt),
+        (GT, Reading::Signed) => Some(IntPred::Sgt),
+        (b, Reading::Signed) if b == LT | EQ => Some(IntPred::Sle),
+        (b, Reading::Signed) if b == GT | EQ => Some(IntPred::Sge),
+        (LT, Reading::Unsigned) => Some(IntPred::Ult),
+        (GT, Reading::Unsigned) => Some(IntPred::Ugt),
+        (b, Reading::Unsigned) if b == LT | EQ => Some(IntPred::Ule),
+        (b, Reading::Unsigned) if b == GT | EQ => Some(IntPred::Uge),
+        _ => None,
+    }
+}
+
+/// The buckets a floating point predicate accepts.
+///
+/// The sixteen predicates are the sixteen subsets, which is why the IR has `false` and `true` among
+/// them and why this direction and the one below are both total.
+const fn float_buckets(pred: FloatPred) -> u8 {
+    use bucket::{ALL_FLOAT, EQ, GT, LT, UN};
+    match pred {
+        FloatPred::False => 0,
+        FloatPred::Oeq => EQ,
+        FloatPred::Ogt => GT,
+        FloatPred::Oge => GT | EQ,
+        FloatPred::Olt => LT,
+        FloatPred::Ole => LT | EQ,
+        FloatPred::One => LT | GT,
+        FloatPred::Ord => LT | EQ | GT,
+        FloatPred::Uno => UN,
+        FloatPred::Ueq => EQ | UN,
+        FloatPred::Ugt => GT | UN,
+        FloatPred::Uge => GT | EQ | UN,
+        FloatPred::Ult => LT | UN,
+        FloatPred::Ule => LT | EQ | UN,
+        FloatPred::Une => LT | GT | UN,
+        FloatPred::True => ALL_FLOAT,
+    }
+}
+
+/// The floating point predicate that accepts exactly this set of buckets.
+fn float_pred(buckets: u8) -> Option<FloatPred> {
+    FloatPred::all().find(|pred| float_buckets(*pred) == buckets)
+}
+
+/// One of the two comparisons under an `and` or an `or`, read as a set of buckets.
+struct Side {
+    /// `ICmp` or `FCmp`, which both sides have to be the same of.
+    opcode: Opcode,
+    /// The flags, which both sides have to carry the same of. A fast math promise is a promise
+    /// about one comparison, and a set built out of two comparisons that were not promised the
+    /// same thing is a set under no promise in particular.
+    flags: Flags,
+    /// The buckets the predicate accepts, already turned round if the operands were.
+    buckets: u8,
+    /// Which ordering it read, for an integer comparison. Always [`Reading::Neither`] for a
+    /// floating point one, where there is only the one ordering and nothing to agree about.
+    reading: Reading,
+    /// The left operand.
+    lhs: Value,
+    /// The right operand.
+    rhs: Value,
+}
+
+/// The comparison a value holds the result of, if that is what it is.
+fn side(func: &Func, value: Value) -> Option<Side> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let (buckets, reading) = match (data.opcode, data.extra) {
+        (Opcode::ICmp, Extra::IntPred(pred)) => int_buckets(pred),
+        (Opcode::FCmp, Extra::FloatPred(pred)) => (float_buckets(pred), Reading::Neither),
+        _ => return None,
+    };
+    let args = &func[data.args];
+    Some(Side {
+        opcode: data.opcode,
+        flags: data.flags,
+        buckets,
+        reading,
+        lhs: *args.first()?,
+        rhs: *args.get(1)?,
+    })
+}
+
+/// The same set of buckets read with the operands the other way round.
+///
+/// Which of the two is below the other changes places and nothing else moves: equal is equal from
+/// both ends, and a NaN makes a pair unordered from both ends.
+const fn turned(buckets: u8) -> u8 {
+    use bucket::{GT, LT};
+    let mut out = buckets & !(LT | GT);
+    if buckets & LT != 0 {
+        out |= GT;
+    }
+    if buckets & GT != 0 {
+        out |= LT;
+    }
+    out
+}
+
+/// The second side read as though its operands were written in the first side's order.
+///
+/// A comparison is not commutative, so `y < x` is not `x < y`, it is `x > y`. Turning the second
+/// side round is what lets `(x<y) && (y<x)` be a pair about one ordered pair of operands rather
+/// than two unrelated comparisons, and it is the only case in either torture program that needs it.
+fn aligned(first: &Side, second: Side) -> Option<Side> {
+    if first.lhs == second.lhs && first.rhs == second.rhs {
+        return Some(second);
+    }
+    if first.lhs != second.rhs || first.rhs != second.lhs {
+        return None;
+    }
+    let buckets = turned(second.buckets);
+    Some(Side { buckets, lhs: first.lhs, rhs: first.rhs, ..second })
+}
+
+/// What an `and` or an `or` of two comparisons over one pair of operands comes to.
+pub(crate) enum Composite {
+    /// Nothing the operands could hold makes it come out the other way.
+    Always(bool),
+    /// One comparison over the same pair says the same thing as the two together.
+    Pred(Flip),
+}
+
+/// Whether this instruction is `and` or `or` of two comparisons over the same pair of operands,
+/// and what it becomes if it is.
+///
+/// This is `(x==y) && (x!=y)`, which is false, and `(x>=y) || (x<y)`, which is true, and the four
+/// other shapes `gcc.c-torture/execute/compare-3.c` is built out of. Neither program is contrived:
+/// a composite condition written out of macros, or one arm of it produced by inlining, arrives
+/// looking exactly like this, and the front end has already flattened the `&&` into an `and` by the
+/// time anything here runs, so what would otherwise be a question about two blocks is a question
+/// about one instruction and its two operands.
+///
+/// Both sides have to be the same family of comparison, carry the same flags and be about the same
+/// two values. Past that the arithmetic is [`bucket`]: intersect for an `and`, union for an `or`,
+/// and read the answer back as a predicate. An answer of no buckets is false, an answer of every
+/// bucket is true, and anything between the two is one comparison where there were two, which is
+/// worth taking on its own and is also what lets the three way condition in
+/// `gcc.c-torture/execute/ieee/compare-fp-3.c` fold: the inner `or` becomes a single `uge` and the
+/// outer one then has a pair to work on rather than an `or` and a comparison.
+fn composite_comparison(func: &Func, inst: Inst) -> Option<Composite> {
+    let data = &func[inst];
+    if func[data.first_result?].ty != Type::int(1) {
+        return None;
+    }
+    let args = &func[data.args];
+    composite(func, data.opcode, *args.first()?, *args.get(1)?)
+}
+
+/// The same question asked about an `and` or an `or` that is not there yet.
+///
+/// [`crate::short_circuit`] asks it before it writes one, because whether the collapse it is
+/// looking at is worth making is the question of whether what it writes survives this pass, and a
+/// collapse that leaves one comparison where there were two and a branch is worth making at every
+/// optimization level rather than only where speculating work is.
+pub(crate) fn composite(func: &Func, opcode: Opcode, lhs: Value, rhs: Value) -> Option<Composite> {
+    let intersect = match opcode {
+        Opcode::And => true,
+        Opcode::Or => false,
+        _ => return None,
+    };
+    let first = side(func, lhs)?;
+    let second = aligned(&first, side(func, rhs)?)?;
+    if first.opcode != second.opcode || first.flags != second.flags {
+        return None;
+    }
+    let reading = first.reading.shared(second.reading)?;
+    let buckets = match intersect {
+        true => first.buckets & second.buckets,
+        false => first.buckets | second.buckets,
+    };
+    let whole = match first.opcode {
+        Opcode::ICmp => bucket::ALL_INT,
+        _ => bucket::ALL_FLOAT,
+    };
+    if buckets == 0 {
+        return Some(Composite::Always(false));
+    }
+    if buckets == whole {
+        return Some(Composite::Always(true));
+    }
+    let extra = match first.opcode {
+        Opcode::ICmp => Extra::IntPred(int_pred(buckets, reading)?),
+        _ => Extra::FloatPred(float_pred(buckets)?),
+    };
+    Some(Composite::Pred(Flip {
+        opcode: first.opcode,
+        flags: first.flags,
+        extra,
+        lhs: first.lhs,
+        rhs: first.rhs,
+    }))
+}
+
+/// Writes what the pair came to over the `and` or the `or` that held it.
+///
+/// In place, which keeps the result value, so every reader of the pair is already reading the one
+/// answer and the two comparisons are left where they were for [`crate::dce`].
+pub(crate) fn fold_composite(func: &mut Func, inst: Inst, composite: Composite) {
+    match composite {
+        Composite::Always(answer) => become_constant(func, inst, answer.into()),
+        Composite::Pred(flip) => {
+            let args = func.push_values(&[flip.lhs, flip.rhs]);
+            let data = &mut func[inst];
+            data.opcode = flip.opcode;
+            data.flags = flip.flags;
+            data.args = args;
+            data.extra = flip.extra;
+        }
+    }
 }
 
 /// Whether this value is a constant with every bit of its type set.
@@ -1781,5 +2133,294 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(came_from(&func, first).0, Opcode::ICmp);
         assert_eq!(came_from(&func, second).0, Opcode::Xor);
+    }
+
+    /// Two `i32` parameters to compare, which every composite test below is about.
+    fn a_pair() -> (Func, Block, Value, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int]).with_returns(&[Type::int(1)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let x = func.append_param(block, int);
+        let y = func.append_param(block, int);
+        (func, block, x, y)
+    }
+
+    /// The same, of `f64`.
+    fn a_float_pair() -> (Func, Block, Value, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let float = Type::float(Float::F64);
+        let signature = Signature::new().with_params(&[float, float]).with_returns(&[Type::int(1)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let x = func.append_param(block, float);
+        let y = func.append_param(block, float);
+        (func, block, x, y)
+    }
+
+    /// Every bucket table agrees with [`FloatPred::inverse`] about what the opposite of a predicate
+    /// is.
+    ///
+    /// The point of the assertion is that the two were written in different crates by different
+    /// reasoning. `inverse` is a sixteen line table of names, and the buckets are four bits and a
+    /// complement, so a predicate given the wrong set here disagrees with the name it was given
+    /// there and this says which one.
+    #[test]
+    fn the_opposite_of_a_float_predicate_is_the_buckets_it_leaves_out() {
+        for pred in FloatPred::all() {
+            assert_eq!(
+                super::float_buckets(pred.inverse()),
+                super::bucket::ALL_FLOAT ^ super::float_buckets(pred),
+                "{pred:?}"
+            );
+        }
+    }
+
+    /// And with [`FloatPred::swapped`] about what reading the operands the other way round does.
+    ///
+    /// Which of two values is below the other changes and nothing else does, because equal is equal
+    /// from both ends and a NaN makes a pair unordered from both ends.
+    #[test]
+    fn swapping_a_float_predicates_operands_exchanges_below_and_above() {
+        for pred in FloatPred::all() {
+            let want = super::turned(super::float_buckets(pred));
+            assert_eq!(super::float_buckets(pred.swapped()), want, "{pred:?}");
+        }
+    }
+
+    /// The sixteen floating point predicates are the sixteen sets, so reading a set back is total
+    /// and gives the predicate it came from.
+    #[test]
+    fn every_set_of_float_buckets_is_a_predicate() {
+        for pred in FloatPred::all() {
+            assert_eq!(super::float_pred(super::float_buckets(pred)), Some(pred), "{pred:?}");
+        }
+        for buckets in 0..=super::bucket::ALL_FLOAT {
+            assert!(super::float_pred(buckets).is_some(), "{buckets} spells nothing");
+        }
+    }
+
+    /// The same two agreements for the integer predicates.
+    #[test]
+    fn an_integer_predicate_agrees_with_its_own_opposite_and_its_own_swap() {
+        use super::bucket::ALL_INT;
+        for pred in IntPred::all() {
+            let (before, reading) = super::int_buckets(pred);
+            let (opposite, other) = super::int_buckets(pred.inverse());
+            assert_eq!(opposite, ALL_INT ^ before, "the opposite of {pred:?}");
+            assert_eq!(other, reading, "the opposite of {pred:?} reads the operands differently");
+            let (swapped, other) = super::int_buckets(pred.swapped());
+            assert_eq!(swapped, super::turned(before), "the swap of {pred:?}");
+            assert_eq!(other, reading, "the swap of {pred:?} reads the operands differently");
+        }
+    }
+
+    /// Reading an integer set back gives the predicate it came from, under the reading that
+    /// predicate wanted.
+    #[test]
+    fn every_integer_predicate_is_read_back_as_itself() {
+        for pred in IntPred::all() {
+            let (buckets, reading) = super::int_buckets(pred);
+            assert_eq!(super::int_pred(buckets, reading), Some(pred), "{pred:?}");
+        }
+    }
+
+    #[test]
+    fn two_integer_comparisons_that_agree_about_nothing_are_false() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let same = build.icmp(IntPred::Eq, x, y);
+        let differ = build.icmp(IntPred::Ne, x, y);
+        let both = build.binary(Opcode::And, same, differ, Flags::NONE);
+        build.ret(&[both]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, both), 0);
+    }
+
+    #[test]
+    fn two_integer_comparisons_that_cover_everything_are_true() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let above = build.icmp(IntPred::Sge, x, y);
+        let below = build.icmp(IntPred::Slt, x, y);
+        let either = build.binary(Opcode::Or, above, below, Flags::NONE);
+        build.ret(&[either]);
+        assert!(simplify(&mut func));
+        assert_ne!(number(&func, either), 0);
+    }
+
+    /// Below or equal is one comparison, and the saving is what makes the rewrite worth taking on
+    /// its own rather than only for the two answers that are constants.
+    #[test]
+    fn two_integer_comparisons_that_overlap_become_one() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let below = build.icmp(IntPred::Slt, x, y);
+        let same = build.icmp(IntPred::Eq, x, y);
+        let either = build.binary(Opcode::Or, below, same, Flags::NONE);
+        build.ret(&[either]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, either), (Opcode::ICmp, Extra::IntPred(IntPred::Sle)));
+        assert_eq!(operands(&func, either), [x, y]);
+    }
+
+    /// `(x<y) && (y<x)`, which is the third test of `gcc.c-torture/execute/compare-3.c` and the one
+    /// that needs the second comparison turned round before the two are about one pair.
+    #[test]
+    fn the_second_comparison_is_read_in_the_first_ones_operand_order() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let below = build.icmp(IntPred::Slt, x, y);
+        let above = build.icmp(IntPred::Slt, y, x);
+        let both = build.binary(Opcode::And, below, above, Flags::NONE);
+        build.ret(&[both]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, both), 0);
+    }
+
+    /// An equality says nothing about how the operands are read, so it combines with either
+    /// ordering and takes the one beside it.
+    #[test]
+    fn an_equality_takes_the_ordering_of_the_comparison_beside_it() {
+        for (ordered, want) in [(IntPred::Ult, IntPred::Ule), (IntPred::Slt, IntPred::Sle)] {
+            let (mut func, block, x, y) = a_pair();
+            let mut build = Builder::new(&mut func, block);
+            let below = build.icmp(ordered, x, y);
+            let same = build.icmp(IntPred::Eq, x, y);
+            let either = build.binary(Opcode::Or, below, same, Flags::NONE);
+            build.ret(&[either]);
+            assert!(simplify(&mut func), "{ordered:?}");
+            assert_eq!(came_from(&func, either).1, Extra::IntPred(want), "{ordered:?}");
+        }
+    }
+
+    /// A signed comparison and an unsigned one are two different questions, and a set built out of
+    /// one of each would be a set about no reading in particular.
+    #[test]
+    fn a_signed_comparison_and_an_unsigned_one_are_left_alone() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let signed = build.icmp(IntPred::Slt, x, y);
+        let unsigned = build.icmp(IntPred::Ugt, x, y);
+        let both = build.binary(Opcode::And, signed, unsigned, Flags::NONE);
+        build.ret(&[both]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, both).0, Opcode::And);
+    }
+
+    #[test]
+    fn two_comparisons_about_different_operands_are_left_alone() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let other = build.iconst(Type::int(32), 7);
+        let first = build.icmp(IntPred::Slt, x, y);
+        let second = build.icmp(IntPred::Sgt, x, other);
+        let both = build.binary(Opcode::And, first, second, Flags::NONE);
+        build.ret(&[both]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, both).0, Opcode::And);
+    }
+
+    /// `x == y && x != y` on floating point, which is false for the same reason it is on integers
+    /// and is not the same reason a reader might expect: `oeq` and `une` do not overlap because
+    /// `oeq` refuses a NaN and `une` accepts one, so the pair is empty rather than only unequal.
+    #[test]
+    fn two_float_comparisons_that_agree_about_nothing_are_false() {
+        let (mut func, block, x, y) = a_float_pair();
+        let mut build = Builder::new(&mut func, block);
+        let same = build.fcmp(FloatPred::Oeq, x, y, Flags::NONE);
+        let differ = build.fcmp(FloatPred::Une, x, y, Flags::NONE);
+        let both = build.binary(Opcode::And, same, differ, Flags::NONE);
+        build.ret(&[both]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, both), 0);
+    }
+
+    /// Unordered, or above or equal, or below, which is the fifth test of
+    /// `gcc.c-torture/execute/ieee/compare-fp-3.c`. It is three comparisons and two `or`s, and it
+    /// folds because the walk is forward and the rewrite is in place: the inner pair is one
+    /// comparison by the time the outer `or` is looked at.
+    #[test]
+    fn a_three_way_float_condition_folds_one_pair_at_a_time() {
+        let (mut func, block, x, y) = a_float_pair();
+        let mut build = Builder::new(&mut func, block);
+        let neither = build.fcmp(FloatPred::Uno, x, y, Flags::NONE);
+        let above = build.fcmp(FloatPred::Oge, x, y, Flags::NONE);
+        let below = build.fcmp(FloatPred::Olt, x, y, Flags::NONE);
+        let first = build.binary(Opcode::Or, neither, above, Flags::NONE);
+        let whole = build.binary(Opcode::Or, first, below, Flags::NONE);
+        build.ret(&[whole]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, first).1, Extra::FloatPred(FloatPred::Uge));
+        assert_ne!(number(&func, whole), 0);
+    }
+
+    /// A fast math promise is a promise about one comparison, and a set built out of two that were
+    /// not promised the same thing is a set under no promise in particular.
+    #[test]
+    fn two_comparisons_promised_different_things_are_left_alone() {
+        let (mut func, block, x, y) = a_float_pair();
+        let mut build = Builder::new(&mut func, block);
+        let below = build.fcmp(FloatPred::Olt, x, y, Flags::FAST);
+        let same = build.fcmp(FloatPred::Oeq, x, y, Flags::NONE);
+        let either = build.binary(Opcode::Or, below, same, Flags::NONE);
+        build.ret(&[either]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, either).0, Opcode::Or);
+    }
+
+    #[test]
+    fn the_promise_both_comparisons_were_made_under_travels_to_the_one_that_replaces_them() {
+        let (mut func, block, x, y) = a_float_pair();
+        let mut build = Builder::new(&mut func, block);
+        let below = build.fcmp(FloatPred::Olt, x, y, Flags::FAST);
+        let same = build.fcmp(FloatPred::Oeq, x, y, Flags::FAST);
+        let either = build.binary(Opcode::Or, below, same, Flags::NONE);
+        build.ret(&[either]);
+        assert!(simplify(&mut func));
+        assert_eq!(came_from(&func, either).1, Extra::FloatPred(FloatPred::Ole));
+        let rucc_ir::Def::Result { inst, .. } = func[either].def else { panic!("not a result") };
+        assert_eq!(func[inst].flags, Flags::FAST);
+    }
+
+    /// An `and` of two comparisons at a width that is not one bit is an and of two bits held in
+    /// something wider, which is a different program.
+    #[test]
+    fn a_wider_and_of_two_comparisons_is_left_alone() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let same = build.icmp(IntPred::Eq, x, y);
+        let differ = build.icmp(IntPred::Ne, x, y);
+        let first = build.unary(Opcode::ZExt, same, Type::int(32));
+        let second = build.unary(Opcode::ZExt, differ, Type::int(32));
+        let both = build.binary(Opcode::And, first, second, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, both, Type::int(1));
+        build.ret(&[narrow]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, both).0, Opcode::And);
+    }
+
+    #[test]
+    fn fuel_stops_the_composite_fold_and_not_the_walk() {
+        let (mut func, block, x, y) = a_pair();
+        let mut build = Builder::new(&mut func, block);
+        let same = build.icmp(IntPred::Eq, x, y);
+        let differ = build.icmp(IntPred::Ne, x, y);
+        let below = build.icmp(IntPred::Slt, x, y);
+        let above = build.icmp(IntPred::Sgt, x, y);
+        let first = build.binary(Opcode::And, same, differ, Flags::NONE);
+        let second = build.binary(Opcode::And, below, above, Flags::NONE);
+        let both = build.binary(Opcode::Or, first, second, Flags::NONE);
+        build.ret(&[both]);
+        let stats =
+            Simplify.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(1));
+        assert!(stats.changed());
+        assert_eq!(stats.count(Kind::Optimized, super::COMPOSITE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_COMPOSITE), 1);
+        assert_eq!(came_from(&func, first).0, Opcode::IConst);
+        assert_eq!(came_from(&func, second).0, Opcode::And);
     }
 }
