@@ -862,7 +862,10 @@ mod tests {
         let back = unsafe { load(into, at(target, 24), pointee) };
         assert_eq!(back.lo, pointee as u64, "the copy brought the pointee's base with it");
         assert_eq!(back.ext, 128);
-        assert_eq!(back.ver, held.ver, "and the version, which is the half a stale slot gets wrong");
+        assert_eq!(
+            back.ver, held.ver,
+            "and the version, which is the half a stale slot gets wrong"
+        );
 
         // SAFETY: the addresses `alloc` handed back.
         unsafe {
@@ -870,6 +873,34 @@ mod tests {
             dealloc(target);
             dealloc(pointee);
             dealloc(other);
+        }
+    }
+
+    #[test]
+    fn growing_a_buffer_brings_the_capabilities_in_it_along() {
+        let _turn = turn();
+        // `realloc` is always a copy here and never a resize in place, so it has the problem an
+        // interposed `memcpy` has and takes the same answer. The shape is the array of structures
+        // a program grows as it fills, which is where the pointers being moved usually are.
+        let holder = alloc(64);
+        let pointee = alloc(128);
+        let held = of(pointee);
+        // SAFETY: real capabilities in this test's own storage.
+        unsafe { store(of(holder), at(holder, 24), pointee, held) };
+
+        // SAFETY: an address this arena handed back.
+        let grown = unsafe { alloc::realloc(holder, 256) };
+        assert!(!grown.is_null());
+        // SAFETY: the word is in the grown instance and holds the pointer the copy moved.
+        let back = unsafe { load(of(grown), at(grown, 24), pointee) };
+        assert_eq!(back.lo, pointee as u64, "the pointer moved and its base moved with it");
+        assert_eq!(back.ext, 128);
+        assert_eq!(back.ver, held.ver);
+
+        // SAFETY: the addresses in hand, and `holder` is the one `realloc` ended.
+        unsafe {
+            dealloc(grown);
+            dealloc(pointee);
         }
     }
 
