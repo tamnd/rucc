@@ -620,12 +620,24 @@ impl Writer<'_> {
     /// to the flags is what it already did, and the jump written behind it reads those. Only the
     /// operand at the front goes, which is the byte, and the opcode changes to the one that has no
     /// operand there.
+    ///
+    /// An addressing mode comes with the rest of it and does not survive the move on its own. What
+    /// a mode holds is where in the operand vector its base and its index are, and every operand
+    /// has just come down one place, so the two positions come down with them. A comparison
+    /// against a register or a constant has no mode and nothing to do here, and a comparison
+    /// against memory is the one that does.
     fn keep_only_the_flags(&mut self, compare: mir::Inst, fusion: &Fusion) {
         let read: Vec<mir::Operand> =
             self.func[self.func[compare].operands].iter().skip(1).copied().collect();
         let operands = self.func.push_operands(&read);
         self.func[compare].opcode = self.opcode(fusion.cmp);
         self.func[compare].operands = operands;
+        if let Some(at) = self.func[compare].mem {
+            let mut amode = self.func[at];
+            amode.base = amode.base.map(|position| position - 1);
+            amode.index = amode.index.map(|position| position - 1);
+            self.func[compare].mem = Some(self.func.add_amode(amode));
+        }
     }
 
     /// Takes the conditional branch off the end of a block and gives back what it read.
@@ -663,7 +675,7 @@ impl Writer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use rucc_mir::{BlockCall, Opcode, Operand, Reg};
+    use rucc_mir::{BlockCall, Mem, Opcode, Operand, Reg};
     use rucc_target::x86_64::{BRANCH, GPR, RAX, RCX, REGS};
 
     use super::*;
@@ -938,6 +950,47 @@ mod tests {
                 "block2:",
             ]
         );
+    }
+
+    /// The same thing for a comparison that reads memory, where the address has to come down with
+    /// the operands.
+    ///
+    /// What an addressing mode holds is where its base register is in the operand vector, and
+    /// taking the byte off the front moves every operand one place. A mode left pointing at where
+    /// the base used to be would name the operand in front of it, which here is the value being
+    /// compared, so the instruction would read an address it was never given. The count of the
+    /// operands is checked as well as the position, since a mode that points past the end is the
+    /// other way this goes wrong.
+    #[test]
+    fn a_folded_comparison_keeps_its_address_when_the_byte_comes_off_the_front() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.cmp_set_l_rm_32"));
+        func.build(made[0], opcode)
+            .def(byte, GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .mem(Mem { disp: 24, ..Mem::at(Operand::read(Reg::physical(RCX), GPR)) })
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(made[0], opcode).operand(Operand::read(byte, GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert_eq!(
+            text,
+            [
+                "block0:",
+                "x64.cmp_rm_32 $rax, [$rcx + 24]",
+                "x64.jcc_ge block2, block1",
+                "block1:",
+                "block2:",
+            ]
+        );
+        let compare = func.insts(made[0]).next().expect("the comparison");
+        let mem = func[compare].mem.expect("it reads memory");
+        assert_eq!(func[mem].base, Some(1), "the base came down with the operands");
+        assert_eq!(func[func[compare].operands].len(), 2, "the value and the base of the address");
     }
 
     /// The same comparison with something else reading its answer, which keeps everything.

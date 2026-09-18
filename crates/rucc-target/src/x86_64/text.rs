@@ -211,6 +211,19 @@ static CMP_ONLY_RI_8: [Arg; 2] = [Imm, Reg(0, Byte)];
 static CMP_ONLY_RI_16: [Arg; 2] = [Imm, Reg(0, Word)];
 static CMP_ONLY_RI_32: [Arg; 2] = [Imm, Reg(0, Long)];
 static CMP_ONLY_RI_64: [Arg; 2] = [Imm, Reg(0, Quad)];
+// The same pair with the right hand side in memory. That is the side a comparison
+// subtracts and the side AT&T writes first, so the address goes where the register at index
+// two was and the one at index one stays where it is.
+static CMP_RM_8: [Arg; 2] = [Mem, Reg(1, Byte)];
+static CMP_RM_16: [Arg; 2] = [Mem, Reg(1, Word)];
+static CMP_RM_32: [Arg; 2] = [Mem, Reg(1, Long)];
+static CMP_RM_64: [Arg; 2] = [Mem, Reg(1, Quad)];
+// And those four with the byte gone, which moves the register down one place and leaves
+// the address where it is, an address having no index to move.
+static CMP_ONLY_RM_8: [Arg; 2] = [Mem, Reg(0, Byte)];
+static CMP_ONLY_RM_16: [Arg; 2] = [Mem, Reg(0, Word)];
+static CMP_ONLY_RM_32: [Arg; 2] = [Mem, Reg(0, Long)];
+static CMP_ONLY_RM_64: [Arg; 2] = [Mem, Reg(0, Quad)];
 
 // A compare and exchange names the value it would put there and the address it would put it at.
 // What it compares against is `rax`, which the instruction reads without being told, so nothing
@@ -575,6 +588,46 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_set_ae_ri_16", &[spell("cmpw", &CMP_RI_16), spell("setae", &SET)]),
     ("cmp_set_ae_ri_32", &[spell("cmpl", &CMP_RI_32), spell("setae", &SET)]),
     ("cmp_set_ae_ri_64", &[spell("cmpq", &CMP_RI_64), spell("setae", &SET)]),
+    ("cmp_set_e_rm_8", &[spell("cmpb", &CMP_RM_8), spell("sete", &SET)]),
+    ("cmp_set_e_rm_16", &[spell("cmpw", &CMP_RM_16), spell("sete", &SET)]),
+    ("cmp_set_e_rm_32", &[spell("cmpl", &CMP_RM_32), spell("sete", &SET)]),
+    ("cmp_set_e_rm_64", &[spell("cmpq", &CMP_RM_64), spell("sete", &SET)]),
+    ("cmp_set_ne_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setne", &SET)]),
+    ("cmp_set_ne_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setne", &SET)]),
+    ("cmp_set_ne_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setne", &SET)]),
+    ("cmp_set_ne_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setne", &SET)]),
+    ("cmp_set_l_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setl", &SET)]),
+    ("cmp_set_l_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setl", &SET)]),
+    ("cmp_set_l_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setl", &SET)]),
+    ("cmp_set_l_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setl", &SET)]),
+    ("cmp_set_le_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setle", &SET)]),
+    ("cmp_set_le_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setle", &SET)]),
+    ("cmp_set_le_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setle", &SET)]),
+    ("cmp_set_le_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setle", &SET)]),
+    ("cmp_set_g_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setg", &SET)]),
+    ("cmp_set_g_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setg", &SET)]),
+    ("cmp_set_g_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setg", &SET)]),
+    ("cmp_set_g_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setg", &SET)]),
+    ("cmp_set_ge_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setge", &SET)]),
+    ("cmp_set_ge_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setge", &SET)]),
+    ("cmp_set_ge_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setge", &SET)]),
+    ("cmp_set_ge_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setge", &SET)]),
+    ("cmp_set_b_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setb", &SET)]),
+    ("cmp_set_b_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setb", &SET)]),
+    ("cmp_set_b_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setb", &SET)]),
+    ("cmp_set_b_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setb", &SET)]),
+    ("cmp_set_be_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setbe", &SET)]),
+    ("cmp_set_be_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setbe", &SET)]),
+    ("cmp_set_be_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setbe", &SET)]),
+    ("cmp_set_be_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setbe", &SET)]),
+    ("cmp_set_a_rm_8", &[spell("cmpb", &CMP_RM_8), spell("seta", &SET)]),
+    ("cmp_set_a_rm_16", &[spell("cmpw", &CMP_RM_16), spell("seta", &SET)]),
+    ("cmp_set_a_rm_32", &[spell("cmpl", &CMP_RM_32), spell("seta", &SET)]),
+    ("cmp_set_a_rm_64", &[spell("cmpq", &CMP_RM_64), spell("seta", &SET)]),
+    ("cmp_set_ae_rm_8", &[spell("cmpb", &CMP_RM_8), spell("setae", &SET)]),
+    ("cmp_set_ae_rm_16", &[spell("cmpw", &CMP_RM_16), spell("setae", &SET)]),
+    ("cmp_set_ae_rm_32", &[spell("cmpl", &CMP_RM_32), spell("setae", &SET)]),
+    ("cmp_set_ae_rm_64", &[spell("cmpq", &CMP_RM_64), spell("setae", &SET)]),
     // The conversions between widths. Widening to sixty four bits from thirty two is a thirty two
     // bit move, because every instruction that writes a thirty two bit register clears the half
     // above it, and taking the low bits of anything is a move of that many bits.
@@ -693,6 +746,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_ri_16", &[spell("cmpw", &CMP_ONLY_RI_16)]),
     ("cmp_ri_32", &[spell("cmpl", &CMP_ONLY_RI_32)]),
     ("cmp_ri_64", &[spell("cmpq", &CMP_ONLY_RI_64)]),
+    ("cmp_rm_8", &[spell("cmpb", &CMP_ONLY_RM_8)]),
+    ("cmp_rm_16", &[spell("cmpw", &CMP_ONLY_RM_16)]),
+    ("cmp_rm_32", &[spell("cmpl", &CMP_ONLY_RM_32)]),
+    ("cmp_rm_64", &[spell("cmpq", &CMP_ONLY_RM_64)]),
     // And the byte with the comparison gone, which is the same pair cut the other way. It is the
     // second half of every `cmp_set_` row above, written on its own and with its operand back at
     // zero, and the assembler spells it the same way whatever width was compared.

@@ -40,11 +40,11 @@ use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
 
 use Form::{
     Align, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec, ArithX87, Barrier, BrCond,
-    Call, Cmov, Cmp, CmpRi, CmpSet, CmpSetRi, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
-    CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem,
-    Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop, Pop, PopX87,
-    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    Call, Cmov, Cmp, CmpRi, CmpRm, CmpSet, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87,
+    CmpSetX87Both, CmpXchg, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87,
+    DivQuo, DivRem, Jcc, Jmp, JmpReg, Landing, Lea, Load, LoadImm, LoadVec, Move, MoveVec, Nop,
+    Pop, PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search,
+    Set, ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -127,6 +127,22 @@ pub enum Form {
     /// what a comparison writes is the flags, and the byte the set behind it writes is a
     /// destination neither source has any claim on.
     CmpSetRi,
+    /// The same reading its right hand side out of memory.
+    ///
+    /// [`Form::CmpSet`] with the second source moved from a register number to an addressing mode,
+    /// which is the change [`Form::AluRm`] is to [`Form::AluRr`]. The byte stays where it is and
+    /// the left hand side stays in a register, so the description is the one a comparison against
+    /// a constant has, with an address on the instruction instead of an immediate.
+    ///
+    /// No lowering rule produces one, for the reason no rule produces a [`Form::AluRm`]: what this
+    /// is is a load and a comparison put together, which is two terms. `rucc_codegen::combine`
+    /// writes one, out of a comparison whose source came from a load nothing else read.
+    ///
+    /// Which side the memory is decides the condition rather than ruling the fold out. A
+    /// comparison does not commute and does not have to: reading the two sides the other way round
+    /// asks the same question backwards, so a load that fed the left hand side becomes this form
+    /// with the condition turned over, and `a < b` folded on the left is `b > a`.
+    CmpSetRm,
     /// A comparison that keeps nothing but the flags.
     ///
     /// The same instruction as the first half of [`Form::CmpSet`] with the second half gone. It
@@ -138,6 +154,14 @@ pub enum Form {
     Cmp,
     /// The same against a constant, which is [`Form::CmpSetRi`] with the byte gone.
     CmpRi,
+    /// The same against memory, which is [`Form::CmpSetRm`] with the byte gone.
+    ///
+    /// Written by the block layout for the reason [`Form::Cmp`] is, out of a folded comparison and
+    /// the branch behind it. The one register it is left with moves down a place because the byte
+    /// in front of it went, and the addressing mode stays as it was, so the positions the mode
+    /// names have to come down with the operands. That is the layout's business and the reason it
+    /// is written here is that this is the only form it has to do it for.
+    CmpRm,
     /// The byte a comparison sets, with the comparison gone.
     ///
     /// The other half of [`Form::CmpSet`], and it exists for the mirror of the reason [`Form::Cmp`]
@@ -771,6 +795,9 @@ static TEST: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A comparison that keeps only the flags, which is `TWO_TO_ONE` and `ONE_TO_ONE` with the byte
 // they wrote gone. Both sources stay reads and neither is tied to anything, since there is no
 // destination left for either of them to be destroyed by.
+// `CMP_RI` is what a comparison against memory has as well as one against a constant. Both name
+// one register and take their other side off the instruction, and an address is not an operand
+// here any more than an immediate is.
 static CMP: [OperandDesc; 2] = [OperandDesc::read(GPR), OperandDesc::read(GPR)];
 static CMP_RI: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 // A jump reads nothing and writes nothing. Where it goes is on the block, not in an operand.
@@ -860,9 +887,9 @@ impl Form {
             AluRi | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
-            CmpSetRi => &ONE_TO_ONE,
+            CmpSetRi | CmpSetRm => &ONE_TO_ONE,
             Cmp => &CMP,
-            CmpRi => &CMP_RI,
+            CmpRi | CmpRm => &CMP_RI,
             Set => &ONE_WRITTEN,
             Convert | Search => &ONE_TO_ONE,
             CpuId => &CPU_ID,
@@ -922,6 +949,8 @@ impl Form {
                 | AluRm
                 | AluMr
                 | AluMi
+                | CmpSetRm
+                | CmpRm
                 | Store
                 | LoadVec
                 | StoreVec
@@ -961,6 +990,8 @@ impl Form {
             Load | AluRm
                 | AluMr
                 | AluMi
+                | CmpSetRm
+                | CmpRm
                 | Store
                 | LoadVec
                 | StoreVec
@@ -1256,6 +1287,49 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ae_ri_16", CmpSetRi),
     ("cmp_set_ae_ri_32", CmpSetRi),
     ("cmp_set_ae_ri_64", CmpSetRi),
+    // The same ten conditions with the right hand side read out of memory, which is the
+    // shape `rucc_codegen::combine` writes where the register one of the two sides came out
+    // of a load nothing else wanted.
+    ("cmp_set_e_rm_8", CmpSetRm),
+    ("cmp_set_e_rm_16", CmpSetRm),
+    ("cmp_set_e_rm_32", CmpSetRm),
+    ("cmp_set_e_rm_64", CmpSetRm),
+    ("cmp_set_ne_rm_8", CmpSetRm),
+    ("cmp_set_ne_rm_16", CmpSetRm),
+    ("cmp_set_ne_rm_32", CmpSetRm),
+    ("cmp_set_ne_rm_64", CmpSetRm),
+    ("cmp_set_l_rm_8", CmpSetRm),
+    ("cmp_set_l_rm_16", CmpSetRm),
+    ("cmp_set_l_rm_32", CmpSetRm),
+    ("cmp_set_l_rm_64", CmpSetRm),
+    ("cmp_set_le_rm_8", CmpSetRm),
+    ("cmp_set_le_rm_16", CmpSetRm),
+    ("cmp_set_le_rm_32", CmpSetRm),
+    ("cmp_set_le_rm_64", CmpSetRm),
+    ("cmp_set_g_rm_8", CmpSetRm),
+    ("cmp_set_g_rm_16", CmpSetRm),
+    ("cmp_set_g_rm_32", CmpSetRm),
+    ("cmp_set_g_rm_64", CmpSetRm),
+    ("cmp_set_ge_rm_8", CmpSetRm),
+    ("cmp_set_ge_rm_16", CmpSetRm),
+    ("cmp_set_ge_rm_32", CmpSetRm),
+    ("cmp_set_ge_rm_64", CmpSetRm),
+    ("cmp_set_b_rm_8", CmpSetRm),
+    ("cmp_set_b_rm_16", CmpSetRm),
+    ("cmp_set_b_rm_32", CmpSetRm),
+    ("cmp_set_b_rm_64", CmpSetRm),
+    ("cmp_set_be_rm_8", CmpSetRm),
+    ("cmp_set_be_rm_16", CmpSetRm),
+    ("cmp_set_be_rm_32", CmpSetRm),
+    ("cmp_set_be_rm_64", CmpSetRm),
+    ("cmp_set_a_rm_8", CmpSetRm),
+    ("cmp_set_a_rm_16", CmpSetRm),
+    ("cmp_set_a_rm_32", CmpSetRm),
+    ("cmp_set_a_rm_64", CmpSetRm),
+    ("cmp_set_ae_rm_8", CmpSetRm),
+    ("cmp_set_ae_rm_16", CmpSetRm),
+    ("cmp_set_ae_rm_32", CmpSetRm),
+    ("cmp_set_ae_rm_64", CmpSetRm),
     // The conversions between widths.
     ("movzx_8_16", Convert),
     ("movzx_8_32", Convert),
@@ -1396,6 +1470,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_ri_16", CmpRi),
     ("cmp_ri_32", CmpRi),
     ("cmp_ri_64", CmpRi),
+    // And the same against memory, which is what the layout leaves of a folded comparison
+    // it took the byte off.
+    ("cmp_rm_8", CmpRm),
+    ("cmp_rm_16", CmpRm),
+    ("cmp_rm_32", CmpRm),
+    ("cmp_rm_64", CmpRm),
     // And the other half of the same pair, which is the byte with the comparison gone. There is
     // one per condition and not one per width, because what a `setcc` writes is a byte whatever
     // the comparison in front of it was comparing.
@@ -1743,7 +1823,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 484);
+        assert_eq!(described, 528);
     }
 
     #[test]
@@ -1792,6 +1872,7 @@ mod tests {
                             | Test
                             | Cmp
                             | CmpRi
+                            | CmpRm
                             | Jcc
                             | Jmp
                             | JmpReg

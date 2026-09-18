@@ -200,6 +200,10 @@ mod tests {
         "cmp_ri_16",
         "cmp_ri_32",
         "cmp_ri_64",
+        "cmp_rm_8",
+        "cmp_rm_16",
+        "cmp_rm_32",
+        "cmp_rm_64",
         "jcc_e",
         "jcc_ne",
         "jcc_l",
@@ -541,9 +545,12 @@ mod tests {
     /// at length.
     fn combine() -> Vec<&'static str> {
         let loads = crate::combine::FOLDS.iter().map(|fold| fold.into);
+        // And the instruction a load on the other side comes to, which for most rows is the one
+        // above and for a comparison is the condition the other way round.
+        let swapped = crate::combine::FOLDS.iter().filter_map(|fold| fold.swapped);
         let stores = crate::combine::UPDATES.iter().map(|update| update.into);
         let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
-        loads.chain(stores).chain(constants).collect()
+        loads.chain(swapped).chain(stores).chain(constants).collect()
     }
 
     #[test]
