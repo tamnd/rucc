@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `__SEH__` is defined for `x86_64-windows-gnu`, which is the last predefined macro where this compiler and gcc disagreed on that target. mingw's `setjmp.h` reads it to choose the two argument `_setjmp`, whose second argument is `__builtin_frame_address(0)` and becomes the frame `longjmp` hands to `RtlUnwindEx`, so it has to be the same address the function's own unwind record reports. It is, because the record names the frame pointer with an offset of zero and the prologue leaves that pointer holding the body's stack pointer. The macro was held back until the record existed at all, which was tamnd/rucc#1403. Measured against gcc 13.2 on server3: a program that longjmps out of four frames of recursion back past a `setjmp`, with a variable length array after it, prints the same three answers under wine as the one gcc built, and the call in the object passes `%rbp` where gcc passes `%rbp`. Part of tamnd/rucc#1360.
+
 ## 0.10.60
 
 ### Added
