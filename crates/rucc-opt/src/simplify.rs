@@ -2049,6 +2049,48 @@ mod tests {
         assert_eq!(returned(&func, block), x);
     }
 
+    /// Shifting nothing in any direction, and all ones to the right with the sign bit coming in.
+    /// The count is a parameter here, so nothing at all is known about it and the identity is the
+    /// only thing that could decide these.
+    #[test]
+    fn shifting_nothing_and_shifting_all_ones_with_the_sign() {
+        for bits in [8, 16, 32, 64] {
+            let ty = Type::int(bits);
+            let cases = [
+                (Opcode::Shl, 0_i128, 0_i128),
+                (Opcode::LShr, 0, 0),
+                (Opcode::AShr, 0, 0),
+                (Opcode::AShr, -1, -1),
+            ];
+            for (opcode, from, expected) in cases {
+                let (_, mut func, block) = one_block(ty);
+                let count = func.append_param(block, ty);
+                let mut build = Builder::new(&mut func, block);
+                let value = build.iconst(ty, from);
+                let shifted = build.binary(opcode, value, count, Flags::NONE);
+                build.ret(&[shifted]);
+                assert!(simplify(&mut func), "{opcode:?} of {from} at {bits} bits");
+                let said = number(&func, shifted);
+                assert_eq!(said, expected, "{opcode:?} of {from} at {bits} bits");
+            }
+        }
+    }
+
+    /// All ones shifted right with zeroes coming in is not all ones, and there is no rule saying
+    /// it is. The pair with the arithmetic shift above is the whole of why the sign matters here.
+    #[test]
+    fn all_ones_shifted_right_with_zeroes_coming_in_is_left_alone() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = one_block(i32);
+        let count = func.append_param(block, i32);
+        let mut build = Builder::new(&mut func, block);
+        let ones = build.iconst(i32, -1);
+        let shifted = build.binary(Opcode::LShr, ones, count, Flags::NONE);
+        build.ret(&[shifted]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, shifted).0, Opcode::LShr);
+    }
+
     #[test]
     fn an_instruction_no_rule_is_about_is_left_alone() {
         // Multiplying by three. Two is tier two and is an addition, and one and zero are tier one,

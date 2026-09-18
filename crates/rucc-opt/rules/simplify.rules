@@ -698,6 +698,87 @@
       (spec (= (bvashr x 0) (result))))
 
 
+;; Shifting nothing, and shifting all ones to the right with the sign coming in.
+;;
+;; The twelve above are about the count and these four are about the value. Every bit of zero
+;; shifted any distance in any direction is still zero, and all ones shifted right with the sign bit
+;; coming in is still all ones, so not one of the four has to know what the count is.
+;;
+;; That is also why they are written here rather than left to the range analysis. Document 10's
+;; table answers a shift by walking the counts when there are few enough of them to walk and falling
+;; back on what holds for every count at once when there are not, and the second answer for a left
+;; shift and for a logical shift keeps the count and drops the value, so `0 << x` against an unknown
+;; `x` comes back as everything. The identity holds at every count, and a rule that says so needs
+;; nothing analysed.
+;;
+;; A logical shift right of all ones is not here, because zeroes come in at the top and the answer
+;; is not all ones. A left shift of all ones is not here for the same reason at the other end.
+
+(rule (simplify (shl.i8 (iconst.i8 0) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvshl 0 x) (result))))
+
+(rule (simplify (shl.i16 (iconst.i16 0) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvshl 0 x) (result))))
+
+(rule (simplify (shl.i32 (iconst.i32 0) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvshl 0 x) (result))))
+
+(rule (simplify (shl.i64 (iconst.i64 0) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvshl 0 x) (result))))
+
+(rule (simplify (lshr.i8 (iconst.i8 0) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvlshr 0 x) (result))))
+
+(rule (simplify (lshr.i16 (iconst.i16 0) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvlshr 0 x) (result))))
+
+(rule (simplify (lshr.i32 (iconst.i32 0) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvlshr 0 x) (result))))
+
+(rule (simplify (lshr.i64 (iconst.i64 0) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvlshr 0 x) (result))))
+
+(rule (simplify (ashr.i8 (iconst.i8 0) (value.i8 x)))
+      (iconst.i8 0)
+      (spec (= (bvashr 0 x) (result))))
+
+(rule (simplify (ashr.i16 (iconst.i16 0) (value.i16 x)))
+      (iconst.i16 0)
+      (spec (= (bvashr 0 x) (result))))
+
+(rule (simplify (ashr.i32 (iconst.i32 0) (value.i32 x)))
+      (iconst.i32 0)
+      (spec (= (bvashr 0 x) (result))))
+
+(rule (simplify (ashr.i64 (iconst.i64 0) (value.i64 x)))
+      (iconst.i64 0)
+      (spec (= (bvashr 0 x) (result))))
+
+(rule (simplify (ashr.i8 (iconst.i8 -1) (value.i8 x)))
+      (iconst.i8 -1)
+      (spec (= (bvashr -1 x) (result))))
+
+(rule (simplify (ashr.i16 (iconst.i16 -1) (value.i16 x)))
+      (iconst.i16 -1)
+      (spec (= (bvashr -1 x) (result))))
+
+(rule (simplify (ashr.i32 (iconst.i32 -1) (value.i32 x)))
+      (iconst.i32 -1)
+      (spec (= (bvashr -1 x) (result))))
+
+(rule (simplify (ashr.i64 (iconst.i64 -1) (value.i64 x)))
+      (iconst.i64 -1)
+      (spec (= (bvashr -1 x) (result))))
+
+
 ;; The same three at one bit, which is the width a truth value comes in.
 ;;
 ;; A one bit `and` is a logical and, and the identities are the ones above read as truth rather
