@@ -89,6 +89,10 @@ struct Declared {
     startup: Startup,
     /// How far this declaration said the name reaches outside a shared library.
     visibility: Option<Visibility>,
+    /// Where this declaration wrote `weak`, if it did. The span is kept rather than a flag
+    /// because the attribute is refused on a name with internal linkage and the sentence has to
+    /// point at it.
+    weak: Option<Span>,
     /// The function a `cleanup` attribute on this declaration asks to have called on the way out
     /// of the block the object is in.
     cleanup: Option<DeclId>,
@@ -301,6 +305,10 @@ impl Checker<'_> {
             // no declarator to write an attribute after, so a definition that says anything says
             // it there.
             visibility: self.seen(specs.attrs),
+            // The specifiers only, for the reason the visibility above reads them only. A
+            // definition carrying it is the usual way a program offers a default somebody else
+            // may replace, and the declaration above it is the other way.
+            weak: self.weak_here(self.weakened(specs.attrs), linkage, name),
             // And the specifiers only here as well, which is where a definition carrying one of
             // the two attributes has put it.
             startup: self.startup(specs.attrs, DeclKind::Function),
@@ -602,6 +610,14 @@ impl Checker<'_> {
                 || self.never_returns(item.attrs),
             // Both places, for the reason `retained` above reads both.
             visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
+            // Both places, for the reason `retained` above reads both. The usual place a library
+            // writes it is on the specifiers of a declaration in a header, which is where a hook
+            // nobody has to define is offered.
+            weak: self.weak_here(
+                self.weakened(specs.attrs).or_else(|| self.weakened(item.attrs)),
+                linkage,
+                name,
+            ),
             // Both places, for the reason `retained` above reads both. The kind and the duration
             // go with them because the attribute only means something on an object inside a block
             // and the warning for anything else is given where it was written.
@@ -845,6 +861,26 @@ impl Checker<'_> {
         // A file-scope object with no initializer defines the object only if nothing else in the
         // translation unit does, which is not known here and is what tentative means.
         if self.scopes.at_file_scope() { Definition::Tentative } else { Definition::Defined }
+    }
+
+    /// Whether a `weak` attribute holds up on the name it was written on.
+    ///
+    /// What the attribute asks for is that the linker be allowed to let another object's
+    /// definition of the name win, and a name the linker never sees has nobody to lose to. So it
+    /// is refused on internal linkage, which is where gcc refuses it too, and it comes back off so
+    /// that the rest of the file is read against a name that is only `static`. Every other
+    /// linkage keeps it, including the `None` a block-scope `extern` declaration has, since that
+    /// is a reference to a file-scope name rather than a name of its own.
+    fn weak_here(&mut self, weak: Option<Span>, linkage: Linkage, name: Symbol) -> Option<Span> {
+        let at = weak?;
+        if linkage != Linkage::Internal {
+            return Some(at);
+        }
+        let spelled = self.text(name).to_owned();
+        let what = format!("weak declaration of '{spelled}' must be public");
+        let note = "'static' keeps the name inside this file, so no other object can define it";
+        self.report(Diagnostic::error(what, at).with_code("E0711").note(note, at));
+        None
     }
 
     /// What may and may not carry an initializer, which the storage class decides.
@@ -1114,6 +1150,11 @@ impl Checker<'_> {
             // same grounds it warns about a late `noreturn`: the references above it were
             // already compiled against the answer the first one gave.
             visibility: node.visibility.or(declared.visibility),
+            // One declaration of a name saying it is enough, which is the rule `retained` above
+            // is under and is there for the same reason: a library writes the attribute once, in
+            // the header, and the file that defines the name writes an ordinary definition. gcc
+            // takes the same reading and warns only when a reference was already compiled.
+            weak: node.weak || declared.weak.is_some(),
             // The first one written stands, for the reason the visibility above does: the usual
             // place to write either attribute is a header and the definition below writes nothing,
             // so a later declaration saying nothing must not take the order away, and a later one
@@ -1330,6 +1371,7 @@ impl Checker<'_> {
             gnu_inline: declared.gnu_inline,
             noreturn: declared.noreturn,
             visibility: declared.visibility,
+            weak: declared.weak.is_some(),
             startup: declared.startup,
             init: None,
             cleanup: declared.cleanup,

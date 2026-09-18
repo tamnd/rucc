@@ -53,6 +53,23 @@ pub struct Globals {
     /// because a file says nothing about a variable another file defines beyond the references
     /// that name it, and those are already in the text.
     pub vars: Vec<Variable>,
+    /// Every name a declaration wrote `weak` on and this file does not define, in the order the
+    /// module held them.
+    ///
+    /// Not a definition and not bytes of anything, which is why it is a list of names beside the
+    /// variables rather than an entry among them. What it asks for is that the link be allowed to
+    /// leave the name undefined and hand every reference a zero address, which is how a library
+    /// offers a hook a profiler may fill in: the calls are written under `if (hook)` and the test
+    /// is false when nobody filled it in. Without it the link of a file that declares one fails
+    /// on an undefined symbol, which is what zstd's four tracing hooks do.
+    ///
+    /// Every one of them is here whether or not anything in the file refers to it, which is what
+    /// keeps the listing and the object saying the same thing: both read this list and neither
+    /// works out the answer for itself. gcc writes the directive only for the ones something
+    /// refers to, so a file that declares a hook and never calls it gets one undefined weak symbol
+    /// here that gcc does not put in. A linker has nothing to do about an undefined weak symbol
+    /// nothing refers to, which is why that difference is a difference and not a bug.
+    pub weak: Vec<String>,
 }
 
 /// One global variable, as the pieces of its image and what the linker is told about it.
@@ -116,7 +133,7 @@ impl Globals {
     /// which is what makes a program with a large zeroed array a small file.
     #[must_use]
     pub fn image(&self) -> Data {
-        let mut data = Data::default();
+        let mut data = Data { weak: self.weak.clone(), ..Data::default() };
         for var in &self.vars {
             let mut object = Object {
                 name: var.name.clone(),
@@ -180,6 +197,27 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
             continue;
         }
         out.vars.push(variable(module, names, id, format)?);
+    }
+    // The other half, which is names and no bytes. A declaration is not a variable and has no
+    // image, so it is skipped above and picked up here, and only the weak ones are: an ordinary
+    // undefined name needs nothing said about it, since a reference to one is already an
+    // undefined symbol and a link that cannot resolve it is a link that should fail.
+    //
+    // The functions as well as the objects, and the functions are the ones a program actually
+    // writes: a hook a library offers is a function, and `if (hook)` around the call is the test
+    // that reads the zero address a weak reference gets. Both walks are here rather than one in
+    // each caller, for the reason the walk over the definitions above is one walk.
+    for id in module.funcs() {
+        let func = &module[id];
+        if func.is_declaration() && func.linkage == Linkage::Weak {
+            out.weak.push(names.resolve(func.name).to_owned());
+        }
+    }
+    for id in module.globals() {
+        let global = &module[id];
+        if global.is_declaration() && global.linkage == Linkage::Weak {
+            out.weak.push(names.resolve(global.name).to_owned());
+        }
     }
     Ok(out)
 }
@@ -563,7 +601,7 @@ mod tests {
             globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
         assert_eq!(vars[0].pieces, [Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 }]);
 
-        let data = Globals { vars }.image();
+        let data = Globals { vars, weak: Vec::new() }.image();
         assert_eq!(data.objects[0].bytes, vec![0; 8]);
         assert_eq!(
             data.objects[0].relocs,

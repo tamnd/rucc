@@ -564,10 +564,10 @@ notes = "All four strings are taken and there are three answers, because `intern
 name = "weak"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["linux", "glibc", "musl"]
-tests = []
+tests = ["rucc::a_definition_that_asked_to_lose_is_written_weak_rather_than_global", "rucc::a_hook_nobody_defines_is_declared_weak_rather_than_wanted", "rucc::a_static_name_has_nothing_to_give_way_to_and_is_told_so"]
+notes = "Two things, and which one it is depends on whether this file defines the name. On a definition it says another object's definition beats this one, which is how a library ships a default somebody may replace, and it reaches the listing as `.weak` with a body under it and an object as a weak defined symbol. On a declaration of something this file does not define it says the link may leave the name undefined and hand every reference a zero address, which is how a library offers a hook a profiler may fill in, and it reaches the listing as `.weak` with nothing under it and an object as a weak undefined symbol. It is a fact about the name rather than about one declaration of it, so a header may say it and the definition below need not say it again. It is refused on internal linkage, where gcc refuses it too, since a name the linker never sees has nobody to lose to. One difference from gcc: the directive is written for every name a declaration marked, and gcc writes it only for the ones something in the file refers to, which is one undefined weak symbol more in a file that declares a hook and never calls it and is what keeps the listing and the object reading the same list."
 
 [[feature]]
 name = "alias"

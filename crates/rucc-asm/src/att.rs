@@ -113,6 +113,11 @@ pub fn print(
     for alias in aliases {
         writer.directives.alias(&mut writer.out, alias);
     }
+    // Last, which is where gcc puts them. Each is a name and no bytes, so there is nothing to open
+    // a section for and nothing to close.
+    for name in &globals.weak {
+        writer.directives.absent(&mut writer.out, name);
+    }
     writer.directives.end(&mut writer.out, property);
     Ok(writer.out)
 }
@@ -560,7 +565,7 @@ mod tests {
     /// Those variables, written out for that object format.
     fn data(vars: Vec<Variable>, os: Os) -> String {
         let names = Interner::new();
-        print(&[], &Globals { vars }, &[], &names, &target(os), true, Output::default())
+        print(&[], &Globals { vars, weak: Vec::new() }, &[], &names, &target(os), true, Output::default())
             .expect("a machine with a writer")
     }
 
@@ -569,7 +574,7 @@ mod tests {
         let names = Interner::new();
         let sections =
             Output { sections: Sections { functions: false, data: true }, ..Output::default() };
-        print(&[], &Globals { vars }, &[], &names, &target(os), true, sections)
+        print(&[], &Globals { vars, weak: Vec::new() }, &[], &names, &target(os), true, sections)
             .expect("a machine with a writer")
     }
 
@@ -965,7 +970,7 @@ mod tests {
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
         let text = print(
             &[],
-            &Globals { vars },
+            &Globals { vars, weak: Vec::new() },
             &aliases,
             &names,
             &target(Os::Linux),

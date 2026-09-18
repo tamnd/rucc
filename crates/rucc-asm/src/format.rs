@@ -410,6 +410,21 @@ impl Directives {
         let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
     }
 
+    /// A name this file uses and does not define, which the link may leave undefined.
+    ///
+    /// The same directive a weak definition gets and nothing else, because the difference between
+    /// the two is whether a label follows it: `.weak f` with a body under it is a definition
+    /// another object may beat, and `.weak f` with nothing under it is a reference that may come
+    /// to nothing and whose address is then zero. That is how gas reads it and it is what gcc
+    /// writes, which was measured rather than read off the manual.
+    ///
+    /// After everything else, which is also where gcc writes it. Nothing turns on the position,
+    /// since a directive about a name is not a byte of any section, but a listing somebody
+    /// compares against gcc's is easier to compare when the two put things in the same order.
+    pub fn absent(self, out: &mut String, name: &str) {
+        let _ = writeln!(out, "\t.weak\t{}{name}", self.symbol());
+    }
+
     /// What is said once, after every function.
     ///
     /// `property` is what the file says it was built to have checked, which is written on the one

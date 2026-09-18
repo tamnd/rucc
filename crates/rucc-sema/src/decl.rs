@@ -147,6 +147,24 @@ pub struct Decl {
     /// and keeps the first when a later one disagrees, since the calls above it have already been
     /// compiled against the answer it gave.
     pub visibility: Option<Visibility>,
+    /// Whether `__attribute__((weak))` was written on a declaration of this name.
+    ///
+    /// It asks for two different things depending on whether this file defines the name. On a
+    /// definition it says that another object's definition of the same name wins over this one,
+    /// which is how a library ships a default somebody may replace. On a declaration of something
+    /// this file does not define it says that the link may leave the name undefined rather than
+    /// fail, and the address a reference gets is then zero, which is how a library offers a hook a
+    /// profiler may fill in: the calls are written under `if (hook)` and the test is false when
+    /// nobody filled it in. zstd's four tracing hooks are the second of those and are what made
+    /// this field, since without it the link of thirty of its files fails.
+    ///
+    /// A fact about the name rather than about one declaration of it, like [`Self::retained`], and
+    /// merged the way that one is: one declaration saying it is enough, so a header may say it and
+    /// the definition below may be written as an ordinary definition.
+    ///
+    /// It is refused on a name with internal linkage, since what it asks for is that the linker
+    /// let somebody else win and a `static` name is one the linker never sees.
+    pub weak: bool,
     /// The function `__attribute__((cleanup(f)))` named, which runs on every way out of the block
     /// the object was declared in, and nothing when the attribute was not written.
     ///

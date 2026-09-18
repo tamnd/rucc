@@ -192,6 +192,7 @@ impl Checker<'_> {
                 gnu_inline: false,
                 noreturn: false,
                 visibility: None,
+                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,
