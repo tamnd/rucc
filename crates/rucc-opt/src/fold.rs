@@ -41,6 +41,21 @@
 //! about the environment belongs with the rest of the floating point work rather than in the first
 //! pass.
 //!
+//! Negation is folded, and is inside that boundary rather than an exception to it. 754 says a
+//! negation flips the sign bit and copies every other bit, for every input including a NaN and a
+//! zero, so it is exact, it raises nothing and it never consults the rounding mode: there is no
+//! decision about the environment in it to get wrong. The reason to bother is that C has no
+//! negative floating constant. Every one of them is a unary minus applied to a positive one, so
+//! `-1.0` arrives as an `fneg` of an `fconst`, and without this the back end makes a constant, a
+//! mask and three moves through a general register out of what should be one load. That is every
+//! negative floating literal in every program, and it is issue 1427.
+//!
+//! A bitcast of a constant is folded for the same reason and pays for the same kind of code. It is
+//! the same bits read as another type of the same width, so there is nothing to decide about it
+//! either, and what it unblocks is `fabs` and `copysign` of a constant: neither is a call, the
+//! front end lowers both to a mask over the bits, and without this the mask and the two bitcasts
+//! around it survive to the back end computing a number the compiler already has.
+//!
 //! A conversion from floating point to an integer is folded, and is inside that boundary rather
 //! than an exception to it. C says the conversion discards the fractional part, so the rounding is
 //! the language's rather than the environment's and nothing anybody sets at run time reaches it.
@@ -69,14 +84,14 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, 
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction that became a constant.
-const FOLDED: &str = "integer instruction folded to a constant";
+const FOLDED: &str = "instruction with constant operands folded to a constant";
 
 /// Recorded for an instruction that would have folded if there had been fuel for it.
 ///
 /// Not a missed optimization in the ordinary sense, since the fuel is a person deliberately
 /// stopping the pass. It is here because it is the number a bisection is searching for: the count
 /// of sites past the cut is how far there is left to go.
-const NO_FUEL: &str = "integer instruction not folded, the pass ran out of fuel";
+const NO_FUEL: &str = "instruction not folded, the pass ran out of fuel";
 
 /// The pass. It holds nothing, because folding needs to know nothing beyond the instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +103,7 @@ impl Pass for Fold {
     }
 
     fn describe(&self) -> &'static str {
-        "an integer instruction whose operands are all constants becomes a constant"
+        "an instruction whose operands are all constants becomes a constant"
     }
 
     fn preserves(&self) -> Preserved {
@@ -118,11 +133,14 @@ impl Pass for Fold {
                 let ty = func[result_of(func, inst)].ty;
                 let at = func.add_imm(folded);
                 let data = &mut func[inst];
-                data.opcode = Opcode::IConst;
+                // Which constant instruction holds the answer is the result type's question and
+                // not the folded instruction's. An `fneg` and a bitcast out of an integer both
+                // answer in a floating point type and the rest of what folds here answers in an
+                // integer one, and an immediate is the same bits either way.
+                data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
                 data.flags = Flags::NONE;
                 data.args = rucc_ir::ValueList::EMPTY;
                 data.extra = Extra::Imm(at);
-                debug_assert!(ty.is_int(), "only an integer instruction folds");
                 stats.optimized(FOLDED);
             }
         }
@@ -146,12 +164,24 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
     }
     let result = data.results().next()?;
     let ty = func[result].ty;
-    // A vector constant is a `splat` rather than an `iconst`, so a vector fold would have to
-    // build a different instruction and would have to be right about the lane count as well.
-    if !ty.is_int() || !ty.is_scalar() {
+    // A vector constant is a `splat` rather than an `iconst` or an `fconst`, so a vector fold
+    // would have to build a different instruction and would have to be right about the lane
+    // count as well.
+    if !ty.is_scalar() {
         return None;
     }
     let args = &func[data.args];
+    // The two that are the bits and nothing else, and the only two here whose answer can have a
+    // floating point type. They are above the gate below rather than inside the match under it
+    // because that gate is what keeps the rest of this file about integers.
+    match data.opcode {
+        Opcode::FNeg => return negated(func, *args.first()?, ty),
+        Opcode::Bitcast => return reinterpreted(func, *args.first()?, ty),
+        _ => {}
+    }
+    if !ty.is_int() {
+        return None;
+    }
     match data.opcode {
         Opcode::Trunc | Opcode::SExt | Opcode::ZExt => {
             let (value, from) = constant(func, *args.first()?)?;
@@ -183,6 +213,65 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         }
         _ => None,
     }
+}
+
+/// The bits a value holds, if it is a constant of either kind.
+///
+/// Both kinds, because the two rewrites above this are about the bits and do not care which of
+/// them they were written as. A constant of either is one instruction with one immediate, and an
+/// immediate is the bits.
+fn bits_of(func: &Func, value: Value) -> Option<u128> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::IConst | Opcode::FConst) {
+        return None;
+    }
+    let Extra::Imm(at) = data.extra else { return None };
+    Some(func[at].bits())
+}
+
+/// A negation of a floating point constant, which is that constant with its sign bit flipped.
+///
+/// This is the one piece of floating point arithmetic that folds, and it is inside the boundary
+/// the file header draws rather than an exception to it. Negation is not arithmetic in the sense
+/// that boundary is about: 754 says it flips the sign bit and copies every other bit, for every
+/// input including a NaN and a zero, so it is exact, it raises nothing and it never consults the
+/// rounding mode. There is no decision about the environment to get wrong.
+///
+/// The reason to bother is that C has no negative floating constant. Every one of them is a unary
+/// minus applied to a positive one, so `-1.0` arrives here as an `fneg` of an `fconst` and stays
+/// that way, and what the back end makes of it is a constant, a mask and three moves through a
+/// general register where one load would do. That is every negative floating literal in every
+/// program, and it is issue 1427.
+///
+/// The sign bit is the top bit of the value and not of the object it is stored in. An `f80` is
+/// eighty bits of value in a hundred and twenty eight of storage, and [`Type::bits`] answers
+/// eighty for it, which is the bit this has to flip.
+fn negated(func: &Func, operand: Value, ty: Type) -> Option<Imm> {
+    if !ty.is_float() {
+        return None;
+    }
+    let bits = bits_of(func, operand)?;
+    Some(Imm::from_bits(bits ^ 1u128 << (ty.bits() - 1)))
+}
+
+/// A bitcast of a constant, which is the same bits read as another type of the same width.
+///
+/// It folds in both directions, and the one that pays is out of an integer, because that is what
+/// `fabs` and `copysign` leave behind. Neither is a call: the front end lowers both to a mask over
+/// the bits, so `fabs (1.0)` is a bitcast of an `and` of a bitcast, and without this the three
+/// survive to the back end and compute a number the compiler already has.
+///
+/// The widths are checked rather than assumed. The verifier requires them to match and a fold that
+/// quietly widened or narrowed a constant would be a wrong answer rather than a refused one, which
+/// is not a thing to leave to another pass being right.
+fn reinterpreted(func: &Func, operand: Value, ty: Type) -> Option<Imm> {
+    let from = func[operand].ty;
+    if !from.is_scalar() || from.bits() != ty.bits() {
+        return None;
+    }
+    let bits = bits_of(func, operand)?;
+    Some(Imm::from_bits(bits))
 }
 
 /// The constant this value is, with the type it has, if it is one.
@@ -419,6 +508,114 @@ mod tests {
         }
         let Extra::Imm(at) = func[inst].extra else { return None };
         Some(func[at].signed(ty))
+    }
+
+    /// The bits a value now holds, or `None` if it is not a floating point constant.
+    fn float_bits(func: &Func, value: Value) -> Option<u128> {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { return None };
+        if func[inst].opcode != Opcode::FConst {
+            return None;
+        }
+        let Extra::Imm(at) = func[inst].extra else { return None };
+        Some(func[at].bits())
+    }
+
+    /// C has no negative floating constant, so `-1.0` is a unary minus on a positive one and
+    /// arrives here as two instructions. This is the fold that makes it one.
+    #[test]
+    fn a_negated_floating_constant_becomes_a_constant() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let one = number(&mut build, "1.0", ty);
+        let minus = build.unary(Opcode::FNeg, one, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(0xbff0_0000_0000_0000));
+    }
+
+    /// Negation is the sign bit and nothing else, which is what lets it fold at all, and a
+    /// negative zero is where that shows: the value is equal to a positive zero and the bits are
+    /// not, so anything that went through a comparison would give the wrong answer here.
+    #[test]
+    fn a_negated_zero_keeps_its_sign_bit() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let zero = number(&mut build, "0.0", ty);
+        let minus = build.unary(Opcode::FNeg, zero, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(1 << 63));
+    }
+
+    /// The same for a NaN, whose payload goes through untouched. 754 says negation copies every
+    /// bit but the sign for every input, and a NaN is the input where a compiler that quietly did
+    /// arithmetic instead would be caught.
+    #[test]
+    fn a_negated_nan_keeps_its_payload() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let nan = build.fconst(ty, 0x7ff8_0000_dead_beef);
+        let minus = build.unary(Opcode::FNeg, nan, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(0xfff8_0000_dead_beef));
+    }
+
+    /// The sign bit of an `f80` is the top bit of the eighty the value has and not of the hundred
+    /// and twenty eight the object is stored in, which is the one place this could be written
+    /// wrong and give a number nobody asked for.
+    #[test]
+    fn the_sign_bit_of_an_x87_value_is_the_top_bit_of_its_width() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F80);
+        let mut build = Builder::new(&mut func, block);
+        let one = number(&mut build, "1.0", ty);
+        let minus = build.unary(Opcode::FNeg, one, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        let bits = float_bits(&func, minus).expect("a constant");
+        assert_eq!(bits >> 79 & 1, 1, "the sign bit is set");
+        assert_eq!(bits >> 80, 0, "nothing above the value is touched");
+    }
+
+    /// A bitcast of a constant is the same bits read as another type, which is what `fabs` of a
+    /// constant needs: the front end lowers it to a mask over the bits rather than to a call, so
+    /// folding it away is three instructions rather than one.
+    #[test]
+    fn a_bitcast_of_a_constant_is_the_same_bits() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let bits = Type::int(64);
+        let mut build = Builder::new(&mut func, block);
+        let value = number(&mut build, "-3.5", ty);
+        let number = build.unary(Opcode::Bitcast, value, bits);
+        let mask = build.iconst(bits, i128::from(i64::MAX));
+        let cleared = build.binary(Opcode::And, number, mask, Flags::NONE);
+        let back = build.unary(Opcode::Bitcast, cleared, ty);
+        build.ret(&[back]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, back), Some(0x400c_0000_0000_0000));
+    }
+
+    /// A bitcast whose operand is not a constant is left alone, which is the case nearly every
+    /// bitcast in a real function is.
+    #[test]
+    fn a_bitcast_of_something_that_is_not_a_constant_is_left_alone() {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let ty = Type::float(Float::F64);
+        let signature = Signature::new().with_params(&[ty]).with_returns(&[Type::int(64)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let number = build.unary(Opcode::Bitcast, x, Type::int(64));
+        build.ret(&[number]);
+        assert!(!fold(&mut func));
+        assert_eq!(value_of(&func, number, Type::int(64)), None);
     }
 
     #[test]

@@ -1562,7 +1562,9 @@ mod tests {
         let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
         let text = crate::optinfo::render("t.c", &report, &names, crate::Wants::all());
         assert!(
-            text.contains("t.c: f: optimized: integer instruction folded to a constant (1) [fold]"),
+            text.contains(
+                "t.c: f: optimized: instruction with constant operands folded to a constant (1) [fold]"
+            ),
             "{text}"
         );
         assert!(
