@@ -92,6 +92,44 @@ use crate::types::{self, TypeId};
 /// a constant offset into a known object are usually provable and its liveness usually is not. One
 /// fused check would have to survive whenever either half did.
 ///
+/// # The capability may permit and may not refuse
+///
+/// The capability is asked first and the planes are asked only if it did not permit, which is the
+/// whole of box 6 of tamnd/rucc#1241. A capability's two numbers are the instance's base and extent,
+/// so a permit is a subtraction and a compare against two words the caller already has in hand, and
+/// nothing is read from memory at all. The plane path is a region lookup and two plane loads for the
+/// same answer, and it is the path this check has always taken. It costs nothing to ask the
+/// capability first, because the lifetime check standing beside this one is loading the same
+/// capability for the version compare anyway, which is the sense in which that issue says this is
+/// where the version compare pays for itself.
+///
+/// A permit is safe to believe, because a capability's range was taken off the very thing the plane
+/// path reads. [`crate::recover::made`] takes the base and extent out of the instance's own header,
+/// and [`crate::recover::recover`] takes them off the run of the lifetime plane that owns the
+/// address, which is the same run the two plane loads below compare the ends of. A capability over a
+/// mapping covers the region, which is what `region.holds` asks, and the one that covers everything
+/// is what an address no region covers already gets.
+///
+/// A refusal is not, and the reason is worth writing down rather than discovering twice. A
+/// capability can be narrower than the access it is standing next to without the access being wrong.
+/// It can have been recovered at a boundary, where the run of equal versions the walk found is the
+/// storage around the address rather than the object the pointer was made for. It can have been
+/// loaded out of an aux slot that was never written, where the same walk answers the same way. In
+/// all of those the capability under-describes a correct access, and the planes, which are what this
+/// check has always asked, say so. The SQLite amalgamation has one such site: `whereLoopInsert`
+/// reads a byte ninety nine into a `WhereLoop`, and the capability beside that access covers ninety
+/// six bytes starting eight bytes below the pointer, so it does not reach. The access is correct and
+/// believing the capability aborts a working program on its second statement. Why that capability
+/// describes what it describes is tamnd/rucc#1338. So the capability is a fast yes and never a no,
+/// and the planes keep the whole of the refusing. What it costs is that a capability narrower than
+/// the truth pays for both paths, which is a site that was paying for one of them before.
+///
+/// This is also why a bottom capability and a null one need no case of their own. Neither covers
+/// anything, so neither permits anything, and both fall through to the planes the way they always
+/// did. That matters most for bottom, which says nobody owns the address: that is [`live`]'s
+/// refusal and not this one's, and calling it out of bounds would put the wrong sentence in the
+/// report, since storage that has been freed is inside the instance it used to be inside.
+///
 /// # Panics
 ///
 /// When the access is refused and [`crate::posture`] says to stop, which is the default. Under the
@@ -101,11 +139,13 @@ use crate::types::{self, TypeId};
 /// # Safety
 ///
 /// `descriptor` is the address of a descriptor the same build wrote into `.rucc_safety_desc`, or
-/// null. It is only read when the check refuses.
+/// null. It is only read when the check refuses. `capability` is null or the address of a capability
+/// the same build reserved a slot for and filled, exactly as [`live`] takes one.
 pub unsafe fn bounds(
     addr: *const c_void,
     size: usize,
     align: usize,
+    capability: *const Cap,
     descriptor: *const Descriptor,
 ) {
     let addr = addr as usize;
@@ -118,6 +158,10 @@ pub unsafe fn bounds(
         // One report per access. Under the abort posture there is no second one to consider, and
         // under the postures that carry on a report that the same access is also out of bounds
         // would say the same J1 about the same line twice and count twice in the tally.
+        return;
+    }
+    // SAFETY: this function's own contract about `capability`, passed straight on.
+    if unsafe { permits(capability, addr, size) } {
         return;
     }
     let Some(region) = alloc::covering(addr) else { return };
@@ -838,6 +882,32 @@ fn owner(region: &Region, addr: usize) -> Version {
     unsafe { region.plane.version(addr) }
 }
 
+/// Whether the capability covers the whole of the access on its own.
+///
+/// Only ever a reason to permit, never a reason to refuse, for the reasons [`bounds`] sets out. A
+/// null capability is a check the compiler found none for and covers nothing, and the bottom one
+/// names no instance and covers nothing either, so neither needs a case here: both answer no and
+/// both send the caller to the planes, which is where they were being sent before.
+///
+/// A recovered capability answers yes here, which is the one place a recovered capability is
+/// believed and is worth saying why. What recovery cannot work out is which instance a pointer was
+/// made for, and the range it hands back is the run of the lifetime plane the address is in now,
+/// which is what the plane path computes from the same plane. So a yes here is the plane's own yes
+/// arrived at earlier. Whether the instance is the right one is [`live`]'s question, it is still
+/// asked, and [`stale`] is where the restraint about recovery lives.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn permits(capability: *const Cap, addr: usize, size: usize) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    held.covers(addr as u64, size as u64)
+}
+
 /// Whether the capability names an instance other than the one that owns the address now.
 ///
 /// False for every capability that names no instance, so a build where the runtime could not work
@@ -908,15 +978,25 @@ pub mod exports {
     ///
     /// Called from generated code with the address of a descriptor the same build wrote into
     /// `.rucc_safety_desc`. `addr` is whatever the program computed and is never read through.
+    /// `capability` is null or the address of a capability the same build reserved a slot for and
+    /// filled, as [`__rucc_check_live`] takes one.
+    ///
+    /// The capability comes fourth rather than first, which is the other order from the lifetime
+    /// check beside it. The three in front of it are the ones the access itself is about and they
+    /// were here first, so leaving them where they are keeps them in the registers the caller would
+    /// have put them in anyway, and the descriptor stays last for the reason this module says it
+    /// does. The lifetime check has the capability first because it went in with the capability and
+    /// has nothing to be moved out of the way.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_check_bounds(
         addr: *const c_void,
         size: usize,
         align: usize,
+        capability: *const Cap,
         descriptor: *const Descriptor,
     ) {
         // SAFETY: this wrapper's contract is the one it calls, passed straight on.
-        unsafe { super::bounds(addr, size, align, descriptor) };
+        unsafe { super::bounds(addr, size, align, capability, descriptor) };
     }
 
     /// # Safety
@@ -1115,7 +1195,7 @@ mod tests {
     /// once rather than at every call site keeps the tests about which accesses are refused.
     fn bounds(addr: *const c_void, size: usize) {
         // SAFETY: the address of a `static`, which is what a descriptor is at run time too.
-        unsafe { super::bounds(addr, size, 1, &raw const ROW) }
+        unsafe { super::bounds(addr, size, 1, core::ptr::null(), &raw const ROW) }
     }
 
     /// The bounds check over an access that is allowed to assume an alignment.
@@ -1124,7 +1204,17 @@ mod tests {
     /// says nothing about alignment, which is what passing one means.
     fn aligned(addr: *const c_void, size: usize, align: usize) {
         // SAFETY: as above.
-        unsafe { super::bounds(addr, size, align, &raw const ROW) }
+        unsafe { super::bounds(addr, size, align, core::ptr::null(), &raw const ROW) }
+    }
+
+    /// The bounds check over an access that goes through a capability.
+    ///
+    /// Which is the path generated code takes wherever the capability survived to the access, and
+    /// [`bounds`] is the one it takes where it did not. The alignment is one byte so that these say
+    /// nothing about alignment either.
+    fn within(addr: *const c_void, size: usize, capability: &Cap) {
+        // SAFETY: as above, and the capability outlives the call.
+        unsafe { super::bounds(addr, size, 1, capability, &raw const ROW) }
     }
 
     /// The liveness check, the same way, with no capability to compare against.
@@ -1797,6 +1887,55 @@ mod tests {
         for offset in [0, 8, 32, 63] {
             assert!(!refused(|| held(at(ptr, offset), &held_for)), "offset {offset}");
         }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_capability_that_covers_the_access_permits_it_on_its_own() {
+        let _turn = turn();
+        // The fast path. The two numbers the capability carries are the instance's base and
+        // extent, so every access inside the block is permitted by a subtraction and a compare
+        // with no plane read at all, and the answers are the ones the plane would have given,
+        // which is what makes this a shortcut rather than a second check.
+        let ptr = alloc(64);
+        let made = crate::recover::made(ptr);
+        for offset in [0, 8, 32, 60] {
+            assert!(!refused(|| within(at(ptr, offset), 4, &made)), "offset {offset}");
+        }
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_capability_narrower_than_the_access_leaves_the_planes_to_answer() {
+        let _turn = turn();
+        // The restraint the whole design rests on. A capability that does not cover the access is
+        // not evidence that the access is wrong: it can be narrower than the object, or recovered
+        // from a plane walk that found the storage around the pointer rather than the object the
+        // pointer was made for. So it sends the question to the planes rather than refusing, and
+        // the planes permit a read that is inside the block whatever the capability said.
+        let ptr = alloc(64);
+        let member = crate::recover::made(ptr).narrowed(8, 16);
+        assert!(!refused(|| within(at(ptr, 8), 16, &member)));
+        assert!(!refused(|| within(at(ptr, 40), 4, &member)));
+        // What the planes refuse they still refuse, which is the access that leaves the block.
+        assert!(refused(|| within(at(ptr, 60), 8, &member)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_capability_that_covers_nothing_leaves_the_planes_to_answer_too() {
+        let _turn = turn();
+        // Bottom and null cover nothing, so they permit nothing and need no case of their own.
+        // Bottom matters most: it says nobody owns the address, which is the lifetime check's
+        // refusal and not this one's, and refusing here would put the wrong sentence in the report.
+        let ptr = alloc(64);
+        assert!(!refused(|| within(at(ptr, 60), 4, &Cap::BOTTOM)));
+        assert!(refused(|| within(at(ptr, 60), 8, &Cap::BOTTOM)));
+        assert!(!refused(|| bounds(at(ptr, 60), 4)));
+        assert!(refused(|| bounds(at(ptr, 60), 8)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
