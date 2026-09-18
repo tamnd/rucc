@@ -2514,6 +2514,54 @@ decl #0 x : int object external static defined
         assert!(!text.contains("cvttsd2si"), "{text}");
     }
 
+    /// A slot of a `const` table read at an index the optimizer works out, which is what
+    /// `rucc_opt::image` is for.
+    ///
+    /// The subscript is not a constant expression and the front end does not fold it. What it
+    /// writes is the index sign extended, multiplied by four and added to the address of the
+    /// table, so the offset only exists once `fold` has run and the load only folds after that.
+    /// What came out before was a `movl t+8(%rip), %eax`.
+    #[test]
+    fn a_slot_of_a_read_only_table_is_the_value_the_table_holds() {
+        let text =
+            optimized("static const int t[4] = {10, 20, 30, 40};\nint f(void) { return t[2]; }\n");
+        assert!(text.contains("movl\t$30, %eax"), "{text}");
+        assert!(!text.contains("t(%rip)"), "{text}");
+    }
+
+    /// A byte of a string literal, which is the same fold reading literal bytes rather than the
+    /// scalars an `int` array is written as.
+    #[test]
+    fn a_byte_of_a_read_only_string_is_the_byte_the_string_spells() {
+        let text = optimized("static const char s[] = \"abc\";\nint f(void) { return s[1]; }\n");
+        assert!(text.contains("movl\t$98, %eax"), "{text}");
+    }
+
+    /// A global something can write to, which is the condition the fold turns on and therefore
+    /// the one worth a test of its own. Nothing here is `const`, so the store in `g` could be the
+    /// store that ran last and the load has to happen.
+    #[test]
+    fn a_table_that_is_not_read_only_keeps_its_load() {
+        let text = optimized(
+            "static int t[4] = {10, 20, 30, 40};\nvoid g(int x) { t[2] = x; }\nint f(void) { return t[2]; }\n",
+        );
+        assert!(!text.contains("movl\t$30, %eax"), "{text}");
+    }
+
+    /// `gcc.c-torture/execute/20030216-1.c`, which is the program the whole of this is for.
+    ///
+    /// It calls a function nothing defines, guarded by a condition the optimizer is meant to prove
+    /// false, so the program links exactly when the call has been folded away. Getting there is
+    /// three folds standing on each other: the load of the `const double`, the conversion of it to
+    /// an `int`, and the comparison against one.
+    #[test]
+    fn a_call_guarded_by_a_condition_a_read_only_object_settles_is_not_emitted() {
+        let text = optimized(
+            "void link_error(void);\nconst double one = 1.0;\nint main(void) { if ((int) one != 1) link_error(); return 0; }\n",
+        );
+        assert!(!text.contains("call\tlink_error"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {

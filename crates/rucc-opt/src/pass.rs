@@ -77,6 +77,7 @@ pub trait Pass: Sync {
 pub static PASSES: &[&dyn Pass] = &[
     &crate::expect::Expect,
     &crate::fold::Fold,
+    &crate::image::Image,
     &crate::simplify::Simplify,
     &crate::narrow::Narrow,
     &crate::dce::Dce,

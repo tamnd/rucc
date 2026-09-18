@@ -32,13 +32,15 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, nofree, params, pass,
+    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, nofree, params,
+    pass,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -84,6 +86,20 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// that order because folding and the peephole are what make most of the dead code there is to
 /// eliminate, because a constant a fold produced is a branch condition the control flow pass can
 /// then read, and because the comparison that branch was on is dead once it has.
+///
+/// `image` has a `fold` on each side of it, which is the other place in this list where a pass is
+/// named twice in a row, and both of them are the position rather than the pass. What it reads is
+/// a load from a `const` global at a constant byte offset, and until something has folded the
+/// address there is no constant byte offset: a subscript arrives from the front end as the index
+/// sign extended and multiplied by the element size, so without the `fold` ahead of it every array
+/// and every string in the program is a load it cannot answer. The `fold` behind it is the mirror
+/// of that. What `image` writes is a constant where a load stood, and what stands on top of it is
+/// whatever the program did with the value it read, so a `const double` converted to an `int` and
+/// compared against one is three folds in a row and only the first of them is this pass. Nothing
+/// later in the list would do it in time: the branch passes read the condition, and a condition
+/// still spelled as a conversion of a constant is a branch they leave standing. Running `image`
+/// before the pipeline rather than inside it is the alternative that does not work, and
+/// `crate::image` says at length why.
 ///
 /// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
 /// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
@@ -194,6 +210,8 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 const O1: &[&str] = &[
     "expect",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -252,6 +270,8 @@ const O1: &[&str] = &[
 const O2: &[&str] = &[
     "expect",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -286,6 +306,8 @@ const O2: &[&str] = &[
 /// and distribution where the dependence analysis is confident, and function specialization.
 const O3: &[&str] = &[
     "expect",
+    "fold",
+    "image",
     "fold",
     "simplify",
     "narrow",
@@ -342,6 +364,8 @@ const O3: &[&str] = &[
 const OS: &[&str] = &[
     "expect",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "narrow",
     "simplify",
@@ -372,6 +396,8 @@ const OS: &[&str] = &[
 /// speed reason.
 const OZ: &[&str] = &[
     "expect",
+    "fold",
+    "image",
     "fold",
     "simplify",
     "narrow",
@@ -677,6 +703,15 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
         params::annotate(module, opts.interposition);
         heap::annotate(module, names);
     }
+    // In the same place and for the same reason, except that this one is read by a pass rather
+    // than by a summary, so it is handed over on the analysis cache instead of written onto the
+    // module. Only when the run has that pass in it, since it is a copy of the module's read only
+    // data and nothing else would ever look at it.
+    let images = if passes.iter().any(|pass| pass.name() == image::NAME) {
+        Arc::new(image::Images::of(module, opts.interposition))
+    } else {
+        Arc::default()
+    };
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -704,7 +739,9 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 // looked.
                 continue;
             }
-            let an = cached.entry(id).or_insert_with(|| Analyses::new(machine));
+            let an = cached
+                .entry(id)
+                .or_insert_with(|| Analyses::new(machine).reading(Arc::clone(&images)));
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.
@@ -1283,7 +1320,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("4: narrow, "), "{text}");
+        assert!(text.contains("6: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
@@ -1416,10 +1453,11 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &names, &opts);
-        // The level folds twice, once at the top and once after the loop pipeline, and what a
-        // dump request names is a pass rather than a position, so both runs are written out. The
-        // side is what this is about: not one of the two is a `before`.
-        assert_eq!(report.dumps.len(), 2, "both runs of the pass, one dump each");
+        // The level folds three times, twice at the top on either side of `image` and once after
+        // the loop pipeline, and what a dump request names is a pass rather than a position, so
+        // every run is written out. The side is what this is about: not one of the three is a
+        // `before`.
+        assert_eq!(report.dumps.len(), 3, "every run of the pass, one dump each");
         assert!(
             report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
             "{:?}",

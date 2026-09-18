@@ -232,7 +232,11 @@ pub(crate) fn extents(module: &Module, pic: Pic) -> HashMap<Symbol, u64> {
 ///
 /// The four conditions of the module comment's "which globals are believed", in the order it
 /// gives them.
-fn vouched(global: &Global, pic: Pic) -> bool {
+///
+/// Shared with [`crate::image`], which asks the same question about the same globals and then one
+/// more of its own. Two answers about which definition the program will run would be two rules
+/// about interposition, and there is one rule.
+pub(crate) fn vouched(global: &Global, pic: Pic) -> bool {
     !global.is_declaration()
         && global.size != 0
         && global.tls.is_none()
