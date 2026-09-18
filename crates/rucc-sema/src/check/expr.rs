@@ -1873,7 +1873,7 @@ impl Checker<'_> {
             pointee(&self.types, member).expect("a pointer"),
             pointee(&self.types, source).expect("a pointer"),
         );
-        let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
+        let (a, b) = (self.types.unqualified_object(a), self.types.unqualified_object(b));
         is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b)
     }
 
@@ -1890,8 +1890,12 @@ impl Checker<'_> {
             pointee(&self.types, source).expect("a pointer"),
         );
         // The qualifiers are checked before the types are, because dropping a `const` is worth
-        // saying even when the two point at the same thing, which is the common case.
-        let (target_quals, source_quals) = (self.types.quals(a), self.types.quals(b));
+        // saying even when the two point at the same thing, which is the common case. Asked of the
+        // object rather than of the node, so that a pointer to an array answers with the element's
+        // qualifiers: that is where 6.7.3p10 puts them, and a `const int (*)[4]` is a pointer to
+        // something nobody may write to however little the array node says.
+        let (target_quals, source_quals) =
+            (self.types.object_quals(a), self.types.object_quals(b));
         for (qual, name) in [
             (Qualifiers::CONST, "const"),
             (Qualifiers::VOLATILE, "volatile"),
@@ -1916,7 +1920,7 @@ impl Checker<'_> {
                 return;
             }
         }
-        let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
+        let (a, b) = (self.types.unqualified_object(a), self.types.unqualified_object(b));
         // `void *` converts both ways without a word, which is what makes `malloc` usable
         // without a cast and what a compiler that warns here gets wrong.
         if is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b) {

@@ -46,6 +46,8 @@ C23 changed this area meaningfully: struct and union types with the same tag and
 
 The composite type construction is used at redeclaration and at conditional-expression type computation, and getting it wrong produces either spurious errors on valid code or silently wrong ABI decisions.
 
+One rule of the assignment between two pointers does not read compatibility as written, and the exception is an array. 6.7.3p10 puts the qualifiers of an array declaration on the element rather than on the array, so `const int [4]` is an unqualified array of `const int`, and compatibility reads the element types and finds one `const` and one not. Taken literally that makes `const int (*)[4] = p` an incompatible pointer rather than a pointer gaining a qualifier, which is a diagnostic on code every compiler accepts and which a real library writes. So the rule here is that the qualifiers of an array are the element's for both halves of that check: they come off both sides before the comparison, and they are what the check for a discarded qualifier asks about. That is what C23 says outright and what gcc and clang did before it, where the only difference from an ordinary pointer target is the name of the warning when a qualifier is dropped.
+
 ## 7.4 Initialization
 
 Initializer processing is a small, tedious, high-bug-density algorithm and it gets its own module with its own test suite.
