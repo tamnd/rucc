@@ -419,8 +419,20 @@ fn a_label_and_a_jump_back_to_it_are_written_as_a_loop() {
     assert!(body.contains("leaq\t8("), "the step along a limb never reached the listing:\n{body}");
     let Some(at) = body.find("\tjb\t") else { panic!("the carry never became a jump:\n{body}") };
     let to = body[at + 4..].lines().next().expect("a jump names where it goes").trim();
+    // The arm the carry takes is a critical edge, so the pass that splits those stands a block of its
+    // own on it and the jump arrives there rather than at the top of the loop. That block holds the
+    // moves the arm turns into, of which there are none here, and the jump on to where the template
+    // said, so the loop is one hop further round than the template wrote it.
+    let to = landing(&body, to).unwrap_or(to);
     let back = body[..at].contains(&format!("\n{to}:"));
     assert!(back, "the jump goes to {to}, which is not a place above it:\n{body}");
+}
+
+/// Where a block that holds nothing but a jump sends whatever arrived at it.
+fn landing<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let at = body.find(&format!("\n{label}:\n"))?;
+    let rest = body[at + label.len() + 3..].trim_start_matches(['\t', ' ']);
+    rest.strip_prefix("jmp")?.lines().next().map(str::trim)
 }
 
 #[test]
