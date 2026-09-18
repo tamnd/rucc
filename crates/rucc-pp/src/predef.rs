@@ -874,14 +874,7 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
 /// Each of these says how many value bits and sign bits the type has, which is not the same as
 /// how many bits it occupies. They agree for every type on every target here, and the day one of
 /// them does not, this is the family that has to say the smaller number.
-fn widths(
-    d: &mut Defs,
-    target: &TargetInfo,
-    wchar: &Wchar,
-    wint: &Wint,
-    fast16: u32,
-    fast32: u32,
-) {
+fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast16: u32, fast32: u32) {
     let pointer = target.pointer_width;
     d.set("__SCHAR_WIDTH__", "8");
     d.set("__SHRT_WIDTH__", "16");
@@ -1856,10 +1849,9 @@ mod tests {
         // declaration that quietly is not there: `winuser.h` guards `EndTask` with `#ifdef
         // WINNT` and `rpcdcep.h` guards six `I_Rpc` declarations with `#ifndef WINNT`.
         let windows = set_for("x86_64-pc-windows-gnu");
-        for name in [
-            "_WIN32", "__WIN32", "__WIN32__", "__WINNT", "__WINNT__", "__MINGW32__", "_WIN64",
-            "__WIN64", "__WIN64__", "__MINGW64__", "__MSVCRT__", "WIN32", "WIN64", "WINNT",
-        ] {
+        let every = "_WIN32 __WIN32 __WIN32__ __WINNT __WINNT__ __MINGW32__ \
+                     _WIN64 __WIN64 __WIN64__ __MINGW64__ __MSVCRT__ WIN32 WIN64 WINNT";
+        for name in every.split_whitespace() {
             assert!(has(&windows, &format!("#define {name} 1")), "no {name}");
         }
         assert!(has(&windows, "#define _INTEGRAL_MAX_BITS 64"));
