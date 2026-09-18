@@ -227,7 +227,8 @@
 //!
 //! The claim to be made is that a bounds fact may cross a call when every access that then uses it
 //! is guarded by a lifetime check that refuses once the instance has changed. Three things have to
-//! hold for that and one of them does not.
+//! hold for that. The first two do since the runtime started reading the version a recovery found
+//! and started moving the aux with the bytes at a copy, and the third is what the box is waiting on.
 //!
 //! The first holds. `rucc_safety::check` emits the two checks as a pair off one capability, so the
 //! only question is whether this pass took the lifetime half out again, and there are five ways it
@@ -240,17 +241,18 @@
 //! widened, so it is those two again. On the far side of a call the lifetime check is therefore
 //! either still standing or about an object no callee can end.
 //!
-//! The second does not hold. A lifetime check that is still standing refuses a changed instance
-//! only when the capability it reads names one, and `rucc_safe_rt::check`'s `stale` takes the
-//! weaker reading for a bottom capability and for a recovered one, because a recovery reads the
-//! plane at the address and that is an answer about the address rather than about the pointer. A
-//! `cap_of` lowers to `__rucc_cap_recover` for every pointer that did not come straight out of an
-//! allocator, so the pointers this would win the most on, which are the ones a function was handed
-//! and the ones it loaded out of memory, are exactly the pointers whose capability keeps the weaker
-//! reading. Turning the strictness off today would not trade a rate for a gate, it would trade a
-//! rate for nothing. The second box of tamnd/rucc#1241 is what this waits on, which is `cap_of`
-//! lowering to something that names an instance, and not the version compare, which landed with the
-//! fourth box and is not the part that was missing.
+//! The second holds and did not when this section was first written. A lifetime check that is still
+//! standing refuses a changed instance only when the version the capability carries is about the
+//! pointer the access went through, and `rucc_safe_rt::check`'s `stale` used to take the weaker
+//! reading for every recovered capability, which is every pointer a `cap_of` could not trace back to
+//! an allocator call. A recovery that walked the planes answers now, so a pointer a function was
+//! handed is covered. A pointer it loaded out of memory is covered too, and that took a second
+//! thing: the capability for one of those comes out of the aux slot beside the word, a slot holds a
+//! displacement from the pointer it was written beside rather than an address, and a `memcpy` used
+//! to move the word and leave the slot. `rucc_safe_rt::check::relocate` moves the aux across at
+//! every copy a wrapper interposes, which is what tamnd/rucc#1148 wanted. What is left uncovered is
+//! a pointer stored by code this compiler did not build, and an object a foreign writer has touched
+//! is the case `rucc_safe_rt::layout::Meta::HANDED` already stands apart.
 //!
 //! The third is a hazard the relaxation would introduce rather than one it inherits, and it is
 //! written down here so that whoever comes back to this does not have to find it twice. A lifetime

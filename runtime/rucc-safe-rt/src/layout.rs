@@ -154,6 +154,30 @@ impl Meta {
     /// tamnd/rucc#1081 is the decision.
     pub const HANDED: u8 = 8;
 
+    /// Flag: the bounds and the version were rebuilt out of an aux slot rather than read from a
+    /// plane or a header, so they are about the pointer that was stored rather than about the
+    /// pointer that was loaded.
+    ///
+    /// A slot holds a displacement from the pointer beside it rather than an address, which is what
+    /// makes four words fit in two, and `crate::aux_slot::Slot::read` turns that back into an
+    /// address by subtracting it from the pointer the program has just loaded. That is the right
+    /// answer for as long as the word still holds the pointer the slot was written for, so what the
+    /// bit really marks is an answer that depends on the slot having stayed beside its word.
+    ///
+    /// Keeping it there is the runtime's job rather than the reader's, which is why this is a flag
+    /// and not a check. `crate::check::relocate` moves the aux along with the bytes at every copy a
+    /// wrapper in `crate::wrap` interposes, so the `memcpy` of a structure that used to move the
+    /// pointer and leave the slot behind no longer does, and that was tamnd/rucc#1148. What is left
+    /// is a store of a pointer that did not come through `cap_store` at all, which is uninstrumented
+    /// code writing storage this crate watches, and a build with a foreign writer in it is already
+    /// the case `HANDED` is about.
+    ///
+    /// So nothing reads this today and it is worth setting anyway. It is the one place an answer
+    /// records how it was arrived at, and the next thing to widen the version compare will want to
+    /// know which capabilities came out of a slot without having to work it out from the shape of
+    /// the flags that are left.
+    pub const REBUILT: u8 = 16;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {

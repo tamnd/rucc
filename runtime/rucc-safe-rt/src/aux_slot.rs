@@ -178,6 +178,11 @@ impl Slot {
         }
         let off = (self.packed >> OFF) & EXACT;
         let ext = (self.packed >> EXT) & EXACT;
+        // Rebuilt rather than read, and [`Meta::REBUILT`] says what that costs. The displacement
+        // was measured from the pointer that was stored and is being subtracted from the pointer
+        // that was loaded, so everything below is right exactly as far as those two are the same
+        // pointer.
+        let meta = meta.with_flags(meta.flags() | Meta::REBUILT);
         Read::Whole(Cap::new(addr.wrapping_sub(off), ext, self.ver, meta))
     }
 
@@ -316,6 +321,27 @@ mod tests {
             assert_eq!(back.meta.perm(), original.meta.perm());
             assert_eq!(back.meta.state(), original.meta.state());
         }
+    }
+
+    #[test]
+    fn what_comes_back_says_it_was_rebuilt_rather_than_read() {
+        // The one field that does not come back the way it went in, and it is a field about the
+        // answer rather than about the object. Everything in a slot is measured from the pointer
+        // it was written beside, so what a read produces is only as good as the word still holding
+        // that pointer, and `crate::check` is the reader that has to know.
+        let original = cap(0x4000, 96);
+        assert_eq!(original.meta.flags() & Meta::REBUILT, 0);
+        let Read::Whole(back) = Slot::of(original, 0x4000).read(0x4000) else {
+            panic!("an object of 96 bytes fits in a slot");
+        };
+        assert_ne!(back.meta.flags() & Meta::REBUILT, 0);
+        // The pointer the word held when the slot was written is the only one this is right for,
+        // and a different pointer gets a base that is not the base of anything.
+        let Read::Whole(moved) = Slot::of(original, 0x4000).read(0x9000) else {
+            panic!("the slot says the same thing whatever it is read against");
+        };
+        assert_eq!(moved.lo, 0x9000);
+        assert_eq!(moved.ver, original.ver);
     }
 
     #[test]

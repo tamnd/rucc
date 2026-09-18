@@ -61,9 +61,11 @@
 use core::ffi::c_void;
 
 use crate::alloc::{self, Region};
+use crate::aux_slot;
 use crate::fail::Descriptor;
-use crate::layout::{Cap, Meta};
+use crate::layout::{AUX_PER_WORD, Cap, Class, Meta, WORD};
 use crate::plane::{self, Version};
+use crate::recover;
 use crate::types::{self, TypeId};
 
 /// Judgement J1, the bounds half: an access of `size` bytes at `addr` stays in one instance, and
@@ -142,20 +144,23 @@ pub unsafe fn bounds(
 /// enough to reuse a block, and until the capability reached this function there was nothing here
 /// to compare against.
 ///
-/// It is asked only of a capability that names an instance. A bottom one names none, and a
-/// recovered one carries the version of whatever the plane said at the moment the boundary lost
-/// track, which is an answer about the address rather than about the pointer, so neither is
-/// evidence that anything is stale and both keep the weaker reading. A null `capability` is the
-/// same answer for the same reason.
+/// It is asked only of a capability whose version is about this pointer. A bottom one has none, and
+/// neither has a capability recovered from the containing mapping rather than from the planes,
+/// whose version is `plane::FOREIGN` and whose bounds are the mapping's. Neither is evidence that
+/// anything is stale and both keep the weaker reading, and a null `capability` is the same answer
+/// for the same reason. A recovery that did find an instance is not in that group, for the reason
+/// `stale` gives: the version it read is the version of the instance the pointer was in when it
+/// ran. Neither is a capability an aux slot rebuilt, for the reason `stale` gives about that: the
+/// slot travels with the word it describes.
 ///
 /// Generated code fills it in now. `rucc_safety::origin` takes one capability per pointer where the
 /// pointer is made, `rucc_safety::lower` hands it to the call, and `rucc_safety::slot` gives it four
 /// words of frame, so what arrives here is the capability of the pointer the access went through
-/// rather than a null. Which producer filled it is what decides whether the strong question gets
-/// asked: a pointer an allocator returned carries the version the allocator wrote, and a pointer
-/// nothing in the unit could trace is recovered from the plane and keeps the weaker reading, which
-/// is counted. The remaining boxes of tamnd/rucc#1241 are about moving pointers out of the second
-/// group and into the first.
+/// rather than a null. Where it came from decides how tight the answer is rather than whether the
+/// question is asked: a pointer an allocator returned carries the version the allocator wrote, and
+/// a pointer nothing in the unit could trace carries the version the plane held where the recovery
+/// ran, which is later and so catches less. The remaining boxes of tamnd/rucc#1241 are about moving
+/// pointers out of the second group and into the first.
 ///
 /// When the freeing was another thread's and nothing orders it against this access, the report says
 /// so and names both of them. That is document 03's C4, the use after free a race produced rather
@@ -233,10 +238,10 @@ pub unsafe fn live(addr: *const c_void, capability: *const Cap, descriptor: *con
 /// What is left is the address of a live instance reached through a capability made for a different
 /// one, which is the case nothing downstream of here can see.
 ///
-/// It is asked only of a capability that names an instance, exactly as [`live`] asks it. A bottom
-/// one names none and a recovered one carries whatever the plane said when the boundary lost track,
-/// so neither is evidence that this pointer is the stale one and both let the free through to the
-/// allocator to decide the way it always did.
+/// It is asked only of a capability whose version is about this pointer, exactly as [`live`] asks
+/// it. A bottom one has none, and a capability recovered from a mapping rather than from the planes
+/// has none. Neither is evidence that this pointer is the stale one and both let the free through
+/// to the allocator to decide the way it always did.
 ///
 /// # Panics
 ///
@@ -467,11 +472,8 @@ pub unsafe fn wrote(addr: *const c_void, size: usize) {
 /// and it is the same trade [`carry`] makes for the same reason: the alternative is a region lookup
 /// per byte on the path every `memcpy` in the program goes down.
 ///
-/// The init plane and no other. A copy moves the pointers in a structure as well as its bytes and
-/// their capabilities stay where they were, so the destination's aux is stale afterwards, and this
-/// is not the bit [`handed`] sets: the runtime is the one doing the writing here and it has both
-/// ranges, so the answer is to copy the aux too. That is tamnd/rucc#1148 and it waits on something
-/// writing a slot in the first place.
+/// The init plane and no other. A copy moves the pointers in a structure as well as its bytes, and
+/// the aux that describes them is [`relocate`]'s job rather than this one's.
 ///
 /// # Safety
 ///
@@ -487,6 +489,74 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
     }
     // SAFETY: as above, for the destination alone.
     unsafe { region.init.set(dst, len) }
+}
+
+/// The judgement a copy makes about the pointers it moved: the capability goes with the word.
+///
+/// A structure full of pointers copied through `memcpy` arrives with the pointers in it and without
+/// anything that says what they point at, because a capability lives in the aux slot beside the
+/// word rather than in the word, and the C library's `memcpy` has never heard of the aux. The word
+/// then reads back against whatever slot the destination happened to be carrying, which is the
+/// previous tenant's if the storage was used before and is nothing at all if it was not. That is
+/// tamnd/rucc#1148, and it is the reason an instrumented SQLite stopped inside `whereLoopInsert`
+/// against a `WhereLoop` that `whereLoopXfer` had just copied.
+///
+/// Copying the slot is exactly right rather than nearly right, and the reason is what a slot holds.
+/// [`crate::aux_slot::Slot::of`] writes down a displacement from the pointer value beside it, not
+/// an address, and a `memcpy` moves that pointer value across unchanged. So a slot that was correct
+/// beside the source word is correct beside the destination word, byte for byte, with no fixing up
+/// of anything inside it.
+///
+/// A destination word the copy only partly covers gets its slot cleared instead. Half a pointer is
+/// not a pointer, and leaving the slot would leave a capability describing a word whose bytes have
+/// just changed underneath it. The same goes for a whole word whose source has no slot to give: a
+/// copy out of a stack object or out of storage this monitor does not watch carries no capability,
+/// and the honest record of that is an empty slot and a refusal at the first access through it, not
+/// whatever was there before.
+///
+/// Nothing at all when the destination is not an allocation this runtime laid out, since then there
+/// is no aux in front of it to write.
+///
+/// # Safety
+///
+/// Neither address is read through by this function. They may overlap, and the aux is moved with
+/// the same overlap rules the bytes are, so a `memmove` of a structure onto itself is the same
+/// answer either way.
+pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
+    if len < WORD {
+        return;
+    }
+    let (dst, src) = (dst as u64, src as u64);
+    let into = recover::recover(dst as *const c_void);
+    if into.meta.class() != Class::Allocated as u8 {
+        return;
+    }
+    let from = recover::recover(src as *const c_void);
+    let word = WORD as u64;
+    // Every destination word the copy reaches, including the two at the ends it may only reach part
+    // of, walked by the destination's word grid because that grid is the one the aux is laid on.
+    let mut at = dst & !(word - 1);
+    let after = dst.wrapping_add(len as u64).wrapping_add(word - 1) & !(word - 1);
+    while at < after {
+        if let Some(slot) = aux_slot::address_of(into, at) {
+            let whole = at >= dst && at.wrapping_add(word) <= dst.wrapping_add(len as u64);
+            let carried =
+                if whole { aux_slot::address_of(from, src.wrapping_add(at - dst)) } else { None };
+            match carried {
+                // SAFETY: both addresses came from `address_of`, so each is a slot inside the aux
+                // of the instance the recovery found, and a slot is `AUX_PER_WORD` bytes the
+                // runtime owns. `copy` rather than `copy_nonoverlapping` because the two objects
+                // may be one object.
+                Some(had) => unsafe {
+                    core::ptr::copy(had as *const u8, slot as *mut u8, AUX_PER_WORD);
+                },
+                // SAFETY: as above, for the destination alone. Zero is `Slot::EMPTY`, which is
+                // what a slot nothing ever wrote already reads as.
+                None => unsafe { core::ptr::write_bytes(slot as *mut u8, 0, AUX_PER_WORD) },
+            }
+        }
+        at = at.wrapping_add(word);
+    }
 }
 
 /// The judgement a call out of this build makes: whatever it was handed may now hold something.
@@ -520,12 +590,12 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
 pub unsafe fn handed(addr: *const c_void) {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
-    let Some((lo, len)) = crate::recover::extent(&region, addr) else { return };
+    let Some((lo, len)) = recover::extent(&region, addr) else { return };
     // SAFETY: the run came out of the plane over this region, so the init plane covers it too.
     unsafe { region.init.set(lo, len) }
     // SAFETY: the address is inside the region, which is what reading its plane asks for.
     let version = unsafe { region.plane.version(addr) };
-    crate::recover::mark_handed(&region, lo, version);
+    recover::mark_handed(&region, lo, version);
 }
 
 /// The judgement a store through a pointer shaped slot makes: this thread wrote these bytes, now.
@@ -770,9 +840,35 @@ fn owner(region: &Region, addr: usize) -> Version {
 
 /// Whether the capability names an instance other than the one that owns the address now.
 ///
-/// False for every capability that names no instance, which is the bottom one and the recovered
-/// one, so a build where the compiler could not work out where a pointer came from is left with
-/// the answer it had before rather than given a refusal it cannot stand behind. [`live`] says why.
+/// False for every capability that names no instance, so a build where the runtime could not work
+/// out which object a pointer is in is left with the answer it had before rather than given a
+/// refusal it cannot stand behind. [`live`] says why.
+///
+/// Naming an instance is not the same as having been handed over, and the difference is the whole
+/// of what this reads. [`Meta::RECOVERED`] says the capability was worked out at a boundary rather
+/// than published by a caller, and that on its own is no reason to keep quiet: a recovery that
+/// found an owned granule read the version of the instance that owned the address at the moment the
+/// recovery ran, which is the instance the pointer was in then, so a later access finding a
+/// different version is a later access to storage that instance no longer holds. That is the lock
+/// and key rule with the key taken a little later than it might have been, and taking it later can
+/// only miss a use after free that had already happened. It cannot report one that has not.
+///
+/// [`Meta::WIDE`] is the recovery that found no instance, which is the one this has to stay quiet
+/// about. Its bounds are a whole mapping and its version is [`crate::plane::FOREIGN`], which is a
+/// number no instance ever carries, so comparing it would refuse every access through a pointer
+/// whose object the runtime was never told about. The odd version is the same case reached another
+/// way: a slot holding an instance that had already been given back is not evidence about this
+/// pointer either.
+///
+/// [`Meta::REBUILT`] is read and not one of them, and the reason is worth writing down because it
+/// was nearly the other way. The flag says the capability came out of an aux slot, which holds a
+/// displacement from the pointer it was written beside rather than an address, so it turns back
+/// into the right answer only while the word still holds the pointer the slot was written for. A
+/// `memcpy` of a structure used to be a way it did not, which is what tamnd/rucc#1148 was about,
+/// and while that was true this had to stay quiet about a rebuilt capability or refuse an
+/// instrumented SQLite inside `whereLoopInsert`. [`relocate`] moves the aux with the bytes now, so
+/// the word and the slot stay together and the version a slot gives is about the pointer that came
+/// out of the word beside it.
 ///
 /// # Safety
 ///
@@ -783,7 +879,10 @@ unsafe fn stale(capability: *const Cap, holder: Version) -> bool {
     }
     // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
     let held = unsafe { core::ptr::read(capability) };
-    if held.is_bottom() || held.meta.flags() & Meta::RECOVERED != 0 {
+    if held.is_bottom() || held.meta.flags() & Meta::WIDE != 0 {
+        return false;
+    }
+    if !plane::owned(held.ver) {
         return false;
     }
     held.ver != holder
@@ -1627,7 +1726,7 @@ mod tests {
         // somebody owns it, and the only thing that says it is not the somebody this pointer was
         // made for is the version the capability was taken at.
         let ptr = alloc(64);
-        let held_for = crate::recover::made(ptr);
+        let held_for = recover::made(ptr);
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
         let again = alloc(64);
@@ -1635,7 +1734,7 @@ mod tests {
         assert!(refused(|| held(at(ptr, 0), &held_for)));
         // The pointer the second allocation gave out reads the same bytes and is not refused,
         // which is what says this is about the pointer rather than about the address.
-        assert!(!refused(|| held(at(again, 0), &crate::recover::made(again))));
+        assert!(!refused(|| held(at(again, 0), &recover::made(again))));
         // SAFETY: `again` is a live instance.
         unsafe { dealloc(again) };
     }
@@ -1643,18 +1742,47 @@ mod tests {
     #[test]
     fn a_capability_that_says_nothing_leaves_the_answer_about_the_address_alone() {
         let _turn = turn();
-        // Bottom names no instance and a recovered one carries whatever the plane said when the
-        // boundary lost track, so neither is evidence that a pointer is stale. The same read the
-        // test above refuses goes through under both, which is the conservative direction.
+        // Bottom names no instance and neither does a capability recovered from the mapping rather
+        // than from the planes, whose version is a number no instance carries. Neither is evidence
+        // that a pointer is stale, so the same read the test above refuses goes through under
+        // both, which is the conservative direction.
         let ptr = alloc(64);
-        let made = crate::recover::made(ptr);
+        let made = recover::made(ptr);
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
         let again = alloc(64);
         assert_eq!(again, ptr, "the allocator is expected to hand the same block back");
         assert!(!refused(|| held(at(ptr, 0), &Cap::BOTTOM)));
-        let lost = Cap::new(made.lo, made.ext, made.ver, made.meta.with_flags(Meta::RECOVERED));
-        assert!(!refused(|| held(at(ptr, 0), &lost)));
+        let flags = Meta::RECOVERED | Meta::WIDE;
+        let mapped = Cap::new(made.lo, made.ext, plane::FOREIGN, made.meta.with_flags(flags));
+        assert!(!refused(|| held(at(ptr, 0), &mapped)));
+        // A capability an aux slot rebuilt is not in this group, which is the whole of what
+        // carrying the aux across a copy bought. It names an instance and the slot travelled with
+        // the word, so the same read is refused under it.
+        let rebuilt = made.meta.with_flags(made.meta.flags() | Meta::REBUILT);
+        assert!(refused(|| held(at(ptr, 0), &Cap::new(made.lo, made.ext, made.ver, rebuilt))));
+        // SAFETY: `again` is a live instance.
+        unsafe { dealloc(again) };
+    }
+
+    #[test]
+    fn a_capability_recovered_from_the_planes_still_answers_the_version_question() {
+        let _turn = turn();
+        // Where the pointer's provenance came from decides how much the answer catches, not
+        // whether it is asked. A recovery that found an owned granule read the version of the
+        // instance that owned the address when it ran, so a later access finding a different
+        // version is an access to storage that instance no longer holds. Taking the key later than
+        // the allocator would have can only miss a use after free that had already happened, and
+        // this is the case that says it does not miss the ordinary one.
+        let ptr = alloc(64);
+        let walked = recover::recover(at(ptr, 8));
+        assert!(walked.meta.flags() & Meta::RECOVERED != 0, "a walk of the planes is a recovery");
+        assert!(walked.meta.flags() & Meta::WIDE == 0, "and it found the instance");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+        let again = alloc(64);
+        assert_eq!(again, ptr, "the allocator is expected to hand the same block back");
+        assert!(refused(|| held(at(ptr, 8), &walked)));
         // SAFETY: `again` is a live instance.
         unsafe { dealloc(again) };
     }
@@ -1665,7 +1793,7 @@ mod tests {
         // The compare has to be silent on every ordinary access or it would refuse the whole
         // program, so it is worth a test of its own rather than only the negative halves above.
         let ptr = alloc(64);
-        let held_for = crate::recover::made(ptr);
+        let held_for = recover::made(ptr);
         for offset in [0, 8, 32, 63] {
             assert!(!refused(|| held(at(ptr, offset), &held_for)), "offset {offset}");
         }
