@@ -28,8 +28,11 @@
 //! neither: every value it moves is a tagged union whose payload is sometimes a pointer and
 //! sometimes an integer of the same width, its collector reaches every live object by walking those
 //! unions, and its errors leave through longjmp from the middle of a C stack the interpreter built.
-//! None of the three reaches the others' paths. The rows here are the projects and the code below is
-//! the same for all of them, which is what makes adding the next one a paragraph of data.
+//! brotli is the same job as zlib written a different way: a static dictionary of a hundred and
+//! twenty thousand words, a ring buffer it grows as it learns how much it needs, and a distance that
+//! is a number selecting storage from one of several places rather than a pointer to it. None of the
+//! four reaches the others' paths. The rows here are the projects and the code below is the same for
+//! all of them, which is what makes adding the next one a paragraph of data.
 //!
 //! # Why the sources are not in the tree
 //!
@@ -107,6 +110,12 @@ struct Project {
     usual: &'static [&'static str],
     /// The C files to build, relative to the source directory.
     sources: &'static [&'static str],
+    /// Anything else to put on the include path, relative to the source directory.
+    ///
+    /// The source directory itself is always searched, which is all the first rows needed. A project
+    /// that keeps its public headers apart from its C, which is most of the larger ones, names the
+    /// directory here and the workload gets the same path the library does.
+    includes: &'static [&'static str],
     /// What the project's configure script would have defined on a Linux machine.
     defines: &'static [&'static str],
     /// Every report the monitor should make, and nothing else.
@@ -124,6 +133,7 @@ const PROJECTS: &[Project] = &[
         marker: "sqlite3.c",
         usual: &["sqlite-autoconf", "sqlite"],
         sources: &["sqlite3.c"],
+        includes: &[],
         defines: &[],
         known: &[],
     },
@@ -149,6 +159,7 @@ const PROJECTS: &[Project] = &[
             "uncompr.c",
             "zutil.c",
         ],
+        includes: &[],
         // What zlib's configure writes on any Linux machine. Without it the three gzip files do not
         // compile at all, because zlib only reaches for unistd.h when it has been told the header
         // is there.
@@ -205,12 +216,58 @@ const PROJECTS: &[Project] = &[
             "lvm.c",
             "lzio.c",
         ],
+        includes: &[],
         // The one thing Lua's own makefile passes on this platform. It turns on the POSIX bits of
         // the io and os libraries and the dlopen path in loadlib.c, all of which are library code
         // this ought to be running rather than stubs. The two files with a main in them, lua.c and
         // luac.c, are not in the list above, and they are the only ones that would have wanted
         // readline.
         defines: &["LUA_USE_LINUX"],
+        known: &[],
+    },
+    Project {
+        name: "brotli",
+        variable: "RUCC_BROTLI_SOURCE",
+        marker: "c/include/brotli/decode.h",
+        usual: &["brotli"],
+        sources: &[
+            "c/common/constants.c",
+            "c/common/context.c",
+            "c/common/dictionary.c",
+            "c/common/platform.c",
+            "c/common/shared_dictionary.c",
+            "c/common/transform.c",
+            "c/dec/bit_reader.c",
+            "c/dec/decode.c",
+            "c/dec/huffman.c",
+            "c/dec/state.c",
+            "c/enc/backward_references.c",
+            "c/enc/backward_references_hq.c",
+            "c/enc/bit_cost.c",
+            "c/enc/block_splitter.c",
+            "c/enc/brotli_bit_stream.c",
+            "c/enc/cluster.c",
+            "c/enc/command.c",
+            "c/enc/compound_dictionary.c",
+            "c/enc/compress_fragment.c",
+            "c/enc/compress_fragment_two_pass.c",
+            "c/enc/dictionary_hash.c",
+            "c/enc/encode.c",
+            "c/enc/encoder_dict.c",
+            "c/enc/entropy_encode.c",
+            "c/enc/fast_log.c",
+            "c/enc/histogram.c",
+            "c/enc/literal_cost.c",
+            "c/enc/memory.c",
+            "c/enc/metablock.c",
+            "c/enc/static_dict.c",
+            "c/enc/utf8_util.c",
+        ],
+        // brotli's public headers are the only ones outside its C, and both the library and the
+        // workload reach them by the same spelling, so both get the same flag. The one file with a
+        // main in it, c/tools/brotli.c, is not in the list above.
+        includes: &["c/include"],
+        defines: &[],
         known: &[],
     },
 ];
@@ -453,6 +510,12 @@ fn build(project: &Project, source: &Path) -> Result<PathBuf> {
                 .args(["-S", &format!("--target={TRIPLE}"), "-fsafety=detect", level])
                 .arg("-I")
                 .arg(source)
+                .args(
+                    project
+                        .includes
+                        .iter()
+                        .flat_map(|inside| [Path::new("-I").to_path_buf(), source.join(inside)]),
+                )
                 .args(project.defines.iter().map(|define| format!("-D{define}")))
                 .arg("-o")
                 .arg(work.join(format!("{stem}{level}.s")))
@@ -484,11 +547,15 @@ fn build(project: &Project, source: &Path) -> Result<PathBuf> {
 ///
 /// The workload is called `driver` rather than what it is called in the tree, so that the script
 /// below can name it without knowing which project it is running.
+///
+/// A project that keeps its C in subdirectories gets one flat directory of assembly out, with the
+/// path written into the name, because two files called `state.c` in two directories are two files
+/// and a name that dropped the directory would quietly be one.
 fn files(project: &Project, source: &Path, driver: &Path) -> Vec<(PathBuf, String)> {
     let mut all: Vec<(PathBuf, String)> = project
         .sources
         .iter()
-        .map(|name| (source.join(name), name.trim_end_matches(".c").to_owned()))
+        .map(|name| (source.join(name), name.trim_end_matches(".c").replace('/', "-")))
         .collect();
     all.push((driver.to_path_buf(), "driver".to_owned()));
     all
@@ -615,6 +682,7 @@ mod tests {
             marker: "",
             usual: &[],
             sources: &[],
+            includes: &[],
             defines: &[],
             known: &[],
         };
@@ -657,6 +725,23 @@ mod tests {
         let tests = root().join("tests").join("zlib");
         assert_eq!(declared(&tests, "a-real-workload.c"), Some(tests.clone()));
         assert_eq!(declared(&tests.join("a-real-workload.c"), "a-real-workload.c"), Some(tests));
+    }
+
+    /// The assembly all goes in one directory, so two files with the same name in two of a
+    /// project's own directories have to come out with two names.
+    #[test]
+    fn a_file_in_a_subdirectory_keeps_the_subdirectory_in_its_name() {
+        for project in PROJECTS {
+            let mut stems: Vec<String> =
+                files(project, Path::new(""), Path::new("")).into_iter().map(|(_, s)| s).collect();
+            let all = stems.len();
+            stems.sort();
+            stems.dedup();
+            assert_eq!(stems.len(), all, "{} has two files under one name", project.name);
+            for stem in &stems {
+                assert!(!stem.contains('/'), "{stem} would want a directory that is not made");
+            }
+        }
     }
 
     /// Half the projects worth running unpack their C into a `src` directory and half leave it at
