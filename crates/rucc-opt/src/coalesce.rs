@@ -327,7 +327,11 @@ pub(crate) fn crossed(opcode: Opcode, kind: Opcode) -> bool {
     } else {
         matches!(opcode, Opcode::MetaType | Opcode::MetaTypeCopy | Opcode::CheckType)
     };
+    // And the aux, which is neither of the two planes. A copy's carriage of the slots beside the
+    // pointers it moved says nothing about what any byte's type or init is, so it is the other
+    // plane's write whichever run is asking.
     other
+        || opcode == Opcode::CapCopy
         // Anything that computes a value and touches nothing, which is most of what sits between
         // two fields of a structure being filled in: the address arithmetic and the constants.
         || !opcode.has_effects()

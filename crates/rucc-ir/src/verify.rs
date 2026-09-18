@@ -1565,6 +1565,17 @@ impl<'a> Verifier<'a> {
                     self.capability(opcode, arg(3), 3);
                 }
             }
+            // The bulk form of that write, which is two ranges and a length and no capability at
+            // all. What each destination slot ends up saying is whatever the slot beside the word
+            // it came from said, so there is nothing here for the compiler to name, which is the
+            // shape the two plane copies below have and for the same reason.
+            Opcode::CapCopy => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+            }
             Opcode::CapExtent | Opcode::CapExtentBack => {
                 // The capability and the address it is about, as everywhere else here, and then
                 // how many bytes the asker wants. The answer is a count of the same bytes the

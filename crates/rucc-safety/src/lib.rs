@@ -183,6 +183,14 @@ pub struct Counts {
     /// `judged`: the two planes will be discharged by different rules, so the day one of them
     /// thins the numbers have to be able to differ.
     pub moved: usize,
+    /// Copies that carried the capability beside every pointer they moved over to the bytes they
+    /// wrote.
+    ///
+    /// The same set again, and counted apart from the two of them because it is not a plane write:
+    /// what it moves is the aux, which is the storage `saved` fills one word at a time. A build with
+    /// many of these and few of `saved` is a build whose pointers mostly travel inside structures
+    /// being copied whole, which is a different shape of program and worth being able to see.
+    pub relocated: usize,
     /// Accesses that asked their block whether another `restrict` pointer of it got there first.
     ///
     /// Zero without `-fsafety-restrict`, and zero in the overwhelming majority of functions with
@@ -246,6 +254,7 @@ impl Counts {
         self.wrote += other.wrote;
         self.filled += other.filled;
         self.moved += other.moved;
+        self.relocated += other.relocated;
         self.stamped += other.stamped;
         self.saved += other.saved;
         self.recalled += other.recalled;
@@ -404,6 +413,13 @@ pub fn insert(
                 None => counts.skipped += 1,
             },
             Opcode::Memcpy | Opcode::Memmove => {
+                // The aux first, so that it ends up behind the two plane copies in the stream. Any
+                // order is right here, since none of the three reads what another writes and all
+                // three happen after the copy, and this one matches the order the wrapper around
+                // the library's own `memcpy` does its three in.
+                if relocation(func, inst) {
+                    counts.relocated += 1;
+                }
                 // Second for the reason a store's two are in the order they are in.
                 if moved(func, inst) {
                     counts.moved += 1;
@@ -749,6 +765,44 @@ fn filled(
     let data = InstData { args, extra, ..InstData::new(Opcode::CheckInit) };
     let asked = func.create_inst(data, &[], span);
     func.insert_before(asked, read);
+    true
+}
+
+/// Puts a `cap_copy` immediately after one copy, carrying the capability beside every pointer it
+/// moved.
+///
+/// The third of the three, and the one about the aux rather than about a plane. A pointer written
+/// to memory leaves its capability in the slot beside it, and a copy of a structure moves the
+/// pointer without touching the slot, so a copy with nothing here leaves every pointer in the
+/// destination described by whatever the slot said before. On fresh storage that is nothing, and
+/// the first access through the copied pointer is refused on a program that is correct. On storage
+/// the allocator has handed out before it is worse and quieter, because the slot holds an older
+/// instance's answer and a pointer that really is stale inherits a version that says it is live.
+///
+/// `struct point *a = b;` does not need this and does not get it: an assignment of one pointer is a
+/// `store` and [`saved`] puts a `cap_store` behind it. What needs it is `*a = *b;` of a structure
+/// with a pointer in it, which the front end turns into a `memcpy` of the whole object, and there
+/// the pointers being moved are bytes rather than values and no `store` ever sees them.
+///
+/// The library's own `memcpy` has had this all along. The wrapper in
+/// `runtime/rucc-safe-rt/src/effects.rs` calls the same three, so what this closes is the
+/// difference between a copy the program wrote by hand and one the compiler wrote for it, which is
+/// tamnd/rucc#1471.
+fn relocation(func: &mut Func, copy: Inst) -> bool {
+    let Extra::Mem(info) = func[copy].extra else { return false };
+    // As in `carry` and in `moved`, and for the same reason.
+    let size = func[info].size;
+    if size == 0 {
+        return false;
+    }
+    let [to, from] = func[func[copy].args] else { return false };
+
+    let span = func.span(copy);
+    let (made, length) = extent(func, copy, size);
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::CapCopy) };
+    let carried = func.create_inst(data, &[], span);
+    func.insert_after(carried, made);
     true
 }
 
@@ -2288,7 +2342,7 @@ mod tests {
         let (module, plane) = planed(&mut names, "move.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { carried: 1, moved: 1, ..Counts::default() }
+            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
         );
 
         assert_eq!(
@@ -2301,6 +2355,8 @@ mod tests {
              meta_type_copy %0, %1, %2\n    \
              %3 = iconst.i64 24\n    \
              meta_init_copy %0, %1, %3\n    \
+             %4 = iconst.i64 24\n    \
+             cap_copy %0, %1, %4\n    \
              return\n\
              }\n"
         );
@@ -2320,12 +2376,13 @@ mod tests {
         let (module, plane) = planed(&mut names, "overlap.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { carried: 1, moved: 1, ..Counts::default() }
+            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
         );
 
         let printed = print_func(&module, &func, &names);
         assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
         assert!(printed.contains("meta_init_copy %0, %1, %3\n"), "{printed}");
+        assert!(printed.contains("cap_copy %0, %1, %4\n"), "{printed}");
     }
 
     #[test]

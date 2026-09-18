@@ -149,6 +149,7 @@ block0(%0: ptr, %1: i64):
     meta_end %0, %1
     meta_type_copy %0, %9, %1
     meta_init_copy %0, %9, %1
+    cap_copy %0, %9, %1
     meta_release %0
     meta_acquire %0
     meta_fence_release

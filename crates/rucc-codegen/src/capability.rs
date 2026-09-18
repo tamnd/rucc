@@ -229,6 +229,9 @@ pub static HAND: &[(Opcode, &str)] = &[
     (Opcode::MetaTypeCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
     (Opcode::MetaInit, "`rucc_safety::lower`, into the call that says a store wrote a range"),
     (Opcode::MetaInitCopy, "`rucc_safety::lower`, the same call over the range a copy read"),
+    // The aux's own copy, which the same pass emits beside those two and which is not a plane write
+    // in the sense they are: what it moves is the capability beside every pointer a copy carried.
+    (Opcode::CapCopy, "`rucc_safety::lower`, the same call over the slots a copy moved"),
     (Opcode::MetaEpoch, "`rucc_safety::lower`, into the call that says which thread stored"),
     // The two halves of a synchronization edge, which are the same shape of call and are not a
     // plane write at all: what they move is a thread's own clock, which lives beside the thread.

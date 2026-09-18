@@ -211,6 +211,18 @@ pub enum Opcode {
     /// three [`Opcode::CapLoad`] takes and for the same reasons, and the fourth is what is being
     /// written down.
     CapStore,
+    /// The slots beside a run of copied words, carried over from the run they were copied from.
+    ///
+    /// Three operands, for the reason [`Opcode::MetaTypeCopy`] has three: the destination, the
+    /// source, and how many bytes moved. A copy of a structure moves whatever pointers are in it
+    /// and the capability of each of those lives in the slot beside it, so a copy that moved the
+    /// bytes and left the slots alone would leave every pointer in the destination described by
+    /// whatever was there before, which is nothing at best and another instance's answer at worst.
+    ///
+    /// No capability operand, for the reason the other two copies name no node. What each
+    /// destination slot ends up saying is whatever the slot beside the word it came from said, and
+    /// the only place that is written down is the aux over the source.
+    CapCopy,
     /// The capability that permits nothing, which is what a null pointer has.
     CapNull,
     /// A capability narrowed to a sub-object of what it covered.
@@ -672,6 +684,7 @@ impl Opcode {
             Self::CapOf => "cap_of",
             Self::CapLoad => "cap_load",
             Self::CapStore => "cap_store",
+            Self::CapCopy => "cap_copy",
             Self::CapNull => "cap_null",
             Self::CapNarrow => "cap_narrow",
             Self::CapRecover => "cap_recover",
@@ -875,8 +888,8 @@ impl Opcode {
                 | Self::ThreadPointer
                 | Self::MemEntry
                 // Three of the capability instructions are arithmetic on a pointer's
-                // provenance and touch nothing. The other three do: `cap_load` and
-                // `cap_store` are an access, and `cap_recover` reads the planes.
+                // provenance and touch nothing. The other four do: `cap_load`, `cap_store` and
+                // `cap_copy` are an access, and `cap_recover` reads the planes.
                 | Self::CapOf
                 | Self::CapNull
                 | Self::CapNarrow
@@ -987,6 +1000,7 @@ impl Opcode {
             | Self::Trap
             | Self::LongjmpMarker
             | Self::CapStore
+            | Self::CapCopy
             | Self::CapPublish
             | Self::CapClear
             | Self::CapYield
@@ -1022,8 +1036,9 @@ impl Opcode {
 
     /// Whether an instruction with this opcode produces a capability.
     ///
-    /// Seven of the thirteen `cap` instructions. The other six consume one instead, or none at all:
-    /// `cap_store` writes one beside a pointer, `cap_extent` and `cap_extent_back` ask one a
+    /// Seven of the fourteen `cap` instructions. The other seven consume one instead, or none at
+    /// all: `cap_store` writes one beside a pointer, `cap_copy` moves a run of them from beside one
+    /// set of words to beside another, `cap_extent` and `cap_extent_back` ask one a
     /// question about itself and answer with a number, `cap_publish` hands a call's worth of them
     /// to a callee, `cap_yield` leaves one where the caller of this function will look for it, and
     /// `cap_clear` takes no operands because saying there is no frame is not a statement about any
@@ -1287,6 +1302,7 @@ static ALL: &[Opcode] = &[
     Opcode::CapOf,
     Opcode::CapLoad,
     Opcode::CapStore,
+    Opcode::CapCopy,
     Opcode::CapNull,
     Opcode::CapNarrow,
     Opcode::CapRecover,
