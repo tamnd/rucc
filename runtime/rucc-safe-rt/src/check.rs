@@ -330,8 +330,10 @@ pub unsafe fn judge(addr: *const c_void, size: usize, ty: TypeId) {
 /// The judgement a copy makes: the bytes at `dst` now say whatever the bytes at `src` say.
 ///
 /// C 6.5 says a copy through `memcpy` or through a character array carries the source's effective
-/// type, so this is what a wrapper in [`crate::wrap`] calls once it knows how much was copied, and
-/// it is what keeps the punning idiom the standard permits from being reported.
+/// type, so this is what the `moves` clause of a wrapper in [`crate::wrap`] calls once it knows how
+/// much was copied, and it is what keeps the punning idiom the standard permits from being
+/// reported. Every other clause that writes records [`types::CHARACTER`] instead, which is what a
+/// wrapper writing bytes really does.
 ///
 /// Two ranges in one region is the case worth having and is what this is written for. A copy whose
 /// ends are in different regions, or whose source is outside every region, records the destination
