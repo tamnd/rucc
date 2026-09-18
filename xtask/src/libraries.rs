@@ -353,16 +353,18 @@ const PROJECTS: &[Project] = &[
         defines: &["ZSTD_DISABLE_ASM=1"],
         known: &[],
         pending: Some(
-            "the monitor's reports are not held to a list yet, and they are all one question. \
-             zstd keeps every position as a 32 bit index and one pointer that turns an index into \
-             an address, and ZSTD_window_update computes that pointer as ip - distanceFromBase, \
-             which is the caller's buffer moved back by everything the compressor has seen. It is \
-             never dereferenced and every match finder reads through it at base + matchIndex, \
-             which lands back inside the buffer it came from. J2 refuses the derivation and clears \
-             the capability, so every one of those reads is refused too: 997 derivations, 4,710,697 \
-             reads, 39 distinct sites, and every answer still right. That is question 12 of \
+            "the monitor's two reports are not held to a list yet, and they are the same question \
+             twice. zstd keeps every position as a 32 bit index and one pointer that turns an \
+             index into an address, and ZSTD_window_update computes that pointer as ip - \
+             distanceFromBase, which is the caller's buffer moved back by everything the \
+             compressor has seen. That derivation leaves the object it came from, which is J2, and \
+             the pointer itself is never dereferenced: every match finder reads through it at base \
+             + matchIndex, which lands back inside the buffer it came from, and every one of those \
+             reads is permitted and every answer is right. What the two are worth is question 12 of \
              spec/safe-memory/17-open-questions.md with a library behind it rather than a test \
-             case, and it is tamnd/rucc#1417.",
+             case, and it is tamnd/rucc#1417. There were 56 more reports here until \
+             tamnd/rucc#1429, and they were an alignment this compiler got wrong rather than \
+             anything zstd does.",
         ),
     },
 ];

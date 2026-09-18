@@ -36,7 +36,8 @@ use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
     compatible, is_arithmetic, is_array, is_atomic, is_complete, is_complex, is_function,
-    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, real_part,
+    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, pointee_as_written,
+    real_part,
 };
 
 use crate::check::expr::typeop::Measure;
@@ -511,7 +512,10 @@ impl Checker<'_> {
             return self.poison(span);
         }
         let index = self.conv().promote(index);
-        let elem = pointee(&self.types, self.tast[base].ty).expect("a pointer");
+        // As written, because `p[i]` is `*(p + i)` and the type of that is the type of the thing
+        // pointed at rather than of what a typedef in it stands for. What turns on the difference
+        // is how aligned the access is, since `aligned` on a typedef lowers an alignment.
+        let elem = pointee_as_written(&self.types, self.tast[base].ty).expect("a pointer");
         if is_function(&self.types, elem) {
             self.report(
                 Diagnostic::error("subscripted value is pointer to function", span)
@@ -762,7 +766,8 @@ impl Checker<'_> {
                 return self.poison(span);
             }
             let ty = self.tast[base].ty;
-            let Some(target) = pointee(&self.types, ty) else {
+            // As written, for the reason a subscript reads it that way.
+            let Some(target) = pointee_as_written(&self.types, ty) else {
                 let ty = self.spell(ty);
                 self.report(
                     Diagnostic::error(format!("invalid type argument of '->' (have '{ty}')"), span)
@@ -998,7 +1003,11 @@ impl Checker<'_> {
             return self.poison(span);
         }
         let ty = self.tast[operand].ty;
-        let Some(target) = pointee(&self.types, ty) else {
+        // As written, since the type of `*p` is the type `p` was declared to point at. A typedef
+        // is not only a spelling: `aligned` on one lowers the alignment of an object of it, which
+        // is how a library reads a word out of a buffer nothing aligned, so resolving it here
+        // would turn a one byte aligned read into a wide aligned one and refuse it.
+        let Some(target) = pointee_as_written(&self.types, ty) else {
             let ty = self.spell(ty);
             self.report(
                 Diagnostic::error(

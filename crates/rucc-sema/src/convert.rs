@@ -203,7 +203,13 @@ impl Conv<'_> {
         let expr = self.value(expr);
         let from = self.tast[expr].ty;
         let target = self.read_as(ty);
-        if from == target {
+        // Asked of the canonical form as well as of the identifier, because a typedef is a name
+        // for a type rather than a type of its own and there is nothing to convert between a
+        // name and what it names. The two do not share an identifier, since a typedef keeps its
+        // own so a diagnostic can spell it and so an `aligned` on it can be read, and a vector is
+        // where it matters: `*(const __m128i_u *)p` is a vector and so is the `__m128i` a
+        // function returns one as, and a conversion between them is not a shape anything lowers.
+        if from == target || self.types.canonical(from) == self.types.canonical(target) {
             return expr;
         }
         if is_void(self.types, target) {

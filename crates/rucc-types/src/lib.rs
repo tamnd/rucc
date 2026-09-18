@@ -93,7 +93,8 @@ mod types;
 pub use crate::classify::{
     element, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete, is_complex,
     is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer, is_real,
-    is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee, real_part,
+    is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
+    pointee_as_written, real_part,
 };
 pub use crate::compat::{adjust_parameter, compatible, composite};
 pub use crate::convert::{

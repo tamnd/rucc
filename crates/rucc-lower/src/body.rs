@@ -1319,22 +1319,31 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// Reads the object into the registers it travels in.
-    fn load_slots(&mut self, addr: Value, travel: &Travel, span: Span) -> Vec<Value> {
+    ///
+    /// `align` is how aligned the object at `addr` is known to be, which is not always what its
+    /// type asks for: the object may be a member of something packed or one of a typedef that
+    /// lowered its alignment, and `_mm_loadu_si128` is both a vector returned in registers and a
+    /// read of one that may sit anywhere. The ABI's number lays the pieces out and this one says
+    /// how aligned reading them is, so a sixteen byte object at an odd address is still read as
+    /// two eight byte pieces and neither read claims an alignment the address does not have.
+    fn load_slots(&mut self, addr: Value, align: u32, travel: &Travel, span: Span) -> Vec<Value> {
         let reach = travel.reach();
-        let from = if reach > travel.size {
+        let (from, align) = if reach > travel.size {
             // The same three bytes past the end of a five byte object, read this time.
             let buffer = self.scratch(reach, travel.align, span);
-            self.memcpy(buffer, addr, travel.size, travel.align, span);
-            buffer
+            self.memcpy(buffer, addr, travel.size, align.min(travel.align), span);
+            // Read out of the buffer from here on, which is an object this made and so is as
+            // aligned as it asked for however aligned the one it was copied out of was.
+            (buffer, travel.align)
         } else {
-            addr
+            (addr, align.min(travel.align))
         };
         let slots: Vec<rucc_target::Slot> = travel.slots().to_vec();
         let types = travel.types.clone();
         let mut values = Vec::with_capacity(slots.len());
         for (slot, ty) in slots.iter().zip(types) {
             let at = self.offset(from, slot.offset(), span);
-            let info = self.piece_info(travel.align, slot.offset());
+            let info = self.piece_info(align, slot.offset());
             values.push(self.build(span).load(ty, at, info, Flags::NONE));
         }
         values
@@ -1413,6 +1422,21 @@ impl<'u> Body<'_, 'u> {
         match self.alignment(addr) {
             Some(known) => MemInfo { align: info.align.min(known), ..info },
             None => info,
+        }
+    }
+
+    /// How aligned the object a place names is known to be.
+    ///
+    /// The same two numbers [`Self::info_of`] takes the smaller of, without the rest of what that
+    /// works out. It is separate because the copies want this and nothing else: a `memcpy` and a
+    /// register's worth of an object are bytes moving and have no type at the access, so asking
+    /// through `info_of` would register an alias node for a type nothing ever reads through.
+    fn place_align(&self, place: Place) -> u32 {
+        let align = repr::align_of(self.types(), self.target(), place.ty);
+        let Where::Addr(addr) = place.at else { return align };
+        match self.alignment(addr) {
+            Some(known) => align.min(known),
+            None => align,
         }
     }
 
@@ -2523,7 +2547,7 @@ impl<'u> Body<'_, 'u> {
             Pass::Direct => self.eval(expr).into_iter().collect(),
             Pass::Pieces(_) => {
                 let ty = self.tast()[expr].ty;
-                let addr = match repr::value_type(self.types(), self.target(), ty) {
+                let (addr, align) = match repr::value_type(self.types(), self.target(), ty) {
                     // A scalar that comes back in a register of the other file, which is an
                     // `__int128` on Windows. The two files are reached through memory and not
                     // through each other, so the value is written down and read back as the
@@ -2533,14 +2557,15 @@ impl<'u> Body<'_, 'u> {
                         let at = self.scratch(travel.size, travel.align, span);
                         let info = self.access(ty);
                         self.build(span).store(value, at, info, Flags::NONE);
-                        at
+                        (at, travel.align)
                     }
                     None => {
                         let place = self.place(expr);
-                        self.address_of(place, span)
+                        let align = self.place_align(place);
+                        (self.address_of(place, span), align)
                     }
                 };
-                self.load_slots(addr, &travel, span)
+                self.load_slots(addr, align, &travel, span)
             }
             // The caller passed somewhere to put it, so returning is writing it there.
             Pass::Reference | Pass::Memory => {
@@ -2559,9 +2584,12 @@ impl<'u> Body<'_, 'u> {
                     }
                     None => {
                         let place = self.place(expr);
+                        // The smaller of the two ends, since one number covers both of them and
+                        // the object being read may be less aligned than the one being written.
+                        let align = travel.align.min(self.place_align(place));
                         let from = self.address_of(place, span);
                         if let Some(into) = self.sret {
-                            self.memcpy(into, from, travel.size, travel.align, span);
+                            self.memcpy(into, from, travel.size, align, span);
                         }
                     }
                 }
@@ -6904,8 +6932,9 @@ impl<'u> Body<'_, 'u> {
                 }
                 Pass::Pieces(_) => {
                     let place = self.place(arg);
+                    let align = self.place_align(place);
                     let addr = self.address_of(place, span);
-                    let slots = self.load_slots(addr, travel, span);
+                    let slots = self.load_slots(addr, align, travel, span);
                     values.extend(slots);
                 }
                 // The callee is given the address of a copy and may write to it, so the copy is
