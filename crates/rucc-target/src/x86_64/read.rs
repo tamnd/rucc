@@ -58,11 +58,14 @@
 //! library.
 //!
 //! Once an argument says a width the mnemonic no longer has to, so these are read before the suffix
-//! is worked out and they are what it is worked out from. What they do not do is override the type.
-//! An operand is placed at the width the opcode uses and the caller checks that against the type it
-//! has, so a template saying `%q0` of an `int` is refused where it is placed rather than here: the
-//! top half of that register is something nothing defined, and handing it to an instruction is a
-//! program that assembles into something other than what it says.
+//! is worked out and they are what it is worked out from. Whether one of them is allowed to differ
+//! from the type is not settled here. What is settled here is that the program said it, which is
+//! what the flag on [`Piece::Operand`] carries out, and the caller reads that flag and the operand's
+//! role together. A written operand wider than its type is the program asking for an instruction
+//! that fills more of the register than the object in it does, which is what gmp writes when it
+//! counts the low zero bits of a limb into an `unsigned`. A read one wider than its type is a
+//! program handing an instruction the top half of a register that nothing ever defined, and that is
+//! refused where it is placed.
 //!
 //! Four of them and not the rest. gcc has a dozen more letters in that position and they do other
 //! things: print a constant without its sigil, print the suffix on its own, print an address. Those
@@ -109,6 +112,21 @@ pub enum Piece {
         /// How much of the register the instruction uses, which the opcode says and the template
         /// does not.
         width: Width,
+        /// Whether the template wrote that width down on the operand rather than leaving it.
+        ///
+        /// `%0` is spelled as the register at the width of the object in it, so an opcode that
+        /// uses a different amount of the register than the object fills is an instruction whose
+        /// text would not assemble, and the operand's type is the one answer there. `%q0` is the
+        /// whole register whatever the object is, which is how a program asks for an instruction
+        /// that fills more of the register than its own type covers: gmp counts the low zero bits
+        /// of a limb into an `unsigned` and writes `%q0` so that the count arrives from a quadword
+        /// instruction, and the object is the low half of what that instruction wrote.
+        ///
+        /// So this says which of the two the width came from, and it is not on its own permission
+        /// to differ from the type: the same modifier on a read is the program handing an
+        /// instruction a part of a register it never filled. The place an operand is put reads
+        /// this and the operand's role together, and only a written one may differ.
+        stated: bool,
     },
     /// A register the instruction uses without its text saying so.
     ///
@@ -350,7 +368,7 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
                     return None;
                 }
                 *operands.get_mut(usize::from(index))? =
-                    Some(Piece::Operand { index: operand, width });
+                    Some(Piece::Operand { index: operand, width, stated: stated.is_some() });
             }
             (Arg::Reg(index, width), Given::Reg(reg, spelled)) => {
                 if spelled != width {
@@ -563,7 +581,13 @@ fn address(text: &str, segment: Option<Segment>) -> Option<At> {
 fn base(text: &str) -> Option<Piece> {
     let after = sigil(text)?;
     if after.starts_with(|letter: char| letter.is_ascii_digit()) {
-        return after.parse().ok().map(|index| Piece::Operand { index, width: Width::Quad });
+        // Stated, in the sense the field means: the width is the addressing mode's and not the
+        // operand's, so a pointer's own type is not the thing that has to agree with it.
+        return after.parse().ok().map(|index| Piece::Operand {
+            index,
+            width: Width::Quad,
+            stated: true,
+        });
     }
     let (reg, width) = gpr_named(after)?;
     (width == Width::Quad).then_some(Piece::Reg { reg, width })
@@ -604,7 +628,8 @@ mod tests {
         let lines = read("movq %%fs:0, %0", &[]).expect("a load through a segment");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "mov_rm_64");
-        assert_eq!(lines[0].operands, vec![Piece::Operand { index: 0, width: Width::Quad }]);
+        let out = Piece::Operand { index: 0, width: Width::Quad, stated: false };
+        assert_eq!(lines[0].operands, vec![out]);
         assert_eq!(lines[0].at, Some(At { segment: Some(Segment::Fs), disp: 0, base: None }));
     }
 
@@ -618,8 +643,8 @@ mod tests {
         assert_eq!(
             lines[0].operands,
             vec![
-                Piece::Operand { index: 0, width: Width::Quad },
-                Piece::Operand { index: 1, width: Width::Quad },
+                Piece::Operand { index: 0, width: Width::Quad, stated: false },
+                Piece::Operand { index: 1, width: Width::Quad, stated: false },
             ]
         );
     }
@@ -686,10 +711,11 @@ mod tests {
     fn an_operand_tied_to_a_named_one_is_read_as_that_one() {
         let lines = read("addq %1, %0", &[]).expect("an addition onto an operand");
         assert_eq!(lines[0].opcode, "add_rr_64");
-        let destination = Piece::Operand { index: 0, width: Width::Quad };
+        let destination = Piece::Operand { index: 0, width: Width::Quad, stated: false };
+        let source = Piece::Operand { index: 1, width: Width::Quad, stated: false };
         assert_eq!(
             lines[0].operands,
-            vec![destination, destination, Piece::Operand { index: 1, width: Width::Quad }],
+            vec![destination, destination, source],
             "written, read, and the other source"
         );
     }
@@ -701,7 +727,7 @@ mod tests {
     fn a_shift_by_cl_has_one_operand_of_each_kind_filled_in() {
         let lines = read("shlq %%cl, %0", &[]).expect("a shift by cl");
         assert_eq!(lines[0].opcode, "shl_rcl_64");
-        let destination = Piece::Operand { index: 0, width: Width::Quad };
+        let destination = Piece::Operand { index: 0, width: Width::Quad, stated: false };
         assert_eq!(lines[0].operands[0], destination);
         assert_eq!(lines[0].operands[1], destination, "the value being shifted");
         assert_eq!(
@@ -721,10 +747,11 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].opcode, "cmp_rr_32");
         assert_eq!(lines[1].opcode, "cmov_a_32");
-        let kept = Piece::Operand { index: 0, width: Width::Long };
+        let kept = Piece::Operand { index: 0, width: Width::Long, stated: false };
+        let arm = Piece::Operand { index: 3, width: Width::Long, stated: false };
         assert_eq!(
             lines[1].operands,
-            vec![kept, kept, Piece::Operand { index: 3, width: Width::Long }],
+            vec![kept, kept, arm],
             "the destination is also the arm taken when the condition does not hold"
         );
     }
@@ -745,7 +772,8 @@ mod tests {
             let lines =
                 read(template, &widths).unwrap_or_else(|| panic!("{template} is an addition"));
             assert_eq!(lines[0].opcode, opcode, "{template}");
-            assert_eq!(lines[0].operands[0], Piece::Operand { index: 0, width }, "{template}");
+            let written = Piece::Operand { index: 0, width, stated: true };
+            assert_eq!(lines[0].operands[0], written, "{template}");
         }
     }
 
@@ -771,6 +799,23 @@ mod tests {
             None,
             "one operand saying a width and the other saying a different one"
         );
+    }
+
+    /// The count of the low zero bits of a limb as gmp writes it, which is the template this flag
+    /// was added for. The count goes into an `unsigned` and the instruction is a quadword one, so
+    /// the two widths differ and the one the operand comes back at is the template's. Whether that
+    /// is allowed is the caller's question and the answer depends on the operand's role, which is
+    /// not something this file has, so what this carries is which of the two the width came from.
+    #[test]
+    fn an_operand_whose_width_came_from_the_template_says_where_it_came_from() {
+        let widths = [Some(Width::Long), Some(Width::Quad)];
+        let lines = read("rep;bsf\t%1, %q0", &widths).expect("the count gmp writes");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opcode, "tzcnt_64", "the modifier and not the type");
+        let written = Piece::Operand { index: 0, width: Width::Quad, stated: true };
+        assert_eq!(lines[0].operands[0], written, "the count, written by the whole instruction");
+        let read_from = Piece::Operand { index: 1, width: Width::Quad, stated: false };
+        assert_eq!(lines[0].operands[1], read_from, "the limb, whose own type said sixty four");
     }
 
     /// A width that disagrees with the instruction is refused the way a register name that

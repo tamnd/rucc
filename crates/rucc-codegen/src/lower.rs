@@ -3179,8 +3179,8 @@ impl<'a> Lowering<'a> {
         // statement's operands a constraint letter put there, and to nobody when no letter did.
         // There is no width to check in that case: the operand is the register the letter named and
         // the instruction does what it does to it, which is what a program writing `"=a"` asked for.
-        let (index, width) = match piece {
-            x86_64::Piece::Operand { index, width } => (index, Some(width)),
+        let (index, spelled) = match piece {
+            x86_64::Piece::Operand { index, width, stated } => (index, Some((width, stated))),
             x86_64::Piece::Implicit { reg } => match bound(list, reg, desc.role) {
                 Some(index) => (index, None),
                 None => return self.spare(inst, desc),
@@ -3215,8 +3215,24 @@ impl<'a> Lowering<'a> {
         if !placeable || self.class_of(ty) != desc.class {
             return Err(refused());
         }
-        if width.is_some_and(|width| bits != width.bits()) {
-            return Err(refused());
+        if let Some((width, stated)) = spelled {
+            // An operand the template wrote a width on may be written by an instruction that fills
+            // more of the register than the object in it does, and the object is then the low part
+            // of what was written. That is what gmp asks for when it counts the low zero bits of a
+            // limb into an `unsigned` and spells the count `%q0`: one quadword instruction writes
+            // the whole register and the `unsigned` is the bottom of it, which is every bit of an
+            // answer that cannot exceed sixty four anyway.
+            //
+            // Only written, and only wider. A read of more of a register than its type fills is a
+            // program handing an instruction bits nothing ever put there. A write of less of one
+            // leaves the top of the object holding whatever the register held before, which is the
+            // same thing one instruction later. Both are refused, and an operand the template left
+            // plain is refused either way, because what gets spelled for that one is the register
+            // at the width of its type and no other instruction is the one written down.
+            let widened = stated && desc.role.is_def() && width.bits() > bits;
+            if bits != width.bits() && !widened {
+                return Err(refused());
+            }
         }
         Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
     }

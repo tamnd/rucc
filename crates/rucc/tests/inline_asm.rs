@@ -145,7 +145,8 @@ fn a_width_written_on_an_operand_is_the_width_the_instruction_is_read_at() {
 fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
     // Two ways of disagreeing and both are refused rather than one half being believed over the
     // other. A quadword add into half a register is not an instruction, and a quadword add of an
-    // `int` is an instruction reaching a register half of which nothing defined.
+    // `int` reads a register half of which nothing defined, which the read of `%q1` says and the
+    // read half of `%q0` says again.
     let mnemonic =
         "long f(long x, long y) { asm (\"addq %1, %k0\" : \"+r\" (x) : \"r\" (y)); return x; }\n";
     let (ok, _, said) = run("modifier-mnemonic", mnemonic);
@@ -155,6 +156,30 @@ fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
     let (ok, _, said) = run("modifier-type", ty);
     assert!(!ok, "a width that contradicts the type of the operand was accepted");
     assert!(said.contains("has an operand this cannot place"), "{said}");
+    // And the narrow half of the same question, which is an instruction that writes a third of the
+    // object it was given and leaves the rest holding whatever was there. gcc writes that one and
+    // the program it writes it for is relying on what the machine does to the top of a register
+    // rather than on anything it said, so this refuses it until something real asks for it.
+    let part = "long f(long x) { long n; asm (\"bsf %k1, %k0\" : \"=r\" (n) : \"r\" (x)); \
+                return n; }\n";
+    let (ok, _, said) = run("modifier-narrow", part);
+    assert!(!ok, "an instruction filling part of its output was accepted");
+    assert!(said.contains("has an operand this cannot place"), "{said}");
+}
+
+#[test]
+fn an_operand_written_by_more_of_the_register_than_its_type_fills_is_the_low_part_of_it() {
+    // `count_trailing_zeros` out of libgmp's `longlong.h`, written the way `divis.c` reaches it
+    // rather than the way the header's own comment shows it. The count goes into an `unsigned`,
+    // because a count of the bits of a limb cannot exceed sixty four, and the template still spells
+    // the destination `%q0` because the same line is read on the target where a limb is a `long`.
+    // So the instruction is a quadword one, the object in the register is the low half of what it
+    // wrote, and both of those are exactly what the program asked for.
+    let source = "unsigned f(unsigned long x) { unsigned n; \
+                  asm (\"rep;bsf\\t%1, %q0\" : \"=r\" (n) : \"rm\" (x)); return n; }\n";
+    let body = body(&asm("modifier-wide", source), "f");
+    assert!(body.contains("tzcntq"), "the width on the operand was not read:\n{body}");
+    assert!(!body.contains("tzcntl"), "the type was believed over the template:\n{body}");
 }
 
 #[test]
