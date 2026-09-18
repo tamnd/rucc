@@ -337,6 +337,11 @@ const REMOVED_MADE: &str = "bounds check removed, its bytes are inside an object
 const REMOVED_RANGE: &str = "bounds check removed, every address the walk can reach is inside the \
                              object it started from";
 
+/// Recorded for a bounds check removed by carrying its walk past the step the constant reader
+/// stopped at, all the way back to the pointer its capability names.
+const REMOVED_MIDWAY: &str = "bounds check removed, its walk was carried on to the pointer its \
+                              capability names and every address it can reach is held";
+
 /// Recorded once for each lifetime check taken out.
 const REMOVED_LIVE: &str = "lifetime check removed, a dominating check covers the same storage";
 
@@ -355,6 +360,10 @@ const REMOVED_LIVE_LOCAL: &str =
 /// Recorded once for each lifetime check taken out because a range answered the step it walked by.
 const REMOVED_LIVE_RANGE: &str = "lifetime check removed, every address the walk can reach is in \
                                   storage a check found alive";
+
+/// The same as [`REMOVED_MIDWAY`], for a lifetime check.
+const REMOVED_MIDWAY_LIVE: &str = "lifetime check removed, its walk was carried on to the pointer \
+                                   its capability names and every address it can reach is alive";
 
 /// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
@@ -645,11 +654,53 @@ impl Pass for Discharge {
                             continue;
                         }
                         let Some(asked) = about(func, inst) else {
-                            stats.missed(if midway(func, inst) {
-                                MIDWAY_CAPABILITY
-                            } else {
-                                UNKNOWN_SHAPE
-                            });
+                            // The constant reader could not name the address, so the rules that
+                            // take one address never run. The range reader can, past the step the
+                            // other one stopped at, and only when the base it lands on is the
+                            // pointer the capability names.
+                            let mid = midway(func, inst);
+                            let size = match func[inst].extra {
+                                Extra::Mem(info) => i128::from(func[info].size),
+                                _ => 0,
+                            };
+                            let wide = mid
+                                .then(|| beyond(func, ranges.as_mut(), inst, size))
+                                .flatten()
+                                .filter(|wide| {
+                                    (self.sources.objects
+                                        && declared(func, wide.base)
+                                            .is_some_and(|local| reaches(&local, wide)))
+                                        || (self.sources.objects
+                                            && allocated_around(
+                                                func,
+                                                cfg,
+                                                &mut checked,
+                                                block,
+                                                &[wide],
+                                            ))
+                                        || (self.sources.dominance && scope.bounds.reaches(wide))
+                                })
+                                .filter(|_| match aligned(func, &scope.aligns, inst) {
+                                    Alignment::Answered => true,
+                                    Alignment::Unknown => {
+                                        stats.missed(UNKNOWN_ALIGNMENT);
+                                        false
+                                    }
+                                    Alignment::Lost => {
+                                        stats.missed(LOST_ALIGNMENT);
+                                        false
+                                    }
+                                });
+                            if wide.is_some() {
+                                if fuel.take() {
+                                    going.push((inst, REMOVED_MIDWAY));
+                                } else {
+                                    stats.missed(NO_FUEL);
+                                    scope.proved(func, inst);
+                                }
+                                continue;
+                            }
+                            stats.missed(if mid { MIDWAY_CAPABILITY } else { UNKNOWN_SHAPE });
                             scope.proved(func, inst);
                             continue;
                         };
@@ -748,7 +799,29 @@ impl Pass for Discharge {
                     }
                     Opcode::CheckLive => {
                         let Some(asked) = alive(func, inst) else {
-                            stats.missed(if midway(func, inst) {
+                            // The bounds arm's paragraph, and the same two rules this arm already
+                            // asks of a range, which is a local that holds everything the walk can
+                            // reach and a lifetime fact that does.
+                            let mid = midway(func, inst);
+                            let wide = mid
+                                .then(|| beyond(func, ranges.as_mut(), inst, 1))
+                                .flatten()
+                                .filter(|wide| {
+                                    (self.sources.objects
+                                        && !ends
+                                        && declared(func, wide.base)
+                                            .is_some_and(|local| reaches(&local, wide)))
+                                        || (self.sources.dominance && scope.alive.reaches(wide))
+                                });
+                            if wide.is_some() {
+                                if fuel.take() {
+                                    going.push((inst, REMOVED_MIDWAY_LIVE));
+                                } else {
+                                    stats.missed(NO_FUEL_LIVE);
+                                }
+                                continue;
+                            }
+                            stats.missed(if mid {
                                 MIDWAY_CAPABILITY_LIVE
                             } else {
                                 UNKNOWN_SHAPE_LIVE
@@ -1206,6 +1279,30 @@ fn midway(func: &Func, check: Inst) -> bool {
         let Some(&from) = func[func[inst].args].first() else { return false };
         value = from;
     }
+}
+
+/// Every address a check [`its_own`] refused can land in, when its capability names the far end.
+///
+/// The piece [`about`] cannot supply. That one reads an address as a base and a constant, and a
+/// chain with a step nobody can read has no such reading, so it answers nothing and the rules never
+/// run. [`spanned`] has no such trouble, because a step nobody can read is exactly what it asks the
+/// ranges about, and it walks the whole chain rather than stopping at the first one. So the walk is
+/// carried on from where the constant reader gave up, and what comes back is a range of addresses
+/// off a base further back.
+///
+/// The base it lands on has to be the value the capability names, and that is the whole of what
+/// makes this sound rather than a widening. A fact answers a range by [`reaches`], which already
+/// insists on the same base, so what a rule says yes to is that every address this walk can reach is
+/// inside something already known about that base. The capability naming that base is what says the
+/// instance the rules are talking about is the instance this check is about.
+fn beyond(func: &Func, ranges: Option<&mut Ranges<'_>>, check: Inst, size: i128) -> Option<Reach> {
+    let args = &func[func[check].args];
+    let &capability = args.first()?;
+    let &pointer = args.get(1)?;
+    let named = named_by(func, capability)?;
+    let (base, offset) = normal(func, pointer);
+    let wide = spanned(func, ranges?, base, offset, size, check)?;
+    (wide.base == named).then_some(wide)
 }
 
 fn its_own(named: Value, pointer: Value, base: Value) -> Option<bool> {
@@ -3042,6 +3139,60 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 0);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_RANGE), 1);
+    }
+
+    #[test]
+    fn a_check_whose_capability_is_further_back_than_its_base_is_answered_by_the_ranges() {
+        // The row #1390 is about. The capability was taken at the pointer, the address is that
+        // pointer stepped by something nobody can read, and the constant reader stops at the step
+        // so it has no base and no constant to ask a rule with. Carrying the walk on past the
+        // step with the ranges lands on the pointer the capability names, and the sixty four
+        // bytes an earlier check proved hold every address the step can reach.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 64);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        checking_at(&mut build, pointer, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MIDWAY), 1);
+    }
+
+    #[test]
+    fn a_step_that_can_reach_past_what_was_checked_keeps_its_check() {
+        // The same function with the mask widened. The step is somewhere in nought to a hundred
+        // and twenty seven, the four bytes can start as far out as that, and the check that ran
+        // proved sixty four. Nothing here says the rest of it belongs to the same instance.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 64);
+        let step = low_bits(&mut build, index, 127);
+        let at = walk(&mut build, pointer, step);
+        checking_at(&mut build, pointer, at, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MIDWAY), 0);
+        assert_eq!(stats.count(Kind::Missed, super::MIDWAY_CAPABILITY), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_further_back_than_its_base_is_answered_the_same_way() {
+        // The other half. The first access puts a lifetime fact in, widened by its own bounds
+        // check to the sixty four bytes that check proved are one instance, and every address the
+        // step can reach is inside it.
+        let (_, mut func, block, pointer, index) = indexed();
+        let mut build = Builder::new(&mut func, block);
+        access(&mut build, pointer, 64);
+        let step = low_bits(&mut build, index, 7);
+        let at = walk(&mut build, pointer, step);
+        living_at(&mut build, pointer, at);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_MIDWAY_LIVE), 1);
     }
 
     #[test]
