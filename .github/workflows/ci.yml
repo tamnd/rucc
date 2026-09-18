@@ -382,12 +382,12 @@ jobs:
   # the same shape have been found since and every one of them was found the same way, so this is
   # that by hand run made standing.
   #
-  # The amalgamation is fetched rather than vendored, because it is nine megabytes of somebody
-  # else's C and a copy of it would be in this compiler's history forever. It is pinned by hash for
-  # the ordinary reason, and the check does not care which version it gets: the workload is plain
-  # SQL and its answers are arithmetic.
-  sqlite:
-    name: an instrumented sqlite that has to be right
+  # The sources are fetched rather than vendored, because they are somebody else's C and a copy of
+  # them would be in this compiler's history forever. They are pinned by hash for the ordinary
+  # reason, and the checks do not care which versions they get: the workloads are ordinary use of
+  # each library and their answers are arithmetic.
+  libraries:
+    name: instrumented libraries that have to be right
     needs: quick
     runs-on: ubuntu-24.04
     steps:
@@ -395,15 +395,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: install the target library
         run: rustup target add x86_64-unknown-linux-gnu
-      - name: fetch the amalgamation
+      - name: fetch the sqlite amalgamation
         run: |
           curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
           echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tar.gz" | sha256sum -c -
           tar xzf sqlite.tar.gz
-      - name: build it at both levels and hold it to its answers
-        run: cargo xtask sqlite
+      - name: fetch the zlib sources
+        run: |
+          curl -fsSL -o zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          echo "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23  zlib.tar.gz" | sha256sum -c -
+          tar xzf zlib.tar.gz
+      - name: build them at both levels and hold them to their answers
+        run: cargo xtask libraries
         env:
-          RUCC_SQLITE_AMALGAMATION: ${{ github.workspace }}/sqlite-autoconf-3530400/sqlite3.c
+          RUCC_SQLITE_AMALGAMATION: ${{ github.workspace }}/sqlite-autoconf-3530400
+          RUCC_ZLIB_SOURCE: ${{ github.workspace }}/zlib-1.3.1
 
   # spec/cross-compile/14-testing.md section 14.3 is layer 6 of the ladder, and it is the only
   # layer that can see a calling convention at all: everything cheaper than it reads what the

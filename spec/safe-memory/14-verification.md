@@ -17,7 +17,7 @@ Every mechanism in this document is a way of making that failure observable.
 | The bug model's rows are covered | Juliet, per row | 14.6 |
 | Kernel coverage is what we say it is | the ACSAC 439-CVE replay | 14.7 |
 | The monitor itself is correct | conventional testing, stated as the trust set | 14.8 |
-| A real library survives the monitor and gets the right answers | an instrumented SQLite, per commit | 14.9 |
+| A real library survives the monitor and gets the right answers | instrumented SQLite and zlib, per commit | 14.9 |
 | No false positives | document 12's corpus; empirical, no proof available | 12.6 |
 
 Nothing here proves the compiler correct and nothing here claims to. The parent's document 15 makes the same disposition: verify the narrow, mechanical, high-leverage things (the rewrite rules) and test everything else hard.
@@ -131,16 +131,20 @@ Stated, because a verification effort that does not state its own assumptions is
 
 **The model in document 04 is the right model of C.** The largest assumption in the whole specification, and the only evidence available for it is document 12's false-positive count over real code. Which is why axis 2 outranks axis 1, and why triage bucket 2 ("the model is wrong") is a release-blocking outcome rather than a curiosity.
 
-## 14.9 A real library, end to end
+## 14.9 Real libraries, end to end
 
 Last because it is the newest and because it is the one check here that was added in response to being needed rather than in anticipation of it.
 
 Everything above asks a question of a program written to be asked it. The escape suite is programs that escape, the Juliet rows are cases numbered by the thing they demonstrate, and the suite in `tests/safety` is a few lines of C per judgement. That is the right shape for asking whether a check fires, and it is the wrong shape for asking whether a real library survives the monitor, because a real library does things nobody writing a test case thinks to write down. SQLite recycles its own storage through a lookaside allocator and hands one block out as three different structures, which is not unusual and is not imitable in five lines.
 
-**What the check is.** One C file, compiled by this compiler at `-O0` and at `-O2` with the monitor on, linked against the runtime, and run against a workload whose answers are arithmetic: four thousand rows inserted, an index built over them, a count and a sum taken over a text pattern, and fifty rows read back in index order. The program checks its own answers and the check reads its verdict. A refusal is a failure rather than a result, because the workload does nothing wrong, so every report it produces is a false positive by construction.
+**What the check is.** A table of projects. Each row names the sources, what the project's own configure script would define on a Linux machine, and every report the monitor is expected to make. Each row is compiled by this compiler at `-O0` and at `-O2` with the monitor on, linked against the runtime, and run against a workload whose answers are arithmetic. The program checks its own answers and the check reads its verdict.
+
+**What the expected reports are for.** The workloads do nothing wrong, so a report nothing in the row expects is a false positive by construction and is a failure. A report the row does expect is a finding: the library really does the thing, the row says which site and why, and the check fails if it stops arriving, because that would mean either the library changed or a check stopped looking. The runs are made in the deduplicating posture rather than the aborting one, so one site says its piece once and the program still reaches the end and gets its answers right.
+
+**The rows.** SQLite is one enormous translation unit that recycles small blocks through a lookaside allocator, and its workload inserts four thousand rows, builds an index over them, takes a count and a sum over a text pattern and reads fifty rows back in index order. It expects no reports. zlib is fifteen small translation units that take a few large buffers at the start and then index them with pointers held inside the caller's own structure, and its workload round trips four hundred kilobytes through the whole-buffer interface at three levels, through the streaming interface a thousand bytes at a time with an output buffer too small to hold one call's worth, and through the gzip file interface. It expects one report: `slide_hash` in `deflate.c` reads every two byte entry of `s->prev` before anything has written it, which zlib's own comment beside the loop acknowledges and considers harmless because the value is never consulted. The two libraries are opposite shapes and neither reaches the other's paths, which is the argument for a table rather than for one more anecdote.
 
 **Why both levels.** They fail differently. At `-O0` a wrong answer is the instrumentation or the runtime. At `-O2` it is either of those or a check the optimizer removed that was holding something up, which is the same question section 14.3 asks and asked here of a program nobody wrote for the purpose.
 
 **What it has found.** Four holes in document 10's boundary model, every one of them by being run by hand before it was a check: an interposed write that maintained the init plane and not the type plane, a `memcpy` that moved a pointer and left the aux slot beside it, a `realloc` that did the same, and an allocator that handed a block back out with the previous tenant's aux still in it. None of them was visible to any suite above, and the reason is the same in all four cases: they are properties of what a program does over millions of operations to storage it reuses, and a case written to demonstrate one judgement does not reuse anything.
 
-**What it is not.** One library and one workload, so it is evidence and not coverage. Section 14.7's replay is the coverage claim and document 12's corpus is the number that means something. This is the floor under both: a monitor that cannot run SQLite correctly has nothing to say about a kernel.
+**What it is not.** A handful of libraries and one workload each, so it is evidence and not coverage. Section 14.7's replay is the coverage claim and document 12's corpus is the number that means something. This is the floor under both: a monitor that cannot run SQLite correctly has nothing to say about a kernel.
