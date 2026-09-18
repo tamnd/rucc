@@ -45,6 +45,19 @@
 //! front of. What they read is [`Reads::Carry`], which is a fourth group with nothing in the table
 //! good for it, so naming them here can only stop a rewrite and never allow one.
 //!
+//! # The two kinds of read
+//!
+//! An add with carry reads a bit the instruction in front of it left. A comparison that keeps a
+//! byte reads a bit it set itself a moment earlier, in the same instruction. Both are a [`Reader`]
+//! and the entry says the same thing about both, because what the entry is for is naming which
+//! part of the state a condition is about, and that is the same question either way.
+//!
+//! It is not the same question for a pass asking whether a state is still needed. State arriving at
+//! an add with carry is read. State arriving at a comparison that keeps a byte is written over
+//! before anything looks at it, so it is dead there, exactly as it would be at a plain comparison.
+//! [`FlagInsts::asks_what_it_reads`] is the question, and the answer is already in the two tables:
+//! the second kind makes a comparison and the first kind does not.
+//!
 //! # What is not a [`Zeroing`]
 //!
 //! A shift, because a shift by zero leaves the condition state exactly as it found it, and the
@@ -157,6 +170,24 @@ impl FlagInsts {
     #[must_use]
     pub fn reads(&self, name: &str) -> Option<Reads> {
         self.readers.iter().find(|entry| entry.name == name).map(|entry| entry.reads)
+    }
+
+    /// Whether what the instruction of that name reads is what it wrote itself.
+    ///
+    /// A comparison that keeps a byte makes a comparison and then reads the answer, both in the one
+    /// instruction, so it is a [`Compare`] and a [`Reader`] at once. What it reads is not what it
+    /// found. An add with carry is the other kind: it reads the bit the instruction in front left,
+    /// and it is a [`Reader`] and no [`Compare`], which is what tells the two apart without a
+    /// second table.
+    ///
+    /// The difference is the whole question for a pass asking whether some state is still needed
+    /// behind an instruction. A state arriving at an add with carry is a state that is read. A
+    /// state arriving at a comparison that keeps a byte is a state that is written over before
+    /// anything looks at it, which is to say a state that is dead there, and treating the two the
+    /// same way makes a pass decline rewrites in most of the functions a C program has.
+    #[must_use]
+    pub fn asks_what_it_reads(&self, name: &str) -> bool {
+        self.reads(name).is_some() && self.compare(name).is_some()
     }
 
     /// The entry for the instruction of that name, if it leaves a comparison against zero.

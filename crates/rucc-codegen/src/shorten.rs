@@ -86,9 +86,15 @@
 //! That is an invariant of the passes in front rather than of this one, so it is checked instead of
 //! believed. `carried` walks every block and asks whether any of them reads the condition state
 //! before writing it, which is what a block reading a predecessor's state would look like from
-//! here, and one that does turns the whole function down. It has never turned one down. What it
-//! buys is that if some later pass starts writing that shape, this pass stops rather than starts
-//! being wrong.
+//! here, and one that does turns the whole function down. What it buys is that if some later pass
+//! starts writing that shape, this pass stops rather than starts being wrong.
+//!
+//! Reads it rather than mentions it. A comparison that keeps a byte makes the comparison and reads
+//! the answer in the one instruction, so a block opening with one is not a block reading anything a
+//! predecessor left, and the description is asked which of the two kinds of read it is rather than
+//! being taken at the word. tamnd/rucc#1432 is what that cost before it was asked: 456 functions in
+//! the SQLite amalgamation were turned down and every one of them was turned down by this, which is
+//! most of the functions in it that have anything for this pass to do.
 //!
 //! Down for the exclusive or and the increment. The narrower move reads no condition state and
 //! writes none and the test writes the same state the comparison it replaces wrote, so where a
@@ -235,7 +241,17 @@ pub fn shorter(
             // read it does is a read of what is there now. An add with carry is the one that does,
             // and asking the other way round would call it the end of the state's life and let a
             // rewrite in front of it take the carry away.
-            if let Some(reads) = flags.reads(name) {
+            //
+            // Unless what it reads is what it wrote itself. A comparison that keeps a byte makes
+            // the comparison and reads the answer in the one instruction, so the state it was
+            // handed is state it wrote over before anything looked at it, and it ends a life rather
+            // than extending one. Asking the description which kind it is rather than stopping at
+            // the word read is most of what this pass gets to do in real code, since a C function
+            // of any size has one of these in it.
+            if flags.asks_what_it_reads(name) {
+                live = false;
+                carry = false;
+            } else if let Some(reads) = flags.reads(name) {
                 live = true;
                 // Which part of the state the condition on it is about. A condition that asks where
                 // a value sits as an unsigned number reads the carry, and so does an instruction
@@ -269,11 +285,18 @@ pub fn shorter(
 /// the same reason it does not count as having written it in the walk. A block opening with one and
 /// reading a carry afterwards is reading a carry a predecessor left, which is exactly the shape this
 /// is looking for, and stopping at it would be calling that block clean.
+///
+/// An instruction that reads what it wrote itself does not count as having read the state, for the
+/// same reason it does not in the walk. A block opening with a comparison that keeps a byte opens
+/// with a comparison, and what the comparison found is not what anything in front of it left.
+/// Counting it as a read is the difference between this turning down a few functions and turning
+/// down most of them, because a comparison that keeps a byte is what every `!` and every `==` in a
+/// value position comes out as.
 fn carried(func: &mir::Func, short: &ShortInsts, flags: &FlagInsts, names: &Interner) -> bool {
     func.blocks().any(|block| {
         for inst in func.insts(block) {
             let Some(name) = opcode(func, flags, names, inst) else { return true };
-            if flags.reads(name).is_some() {
+            if flags.reads(name).is_some() && !flags.asks_what_it_reads(name) {
                 return true;
             }
             if (flags.writes)(name) && !short.steps(name) {
@@ -981,6 +1004,79 @@ mod tests {
         assert_eq!(small(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["inc_r_32", "add_ri_32", "set_b"]);
         assert_eq!(imm(&func, second), Some(1));
+    }
+
+    /// The instruction the whole function check used to stop at. A comparison that keeps a byte
+    /// reads the condition state and the state it reads is the one it wrote itself a moment
+    /// earlier, so a block opening with one is not a block reading what a predecessor left, and the
+    /// move in the other block is rewritten.
+    #[test]
+    fn a_block_opening_with_a_comparison_that_keeps_a_byte_is_not_a_carried_state() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let fused = op(&mut names, "cmp_set_e_32");
+        func.build(first, zero).def(into, GPR).imm(0).finish();
+        func.build(second, fused).def(byte, GPR).uses(value, GPR).uses(value, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, first), ["xor_rr_32"]);
+    }
+
+    /// The same sentence inside a block. What the comparison reads is what it wrote, so what it was
+    /// handed is written over before anything looks at it, and the move in front of it may spend a
+    /// state nothing wants.
+    #[test]
+    fn a_comparison_that_keeps_a_byte_ends_the_life_of_the_state() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let fused = op(&mut names, "cmp_set_e_32");
+        func.build(block, zero).def(into, GPR).imm(0).finish();
+        func.build(block, fused).def(byte, GPR).uses(value, GPR).uses(value, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["xor_rr_32", "cmp_set_e_32"]);
+    }
+
+    /// And the carry with it. A comparison that keeps a byte and asks where a value sits as an
+    /// unsigned number reads the carry, and it is the carry it set itself, so the addition in front
+    /// of it is free to become the instruction that leaves the carry alone.
+    #[test]
+    fn a_comparison_that_keeps_a_byte_does_not_keep_the_carry_alive() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_32");
+        let fused = op(&mut names, "cmp_set_b_32");
+        func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+        func.build(block, fused).def(byte, GPR).uses(value, GPR).uses(value, GPR).finish();
+
+        assert_eq!(small(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["inc_r_32", "cmp_set_b_32"]);
+    }
+
+    /// The other kind of read, which is the one this must go on stopping at. An add with carry is
+    /// reading the bit the instruction in front of it left rather than one it wrote itself, and it
+    /// makes no comparison, which is how the description tells the two apart.
+    #[test]
+    fn an_add_with_carry_opening_a_block_is_still_a_carried_state() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        let into = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let adc = op(&mut names, "adc_ri_32");
+        func.build(first, zero).def(into, GPR).imm(0).finish();
+        func.build(second, adc).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, first), ["mov_ri_32"]);
     }
 
     /// A name the description does not cover, which is anything without this target's prefix. It
