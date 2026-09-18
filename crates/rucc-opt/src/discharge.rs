@@ -72,8 +72,21 @@
 //! measurement in the changelog and is what says the flag earns its bit.
 //!
 //! What is left is a pointer this function was handed, one it loaded out of memory, and one a call
-//! gave back. It is counted rather than argued about, the same as everything else here, so
-//! `-fopt-info-missed` says what the rest of the `!aligned` fact of section 6.2.4 would be worth.
+//! gave back, and for those the answer is the same one the bytes get: a check that stays is a check
+//! that runs, and a check that runs tests the alignment and refuses when it does not hold. So the
+//! first access through a pointer somebody handed in proves for nothing what every later access
+//! through the same value needs, and `Scope::aligns` carries it.
+//!
+//! That fact is easier to carry than a range and it is worth saying why, because the section below
+//! spends a page arguing about what a call does to a range. A range is about storage and storage
+//! can be freed and handed back out smaller. An alignment is about the number in the value, and
+//! nothing in a function changes the number an SSA value holds, so it crosses a call, it crosses
+//! inline assembly and it crosses a `meta_end`. Dominance is the only thing that bounds it.
+//!
+//! What is still not answered is counted rather than argued about, the same as everything else
+//! here, so `-fopt-info-missed` says what the rest of the `!aligned` fact of section 6.2.4 would be
+//! worth. On the SQLite amalgamation that row is 6046 checks at 1178 sites, down from 10729 at 1413
+//! once a check's own answer is carried, and the checks in the assembly went from 28473 to 23790.
 //!
 //! # The fact nobody had to check for
 //!
@@ -372,6 +385,11 @@ const PAST_A_CALL_LIVE: &str =
 /// so the number is what the gate costs rather than how many checks have an alignment, which makes
 /// it what the `!aligned` fact of `spec/safe-memory/06-instrumentation.md` section 6.2.4 would be
 /// worth.
+///
+/// What is left in this row is the pointers no check has run on yet, since one that has is answered
+/// by [`Scope::proved`]. So it is now a count of first accesses rather than of all of them, and
+/// what would take it down further is the front end saying what a pointer is aligned to at the
+/// point it makes one.
 const UNKNOWN_ALIGNMENT: &str =
     "bounds check kept, nothing here says the address is aligned to what the access assumes";
 
@@ -593,10 +611,12 @@ impl Pass for Discharge {
                     Opcode::CheckBounds => {
                         if func[func[inst].args].len() > 2 {
                             stats.missed(COMPUTED_EXTENT);
+                            scope.proved(func, inst);
                             continue;
                         }
                         let Some(asked) = about(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE);
+                            scope.proved(func, inst);
                             continue;
                         };
                         // The four objects whose extent is known without anybody having checked
@@ -652,7 +672,7 @@ impl Pass for Discharge {
                         // the number somebody reads has to be what it actually costs. A check kept
                         // here still runs, so it still establishes what it was about.
                         let why = why.filter(|_| {
-                            aligned(func, inst) || {
+                            aligned(func, &scope.aligns, inst) || {
                                 stats.missed(UNKNOWN_ALIGNMENT);
                                 false
                             }
@@ -664,12 +684,16 @@ impl Pass for Discharge {
                             // A check that stays is a check that runs, and a check that runs
                             // establishes what it was about. One that was removed establishes
                             // nothing new: whatever covered it covers everything it would have.
+                            // Both halves of what it was about, since the alignment conjunct rides
+                            // on this check and the gate above may well be the thing that kept it.
                             scope.bounds.held.push(asked);
+                            scope.proved(func, inst);
                             continue;
                         };
                         if !fuel.take() {
                             stats.missed(NO_FUEL);
                             scope.bounds.held.push(asked);
+                            scope.proved(func, inst);
                             continue;
                         }
                         // A check that goes normally establishes nothing new, because whatever
@@ -990,13 +1014,42 @@ struct Scope {
     bounds: Known,
     /// Ranges a `check_live` established are in an instance that is alive.
     alive: Known,
+    /// What a `check_bounds` that ran proved about where the address it was about starts.
+    ///
+    /// Nothing here is ever given up, and that is the difference between this and the other two.
+    /// They are facts about storage, and storage can be freed and handed back out, which is the
+    /// whole of what a call does to them. This is a fact about the number a value holds, and
+    /// nothing in a function changes the number an SSA value holds. So it survives a call, it
+    /// survives inline assembly and it survives a `meta_end`, and dominance is the only thing that
+    /// bounds it, which the walk already handles by giving each child its own copy.
+    aligns: HashMap<Value, u64>,
 }
 
 impl Scope {
-    /// Gives up every fact of either kind.
+    /// Gives up every fact of either kind. The alignment facts are not one of the two, and
+    /// [`Scope::aligns`] says why they are not given up here or anywhere else.
     fn forget(&mut self) {
         self.bounds.forget();
         self.alive.forget();
+    }
+
+    /// Records what a `check_bounds` that is staying proves about where its address starts.
+    ///
+    /// The check runs the alignment conjunct, which is `addr & (align - 1) != 0` in the runtime's
+    /// `bounds`, and refuses when it does not hold. So on any path past the check the address is a
+    /// multiple of what the access assumed, and the first access through a pointer somebody handed
+    /// in proves for nothing what every later access through the same value needs.
+    ///
+    /// Only for a check that stays. One that is removed does not run and proves nothing, and it
+    /// needs nothing either, since [`aligned`] answered it before it was allowed to go.
+    fn proved(&mut self, func: &Func, check: Inst) {
+        let Extra::Mem(info) = func[check].extra else { return };
+        let claim = u64::from(func[info].align);
+        let Some(&pointer) = func[func[check].args].get(1) else { return };
+        if claim > 1 {
+            let held = self.aligns.entry(pointer).or_default();
+            *held = (*held).max(claim);
+        }
     }
 
     /// Gives up the lifetime facts and keeps the bounds ones, marked as a call having run over them.
@@ -1203,21 +1256,22 @@ const DEEP: u32 = 4;
 /// A global is not read here at all. It arrives as [`Flags::ALIGNED`] from `crate::extents`, which
 /// is given the module this is not, and the flag is the whole of what this asks about one.
 ///
-/// A pointer this cannot read the origin of is zero, which answers nothing and keeps the check.
-/// That is a block parameter, a pointer loaded out of memory, and one handed in.
-/// [`UNKNOWN_ALIGNMENT`] counts them.
+/// A pointer whose origin this cannot read is answered by a check that already ran on it, which is
+/// [`Scope::proved`] and is the only thing that answers a block parameter, a pointer loaded out of
+/// memory or one handed in. What is left after that is zero, which answers nothing and keeps the
+/// check, and [`UNKNOWN_ALIGNMENT`] counts them.
 ///
 /// The two answers given before [`settles`] is asked are not arithmetic and so are not a rule's.
 /// An access of one byte assumes nothing about where it starts, so there is nothing to prove about
 /// it, and the flag is a fact `crate::extents` established over the whole module and wrote down.
-fn aligned(func: &Func, check: Inst) -> bool {
+fn aligned(func: &Func, aligns: &HashMap<Value, u64>, check: Inst) -> bool {
     let Extra::Mem(info) = func[check].extra else { return false };
     let claim = u64::from(func[info].align);
     if claim <= 1 || func[check].flags.contains(Flags::ALIGNED) {
         return true;
     }
     let Some(&pointer) = func[func[check].args].get(1) else { return false };
-    settles(settled(func, pointer), claim)
+    settles(settled(func, aligns, pointer), claim)
 }
 
 /// Whether an address known to be a multiple of one number meets an access's claim.
@@ -1253,10 +1307,16 @@ fn settles(known: u64, claim: u64) -> bool {
 /// smaller, which is why the steps are gathered with a `min` and why they start at the largest
 /// number there is instead of at zero. Zero is the answer and not a step, since an alignment of
 /// zero is not something an access can assume and a claim is never met by one.
-fn settled(func: &Func, pointer: Value) -> u64 {
+fn settled(func: &Func, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
     let mut steps = u64::MAX;
     let mut value = pointer;
     loop {
+        // Asked in front of the shape, because the point of it is the values the shape gives up
+        // on: a pointer handed in, a pointer read out of a field, a block parameter. A check that
+        // ran on one of those is as good an answer as an `alloca` and is the only answer there is.
+        if let Some(&proved) = aligns.get(&value) {
+            return steps.min(proved);
+        }
         let Def::Result { inst, .. } = func[value].def else { return 0 };
         match func[inst].opcode {
             Opcode::Alloca => {
@@ -2023,20 +2083,100 @@ mod tests {
     }
 
     #[test]
-    fn a_check_whose_alignment_nothing_here_settles_stays() {
-        // A pointer from outside, so nothing says what it is aligned to, and a second check of the
-        // same bytes that dominance would otherwise take. The bytes are covered and the alignment
-        // is not, and the check tests both, so it stays. One remark and not two: the first check
-        // was staying whatever anybody said about its alignment, and what the number is for is
-        // what the gate costs.
+    fn a_check_that_ran_answers_the_alignment_of_the_next_one_through_the_same_pointer() {
+        // A pointer from outside, so nothing about where it came from says what it is aligned to,
+        // and two checks of the same bytes. The first stays, because nothing covers its bytes, and
+        // in staying it runs and refuses if the address is not a multiple of four. So on the way
+        // to the second the address is a multiple of four whatever anybody knew before, the bytes
+        // are covered by the first, and the second goes. This is the shape most of an ordinary
+        // library is: a function reads a field of something it was handed and then reads it again.
         let (_, mut func, block, pointer) = blank();
         let mut build = Builder::new(&mut func, block);
         assuming(&mut build, pointer, 4, 4);
         assuming(&mut build, pointer, 4, 4);
         build.ret(&[]);
         let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn a_check_that_ran_answers_an_alignment_no_larger_than_the_one_it_tested() {
+        // The first check assumes two bytes and the second assumes four, and two does not answer
+        // four, so the second stays. Everything a check proves is what the access it stands beside
+        // was allowed to assume and not a byte more.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 4, 2);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
         assert_eq!(checks(&func), 2);
-        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn a_call_does_not_take_the_alignment_a_check_proved() {
+        // What a call can do is free the storage and hand it back out smaller, which is why the
+        // bounds facts are marked when one runs over them. It cannot change the number in a value,
+        // and an alignment fact is about the number, so it crosses a call untouched. The bounds
+        // half carries across too, marked, which is what leaves this with one check.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 4, 4);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+    }
+
+    #[test]
+    fn an_alignment_a_check_proved_reaches_only_the_blocks_that_check_dominates() {
+        // The alignment is proved in one arm of a branch and read in the join, so on the other
+        // path nothing has tested the address at all. A fact that leaked here would take a check
+        // the misaligned read needs, and dominance is the only thing holding an alignment fact.
+        // The check in the entry assumes a byte, which is an access that assumes nothing about
+        // where it starts, so it covers the bytes for the one in the join without saying anything
+        // about its alignment and the gate is what is left deciding.
+        let (_, mut func, block, pointer) = blank();
+        let arm = func.create_block();
+        let join = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 16, 1);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[]);
+        let mut build = Builder::new(&mut func, arm);
+        assuming(&mut build, pointer, 32, 4);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        assuming(&mut build, pointer, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 3, "the one in the arm reaches further, so all three stay");
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn a_step_off_an_alignment_a_check_proved_is_walked_the_way_a_local_is() {
+        // The pointer is proved four byte aligned by a check that ran, and then the two accesses
+        // are at four bytes in, which keeps it, and at one byte in, which does not. Nothing about
+        // the walk changes because the thing it ends at is a check rather than an `alloca`, which
+        // is the point of putting the answer where `settled` already looks.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 64, 4);
+        let even = past(&mut build, pointer, 4);
+        assuming(&mut build, even, 4, 4);
+        let odd = past(&mut build, pointer, 1);
+        assuming(&mut build, odd, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 2, "the one four bytes in goes and the one a byte in stays");
         assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
     }
 

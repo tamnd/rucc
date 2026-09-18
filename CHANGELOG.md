@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Changed
+
+- A bounds check whose alignment nothing in the function settles is answered by the check in front of it. A `check_bounds` tests two things, that the bytes are inside one instance and that the address starts where an access of that alignment may start, and a check that goes takes the second test with it, so nothing may go until something has answered it. What answered it was a walk back from the address to an `alloca` or to a call an allocator marked, and that walk gives up on a pointer the function was handed, a pointer read out of a field and a block parameter, which is most of the pointers in a library somebody else wrote. The thing it was missing is that a check which stays is a check that runs, and a check that runs tests the alignment and refuses when it does not hold, so the first access through a pointer somebody handed in proves for nothing what every later access through the same value needs. That fact is carried down the dominator tree like the others and is not given up anywhere, because a range is about storage and storage can be freed and handed back out smaller, while an alignment is about the number in the value and nothing in a function changes the number an SSA value holds. On the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect` that takes 4683 bounds checks out, 28473 down to 23790, brings 352 derivation checks back for the reason the entry above gives, leaves the lifetime checks at 20423 and shrinks the assembly by 1.6 megabytes. The row counting what the gate costs goes from 10729 checks at 1413 sites to 6046 at 1178, and what is left in it is first accesses rather than all accesses, so what would take it down further is the front end saying what a pointer is aligned to at the point it makes one. The row counting bounds checks a call stands between falls with it, 3978 at 605 sites to 1941 at 414, since a check that is removed outright is not a check anything is still counting a reason for. Part of tamnd/rucc#1379.
+
 ## 0.10.57
 
 ### Added
