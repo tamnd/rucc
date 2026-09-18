@@ -186,11 +186,17 @@ pub fn recover(addr: *const c_void) -> Cap {
         return tally(Origin::Unwatched, everything());
     };
 
+    // Somebody else's arena, whose blocks have none of this crate's bookkeeping in front of them.
+    // The class is still the allocator's and is still the truth, and what is not true of it is the
+    // layout, so the answer carries the class and says the layout is not ours. `Meta::ADOPTED` says
+    // what reads it and why.
+    let adopted = if region.carved { 0 } else { Meta::ADOPTED };
+
     // SAFETY: the region is the one covering this address, so its plane is built over it.
     let version = unsafe { region.plane.version(addr) };
     if plane::owned(version) {
         let (lo, ext) = run(&region, addr, version);
-        let meta = word(region.class, Meta::RECOVERED);
+        let meta = word(region.class, Meta::RECOVERED | adopted);
         return tally(Origin::Planes, Cap::new(lo as u64, ext as u64, version, meta));
     }
 
@@ -198,7 +204,7 @@ pub fn recover(addr: *const c_void) -> Cap {
         return tally(Origin::Nobody, Cap::BOTTOM);
     }
 
-    let meta = word(region.class, Meta::RECOVERED | Meta::WIDE);
+    let meta = word(region.class, Meta::RECOVERED | Meta::WIDE | adopted);
     let ext = (region.end - region.base) as u64;
     tally(Origin::Mapping, Cap::new(region.base as u64, ext, plane::FOREIGN, meta))
 }
@@ -805,7 +811,11 @@ mod tests {
         assert_eq!(count(Origin::Mapping), before + 1);
 
         assert!(cap.covers(arena as u64, ARENA as u64));
-        assert_eq!(cap.meta.flags(), Meta::RECOVERED | Meta::WIDE);
+        // And adopted, which is true of every answer about this arena whether or not anything has
+        // been carved in it. The flag is there for whoever reads the capability without having the
+        // region beside it, and what that reader must not do is go looking for bookkeeping of ours
+        // in front of an address. See `Meta::ADOPTED`.
+        assert_eq!(cap.meta.flags(), Meta::RECOVERED | Meta::WIDE | Meta::ADOPTED);
         assert_eq!(cap.meta.class(), Class::Mapped as u8);
     }
 

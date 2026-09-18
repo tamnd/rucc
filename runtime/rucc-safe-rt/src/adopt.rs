@@ -416,7 +416,7 @@ pub mod exports {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::Class;
+    use crate::layout::{Class, Meta};
     use crate::report::{Owner, owner};
     use crate::turnstile::turn;
 
@@ -589,5 +589,26 @@ mod tests {
         // The instance is over, so there is no identity to give: a version nobody owns is not one
         // anybody can be freeing.
         assert_eq!(deallocator(object as usize), None);
+    }
+
+    #[test]
+    fn a_carved_object_has_no_aux_in_front_of_it() {
+        let _turn = turn();
+        // tamnd/rucc#1453. The class of a carved object is the allocator's and an allocator's class
+        // is `Allocated`, so everything that finds an aux by subtracting from a payload used to find
+        // one here. Nothing of this crate's sits in front of an object somebody else laid out, so
+        // the subtraction named the bytes below the arena, and a program whose arena had nothing
+        // mapped below it faulted there rather than answering the question it was asked.
+        let object = at(20480);
+        // SAFETY: inside the adopted region, at an offset nothing else uses.
+        unsafe { split(object, 64, 0) };
+
+        let cap = crate::recover::recover(object.cast_const());
+        assert_eq!(cap.meta.class(), Class::Allocated as u8, "the allocator's class is kept");
+        assert!(cap.meta.flags() & Meta::ADOPTED != 0, "and the layout is said not to be ours");
+        assert_eq!(crate::aux_slot::address_of(cap, object as u64), None, "so no word has a slot");
+
+        // SAFETY: the instance carved above.
+        unsafe { merge(object) };
     }
 }
