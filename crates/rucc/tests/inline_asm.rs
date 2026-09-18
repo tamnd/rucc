@@ -410,6 +410,47 @@ fn an_alignment_this_cannot_promise_says_so_rather_than_dropping_it() {
     assert!(said.contains("which nothing here assembles"), "{said}");
 }
 
+/// What a program writes when its assembler was older than the instruction it wants. libwebp writes
+/// exactly this in `src/dsp/cpu.c` and in `sharpyuv/sharpyuv_cpu.c`: the three bytes are `xgetbv`,
+/// which is how a program asks whether the operating system has agreed to save the wide registers,
+/// and the mnemonic arrived after the code that asks did. The bytes are already the answer, so what
+/// is owed here is to write them back out rather than to assemble anything.
+#[test]
+fn a_byte_directive_in_a_template_reaches_the_listing_as_the_bytes_it_names() {
+    let source = "\
+unsigned long long f(unsigned int n) {
+  unsigned int lo, hi;
+  __asm__ volatile (\".byte 0x0f, 0x01, 0xd0\" : \"=a\"(lo), \"=d\"(hi) : \"c\"(n));
+  return ((unsigned long long)hi << 32) | lo;
+}
+";
+    let text = asm("byte", source);
+    let body = body(&text, "f");
+    assert!(
+        body.contains(".byte\t0x0f, 0x01, 0xd0"),
+        "the bytes never reached the listing:\n{body}"
+    );
+    // And the registers, which are the other half of it. The bytes say nothing about where the
+    // operands go, so the constraint letters say it: the argument has to arrive in `rcx` in front
+    // of the bytes and the answer has to be read out of `rax` and `rdx` behind them.
+    let front = body.split(".byte").next().expect("something in front of the bytes");
+    assert!(
+        front.contains("%rcx") || front.contains("%ecx"),
+        "the input never reached `rcx`:\n{body}"
+    );
+}
+
+/// A number that is not a byte is refused rather than truncated, for the reason a fill byte on an
+/// alignment is: a program that wrote one meant something this does not do, and writing the low
+/// eight bits of it would be a program that builds and is not the one that was written.
+#[test]
+fn a_byte_directive_that_is_not_bytes_says_so_rather_than_truncating() {
+    let source = "void f(void) { __asm__ volatile (\".byte 0x0f01\"); }\n";
+    let (ok, _, said) = run("byte-wide", source);
+    assert!(!ok, "a number wider than a byte was accepted");
+    assert!(said.contains("which nothing here assembles"), "{said}");
+}
+
 #[test]
 fn an_asm_goto_says_what_is_missing_too() {
     let source = "int f(int x) { asm goto (\"\" : : : : away); return x; away: return 0; }\n";

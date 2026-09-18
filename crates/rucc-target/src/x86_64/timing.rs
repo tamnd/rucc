@@ -198,14 +198,15 @@ fn plain(form: Form) -> Timing {
         // where a value already is, and a schedule built around them taking a cycle would be a
         // schedule built around instructions that are not in the output.
         RetVal | RetVal2 | ArgVal | BrCond | RetValVec | RetVal2Vec | ArgValVec => (0, Unit::Free),
-        // What is left: a fence, a trap, a landing pad, a pad, a spin hint and an alignment. None
+        // What is left: a fence, a trap, a landing pad, a pad, a spin hint, an alignment and a
+        // byte of a template. None
         // of them produces a value anything waits on, and every one of them is in the function for
         // a reason its operands do not say, which is what `Unit::Fixed` is and what stops a
         // schedule from moving one or from moving anything past one. The alignment needs the second
         // half of that more than anything else here does: what it is about is which instruction
         // comes after it, so an instruction moved across one is an alignment of something other
         // than what the program pointed at.
-        Barrier | Trap | Landing | Nop | Spin | Align => (1, Unit::Fixed),
+        Barrier | Trap | Landing | Nop | Spin | Align | Literal => (1, Unit::Fixed),
         Prefetch => (1, Unit::Load),
         // Asking the processor about itself, which drains it first. It is the most expensive
         // instruction in this table by a long way, in the hundreds of cycles on every machine

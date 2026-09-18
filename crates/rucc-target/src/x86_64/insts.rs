@@ -43,9 +43,9 @@ use Form::{
     ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
     CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing,
-    Lea, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
-    Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin, Store,
-    StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push,
+    PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin,
+    Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -542,6 +542,28 @@ pub enum Form {
     /// with a comment saying it measured a five per cent loss on two compression levels when the
     /// loop moved across a cache line boundary.
     Align,
+    /// One byte of the instruction stream, written out as itself.
+    ///
+    /// The other form here that is not an instruction, and the other one only an `asm` statement
+    /// writes. A template may say `.byte 0x0f, 0x01, 0xd0`, which is what a program writes when it
+    /// wants an instruction its assembler was older than, and what comes back is one of these per
+    /// byte with the byte on it. Both writers know it: the listing writes the directive back out
+    /// and the object writer puts the byte straight in the text, and neither has anything left to
+    /// work out, because a program that wrote the bytes has already answered the only question
+    /// there was.
+    ///
+    /// One of these per directive rather than one per byte, because the bytes of one directive are
+    /// one instruction of the program and everything that reaches a register through it reaches it
+    /// once. They travel in the number an instruction already holds, which is what keeps this
+    /// something the passes and the writers can carry without a field added for it, and [`LITERALS`]
+    /// is how many fit.
+    ///
+    /// The registers are the other half of it and they come from the constraint letters, the way
+    /// [`Form::CpuId`]'s do. There the description says which registers the instruction reaches and
+    /// the letters say which operand is in each, and here the description cannot say: the bytes are
+    /// a number and nothing in them is a register anybody can read. So the letters say both, and the
+    /// lowering builds the operand list from them rather than from this table.
+    Literal,
     /// What the processor is asked about itself, which reads two registers and writes four.
     ///
     /// The one form here whose every operand is fixed by the instruction and named by nothing
@@ -1042,7 +1064,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Landing | Nop | Spin | Trap | Align => &LEAVE,
+            Ret | Barrier | Landing | Nop | Spin | Trap | Align | Literal => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -1154,6 +1176,46 @@ impl Form {
 /// terms. Naming it here is what keeps the two of them asking about the same opcode, rather than
 /// each carrying its own copy of the string. See [`Form::Align`].
 pub const ALIGN: &str = "align";
+
+/// The opcode that is one byte of the instruction stream, named the way [`ALIGN`] is.
+///
+/// Spelled as the directive a template wrote it as, and carrying its bytes as its immediate. See
+/// [`Form::Literal`].
+pub const LITERAL: &str = "byte";
+
+/// The most bytes one `.byte` directive may carry, which is how many fit beside the opcode.
+///
+/// They ride in the number a machine instruction already has rather than in a field added for them,
+/// and one byte of that number says how many there are, which leaves seven. That is more than any
+/// instruction written this way needs: the longest instruction this machine has is fifteen bytes and
+/// the ones programs still spell out are two to four, because what they are is an instruction older
+/// than somebody's assembler rather than a run of data. A directive with more in it is refused
+/// rather than split across two instructions, since the bytes of one directive are one instruction
+/// of the program and splitting them would put a place the allocator may write in the middle of it.
+pub const LITERALS: usize = 7;
+
+/// Those bytes as the number a [`LITERAL`] instruction carries, or nothing for too many of them.
+///
+/// The count goes in the top byte and the bytes themselves go below it in the order they were
+/// written, so the number is never negative and the two writers read it back the same way.
+#[must_use]
+pub fn packed(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() || bytes.len() > LITERALS {
+        return None;
+    }
+    let mut packed = u64::try_from(bytes.len()).ok()? << 56;
+    for (at, &byte) in bytes.iter().enumerate() {
+        packed |= u64::from(byte) << (at * 8);
+    }
+    i64::try_from(packed).ok()
+}
+
+/// The bytes back out of that number, in the order the directive wrote them.
+pub fn unpacked(imm: i64) -> impl Iterator<Item = u8> {
+    let bits = u64::from_ne_bytes(imm.to_ne_bytes());
+    let count = usize::try_from(bits >> 56).unwrap_or(0).min(LITERALS);
+    (0..count).map(move |at| u8::try_from((bits >> (at * 8)) & 0xff).unwrap_or(0))
+}
 
 /// Every opcode the x86-64 rule set can produce, and the form of each.
 ///
@@ -1842,6 +1904,7 @@ pub static INSTS: &[(&str, Form)] = &[
     // all. Only an `asm` statement writes one, and what it is written as is a directive in the
     // listing and a run of padding in the bytes rather than anything the processor does.
     ("align", Align),
+    ("byte", Literal),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -2084,7 +2147,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 611);
+        assert_eq!(described, 612);
     }
 
     #[test]
@@ -2154,6 +2217,7 @@ mod tests {
                             | Prefetch
                             | Trap
                             | Align
+                            | Literal
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -2329,6 +2393,7 @@ mod tests {
                             | Prefetch
                             | Trap
                             | Align
+                            | Literal
                     )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"

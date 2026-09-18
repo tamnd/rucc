@@ -3017,7 +3017,15 @@ impl<'a> Lowering<'a> {
                 *held.get_mut(index).ok_or_else(refused)? = true;
             }
             let form = x86_64::form(line.opcode).ok_or_else(refused)?;
-            for (desc, piece) in form.operands().iter().zip(&line.operands) {
+            // Which registers the instruction reaches, asked the same way it is asked again when
+            // the instruction is written. See [`Self::lettered`] for the one opcode whose answer
+            // comes from the constraint letters rather than from the description.
+            let lettered = (line.opcode == x86_64::LITERAL).then(|| self.lettered(&list));
+            let (described, pieces) = match &lettered {
+                Some((described, pieces)) => (described.as_slice(), pieces.as_slice()),
+                None => (form.operands(), line.operands.as_slice()),
+            };
+            for (desc, piece) in described.iter().zip(pieces) {
                 // An operand the instruction reaches without its text saying so is the statement's
                 // only when a constraint letter put something there. One that is nobody's writes
                 // nothing of the program's, so it is counted nowhere and is dealt with where it is
@@ -3337,8 +3345,18 @@ impl<'a> Lowering<'a> {
     ) -> Result<(), Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let form = x86_64::form(line.opcode).ok_or_else(refused)?;
-        let mut built = Vec::with_capacity(line.operands.len() + clobbered.len());
-        for (desc, piece) in form.operands().iter().zip(&line.operands) {
+        // What the instruction reaches and what is in each of them. The description answers the
+        // first for every opcode but one, and the pieces the template was read into answer the
+        // second. Bytes a program wrote out itself are the one, since nothing in a number is a
+        // register anybody could read, so the constraint letters answer both. See
+        // [`Self::lettered`].
+        let lettered = (line.opcode == x86_64::LITERAL).then(|| self.lettered(list));
+        let (described, pieces) = match &lettered {
+            Some((described, pieces)) => (described.as_slice(), pieces.as_slice()),
+            None => (form.operands(), line.operands.as_slice()),
+        };
+        let mut built = Vec::with_capacity(pieces.len() + clobbered.len());
+        for (desc, piece) in described.iter().zip(pieces) {
             built.push(self.placed(inst, *desc, *piece, places, list)?);
         }
         // The clobbers go in among the definitions rather than behind the reads, because an operand
@@ -3347,7 +3365,7 @@ impl<'a> Lowering<'a> {
         let defs = built.iter().take_while(|operand| operand.role.is_def()).count();
         let mut added = 0usize;
         for &reg in clobbered {
-            if form.operands().iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
+            if described.iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
                 continue;
             }
             built.insert(defs, mir::Operand::write(mir::Reg::physical(reg), self.gpr));
@@ -3386,6 +3404,51 @@ impl<'a> Lowering<'a> {
         }
         build.finish();
         Ok(())
+    }
+
+    /// The registers a run of bytes reaches, taken from the constraint letters rather than from the
+    /// description of an opcode.
+    ///
+    /// Every other instruction of a template has a description saying which registers it reaches
+    /// without naming them, and [`Self::assembly`] matches the letters against that. Bytes a program
+    /// wrote out itself have no such description and could not have one: what the instruction is, is
+    /// a number, and nothing in a number is a register anything could read. So the letters are the
+    /// whole of what is known, and they are enough, because a program writing an instruction this
+    /// way has to say where its operands go for exactly the reason a program writing `cpuid` does.
+    ///
+    /// Each register named by a letter gets one entry for the write and one for the read, the same
+    /// two `cpuid` has, and only the half the statement asked for: a register no output names is not
+    /// written here and one no input names is not read. The writes come first because that is the
+    /// order an operand vector in the machine IR is counted in. A register named by nothing is left
+    /// out rather than given a spare one, which is the difference from `cpuid` and is right for the
+    /// same reason: `cpuid` writes four registers whatever the program said, and what these bytes
+    /// touch is known only from what the program said.
+    fn lettered(&self, list: &[AsmOperand]) -> (Vec<OperandDesc>, Vec<x86_64::Piece>) {
+        let mut named: Vec<PhysReg> = Vec::new();
+        for operand in list {
+            if let Some(reg) = operand.fixed.and_then(x86_64::gpr_letter) {
+                if !named.contains(&reg) {
+                    named.push(reg);
+                }
+            }
+        }
+        let mut described = Vec::with_capacity(named.len() * 2);
+        let mut pieces = Vec::with_capacity(named.len() * 2);
+        for role in [Role::Def, Role::Use] {
+            for &reg in &named {
+                if bound(list, reg, role).is_none() {
+                    continue;
+                }
+                let desc = if role.is_def() {
+                    OperandDesc::write(self.gpr)
+                } else {
+                    OperandDesc::read(self.gpr)
+                };
+                described.push(desc.with(Constraint::Fixed(reg)));
+                pieces.push(x86_64::Piece::Implicit { reg });
+            }
+        }
+        (described, pieces)
     }
 
     /// One operand of one instruction of a template, in the register the statement put it in.
