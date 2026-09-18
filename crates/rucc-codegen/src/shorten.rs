@@ -125,13 +125,14 @@
 //! # What it will not do
 //!
 //! Turn a move into the exclusive or when anything reads its condition state before anything
-//! writes. That is the rule and it is most of the cost: the zero going into a register right before
-//! a comparison of something else stays a move, and the most the other rewrite can do for it is
-//! make it a narrower one. Of the 1,232 moves of zero left over the corpus at `-Os`, 1,162 are this
-//! and the other 70 are the eight bit rule below, so what is left on the table is almost all one
-//! question about the instructions behind rather than anything about the instruction itself. They
-//! are the same 1,232 as before the second rewrite and not one of them is sixty-four bits wide any
-//! more.
+//! writes. That is the rule and what it costs is now a small number: the zero going into a register
+//! right before a comparison of something else stays a move, and the most the other rewrite can do
+//! for it is make it a narrower one. Of the 215 moves of zero left over the corpus at `-Os`, 146
+//! are this and the other 69 are the eight bit rule below. Not one of them is sixty-four bits wide.
+//!
+//! It was 1,232 until the whole function check stopped counting a comparison that keeps a byte as a
+//! state read from in front of it, which is tamnd/rucc#1432 and was most of what this pass was
+//! leaving alone rather than anything about the instructions it was looking at.
 //!
 //! Eight bits. `movb $0, %al` and `xorb %al, %al` are both two bytes, so the exchange buys nothing
 //! and would spend the condition state on it. The target's table is where that is written down.
