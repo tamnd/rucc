@@ -214,6 +214,26 @@ impl Checker<'_> {
         })
     }
 
+    /// Where `weak` was written in an attribute list, if it was.
+    ///
+    /// The span comes back rather than a flag for the reason [`Self::transparent_union`]'s does:
+    /// the attribute is refused on a name the linker never sees, the way gcc refuses it, and the
+    /// sentence about that has to point at the attribute rather than at the whole declaration.
+    /// The armour and the namespace are read the way [`Self::packing`] reads them, and a library
+    /// offering a hook writes the armoured spelling, since the header is read by everybody.
+    ///
+    /// This is a fact about the name and not about one declaration of it, which is why it is kept
+    /// where `visibility` is kept and merged the same way. A header saying it once is enough, and
+    /// the definition below it that says nothing is still weak.
+    pub(in crate::check) fn weakened(&self, attrs: AttrList) -> Option<Span> {
+        self.ast[attrs].iter().find_map(|attr| {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                return None;
+            }
+            (rucc_gnu::unarmour(self.text(attr.name)) == "weak").then_some(attr.span)
+        })
+    }
+
     /// Whether an attribute list asks for the declaration to be kept where nothing refers to it.
     ///
     /// The armour and the namespace are read the same way [`Self::packing`] reads them. What this

@@ -376,6 +376,7 @@ impl<'a> Checker<'a> {
                 gnu_inline: false,
                 noreturn: false,
                 visibility: None,
+                weak: false,
                 startup: Startup::default(),
                 init: Some(entries),
                 cleanup: None,

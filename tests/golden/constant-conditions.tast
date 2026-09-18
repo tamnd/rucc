@@ -102,7 +102,7 @@ decl #5 jumped_into : int(int) function external defined
       return
         convert lvalue : int
           decl #4 n : int lvalue
-decl #6 maybe_there : int object external static declared
+decl #6 maybe_there : int object external static declared weak
 decl #7 present : int(void) function external defined
   body
     block

@@ -518,10 +518,7 @@ impl Unit<'_> {
         let size = repr::size_of(self.types, self.target, ty);
         let align = alignment.unwrap_or_else(|| repr::align_of(self.types, self.target, ty));
         let mut global = Global::new(symbol, size, align);
-        global.linkage = match linkage {
-            Linkage::External => IrLinkage::External,
-            Linkage::Internal | Linkage::None => IrLinkage::Internal,
-        };
+        global.linkage = self.told(decl, linkage);
         // A tentative definition counts as one, because it is one: `int x;` at file scope puts a
         // symbol in this object and the linker never has to look anywhere else for it.
         global.visibility = self.seen(decl, state != Definition::Declared);
@@ -581,10 +578,7 @@ impl Unit<'_> {
         if noreturn {
             func.attrs.set |= AttrSet::NORETURN;
         }
-        func.linkage = match linkage {
-            Linkage::Internal | Linkage::None => IrLinkage::Internal,
-            Linkage::External => IrLinkage::External,
-        };
+        func.linkage = self.told(decl, linkage);
         // The same question as for an object, and the same answer, with one wrinkle: an inline
         // definition this unit does not emit is a declaration here, since C 6.7.4p7 sends the
         // calls to whatever unit holds the external definition, so it is not this file's to
@@ -682,10 +676,7 @@ impl Unit<'_> {
             return;
         }
         let mut alias = Alias::new(name, target);
-        alias.linkage = match self.tast[decl].linkage {
-            Linkage::Internal | Linkage::None => IrLinkage::Internal,
-            Linkage::External => IrLinkage::External,
-        };
+        alias.linkage = self.told(decl, self.tast[decl].linkage);
         // Its own answer, because the attribute is written on the alias and an alias is a symbol
         // of its own. `weak, alias, visibility("hidden")` is a name a library keeps to itself
         // while the thing it points at stays exported, which is how glibc writes half of them.
@@ -811,6 +802,23 @@ impl Unit<'_> {
             Some(Visibility::Protected) => IrVisibility::Protected,
             None if defined => self.visibility,
             None => IrVisibility::Default,
+        }
+    }
+
+    /// What the linker is told about a name, which is its C linkage unless a declaration of it
+    /// wrote `weak`.
+    ///
+    /// The attribute is refused on internal linkage where it is read, so external is the only
+    /// thing it can change, and the two things a program means by it are one thing to the linker.
+    /// On a definition it says another object's definition of the name beats this one, which is
+    /// how a library ships a default. On a reference to something this file does not define it
+    /// says the link may leave the name undefined and hand the reference a zero address, which is
+    /// how a library offers a hook and why zstd's thirty files link at all.
+    fn told(&self, decl: DeclId, linkage: Linkage) -> IrLinkage {
+        match linkage {
+            Linkage::External if self.tast[decl].weak => IrLinkage::Weak,
+            Linkage::External => IrLinkage::External,
+            Linkage::Internal | Linkage::None => IrLinkage::Internal,
         }
     }
 

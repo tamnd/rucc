@@ -171,6 +171,11 @@ impl<'a> Printer<'a> {
             Some(Visibility::Hidden) => head.push_str(" hidden"),
             Some(Visibility::Protected) => head.push_str(" protected"),
         }
+        // Written where it was asked for and not otherwise, since nothing gives a name this that
+        // a declaration did not write.
+        if node.weak {
+            head.push_str(" weak");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not
@@ -893,6 +898,7 @@ decl #0 : int[2] object automatic defined
             gnu_inline: false,
             noreturn: false,
             visibility: None,
+            weak: false,
             startup: Startup::default(),
             init: None,
             cleanup: None,

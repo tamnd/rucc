@@ -337,21 +337,20 @@ const PROJECTS: &[Project] = &[
         // The list zstd's own makefile passes, less the legacy formats, which are old decoders
         // nobody builds unless they have old files.
         includes: &["lib", "lib/common", "lib/compress", "lib/decompress", "lib/dictBuilder"],
-        // The first is the one thing zstd's build decides by looking at the machine rather than at
-        // the platform. Its Huffman decoder ships a hand written amd64 loop in a .S file, this
-        // table compiles C and nothing else, and the flag is zstd's own way of saying to use the C
-        // the loop replaces. Which is the right thing to measure here anyway, since assembly
-        // nobody compiled is assembly the monitor has nothing to say about.
+        // The one thing zstd's build decides by looking at the machine rather than at the
+        // platform. Its Huffman decoder ships a hand written amd64 loop in a .S file, this table
+        // compiles C and nothing else, and the flag is zstd's own way of saying to use the C the
+        // loop replaces. Which is the right thing to measure here anyway, since assembly nobody
+        // compiled is assembly the monitor has nothing to say about.
         //
-        // The second is ours rather than zstd's, and it is a finding rather than a setting. zstd's
-        // four tracing hooks are declared `__attribute__((weak))` and defined by nobody, which is
-        // how a library offers a hook a profiler may fill in, and gcc writes a `.weak` for each so
-        // the link resolves them to nothing and the guarded calls are never made. rucc drops the
-        // attribute on a declaration, so the same four names arrive at the linker as ordinary
-        // undefined symbols and the link fails. tamnd/rucc#1414 is the attribute; this define is
-        // zstd's own way of saying to compile without the hooks, and it comes back out when the
-        // attribute goes in.
-        defines: &["ZSTD_DISABLE_ASM=1", "ZSTD_TRACE=0"],
+        // There was a second one here for a while, and taking it back out is the point of it.
+        // zstd's four tracing hooks are declared `__attribute__((weak))` and defined by nobody,
+        // which is how a library offers a hook a profiler may fill in, and this compiler dropped
+        // the attribute, so the four names arrived at the linker as ordinary undefined symbols and
+        // thirty files would not link. `ZSTD_TRACE=0` is zstd's own way of saying to compile
+        // without the hooks and stood in for the attribute until tamnd/rucc#1414 was done. The row
+        // now builds what zstd builds.
+        defines: &["ZSTD_DISABLE_ASM=1"],
         known: &[],
         pending: Some(
             "the monitor's reports are not held to a list yet, and they are all one question. \

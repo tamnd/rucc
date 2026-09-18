@@ -30,7 +30,7 @@
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use object::write::{
     Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
@@ -418,13 +418,19 @@ pub fn write(
     // Not the unwind table's, which name functions this file defines and are written against the
     // section rather than against the name. A record for anything else is refused below, so a name
     // added here for one would be a name nothing goes on to use.
-    let wanted = text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs));
-    for reloc in wanted {
-        if symbols.contains_key(&reloc.symbol) {
+    // The names a declaration wrote `weak` on, which the link is allowed to leave undefined and
+    // whose references then read a zero address. The listing writes a `.weak` for each of the same
+    // names, so the two paths put the same entries in whether or not anything refers to one.
+    let weak: HashSet<&str> = data.weak.iter().map(String::as_str).collect();
+    let wanted = text.relocs.iter().map(|reloc| &reloc.symbol);
+    let wanted = wanted.chain(data.objects.iter().flat_map(|object| &object.relocs).map(|r| &r.symbol));
+    let wanted: Vec<&String> = wanted.chain(data.weak.iter()).collect();
+    for name in wanted {
+        if symbols.contains_key(name) {
             continue;
         }
         let id = obj.add_symbol(Symbol {
-            name: reloc.symbol.clone().into_bytes(),
+            name: name.clone().into_bytes(),
             value: 0,
             size: 0,
             // What kind of thing an undefined name is is not known here and does not have to be:
@@ -432,11 +438,11 @@ pub fn write(
             // defined anywhere in this file is nothing this file can say.
             kind: SymbolKind::Unknown,
             scope: SymbolScope::Dynamic,
-            weak: false,
+            weak: weak.contains(name.as_str()),
             section: SymbolSection::Undefined,
             flags: SymbolFlags::None,
         });
-        symbols.insert(reloc.symbol.clone(), id);
+        symbols.insert(name.clone(), id);
     }
 
     for reloc in &text.relocs {
@@ -1367,7 +1373,7 @@ mod tests {
 
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
-        let data = Data { objects: vec![object] };
+        let data = Data { weak: Vec::new(), objects: vec![object] };
         write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object")
     }
 
@@ -1448,7 +1454,7 @@ mod tests {
             variable("x", Place::Named(".init_array".to_owned())),
             variable("y", Place::Named(".init_array".to_owned())),
         ];
-        let data = Data { objects };
+        let data = Data { weak: Vec::new(), objects };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1474,7 +1480,7 @@ mod tests {
             (Place::Thread { zero: false }, ".tdata.x"),
             (Place::Thread { zero: true }, ".tbss.x"),
         ] {
-            let data = Data { objects: vec![variable("x", place.clone())] };
+            let data = Data { weak: Vec::new(), objects: vec![variable("x", place.clone())] };
             let bytes = write(&Text::default(), &data, &[], &target(), sections).expect("object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             assert_eq!(lives_in(&file, "x"), wanted, "{place:?}");
@@ -1497,7 +1503,7 @@ mod tests {
         let named = Place::Named(".init_array".to_owned());
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes =
-            write(&Text::default(), &Data { objects }, &[], &target(), sections).expect("object");
+            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections).expect("object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let m = file.symbols().find(|s| s.name() == Ok("m")).expect("the tentative one");
         assert!(m.is_common(), "still the linker's to merge and not in a section at all");
@@ -1527,7 +1533,7 @@ mod tests {
         };
         let objects = vec![variable("first", Place::Written), pointer];
         let bytes =
-            write(&Text::default(), &Data { objects }, &[], &target(), sections).expect("object");
+            write(&Text::default(), &Data { weak: Vec::new(), objects }, &[], &target(), sections).expect("object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".data.p").expect("the pointer's own section");
         let (offset, reloc) = section.relocations().next().expect("one relocation");
@@ -1548,7 +1554,7 @@ mod tests {
     fn every_variable_that_wants_the_local_relocated_section_shares_one() {
         let place = Place::RelocReadOnly { local: true };
         let data =
-            Data { objects: vec![variable("first", place.clone()), variable("second", place)] };
+            Data { weak: Vec::new(), objects: vec![variable("first", place.clone()), variable("second", place)] };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1558,7 +1564,7 @@ mod tests {
 
     #[test]
     fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
-        let mut data = Data { objects: vec![variable("first", Place::Written)] };
+        let mut data = Data { weak: Vec::new(), objects: vec![variable("first", Place::Written)] };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default()).expect("an object");
@@ -1627,10 +1633,43 @@ mod tests {
         assert!(y.is_undefined(), "nothing here defines it and the linker is being asked for it");
     }
 
+    /// A name a declaration wrote `weak` on is undefined and may stay that way.
+    ///
+    /// The difference between this and the case above is one bit and the whole of what a link does
+    /// about it: an ordinary undefined symbol is a name the linker has to find, and a weak one is a
+    /// name it may fail to find, in which case every reference reads a zero address. That is what
+    /// lets a library offer a hook a profiler may fill in, which is tamnd/rucc#1414.
+    #[test]
+    fn a_weak_undefined_name_is_one_the_link_may_leave_unfound() {
+        let mut text = Text::default();
+        text.funcs.push(extent("caller".to_owned(), 0, 8, Binding::Global));
+        text.bytes.resize(8, 0x90);
+        text.relocs.push(Reloc {
+            at: 1,
+            symbol: "hook".to_owned(),
+            kind: Reference::Call,
+            addend: -4,
+            after: 0,
+        });
+        let data = Data { weak: vec!["hook".to_owned(), "never_called".to_owned()], objects: vec![] };
+        let bytes = write(&text, &data, &[], &target(), Output::default()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+
+        let hook = file.symbols().find(|s| s.name() == Ok("hook")).expect("the one called");
+        assert!(hook.is_undefined(), "nothing here defines it");
+        assert!(hook.is_weak(), "so the link may leave it alone rather than fail");
+
+        // And one nothing refers to is still written down, because the listing writes a directive
+        // for it and the two paths have to put the same entries in. A linker has nothing to do
+        // about an undefined weak symbol no relocation names.
+        let quiet = file.symbols().find(|s| s.name() == Ok("never_called")).expect("the other");
+        assert!(quiet.is_undefined() && quiet.is_weak(), "{:?}", quiet.flags());
+    }
+
     /// Not a rewording of the case above: what is checked is the arithmetic between the two.
     #[test]
     fn a_relocation_counts_from_the_start_of_the_section_and_not_of_the_image_it_is_in() {
-        let mut data = Data { objects: vec![variable("first", Place::Written)] };
+        let mut data = Data { weak: Vec::new(), objects: vec![variable("first", Place::Written)] };
         data.objects.push(Object {
             bytes: vec![0; 16],
             size: 16,
@@ -1657,6 +1696,7 @@ mod tests {
     #[test]
     fn a_second_name_is_a_second_symbol_at_the_first_one_s_address_and_no_second_image() {
         let data = Data {
+            weak: Vec::new(),
             objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
         };
         let aliases = [Alias {
@@ -1743,6 +1783,7 @@ mod tests {
         text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
         text.bytes.resize(33, 0x90);
         let data = Data {
+            weak: Vec::new(),
             objects: vec![variable("seen", Place::Written), {
                 let mut quiet = variable("quiet", Place::Zero);
                 quiet.binding = Binding::Local;
@@ -1859,7 +1900,7 @@ mod tests {
             }],
             ..variable("p", Place::Written)
         };
-        let data = Data { objects: vec![object] };
+        let data = Data { weak: Vec::new(), objects: vec![object] };
         let bytes =
             write(&Text::default(), &data, &[], &windows(), Output::default()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1874,7 +1915,7 @@ mod tests {
     #[test]
     fn a_variable_the_loader_writes_into_is_read_only_data_here() {
         for local in [false, true] {
-            let data = Data { objects: vec![variable("p", Place::RelocReadOnly { local })] };
+            let data = Data { weak: Vec::new(), objects: vec![variable("p", Place::RelocReadOnly { local })] };
             let bytes = write(&Text::default(), &data, &[], &windows(), Output::default())
                 .expect("an object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1946,7 +1987,7 @@ mod tests {
     #[test]
     fn the_names_a_linker_can_find_are_the_same_list_on_either_format() {
         let text = calling("puts");
-        let data = Data { objects: vec![variable("shared", Place::Written)] };
+        let data = Data { weak: Vec::new(), objects: vec![variable("shared", Place::Written)] };
         let theirs = defines(&text, &data, &[], &windows()).expect("a list");
         assert_eq!(theirs, defines(&text, &data, &[], &target()).expect("a list"));
     }

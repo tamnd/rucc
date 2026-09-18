@@ -249,6 +249,12 @@ pub struct Extent {
 pub struct Data {
     /// Every variable this file defines, in the order the module held them.
     pub objects: Vec<Object>,
+    /// Every name this file declares weak and does not define, in the order the module held them.
+    ///
+    /// Each becomes an undefined symbol the linker is allowed to leave undefined, whose references
+    /// then read a zero address. A name here is not an object and carries no bytes, which is why
+    /// it is a list of names beside the objects rather than one of them.
+    pub weak: Vec<String>,
 }
 
 /// A second name for something the same file defines.
