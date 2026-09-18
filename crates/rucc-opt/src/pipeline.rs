@@ -201,6 +201,16 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// `addq $0`. Over the corpus at `-O2` the run is worth 3000 bytes across 1830 programs, 224 of
 /// them smaller and 4 larger, with every result unchanged.
 ///
+/// A second `simplify-cfg` runs after that `simplify` at `-O1`, `-Os` and `-Oz`, and the two speed
+/// levels already had one further down for what `ivopts` and the second `licm` leave behind. What
+/// it is for is the branch nobody has to take any more. Forwarding a load turns a comparison of
+/// what was read into a comparison of what was written, `fold` settles it, and what is then left is
+/// a conditional branch on a constant with a block on the other side of it that the program cannot
+/// reach. Nothing else at these three levels looks at an edge after `load-forward` has run, so
+/// until now the branch and the block it guards were both written out. The block is usually the
+/// interesting half, since it is where the work that was never going to happen is, and at the two
+/// size levels a block that goes is bytes that go.
+///
 /// `hoist` is the first of the two check passes and it runs where it does because of what is above
 /// it. It needs a loop that tests at the bottom, which is what `header-copy` makes, and it needs a
 /// preheader to put a check in, which is what the `canon` after it puts back. Running it before
@@ -245,6 +255,7 @@ const O1: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "hoist",
     "discharge",
     "dead-plane",
@@ -407,6 +418,7 @@ const OS: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "discharge",
     "dead-plane",
     "coalesce",
@@ -439,6 +451,7 @@ const OZ: &[&str] = &[
     "load-forward",
     "fold",
     "simplify",
+    "simplify-cfg",
     "discharge",
     "dead-plane",
     "coalesce",
