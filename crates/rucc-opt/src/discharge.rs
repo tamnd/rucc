@@ -393,6 +393,22 @@ const PAST_A_CALL_LIVE: &str =
 const UNKNOWN_ALIGNMENT: &str =
     "bounds check kept, nothing here says the address is aligned to what the access assumes";
 
+/// Recorded for a bounds check whose address reached something saying an alignment that was short.
+///
+/// The other half of the row above, and it is separate because the two are worth different things.
+/// That one is a value nothing here says anything about, and a fact from somewhere else could take
+/// it. This one already has an answer and the answer is no, so a fact about where a pointer starts
+/// would change nothing.
+///
+/// Two shapes end up here and they are not the same, which is worth knowing before anybody reads
+/// the number as a target. One is `(int *)(p + 1)`, where the object is known and the step is a
+/// constant that lands a byte into it. That is row S7 and the check has to stay. The other is a
+/// step nobody can read, where [`divides`] answers one because every number divides by one, so the
+/// walk comes back saying a byte and means it does not know. Telling those apart is what a better
+/// [`divides`] would do and this row is where the work would show up.
+const LOST_ALIGNMENT: &str =
+    "bounds check kept, what the address was computed from says less alignment than it assumes";
+
 /// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
 
@@ -671,9 +687,14 @@ impl Pass for Discharge {
                         // all, because a check that was staying anyway costs the gate nothing and
                         // the number somebody reads has to be what it actually costs. A check kept
                         // here still runs, so it still establishes what it was about.
-                        let why = why.filter(|_| {
-                            aligned(func, &scope.aligns, inst) || {
+                        let why = why.filter(|_| match aligned(func, &scope.aligns, inst) {
+                            Alignment::Answered => true,
+                            Alignment::Unknown => {
                                 stats.missed(UNKNOWN_ALIGNMENT);
+                                false
+                            }
+                            Alignment::Lost => {
+                                stats.missed(LOST_ALIGNMENT);
                                 false
                             }
                         });
@@ -1264,14 +1285,39 @@ const DEEP: u32 = 4;
 /// The two answers given before [`settles`] is asked are not arithmetic and so are not a rule's.
 /// An access of one byte assumes nothing about where it starts, so there is nothing to prove about
 /// it, and the flag is a fact `crate::extents` established over the whole module and wrote down.
-fn aligned(func: &Func, aligns: &HashMap<Value, u64>, check: Inst) -> bool {
-    let Extra::Mem(info) = func[check].extra else { return false };
+///
+/// The two ways of saying no are told apart because they are worth different things to a reader.
+/// [`Alignment::Unknown`] is a value nothing here says anything about and a better fact could take.
+/// [`Alignment::Lost`] is an address this followed all the way back to an object it knows the
+/// alignment of, where the steps taken from it landed somewhere the access may not start, and no
+/// fact answers one of those because a check that stays is what the conjunct is for.
+fn aligned(func: &Func, aligns: &HashMap<Value, u64>, check: Inst) -> Alignment {
+    let Extra::Mem(info) = func[check].extra else { return Alignment::Unknown };
     let claim = u64::from(func[info].align);
     if claim <= 1 || func[check].flags.contains(Flags::ALIGNED) {
-        return true;
+        return Alignment::Answered;
     }
-    let Some(&pointer) = func[func[check].args].get(1) else { return false };
-    settles(settled(func, aligns, pointer), claim)
+    let Some(&pointer) = func[func[check].args].get(1) else { return Alignment::Unknown };
+    let known = settled(func, aligns, pointer);
+    if settles(known, claim) {
+        Alignment::Answered
+    } else if known == 0 {
+        Alignment::Unknown
+    } else {
+        Alignment::Lost
+    }
+}
+
+/// What [`aligned`] found out about where an access starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    /// The address starts where the access assumes, so the check may go as far as this conjunct is
+    /// concerned.
+    Answered,
+    /// Nothing here says where the address starts.
+    Unknown,
+    /// This knows where the address started and knows the steps took it off, which is row S7.
+    Lost,
 }
 
 /// Whether an address known to be a multiple of one number meets an access's claim.
@@ -2113,7 +2159,7 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(checks(&func), 2);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
@@ -2162,6 +2208,27 @@ mod tests {
     }
 
     #[test]
+    fn the_two_reasons_an_alignment_is_not_answered_are_counted_apart() {
+        // One function with both in it. The pointer from outside is answered by nothing at all,
+        // which is the row a fact from somewhere else could take, and the slot read a byte in is
+        // answered by something that says no, which is the row no fact takes. The first check on
+        // each is the one that covers the bytes for the second, since the gate is only asked once
+        // a rule has answered those.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        assuming(&mut build, pointer, 16, 1);
+        assuming(&mut build, pointer, 4, 4);
+        let slot = local(&mut build, 16);
+        let odd = past(&mut build, slot, 1);
+        assuming(&mut build, odd, 4, 1);
+        assuming(&mut build, odd, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
+    }
+
+    #[test]
     fn a_step_off_an_alignment_a_check_proved_is_walked_the_way_a_local_is() {
         // The pointer is proved four byte aligned by a check that ran, and then the two accesses
         // are at four bytes in, which keeps it, and at one byte in, which does not. Nothing about
@@ -2177,7 +2244,7 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(checks(&func), 2, "the one four bytes in goes and the one a byte in stays");
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
@@ -2212,7 +2279,7 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LOCAL), 0);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
@@ -2262,7 +2329,7 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(checks(&func), 1);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
