@@ -212,7 +212,11 @@ pub(crate) fn libraries() -> Result<()> {
 }
 
 /// Reads one project's two runs and says what was wrong with them.
-fn judge(project: &Project, ran: &std::collections::BTreeMap<String, safety::Ran>, out: &mut Vec<String>) {
+fn judge(
+    project: &Project,
+    ran: &std::collections::BTreeMap<String, safety::Ran>,
+    out: &mut Vec<String>,
+) {
     for level in LEVELS {
         let name = project.name;
         let Some(ran) = ran.get(level) else {
@@ -220,10 +224,8 @@ fn judge(project: &Project, ran: &std::collections::BTreeMap<String, safety::Ran
             continue;
         };
         match ran.status {
-            None => out.push(format!(
-                "{name} {level}: did not link.\n{}",
-                indent(ran.output.trim_end())
-            )),
+            None => out
+                .push(format!("{name} {level}: did not link.\n{}", indent(ran.output.trim_end()))),
             Some(0) if ran.output.contains(CORRECT) => {}
             _ => out.push(format!(
                 "{name} {level}: ran and got the wrong answers, or did not finish.\n{}",
@@ -526,7 +528,12 @@ mod tests {
     fn every_expected_report_says_what_it_is() {
         for project in PROJECTS {
             for known in project.known {
-                assert!(known.why.len() > 80, "{} says too little about J{}", project.name, known.judgement);
+                assert!(
+                    known.why.len() > 80,
+                    "{} says too little about J{}",
+                    project.name,
+                    known.judgement
+                );
             }
         }
     }
