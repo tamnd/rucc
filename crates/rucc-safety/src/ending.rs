@@ -132,12 +132,7 @@ fn one(func: &mut Func, names: &Interner, defined: &HashSet<&str>) -> usize {
 /// look up, and a tail call is not a shape this pass meets: it is the optimizer that makes one and
 /// this runs before the optimizer. A tail call the optimizer makes out of a call that has already
 /// been given a check keeps the check, since the check is the instruction in front of it.
-fn handed(
-    func: &Func,
-    names: &Interner,
-    defined: &HashSet<&str>,
-    inst: Inst,
-) -> Option<Value> {
+fn handed(func: &Func, names: &Interner, defined: &HashSet<&str>, inst: Inst) -> Option<Value> {
     if func[inst].opcode != Opcode::Call {
         return None;
     }
