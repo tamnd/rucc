@@ -308,11 +308,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Type, Value};
 
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
-use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Preserved, Stats, heap};
+use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Preserved, Stats, copy, heap};
 
 /// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
@@ -644,7 +644,10 @@ impl Pass for Discharge {
         // reader gives up on, and the allocation rule wants it to find where the program has tested
         // what an allocator gave it.
         let walks = self.sources.ranges && walks_by_a_value(func);
-        let cfg = (walks || (self.sources.objects && heap::allocates(func))).then(|| an.cfg(func));
+        let cfg = (walks
+            || joins_a_pointer(func, entry)
+            || (self.sources.objects && heap::allocates(func)))
+        .then(|| an.cfg(func));
         let mut ranges = cfg.filter(|_| walks).map(|cfg| Ranges::new(&*func, cfg, dom));
 
         // One answer per allocation rather than one per check, because a function that reads twenty
@@ -710,7 +713,7 @@ impl Pass for Discharge {
                                             ))
                                         || (self.sources.dominance && scope.bounds.reaches(wide))
                                 })
-                                .filter(|_| match aligned(func, &scope.aligns, inst) {
+                                .filter(|_| match aligned(func, cfg, &scope.aligns, inst) {
                                     Alignment::Answered => true,
                                     Alignment::Unknown => {
                                         stats.missed(UNKNOWN_ALIGNMENT);
@@ -790,7 +793,7 @@ impl Pass for Discharge {
                         // all, because a check that was staying anyway costs the gate nothing and
                         // the number somebody reads has to be what it actually costs. A check kept
                         // here still runs, so it still establishes what it was about.
-                        let why = why.filter(|_| match aligned(func, &scope.aligns, inst) {
+                        let why = why.filter(|_| match aligned(func, cfg, &scope.aligns, inst) {
                             Alignment::Answered => true,
                             Alignment::Unknown => {
                                 stats.missed(UNKNOWN_ALIGNMENT);
@@ -1495,14 +1498,14 @@ const DEEP: u32 = 4;
 /// [`Alignment::Lost`] is an address this followed all the way back to an object it knows the
 /// alignment of, where the steps taken from it landed somewhere the access may not start, and no
 /// fact answers one of those because a check that stays is what the conjunct is for.
-fn aligned(func: &Func, aligns: &HashMap<Value, u64>, check: Inst) -> Alignment {
+fn aligned(func: &Func, cfg: Option<&Cfg>, aligns: &HashMap<Value, u64>, check: Inst) -> Alignment {
     let Extra::Mem(info) = func[check].extra else { return Alignment::Unknown };
     let claim = u64::from(func[info].align);
     if claim <= 1 || func[check].flags.contains(Flags::ALIGNED) {
         return Alignment::Answered;
     }
     let Some(&pointer) = func[func[check].args].get(1) else { return Alignment::Unknown };
-    let known = settled(func, aligns, pointer);
+    let known = settled(func, cfg, aligns, pointer);
     if settles(known, claim) {
         Alignment::Answered
     } else if known == 0 {
@@ -1557,7 +1560,41 @@ fn settles(known: u64, claim: u64) -> bool {
 /// smaller, which is why the steps are gathered with a `min` and why they start at the largest
 /// number there is instead of at zero. Zero is the answer and not a step, since an alignment of
 /// zero is not something an access can assume and a claim is never met by one.
-fn settled(func: &Func, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
+fn settled(func: &Func, cfg: Option<&Cfg>, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
+    let mut budget = JOINS;
+    joined(func, cfg, aligns, pointer, &mut Vec::new(), &mut budget)
+}
+
+/// How many block parameters [`settled`] will walk through before answering nothing.
+///
+/// The cut in [`joined`] keeps the walk from going round for ever, and this keeps it from going
+/// wide for ever. A chain of joins each of which has two predecessors is a walk that doubles at
+/// every step, and a function with forty of those in a row is not a function worth an answer.
+const JOINS: u32 = 256;
+
+/// [`settled`] with the two things a walk through a join needs, the values it is already inside of
+/// and what is left of its budget.
+///
+/// A block parameter holds whatever its predecessors hand in, so it is aligned to at least the
+/// least of what those are aligned to. That is arithmetic over values this function already has
+/// and it needs nothing written on the function, which is why it is here rather than in the side
+/// table tamnd/rucc#1385 is otherwise about.
+///
+/// The care it needs is a parameter that reaches itself round a loop, and the cut is that a value
+/// the walk is already inside of contributes only the steps taken to get back to it. That lands on
+/// the fixpoint rather than above it, which is worth the sentence because getting it wrong here
+/// removes a check that should stay. Every step along a path is folded in as a divisor by the
+/// `min` below, going round the loop a second time applies those same divisors again, and a
+/// minimum does not move when you take it twice. So the answer after one lap is the answer after
+/// any number of them, and there is nothing a second lap could lower that the first did not.
+fn joined(
+    func: &Func,
+    cfg: Option<&Cfg>,
+    aligns: &HashMap<Value, u64>,
+    pointer: Value,
+    inside: &mut Vec<Value>,
+    budget: &mut u32,
+) -> u64 {
     let mut steps = u64::MAX;
     let mut value = pointer;
     loop {
@@ -1567,7 +1604,31 @@ fn settled(func: &Func, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
         if let Some(&proved) = aligns.get(&value) {
             return steps.min(proved);
         }
-        let Def::Result { inst, .. } = func[value].def else { return 0 };
+        let inst = match func[value].def {
+            Def::Result { inst, .. } => inst,
+            // A function's parameters are the entry block's, and nothing inside the function says
+            // anything about those. They are the larger half of the row and they are what the side
+            // table is for.
+            Def::Param { block, index } => {
+                let Some(cfg) = cfg else { return 0 };
+                if func.entry() == Some(block) {
+                    return 0;
+                }
+                // The cut, and the only place a walk answers with the steps alone. Everywhere
+                // else running out of things to look at is nothing known, which is zero.
+                if inside.contains(&value) {
+                    return steps;
+                }
+                if *budget == 0 {
+                    return 0;
+                }
+                *budget -= 1;
+                inside.push(value);
+                let least = handed(func, cfg, aligns, block, index, inside, budget);
+                inside.pop();
+                return steps.min(least);
+            }
+        };
         match func[inst].opcode {
             Opcode::Alloca => {
                 let Extra::Mem(info) = func[inst].extra else { return 0 };
@@ -1585,6 +1646,38 @@ fn settled(func: &Func, aligns: &HashMap<Value, u64>, pointer: Value) -> u64 {
             _ => return 0,
         }
     }
+}
+
+/// The least alignment any predecessor hands to one parameter of a block.
+///
+/// Zero for a block nothing reaches and for an edge whose arguments do not run that far, since
+/// either is a function this does not understand and claiming an alignment for one would be
+/// claiming it out of nothing. A predecessor whose terminator is missing is the same case.
+fn handed(
+    func: &Func,
+    cfg: &Cfg,
+    aligns: &HashMap<Value, u64>,
+    block: Block,
+    index: u32,
+    inside: &mut Vec<Value>,
+    budget: &mut u32,
+) -> u64 {
+    let preds = cfg.predecessors(block);
+    if preds.is_empty() {
+        return 0;
+    }
+    let mut least = u64::MAX;
+    for &pred in preds {
+        let Some(term) = func.terminator(pred) else { return 0 };
+        let Some(&came) = copy::edge_args(func, term, block).get(index as usize) else {
+            return 0;
+        };
+        least = least.min(joined(func, Some(cfg), aligns, came, inside, budget));
+        if least == 0 {
+            break;
+        }
+    }
+    least
 }
 
 /// The largest power of two that divides a step, or one when nothing here says.
@@ -1921,6 +2014,19 @@ fn walks_by_a_value(func: &Func) -> bool {
             func[inst].opcode == Opcode::PtrAdd
                 && func[func[inst].args].get(1).is_some_and(|&by| constant(func, by).is_none())
         })
+    })
+}
+
+/// Whether the control flow joins a pointer anywhere, which is what the alignment walk needs it for.
+///
+/// A block parameter of pointer type outside the entry is a pointer that came in one way on one
+/// path and another way on another, and [`joined`] answers what it is aligned to by asking the
+/// predecessors. Asked rather than always building the graph because the comment above says a
+/// function that wants none of it should pay for none of it, and a function without a join has
+/// nothing here to ask about.
+fn joins_a_pointer(func: &Func, entry: Block) -> bool {
+    func.blocks().any(|block| {
+        block != entry && func[block].params.iter().any(|&param| func[param].ty == Type::PTR)
     })
 }
 
@@ -2438,6 +2544,87 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 3, "the one in the arm reaches further, so all three stay");
         assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+    }
+
+    #[test]
+    fn an_alignment_every_arm_hands_in_reaches_the_join() {
+        // Both predecessors hand the join a slot, both slots are aligned to eight, so the join's
+        // parameter is aligned to eight whichever way control came. Nothing is written on the
+        // function and nothing is assumed from a type: the answer is the least of what the
+        // predecessors actually pass, which is arithmetic over values already here.
+        let (_, mut func, block, _) = blank();
+        let join = func.create_block();
+        let arm = func.create_block();
+        let carried = func.append_param(join, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let one = local(&mut build, 64);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[one]);
+        let mut build = Builder::new(&mut func, arm);
+        let two = local(&mut build, 64);
+        build.jump(join, &[two]);
+        let mut build = Builder::new(&mut func, join);
+        assuming(&mut build, carried, 16, 1);
+        assuming(&mut build, carried, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+        assert_eq!(checks(&func), 1, "the one that covers the bytes stays, the aligned one goes");
+    }
+
+    #[test]
+    fn an_alignment_one_arm_does_not_hand_in_does_not_reach_the_join() {
+        // The same function with one arm handing in the pointer the function was given. Nothing
+        // here says anything about that one, so the least over the predecessors is nothing, and a
+        // walk that took the other arm's answer would be reading a fact off the arm the program
+        // did not take.
+        let (_, mut func, block, pointer) = blank();
+        let join = func.create_block();
+        let arm = func.create_block();
+        let carried = func.append_param(join, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let one = local(&mut build, 64);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[one]);
+        let mut build = Builder::new(&mut func, arm);
+        build.jump(join, &[pointer]);
+        let mut build = Builder::new(&mut func, join);
+        assuming(&mut build, carried, 16, 1);
+        assuming(&mut build, carried, 4, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 1);
+        assert_eq!(checks(&func), 2);
+    }
+
+    #[test]
+    fn a_pointer_that_walks_a_loop_keeps_only_what_the_step_leaves() {
+        // The cut, which is the part of the join walk worth a test of its own. The header's
+        // parameter comes in from the entry as a slot aligned to eight and comes round the back
+        // edge as itself stepped by eight. The walk meets the parameter inside itself and takes
+        // only the steps it took to get back there, which is the fixpoint rather than a guess:
+        // going round again steps by eight again and eight is already the least. So four is
+        // answered, and sixteen is refused by an answer rather than by nothing, which is the
+        // difference between the two rows.
+        let (_, mut func, block, _) = blank();
+        let header = func.create_block();
+        let exit = func.create_block();
+        let carried = func.append_param(header, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 64);
+        build.jump(header, &[slot]);
+        let mut build = Builder::new(&mut func, header);
+        assuming(&mut build, carried, 16, 1);
+        assuming(&mut build, carried, 4, 4);
+        assuming(&mut build, carried, 4, 16);
+        let next = past(&mut build, carried, 8);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, header, &[next], exit, &[]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_ALIGNMENT), 0);
+        assert_eq!(stats.count(Kind::Missed, super::LOST_ALIGNMENT), 1);
     }
 
     #[test]
