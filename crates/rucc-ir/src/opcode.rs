@@ -1047,11 +1047,12 @@ impl Opcode {
 
     /// Which operand of a capability producer names the pointer the capability is about.
     ///
-    /// Four of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
+    /// Five of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
     /// the capability describes the object that pointer is in. Where they differ is only in how the
     /// answer was arrived at, which is a walk of the lifetime plane for `cap_recover`, a read of the
-    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, and whatever
-    /// the back end has at hand for `cap_of`.
+    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, a read of
+    /// the frame the caller published for `cap_result`, and whatever the back end has at hand for
+    /// `cap_of`.
     ///
     /// That is worth stating as one question because the optimizer asks it. A rule that discharges a
     /// check by knowing which pointer the check's capability is about has no business caring which
@@ -1060,14 +1061,22 @@ impl Opcode {
     /// question when tamnd/rucc#1241 started emitting the cheap producers, and a rule that still
     /// asked by name would quietly discharge less the better the code got.
     ///
-    /// The three that answer nothing are the three that are not about a pointer at all. A
-    /// `cap_narrow` is about another capability, a `cap_null` is about nothing by construction, and
-    /// a `cap_result` is about a pointer the callee returned, which is a value this function has
-    /// only as the call's own result and not as an operand.
+    /// The two that answer nothing are the two that are not about a pointer at all. A `cap_narrow`
+    /// is about another capability and a `cap_null` is about nothing by construction.
+    ///
+    /// `cap_result` was in that group and did not belong there. The reasoning was that it is about a
+    /// pointer the callee returned, which sounds like a value this function has only as the call's
+    /// own result, and the opcode carries that pointer as operand zero for the same reason
+    /// `cap_arg` carries one: a callee that wrote nothing leaves the bottom capability in the slot,
+    /// and the pointer is what the runtime falls back to working the answer out from. So the
+    /// operand was there the whole time and this said there was none. It is the same mistake the
+    /// paragraph above is about, made once more in the place that exists to stop it, which is
+    /// exactly how much care this question wants: every producer that names a pointer has to be
+    /// here, and the way to tell is to read the opcode's operands rather than its purpose.
     #[must_use]
     pub const fn capability_names(self) -> Option<usize> {
         match self {
-            Self::CapOf | Self::CapRecover | Self::CapArg => Some(0),
+            Self::CapOf | Self::CapRecover | Self::CapArg | Self::CapResult => Some(0),
             // The third, because the first two are the container's capability and the address of
             // the word, and the pointer this one is about is the value that came out of the word.
             Self::CapLoad => Some(2),
@@ -1731,17 +1740,17 @@ mod tests {
 
     #[test]
     fn a_producer_says_which_of_its_operands_is_the_pointer_it_is_about() {
-        // Four of the seven, and the one that is not operand zero is the one whose first two
+        // Five of the seven, and the one that is not operand zero is the one whose first two
         // operands are the container and the word rather than the value that came out of it.
         assert_eq!(Opcode::CapOf.capability_names(), Some(0));
         assert_eq!(Opcode::CapRecover.capability_names(), Some(0));
         assert_eq!(Opcode::CapArg.capability_names(), Some(0));
+        assert_eq!(Opcode::CapResult.capability_names(), Some(0));
         assert_eq!(Opcode::CapLoad.capability_names(), Some(2));
 
-        // The three that are about something other than a pointer this function has an operand for.
+        // The two that are about something other than a pointer this function has an operand for.
         assert_eq!(Opcode::CapNarrow.capability_names(), None);
         assert_eq!(Opcode::CapNull.capability_names(), None);
-        assert_eq!(Opcode::CapResult.capability_names(), None);
 
         // Nothing that is not a producer answers, since the question is what a capability describes
         // and those have no capability to describe anything with.
