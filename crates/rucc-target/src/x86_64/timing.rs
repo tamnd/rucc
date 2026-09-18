@@ -115,6 +115,11 @@ fn plain(form: Form) -> Timing {
         // the extra cost and the unit it needs is the address unit, because that is what is scarce
         // about it: the arithmetic behind the load is one cycle on a unit there are four of.
         AluRm => (1 + LOAD, Unit::Load),
+        // The same arithmetic with the answer left in memory, which is a load and the arithmetic
+        // and a store. The store is the scarce part, the way the load is the scarce part above,
+        // and the latency is not a number anything waits on for the reason a store's is not:
+        // nothing in a register is waiting for it.
+        AluMr => (1 + LOAD, Unit::Store),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
         DivQuo | DivRem => (26, Unit::Div),

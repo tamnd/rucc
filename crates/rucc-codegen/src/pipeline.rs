@@ -395,6 +395,10 @@ pub fn compile_recording(
     // it has nothing in its own mode worth carrying. Before allocation for the reason the fold is:
     // a virtual register is written once, which is the whole of why the value the load produced
     // cannot have changed between the two instructions this joins.
+    // The run that reads a place, computes on it and writes it back goes first, because it is three
+    // instructions the selector wrote and taking the load out of the middle one first would leave
+    // the same run written a second way.
+    combine::stores(&mut func, machine.shapes, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
 
     // Whether this function carries a canary is the front end's answer, because what

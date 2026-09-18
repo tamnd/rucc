@@ -492,19 +492,22 @@ mod tests {
         "sar_rcl_16",
     ];
 
-    /// The arithmetic that reads its second source out of memory, which [`crate::combine`] writes.
+    /// The arithmetic that reaches memory, which [`crate::combine`] writes: the forms that read a
+    /// source out of it and the forms that leave the answer in it.
     ///
     /// A function rather than a list, for the reason the compare pass's exemption is taken from the
     /// flag description rather than typed out: the pass already writes down which instructions it
     /// can produce, and a second copy of that here would be a second opinion about one pass.
     ///
     /// No rule selects one of these because a rule matches a term and one of these is two terms, a
-    /// load and an arithmetic operation, put together. Whether they may be put together depends on
-    /// what is written between them and on whether anything else wants what the load read, and
-    /// neither is a fact about either term. That is the whole reason the pass exists and the module
-    /// documentation there says it at length.
+    /// load and an arithmetic operation, put together, or three where the answer goes back to
+    /// memory. Whether they may be put together depends on what is written between them and on
+    /// whether anything else wants what the load read, and neither is a fact about any of the
+    /// terms. That is the whole reason the pass exists and the module documentation there says it
+    /// at length.
     fn combine() -> Vec<&'static str> {
-        crate::combine::FOLDS.iter().map(|fold| fold.into).collect()
+        let loads = crate::combine::FOLDS.iter().map(|fold| fold.into);
+        loads.chain(crate::combine::UPDATES.iter().map(|update| update.into)).collect()
     }
 
     #[test]
