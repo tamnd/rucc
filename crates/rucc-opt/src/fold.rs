@@ -36,9 +36,18 @@
 //! evaluating. They belong with the strength reduction that turns a division by a constant into
 //! a multiply, which is where somebody looking for division arithmetic will look.
 //!
-//! Not floating point. Folding it means deciding what rounding mode to fold under and what to do
-//! about a signalling NaN, and `rucc_base::float` has the arithmetic but the decision about the
-//! environment belongs with the rest of the floating point work rather than in the first pass.
+//! Not floating point arithmetic. Folding it means deciding what rounding mode to fold under and
+//! what to do about a signalling NaN, and `rucc_base::float` has the arithmetic but the decision
+//! about the environment belongs with the rest of the floating point work rather than in the first
+//! pass.
+//!
+//! A conversion from floating point to an integer is folded, and is inside that boundary rather
+//! than an exception to it. C says the conversion discards the fractional part, so the rounding is
+//! the language's rather than the environment's and nothing anybody sets at run time reaches it.
+//! What is left is a value whose truncation does not fit the destination type, and a NaN, and both
+//! of those are undefined rather than a number: `rucc_base::float::Float::to_integer` reports each
+//! as `Status::INVALID` and neither folds, which is the rule below for an add that overflows under
+//! `nsw` applied to the same kind of program. That is issue 1357.
 //!
 //! Not an operation that overflows under `nsw` or `nuw`. The result there is poison, so any
 //! answer would be a valid refinement, and quietly picking the wrapping one hides a program that
@@ -54,6 +63,7 @@
 //! and one for a byte holding it, so the constant this leaves behind lowers wherever the
 //! comparison did.
 
+use rucc_base::float::{Float, Status};
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
 
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -161,6 +171,10 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             let (value, from) = constant(func, *args.first()?)?;
             count(data.opcode, value, from, ty)
         }
+        Opcode::FPToSI | Opcode::FPToUI => {
+            let value = floating(func, *args.first()?)?;
+            to_integer(value, ty, data.opcode == Opcode::FPToSI)
+        }
         Opcode::ICmp => {
             let Extra::IntPred(pred) = data.extra else { return None };
             let (lhs, from) = constant(func, *args.first()?)?;
@@ -183,6 +197,34 @@ pub(crate) fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
     let Extra::Imm(at) = func[inst].extra else { return None };
     let ty = func[value].ty;
     ty.is_int().then(|| (func[at], ty))
+}
+
+/// The floating point constant this value is, read in the format its own type gives it.
+///
+/// An `fconst` stores the bits and the type says how to read them, which is why this is one
+/// function and not a pair of them: the bits of an `f80` and the bits of an `f128` are the same
+/// hundred and twenty eight bits and mean different numbers.
+fn floating(func: &Func, value: Value) -> Option<Float> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::FConst {
+        return None;
+    }
+    let Extra::Imm(at) = func[inst].extra else { return None };
+    let format = func[value].ty.format()?.encoding();
+    Some(Float::from_bits(format, func[at].bits()))
+}
+
+/// A conversion of a floating point constant to an integer, and nothing when C does not say what
+/// the answer is.
+///
+/// The two undefined cases are a number whose truncation is outside the destination type and a
+/// NaN, and `to_integer` reports both as [`Status::INVALID`] rather than answering. Folding either
+/// would be picking one refinement of poison and writing it into the program, which is what this
+/// pass declines to do for an add that overflows under `nsw` and declines to do here for the same
+/// reason.
+fn to_integer(value: Float, to: Type, signed: bool) -> Option<Imm> {
+    let (number, status) = value.to_integer(to.bits(), signed);
+    (!status.has(Status::INVALID)).then(|| Imm::int(number, to))
 }
 
 /// A widening or a narrowing of a constant.
@@ -334,8 +376,9 @@ fn overflowed(exact: i128, to: Type, flags: Flags) -> bool {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
+    use rucc_base::float::Format;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Func, IntPred, Module, Opcode, Signature, Type, Value,
+        Block, Builder, Extra, Flags, Float, Func, IntPred, Module, Opcode, Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -355,6 +398,17 @@ mod tests {
     /// rewrote anything.
     fn fold(func: &mut Func) -> bool {
         Fold.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited()).changed()
+    }
+
+    /// An `fconst` of the number this text spells, in the format the type gives it.
+    ///
+    /// Through `rucc_base::float` rather than through the host's `f64`, for the reason that module
+    /// exists: the bits a literal means are the target's answer and not the machine running the
+    /// test's.
+    fn number(build: &mut Builder<'_>, text: &str, ty: Type) -> Value {
+        let format = ty.format().expect("a floating point type").encoding();
+        let (value, _) = super::Float::parse(text, format).expect("a number");
+        build.fconst(ty, value.to_bits())
     }
 
     /// The constant a value now holds, or `None` if it is not one.
@@ -630,6 +684,79 @@ mod tests {
         build.ret(&[out]);
         assert!(!fold(&mut func));
         assert_eq!(func[out_inst(&func, out)].opcode, Opcode::Add);
+    }
+
+    #[test]
+    fn a_conversion_to_an_integer_truncates_toward_zero() {
+        for (text, expected) in [("2.75", 2_i128), ("-2.75", -2), ("0.5", 0), ("-0.5", 0)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = number(&mut build, text, Type::float(Float::F64));
+            let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{text}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_negative_number_converts_to_an_unsigned_type_only_when_truncating_lands_on_zero() {
+        for (text, expected) in [("-0.5", Some(0)), ("-1.5", None)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = number(&mut build, text, Type::float(Float::F64));
+            let out = build.unary(Opcode::FPToUI, value, Type::int(32));
+            build.ret(&[out]);
+            assert_eq!(fold(&mut func), expected.is_some(), "{text}");
+            assert_eq!(value_of(&func, out, Type::int(32)), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_number_the_destination_type_has_no_room_for_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = number(&mut build, "1e30", Type::float(Float::F64));
+        let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+        assert_eq!(func[out_inst(&func, out)].opcode, Opcode::FPToSI);
+    }
+
+    #[test]
+    fn a_nan_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.fconst(Type::float(Float::F64), 0x7ff8_0000_0000_0000);
+        let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_constant_is_read_in_the_format_its_own_type_gives_it() {
+        // The same hundred and twenty eight bits, which are an x87 three and an `f128` far too
+        // small to be anything but zero once it has been truncated.
+        let bits = super::Float::parse("3.0", Format::X87Extended).expect("a number").0.to_bits();
+        for (float, expected) in [(Float::F80, 3_i128), (Float::F128, 0)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = build.fconst(Type::float(float), bits);
+            let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{float}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{float}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_of_something_that_is_not_a_constant_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let param = func.append_param(block, Type::float(Float::F64));
+        let mut build = Builder::new(&mut func, block);
+        let out = build.unary(Opcode::FPToSI, param, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
     }
 
     #[test]

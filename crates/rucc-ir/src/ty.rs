@@ -53,6 +53,8 @@
 
 use std::fmt;
 
+use rucc_base::float::Format;
+
 /// An IR type.
 ///
 /// Four bytes, packed, because a type sits on every value in a function and a function has a
@@ -152,6 +154,36 @@ impl Float {
             80 => Some(Self::F80),
             128 => Some(Self::F128),
             _ => None,
+        }
+    }
+
+    /// The encoding this is, as `rucc_base::float` spells it.
+    ///
+    /// The inverse of the map `rucc-lower` keeps in the other direction, and total where that one
+    /// is not. Every format the IR has a type for is an IEEE encoding, so the two that map to
+    /// nothing there, the brain float and the double-double, are not among these and there is no
+    /// case here to return nothing for.
+    ///
+    /// It is on the type rather than in the crate that wants it because which encoding an `f80` is
+    /// is a fact about `f80` and not about whoever is asking. Anything that has to interpret the
+    /// bits of an `fconst` needs it, and a copy of the table in each of them is a table that can
+    /// disagree with itself.
+    ///
+    /// ```
+    /// use rucc_base::float::Format;
+    /// use rucc_ir::Float;
+    ///
+    /// assert_eq!(Float::F64.encoding(), Format::Double);
+    /// assert_eq!(Float::F80.encoding(), Format::X87Extended);
+    /// ```
+    #[must_use]
+    pub const fn encoding(self) -> Format {
+        match self {
+            Self::F16 => Format::Half,
+            Self::F32 => Format::Single,
+            Self::F64 => Format::Double,
+            Self::F80 => Format::X87Extended,
+            Self::F128 => Format::Quad,
         }
     }
 }
