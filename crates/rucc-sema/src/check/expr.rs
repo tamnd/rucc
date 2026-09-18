@@ -1894,8 +1894,7 @@ impl Checker<'_> {
         // object rather than of the node, so that a pointer to an array answers with the element's
         // qualifiers: that is where 6.7.3p10 puts them, and a `const int (*)[4]` is a pointer to
         // something nobody may write to however little the array node says.
-        let (target_quals, source_quals) =
-            (self.types.object_quals(a), self.types.object_quals(b));
+        let (target_quals, source_quals) = (self.types.object_quals(a), self.types.object_quals(b));
         for (qual, name) in [
             (Qualifiers::CONST, "const"),
             (Qualifiers::VOLATILE, "volatile"),
