@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- libwebp is the sixth library built and run under the monitor, which is the count milestone S5 asks for. The five before it move bytes: a compressor reads a buffer and writes a smaller one, a database reads a page and writes a row back. This one reads a rectangle, which is two shapes the check had not seen. Storage indexed by two numbers multiplied by a stride the caller chose is one, and a table of function pointers filled in once at startup by asking the processor what it is and read from everywhere after is the other, and the second is the reason the row was worth adding at all: nearly every call into libwebp's pixel code goes through a pointer that was stored into a global and loaded back, so a monitor that cannot follow one cannot say anything about a library built this way. 1.6.0 builds from its own unmodified sources at `-O0` and at `-O2`, all 125 files of it, and the workload in `tests/libwebp/a-real-workload.c` builds an image of flat blocks, a gradient and noise, encodes it lossy and lossless, decodes both back, decodes a third time through the incremental interface a few hundred bytes at a time, and checks two checksums it computes itself over an image it built itself, so the answers are the same numbers against any version of the library. The monitor makes seven reports and they are two idioms. Two are the init plane over the fourth `uint16_t` of every pixel group in `AccumulateRGB`, which libwebp leaves unwritten because there is no alpha on that path and which `ConvertRGBA32ToUV_SSE2` then loads anyway because it takes sixteen bytes at a time, the same shape as zlib's `slide_hash` and acknowledged in libwebp's own source with a `WEBP_MSAN` arm and a link to crbug.com/webp/573. Five are the type plane over a run of pixels `CopySmallPattern32b` fills through a `uint64_t*` for speed and every later reader takes back through a `uint32_t*`, which is an effective type the lossless decoder changes on purpose and gets away with on every compiler there is. All seven are written into the row with the site and the reason, and an eighth would fail the check. Closes tamnd/rucc#1458.
+
 ## 0.10.65
 
 ### Fixed
