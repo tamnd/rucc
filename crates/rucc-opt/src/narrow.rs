@@ -21,9 +21,12 @@
 //!
 //! A comparison of extensions. Sign extension is an order isomorphism onto its image under both
 //! readings of the bits, so a comparison of two of them at any predicate is the same comparison of
-//! what they extended. Zero extension is one under the unsigned reading and is not one under the
-//! signed reading, since it takes a negative byte to a positive word, so it carries the equalities
-//! and the unsigned predicates over and not the signed ones. That is what `char a, b; a < b` is.
+//! what they extended. That is what `char a, b; a < b` is. Zero extension is an isomorphism under
+//! the unsigned reading and is not one under the signed reading, since it takes a negative byte to
+//! a positive word, so the equalities and the unsigned predicates come over as they are. A signed
+//! predicate comes over as its unsigned counterpart, because what a zero extension produces has
+//! its top bits clear and the two readings agree on a value like that. That is what `unsigned char
+//! a, b; a < b` is, and the promotions make it the shape most C at these widths has.
 //!
 //! Both are written so that one side may be a constant instead, because `if (c == 'x')` is the
 //! common case and the constant is representable at the narrow width whenever the comparison is
@@ -237,9 +240,18 @@ const fn low_bits_only(opcode: Opcode) -> bool {
 /// Whether this is a comparison of two things extended from the same narrower width.
 ///
 /// Sign extension keeps the order of what it extends under both readings of the bits, so every
-/// predicate survives it. Zero extension keeps the unsigned order and not the signed one, since it
-/// takes a negative byte to a positive word, so it carries the equalities and the unsigned
-/// predicates and refuses the signed ones.
+/// predicate survives it and the comparison narrows as it stands.
+///
+/// Zero extension keeps the unsigned order and not the signed one, since it takes a negative byte
+/// to a positive word. That does not stop a signed comparison of two of them narrowing: what a
+/// zero extension produces is a value with its top bits clear, the two readings of the bits agree
+/// on a value like that, and so the signed comparison is asking an unsigned question. It narrows
+/// to the unsigned predicate rather than to the one that was written. This is the shape the
+/// integer promotions give `unsigned char a, b; a < b`, which is a signed comparison of two zero
+/// extensions and is most of what C produces at these widths, so refusing it would leave the rule
+/// set's narrow half with nothing to match. The swap is asked for on an extension that widens,
+/// because one to the width it already has is the identity and the predicate written on it is the
+/// one that holds.
 ///
 /// The two sides have to be the same extension as well as from the same width. `(signed char) a <
 /// b` where `b` is an `unsigned char` is a sign extension against a zero extension, and comparing
@@ -258,14 +270,14 @@ fn extended_comparison(func: &Func, inst: Inst) -> Option<Redo> {
     if !narrowable(ty) {
         return None;
     }
-    if kind == Opcode::ZExt && pred.is_signed() {
-        return None;
-    }
+    let widens = ty.bits() < func[left].ty.bits();
+    let pred = if kind == Opcode::ZExt && widens { pred.unsigned() } else { pred };
     let rhs = match widening(func, right) {
         Some((same, from, other)) if same == kind && from == ty => Plan::Already(other),
         _ => Plan::Constant(survives(func, right, kind, ty)?),
     };
-    Some(Redo { opcode: Opcode::ICmp, extra: data.extra, ty, lhs: Plan::Already(narrow), rhs })
+    let extra = Extra::IntPred(pred);
+    Some(Redo { opcode: Opcode::ICmp, extra, ty, lhs: Plan::Already(narrow), rhs })
 }
 
 /// The extension this value is, as the kind, the width it came from and the value it extended.
@@ -400,6 +412,13 @@ mod tests {
         let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("a result") };
         let data = &func[inst];
         (data.opcode, func[data.args].iter().map(|&arg| func[arg].ty).collect())
+    }
+
+    /// The predicate of the comparison this value is the answer to.
+    fn predicate(func: &Func, value: Value) -> IntPred {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("a result") };
+        let rucc_ir::Extra::IntPred(pred) = func[inst].extra else { panic!("a comparison") };
+        pred
     }
 
     /// How many instructions are in a block.
@@ -597,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comparison_of_two_zero_extensions_narrows_at_every_predicate_but_the_signed_ones() {
+    fn a_comparison_of_two_zero_extensions_narrows_at_every_predicate() {
         for pred in IntPred::all() {
             let (mut func, block) = blank();
             let a = func.append_param(block, Type::int(8));
@@ -607,9 +626,7 @@ mod tests {
             let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
             let answer = build.icmp(pred, wide_a, wide_b);
             build.ret(&[answer]);
-            // Zero extension takes a negative byte to a positive word, so the signed order is not
-            // the order it came from and the four signed predicates do not survive it.
-            assert_eq!(
+            assert!(
                 Narrow
                     .run(
                         &mut func,
@@ -617,10 +634,86 @@ mod tests {
                         &mut Fuel::unlimited()
                     )
                     .changed(),
-                !pred.is_signed(),
                 "{pred}"
             );
+            assert_eq!(shape(&func, answer).1, vec![Type::int(8), Type::int(8)], "{pred}");
         }
+    }
+
+    #[test]
+    fn a_signed_comparison_of_two_zero_extensions_narrows_to_the_unsigned_one() {
+        // `unsigned char a, b; a < b`, which the promotions write as a signed comparison of two
+        // zero extensions. Both sides have their top bits clear, where the two readings of the
+        // bits agree, so the question the wide comparison asks is the unsigned one and that is
+        // the predicate the narrow comparison is written with.
+        for pred in IntPred::all() {
+            let (mut func, block) = blank();
+            let a = func.append_param(block, Type::int(8));
+            let b = func.append_param(block, Type::int(8));
+            let mut build = Builder::new(&mut func, block);
+            let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+            let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+            let answer = build.icmp(pred, wide_a, wide_b);
+            build.ret(&[answer]);
+            Narrow.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+            assert_eq!(predicate(&func, answer), pred.unsigned(), "{pred}");
+        }
+    }
+
+    #[test]
+    fn a_signed_comparison_of_two_sign_extensions_keeps_the_predicate_it_was_written_with() {
+        for pred in IntPred::all() {
+            let (mut func, block) = blank();
+            let a = func.append_param(block, Type::int(8));
+            let b = func.append_param(block, Type::int(8));
+            let mut build = Builder::new(&mut func, block);
+            let wide_a = build.unary(Opcode::SExt, a, Type::int(32));
+            let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
+            let answer = build.icmp(pred, wide_a, wide_b);
+            build.ret(&[answer]);
+            Narrow.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+            assert_eq!(predicate(&func, answer), pred, "{pred}");
+        }
+    }
+
+    #[test]
+    fn a_signed_comparison_of_a_zero_extension_against_a_constant_narrows_to_the_unsigned_one() {
+        // `unsigned char a; a < 200`. Two hundred is the zero extension of a byte even though it
+        // is not the sign extension of one, so the constant comes along and the comparison that
+        // is left is the unsigned one against that byte.
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide = build.unary(Opcode::ZExt, a, Type::int(32));
+        let k = build.iconst(Type::int(32), 200);
+        let answer = build.icmp(IntPred::Slt, wide, k);
+        build.ret(&[answer]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, answer).1, vec![Type::int(8), Type::int(8)]);
+        assert_eq!(predicate(&func, answer), IntPred::Ult);
+    }
+
+    #[test]
+    fn a_signed_comparison_of_a_zero_extension_against_a_negative_constant_is_left_alone() {
+        // Minus one is no byte's zero extension, so the comparison is already decided and saying
+        // which way is folding's job. Narrowing it would compare a byte against minus one, which
+        // is a different question under either reading.
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide = build.unary(Opcode::ZExt, a, Type::int(32));
+        let k = build.iconst(Type::int(32), -1);
+        let answer = build.icmp(IntPred::Sgt, wide, k);
+        build.ret(&[answer]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
     }
 
     #[test]

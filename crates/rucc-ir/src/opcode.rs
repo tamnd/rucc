@@ -1486,6 +1486,24 @@ impl IntPred {
     pub const fn is_signed(self) -> bool {
         matches!(self, Self::Slt | Self::Sle | Self::Sgt | Self::Sge)
     }
+
+    /// The predicate that asks the same question with the bits read as unsigned.
+    ///
+    /// Each ordering has a counterpart the other way round and equality is the same question at
+    /// both readings, so every predicate has one and nothing here is a refusal. What it is for is
+    /// operands known not to be negative: the two readings agree on those, so a signed comparison
+    /// of two of them is the unsigned comparison of them, and the unsigned one is the one that
+    /// still holds when the same values are looked at in fewer bits.
+    #[must_use]
+    pub const fn unsigned(self) -> Self {
+        match self {
+            Self::Slt => Self::Ult,
+            Self::Sle => Self::Ule,
+            Self::Sgt => Self::Ugt,
+            Self::Sge => Self::Uge,
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for IntPred {
@@ -1866,6 +1884,23 @@ mod tests {
         assert_eq!(IntPred::Slt.inverse(), IntPred::Sge);
         assert_eq!(IntPred::Slt.swapped(), IntPred::Sgt);
         assert_eq!(IntPred::from_name("lt"), None);
+    }
+
+    #[test]
+    fn an_integer_predicate_has_an_unsigned_counterpart_that_asks_the_same_way_round() {
+        for pred in IntPred::all() {
+            let unsigned = pred.unsigned();
+            assert!(!unsigned.is_signed(), "{pred}");
+            assert_eq!(unsigned.unsigned(), unsigned, "{pred}");
+            // The same way round, so inverting or swapping either first gives the same answer.
+            assert_eq!(pred.inverse().unsigned(), unsigned.inverse(), "{pred}");
+            assert_eq!(pred.swapped().unsigned(), unsigned.swapped(), "{pred}");
+        }
+        assert_eq!(IntPred::Slt.unsigned(), IntPred::Ult);
+        assert_eq!(IntPred::Sge.unsigned(), IntPred::Uge);
+        // Equality is the same question at both readings, so it is already its own counterpart.
+        assert_eq!(IntPred::Eq.unsigned(), IntPred::Eq);
+        assert_eq!(IntPred::Ne.unsigned(), IntPred::Ne);
     }
 
     #[test]
