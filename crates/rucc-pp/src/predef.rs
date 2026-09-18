@@ -517,11 +517,49 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
         }
         Os::Windows => {
+            // Every spelling gcc has for this platform, because the mingw-w64 tree reads more
+            // than one of them and a missing one is a declaration that quietly is not there.
+            // `winuser.h` guards `EndTask` with `#ifdef WINNT` and `rpcdcep.h` guards six
+            // declarations with `#ifndef WINNT`, so a compiler that leaves it undefined
+            // preprocesses `windows.h` to a different set of functions than gcc does, which is
+            // what the token comparison against a real mingw install found.
+            //
+            // One gcc defines that is deliberately not here is `__SEH__`. mingw's `setjmp.h`
+            // reads it to choose the two argument `_setjmp`, whose second argument is
+            // `__builtin_frame_address(0)`, and that builtin is not lowered for a Windows frame
+            // yet: defining the macro turns every `setjmp` on this target into E0653. It goes in
+            // with the lowering rather than before it.
             d.flag("_WIN32");
+            d.flag("__WIN32");
             d.flag("__WIN32__");
-            d.flag("_WIN64");
-            d.flag("__WIN64__");
+            d.flag("__WINNT");
+            d.flag("__WINNT__");
             d.flag("__MINGW32__");
+            // Not the machine word: `_WIN64` says the pointer is sixty four bits wide, and
+            // i686-w64-mingw32-gcc defines neither it nor `__MINGW64__`.
+            if target.pointer_width == 64 {
+                d.flag("_WIN64");
+                d.flag("__WIN64");
+                d.flag("__WIN64__");
+                d.flag("__MINGW64__");
+            }
+            // Which C runtime the headers are configured for. The sysroot this compiler fetches
+            // is built `--with-default-msvcrt=msvcrt` to match the link line, which names
+            // `libmsvcrt.a`, and gcc defines this for the same tree.
+            d.flag("__MSVCRT__");
+            // The widest integer the compiler has, which is what Microsoft's headers ask
+            // instead of asking about `long long`.
+            d.set("_INTEGRAL_MAX_BITS", "64");
+            // The unarmoured three, which are not reserved identifiers, so a strict mode may
+            // not define them and gcc does not. Windows code tests all three anyway, the same
+            // way portable Unix code still tests `linux`.
+            if opts.gnu_extensions {
+                d.flag("WIN32");
+                d.flag("WINNT");
+                if target.pointer_width == 64 {
+                    d.flag("WIN64");
+                }
+            }
             windows_spellings(d, opts);
         }
         Os::None => {
@@ -638,7 +676,10 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     d.set("__SIZEOF_SIZE_T__", &pointer.to_string());
     d.set("__SIZEOF_PTRDIFF_T__", &pointer.to_string());
     d.set("__SIZEOF_WCHAR_T__", &wchar(target).size.to_string());
-    d.set("__SIZEOF_WINT_T__", "4");
+    // From the spelling rather than from a constant, because Windows makes `wint_t` a
+    // `short unsigned int` and this said four bytes there while `__WINT_WIDTH__` said sixteen
+    // bits two hundred lines away.
+    d.set("__SIZEOF_WINT_T__", &(wint(target).width / 8).to_string());
     d.set("__BIGGEST_ALIGNMENT__", "16");
     // The `__BYTE_ORDER__` family, which the kernel and every serialisation library read.
     // The names of the orders are defined whichever one is in force, because code compares
@@ -790,15 +831,26 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
         && lp64
         && target.tuple.env() != tuple::Env::Musl;
     let fast_middle = if fast_is_wide { wide } else { "int" };
+    // Windows is the exception in the other direction, and it is only the 16 bit one. mingw's
+    // `stdint.h` makes `int_fast16_t` a `short` and gcc for that target says the same, while
+    // `int_fast32_t` there is the `int` it is nearly everywhere, so the two cannot share an
+    // answer on this platform the way they do on the others. The measurement is the mingw tree,
+    // which is the only Windows header tree this compiler fetches, and the msvc environment is
+    // given the same answer because nothing compiles against a tree of Microsoft's yet.
+    let fast16_is_short = target.tuple.os() == tuple::Os::Windows;
     d.set("__INT_FAST8_TYPE__", "signed char");
     d.set("__UINT_FAST8_TYPE__", "unsigned char");
     d.set("__INT_FAST8_MAX__", "0x7f");
     d.set("__UINT_FAST8_MAX__", "0xff");
     for width in [16, 32] {
-        let unsigned = if fast_middle == "int" { "unsigned int" } else { wide_unsigned };
-        let max = if fast_middle == "int" { "0x7fffffff" } else { wide_max.as_str() };
-        let umax = if fast_middle == "int" { "0xffffffffU" } else { wide_umax.as_str() };
-        d.set(&format!("__INT_FAST{width}_TYPE__"), fast_middle);
+        let (signed, unsigned, max, umax) = if width == 16 && fast16_is_short {
+            ("short int", "short unsigned int", "0x7fff", "0xffff")
+        } else if fast_middle == "int" {
+            ("int", "unsigned int", "0x7fffffff", "0xffffffffU")
+        } else {
+            (wide, wide_unsigned, wide_max.as_str(), wide_umax.as_str())
+        };
+        d.set(&format!("__INT_FAST{width}_TYPE__"), signed);
         d.set(&format!("__UINT_FAST{width}_TYPE__"), unsigned);
         d.set(&format!("__INT_FAST{width}_MAX__"), max);
         d.set(&format!("__UINT_FAST{width}_MAX__"), umax);
@@ -808,7 +860,8 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__INT_FAST64_MAX__", &wide_max);
     d.set("__UINT_FAST64_MAX__", &wide_umax);
 
-    widths(d, target, &wchar, &wint, if fast_is_wide { 64 } else { 32 });
+    let fast32 = if fast_is_wide { 64 } else { 32 };
+    widths(d, target, &wchar, &wint, if fast16_is_short { 16 } else { fast32 }, fast32);
 }
 
 /// The widths, which C23's `limits.h` and `stdint.h` are written out of.
@@ -821,7 +874,14 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
 /// Each of these says how many value bits and sign bits the type has, which is not the same as
 /// how many bits it occupies. They agree for every type on every target here, and the day one of
 /// them does not, this is the family that has to say the smaller number.
-fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast_middle: u32) {
+fn widths(
+    d: &mut Defs,
+    target: &TargetInfo,
+    wchar: &Wchar,
+    wint: &Wint,
+    fast16: u32,
+    fast32: u32,
+) {
     let pointer = target.pointer_width;
     d.set("__SCHAR_WIDTH__", "8");
     d.set("__SHRT_WIDTH__", "16");
@@ -839,8 +899,8 @@ fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast_mi
         d.set(&format!("__INT_LEAST{width}_WIDTH__"), &width.to_string());
     }
     d.set("__INT_FAST8_WIDTH__", "8");
-    d.set("__INT_FAST16_WIDTH__", &fast_middle.to_string());
-    d.set("__INT_FAST32_WIDTH__", &fast_middle.to_string());
+    d.set("__INT_FAST16_WIDTH__", &fast16.to_string());
+    d.set("__INT_FAST32_WIDTH__", &fast32.to_string());
     d.set("__INT_FAST64_WIDTH__", "64");
 }
 
@@ -1769,5 +1829,71 @@ mod tests {
         let arm_musl = set_for("aarch64-unknown-linux-musl");
         assert!(has(&arm_gnu, "#define __INT_FAST16_TYPE__ int"));
         assert!(has(&arm_musl, "#define __INT_FAST16_TYPE__ int"));
+    }
+
+    #[test]
+    fn windows_is_the_one_target_where_the_two_middle_fast_types_differ_from_each_other() {
+        // mingw's `stdint.h` declares `int_fast16_t` a `short` and `int_fast32_t` an `int`, and
+        // x86_64-w64-mingw32-gcc says the same, so this is the one platform where the pair does
+        // not share an answer.
+        let windows = set_for("x86_64-pc-windows-gnu");
+        assert!(has(&windows, "#define __INT_FAST16_TYPE__ short int"));
+        assert!(has(&windows, "#define __UINT_FAST16_TYPE__ short unsigned int"));
+        assert!(has(&windows, "#define __INT_FAST16_MAX__ 0x7fff"));
+        assert!(has(&windows, "#define __UINT_FAST16_MAX__ 0xffff"));
+        assert!(has(&windows, "#define __INT_FAST16_WIDTH__ 16"));
+        assert!(has(&windows, "#define __INT_FAST32_TYPE__ int"));
+        assert!(has(&windows, "#define __UINT_FAST32_TYPE__ unsigned int"));
+        assert!(has(&windows, "#define __INT_FAST32_WIDTH__ 32"));
+        // The two ends of the family are the same as everywhere.
+        assert!(has(&windows, "#define __INT_FAST8_TYPE__ signed char"));
+        assert!(has(&windows, "#define __INT_FAST64_TYPE__ long long int"));
+    }
+
+    #[test]
+    fn windows_answers_to_every_name_gcc_gives_it() {
+        // The mingw tree reads more than one spelling of the platform and a missing one is a
+        // declaration that quietly is not there: `winuser.h` guards `EndTask` with `#ifdef
+        // WINNT` and `rpcdcep.h` guards six `I_Rpc` declarations with `#ifndef WINNT`.
+        let windows = set_for("x86_64-pc-windows-gnu");
+        for name in [
+            "_WIN32", "__WIN32", "__WIN32__", "__WINNT", "__WINNT__", "__MINGW32__", "_WIN64",
+            "__WIN64", "__WIN64__", "__MINGW64__", "__MSVCRT__", "WIN32", "WIN64", "WINNT",
+        ] {
+            assert!(has(&windows, &format!("#define {name} 1")), "no {name}");
+        }
+        assert!(has(&windows, "#define _INTEGRAL_MAX_BITS 64"));
+        // `__SEH__` is gcc's and is deliberately not ours yet, because mingw's `setjmp.h` reads
+        // it to reach a `_setjmp` whose second argument is `__builtin_frame_address(0)`, which
+        // has no lowering for a Windows frame.
+        assert!(!has(&windows, "#define __SEH__ 1"));
+    }
+
+    #[test]
+    fn a_thirty_two_bit_windows_is_not_told_its_pointer_is_sixty_four_bits_wide() {
+        // `_WIN64` is about the pointer rather than the processor, and i686-w64-mingw32-gcc
+        // defines neither it nor `__MINGW64__`.
+        let windows = set_for_tuple("i686-windows-gnu");
+        assert!(has(&windows, "#define _WIN32 1"));
+        assert!(has(&windows, "#define __MINGW32__ 1"));
+        for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "WIN64"] {
+            assert!(!has(&windows, &format!("#define {name} 1")), "{name} on a 32 bit target");
+        }
+    }
+
+    #[test]
+    fn the_three_unreserved_windows_names_need_the_gnu_dialect() {
+        // `WIN32`, `WIN64` and `WINNT` are in the user's namespace, so gcc drops all three under
+        // `-std=c11` and keeps the underscored ones. Windows code tests them anyway, the same
+        // way portable Unix code still tests `linux`.
+        let triple: Triple = "x86_64-pc-windows-gnu".parse().expect("a triple");
+        let mut opts = Predef::new();
+        opts.gnu_extensions = false;
+        let strict = built_in(&TargetInfo::new(triple), &opts);
+        for name in ["WIN32", "WIN64", "WINNT"] {
+            assert!(!has(&strict, &format!("#define {name} 1")), "{name} under -std=c11");
+        }
+        assert!(has(&strict, "#define _WIN32 1"));
+        assert!(has(&strict, "#define __WINNT__ 1"));
     }
 }
