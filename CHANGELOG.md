@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- A comparison of a value with itself is decided without comparing. Ten predicates, one name written in two places, and every one of them settled by the shape of the term: a value equals itself, is not below itself and is not above itself, so `eq`, `le` and `ge` are true and `ne`, `lt` and `gt` are false, at both readings of the bits and at all four widths. Nobody writes that comparison, which is why it is worth having a rule for: it is what another rewrite leaves behind, and `x >> 0 != x` in `gcc.c-torture/execute/shiftopt-1.c` is exactly the shape, since the shift becomes `x` and then the comparison has one value on both sides. Without the rule the machine compares a register against itself and branches on the answer. No floating point comparison is here and none could be, because a value is not equal to itself when it is a NaN, so the shape alone does not decide an `fcmp` and a rule for one would have to know the operand is not a NaN. Section 13.4 of `spec/optimizer/13-rewrite-rules.md` has listed this among the tier one identities since the tier was written, so it is a line of that list getting an implementation rather than a new claim. Five tests in `crate::simplify` used a comparison of one value with itself as filler for a test about something else and now take two values, since the filler is a thing that folds. Closes tamnd/rucc#1440.
+
 ## 0.10.61
 
 ### Added

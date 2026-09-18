@@ -1961,6 +1961,37 @@ mod tests {
         }
     }
 
+    /// Every predicate with one name in both operands, at every width the rules are written at.
+    /// Six of the ten are true and four are false, and not one of them had to look at what the
+    /// operand holds.
+    #[test]
+    fn every_comparison_of_a_value_with_itself_is_decided() {
+        for bits in [8, 16, 32, 64] {
+            for pred in IntPred::all() {
+                let mut names = Interner::new();
+                let name = names.intern("f");
+                let int = Type::int(bits);
+                let signature = Signature::new().with_params(&[int]).with_returns(&[Type::int(1)]);
+                let mut func = Func::new(name, signature);
+                let block = func.create_block();
+                let x = func.append_param(block, int);
+                let mut build = Builder::new(&mut func, block);
+                let answer = build.icmp(pred, x, x);
+                build.ret(&[answer]);
+                assert!(simplify(&mut func), "{pred:?} at {bits} bits");
+                let said = number(&func, answer);
+                if matches!(
+                    pred,
+                    IntPred::Ne | IntPred::Slt | IntPred::Sgt | IntPred::Ult | IntPred::Ugt
+                ) {
+                    assert_eq!(said, 0, "{pred:?} at {bits} bits");
+                } else {
+                    assert_ne!(said, 0, "{pred:?} at {bits} bits");
+                }
+            }
+        }
+    }
+
     /// A remainder by one is nothing, and a division by one is the value. The pair is worth a
     /// test of its own because they are the two identities that produce different shapes from the
     /// same operands.
@@ -2181,7 +2212,8 @@ mod tests {
             let (_, mut func, block) = blank();
             let mut build = Builder::new(&mut func, block);
             let x = build.iconst(Type::int(32), 3);
-            let cmp = build.icmp(pred, x, x);
+            let y = build.iconst(Type::int(32), 4);
+            let cmp = build.icmp(pred, x, y);
             let ones = build.iconst(Type::int(1), -1);
             let not = build.binary(Opcode::Xor, cmp, ones, Flags::NONE);
             build.ret(&[not]);
@@ -2200,7 +2232,8 @@ mod tests {
             let (_, mut func, block) = blank();
             let mut build = Builder::new(&mut func, block);
             let x = build.iconst(Type::int(32), 3);
-            let cmp = build.icmp(IntPred::Slt, x, x);
+            let y = build.iconst(Type::int(32), 4);
+            let cmp = build.icmp(IntPred::Slt, x, y);
             let ones = build.iconst(Type::int(1), -1);
             let (lhs, rhs) = if swapped { (ones, cmp) } else { (cmp, ones) };
             let not = build.binary(Opcode::Xor, lhs, rhs, Flags::NONE);
@@ -2215,8 +2248,9 @@ mod tests {
         let (_, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let x = build.iconst(Type::int(32), 3);
-        let a = build.icmp(IntPred::Slt, x, x);
-        let b = build.icmp(IntPred::Sgt, x, x);
+        let y = build.iconst(Type::int(32), 4);
+        let a = build.icmp(IntPred::Slt, x, y);
+        let b = build.icmp(IntPred::Sgt, x, y);
         let differ = build.binary(Opcode::Xor, a, b, Flags::NONE);
         build.ret(&[differ]);
         assert!(!simplify(&mut func));
@@ -2241,7 +2275,8 @@ mod tests {
         let (_, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let x = build.iconst(Type::int(32), 3);
-        let cmp = build.icmp(IntPred::Slt, x, x);
+        let y = build.iconst(Type::int(32), 4);
+        let cmp = build.icmp(IntPred::Slt, x, y);
         let wide = build.unary(Opcode::ZExt, cmp, Type::int(32));
         let one = build.iconst(Type::int(32), 1);
         let flipped = build.binary(Opcode::Xor, wide, one, Flags::NONE);
@@ -2273,8 +2308,9 @@ mod tests {
         let (_, mut func, block) = blank();
         let mut build = Builder::new(&mut func, block);
         let x = build.iconst(Type::int(32), 3);
-        let a = build.icmp(IntPred::Slt, x, x);
-        let b = build.icmp(IntPred::Sgt, x, x);
+        let y = build.iconst(Type::int(32), 4);
+        let a = build.icmp(IntPred::Slt, x, y);
+        let b = build.icmp(IntPred::Sgt, x, y);
         let ones = build.iconst(Type::int(1), -1);
         let first = build.binary(Opcode::Xor, a, ones, Flags::NONE);
         let second = build.binary(Opcode::Xor, b, ones, Flags::NONE);
