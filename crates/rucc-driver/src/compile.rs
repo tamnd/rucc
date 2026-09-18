@@ -1318,6 +1318,26 @@ mod tests {
         assert!(text.contains("single"), "the SSE header is not reached: {text}");
     }
 
+    /// The wider umbrella reaches everything the narrower one does, and the fence family with it.
+    /// This is what mingw-w64's `<winnt.h>` includes and what it then uses, so a Windows program
+    /// that has never heard of an intrinsic gets here through `<windows.h>`.
+    #[test]
+    fn the_shipped_x86intrin_reaches_the_fences_windows_headers_ask_it_for() {
+        let text = shipped(concat!(
+            "#include <x86intrin.h>\n",
+            "void barriers(void *p) {\n",
+            "  _mm_lfence();\n",
+            "  _mm_sfence();\n",
+            "  _mm_mfence();\n",
+            "  _mm_pause();\n",
+            "  _mm_clflush(p);\n",
+            "}\n",
+            "__m128i wide(__m128i a, __m128i b) { return _mm_add_epi32(a, b); }\n",
+        ));
+        assert!(text.contains("barriers"), "{text}");
+        assert!(text.contains("wide"), "the SSE2 header is not reached: {text}");
+    }
+
     /// Including it twice is the same as including it once, and so is including it beside the
     /// header it reaches. A program that includes both spellings is the usual case rather than an
     /// odd one, because one of its own headers includes the umbrella and another includes SSE2.
@@ -1327,6 +1347,7 @@ mod tests {
             "#include <immintrin.h>\n",
             "#include <emmintrin.h>\n",
             "#include <immintrin.h>\n",
+            "#include <x86intrin.h>\n",
             "__m128i twice(__m128i a, __m128i b) { return _mm_add_epi32(a, b); }\n",
         ));
         assert!(text.contains("twice"), "{text}");

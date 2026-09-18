@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Added
+
+- `x86intrin.h`, the widest of the x86 umbrellas, which the compiler was not shipping and which mingw-w64's `<winnt.h>` includes on its line 1658. Every Windows program that includes `<windows.h>` needs a file of that name to exist whether or not the program has ever heard of an intrinsic, so until now the only way through that header was to hand rucc a real gcc installation's include directory on the command line, which is not something a rung in tamnd/rucc#618 is allowed to do. The two umbrellas differ by vendor rather than by width in any way this compiler can see: `immintrin.h` is Intel's and covers MMX, the SSE line, AVX and AVX512, and this one is gcc's everything header, which is Intel's plus AMD's own families, 3DNow!, FMA4 and XOP, plus the general purpose header that holds the names that are not vector instructions. None of those three AMD families is one this compiler has, and none is one a current machine has either, since 3DNow! went with Bulldozer's successor and FMA4 and XOP went with Zen, so on every target this compiler supports the two reach the same set of names and this header is `immintrin.h` with a reason attached. What `<winnt.h>` then uses out of it is the fence and cache line family, `_mm_lfence`, `_mm_sfence`, `_mm_mfence`, `_mm_pause` and `_mm_clflush`, all of which are SSE and SSE2 and all of which were underneath already. A name this compiler does not have stays missing rather than being made to appear, so a program that includes this and then calls an XOP intrinsic gets a diagnostic at the call, which is where it belongs. `#include <windows.h>` for `x86_64-pc-windows-gnu` now preprocesses with only the mingw-w64 header directory named and nothing of gcc's, at 56,110 lines. Closes tamnd/rucc#1340.
+
 ## 0.10.55
 
 ### Added
