@@ -429,8 +429,13 @@ pub fn stop() -> ! {
 mod tests {
     use super::*;
     // The allocator is Unix only, because it is the one part of this crate that asks an
-    // operating system for memory. The two tests below that put a real address in a report are
-    // gated the same way, and everything else here is about rendering and runs everywhere.
+    // operating system for memory. The tests below that put a real address in a report are gated
+    // the same way, and everything else here is about rendering and runs everywhere.
+    //
+    // What decides which is whether the test has an address the report has to go and look up,
+    // rather than which report it is about. A test that renders a sentence out of numbers it wrote
+    // down itself touches no heap, so it takes no turn at one and is not gated, and taking a turn
+    // it does not need is how three of them stopped compiling on Windows.
     #[cfg(unix)]
     use crate::alloc::{alloc, dealloc};
     #[cfg(unix)]
@@ -613,7 +618,6 @@ mod tests {
 
     #[test]
     fn a_race_report_names_both_threads_and_where_each_of_them_stood() {
-        let _turn = turn();
         // The one judgement whose report is about two threads. The address says which word, and
         // without this line it says nothing about who else touched it, which is the only part
         // somebody chasing a race can act on.
@@ -637,7 +641,6 @@ mod tests {
 
     #[test]
     fn a_torn_store_names_the_two_stores_rather_than_a_reader_and_a_writer() {
-        let _turn = turn();
         // Document 03's C1, which is the one report about two threads where neither of them is the
         // thread asking. Both halves are real and each was written correctly, and what is wrong is
         // that they are beside each other, so the sentence has to name the two stores.
@@ -658,7 +661,6 @@ mod tests {
 
     #[test]
     fn a_use_after_free_two_threads_raced_into_names_the_one_that_ended_the_storage() {
-        let _turn = turn();
         // Document 03's C4, which is judgement J1 with the same line under it. A use after free one
         // thread caused on its own and one two threads raced into are the same refusal at the
         // access and two different things to go and fix, and this line is the only place the
