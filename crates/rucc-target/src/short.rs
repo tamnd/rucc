@@ -40,6 +40,19 @@
 //! not even the same length of operand list, and it is here for the same reason: the listing and the
 //! bytes say the same thing because the pass chose the instruction the encoder then spells.
 //!
+//! The fourth thing described here is adding one and taking one away. `addl $1, %eax` is three
+//! bytes, one for the opcode, one saying which register and one for the number, and `incl %eax` is
+//! two, the number being part of the opcode rather than written after it.
+//!
+//! That one is the first thing here that is not free. The addition writes the carry and the
+//! increment leaves it as it found it, so the two are the same only where nothing behind reads a
+//! carry the addition would have set, which is the question [`crate::FlagInsts`] answers and is the
+//! same shape of question the exclusive or asks. It is also the first thing here that is a trade
+//! rather than a saving: an instruction that leaves part of the condition state alone leaves the
+//! next instruction to write that state having to merge with what it left, which costs where the
+//! code is hot and is worth the byte where the goal is size. So a target says which instructions
+//! these are and the pass asks the goal before it writes one, which is what tamnd/rucc#741 is about.
+//!
 //! It is here rather than in the pass for the reason [`crate::FlagInsts`] and
 //! [`crate::BranchInsts`] are here. The pass is in a pipeline crate and `spec/10-backend.md`
 //! section 10.8 says a pipeline crate holds no target-specific code, so what the pass knows about
@@ -59,6 +72,9 @@ pub struct ShortInsts {
     /// Every instruction that compares a register against a constant and has a shorter one that
     /// asks the same thing of the register against itself when the constant is zero.
     pub testing: &'static [Tested],
+    /// Every instruction that adds a constant to a register and has a shorter one that carries the
+    /// number in its opcode, for the one or two numbers that shorter one is about.
+    pub stepping: &'static [Stepped],
 }
 
 impl ShortInsts {
@@ -78,6 +94,30 @@ impl ShortInsts {
     #[must_use]
     pub fn tested(&self, name: &str) -> Option<&'static str> {
         self.testing.iter().find(|entry| entry.name == name).map(|entry| entry.into)
+    }
+
+    /// The shorter way of adding that number to a register, for the instruction of that name.
+    ///
+    /// Both halves are the key. One instruction has a shorter spelling for more than one number,
+    /// since an addition of one and a subtraction of one are each other going the other way, and
+    /// which of the two shorter instructions is meant depends on which number was written.
+    #[must_use]
+    pub fn stepped(&self, name: &str, by: i64) -> Option<&'static str> {
+        self.stepping
+            .iter()
+            .find(|entry| entry.name == name && entry.by == by)
+            .map(|entry| entry.into)
+    }
+
+    /// Whether the instruction of that name is one of the shorter ones that leaves the carry alone.
+    ///
+    /// Asked of an instruction the walk is looking past rather than of one it is thinking about
+    /// rewriting, so what it is really asking is whether this instruction ends the life of a carry
+    /// something in front of it set. One of these does not, which is the whole of what makes it
+    /// shorter and the whole of what makes the rewrite conditional.
+    #[must_use]
+    pub fn steps(&self, name: &str) -> bool {
+        self.stepping.iter().any(|entry| entry.into == name)
     }
 }
 
@@ -128,5 +168,30 @@ pub struct Tested {
     /// The opcode that asks the same question of the register alone. It writes the condition state
     /// exactly as the first one does, which is why nothing about where the state is live is a
     /// question this rewrite has to ask.
+    pub into: &'static str,
+}
+
+/// One addition of a constant, and the shorter instruction that adds that constant and no other.
+///
+/// Shorter because the number is in the opcode. An addition of a small constant spells the constant
+/// out in a byte after the one saying which register, and an increment says both in the opcode and
+/// the byte after it, so the saving is the byte the number was written in whatever the width.
+///
+/// It says the same thing about the register and not about the condition state. The addition writes
+/// the carry and the increment leaves the carry as it found it, so the two agree wherever nothing
+/// reads a carry between the instruction and the next thing to write one, and disagree everywhere
+/// else. That is a question about the instructions behind rather than about this one, which is what
+/// keeps this a description a pass asks rather than a spelling an encoder chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stepped {
+    /// The opcode that takes the constant.
+    pub name: &'static str,
+    /// The constant it has to be carrying, as the number written on the instruction rather than as
+    /// the number the instruction adds. So a subtraction that takes one away is here as one and
+    /// turns into the instruction that takes one away, and the two agree about the register without
+    /// the pass having to know which of the two opcodes is the subtraction.
+    pub by: i64,
+    /// The opcode that adds that number without writing it out. It writes every part of the
+    /// condition state the first one writes except the carry, which it leaves alone.
     pub into: &'static str,
 }

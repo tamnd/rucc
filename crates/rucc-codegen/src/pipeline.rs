@@ -24,6 +24,7 @@
 //! are still in the output.
 
 use rucc_base::Interner;
+use rucc_cost::Goal;
 use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
@@ -210,7 +211,11 @@ impl Room {
     }
 }
 
-/// What the command line says about a frame, as opposed to what the machine says.
+/// What the command line says, as opposed to what the machine says.
+///
+/// Most of it is about a frame, which is what this held to begin with, and the rest is passes being
+/// asked for or turned off by name. [`Flags::goal`] is neither: it is the one thing here that no
+/// flag names on its own and that every pass below selection may read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
     /// Whether every function keeps a frame pointer, which `-fno-omit-frame-pointer` asks for.
@@ -250,13 +255,25 @@ pub struct Flags {
     /// Whether the register allocator runs its own checks on a build that has assertions compiled
     /// out, which `-Zverify-each` asks for. See [`rucc_regalloc::run`].
     pub verify: bool,
+    /// Whether the level asked for small code or for fast code.
+    ///
+    /// The level itself lives in `rucc-session`, which is above this crate, so what arrives here is
+    /// the answer rather than the question. It is on the flags rather than on the [`Machine`]
+    /// because it is not a fact about a machine: the same machine compiles the same function both
+    /// ways, and which way is what the command line said.
+    ///
+    /// tamnd/rucc#741 is the issue about this not being here at all, and about `-Os` having been a
+    /// shorter list of middle end passes and nothing else. [`crate::shorten`] is the first pass
+    /// below selection to read it.
+    pub goal: Goal,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
     /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
-    /// nothing in the frame sharing with anything and no scheduling, which is what a convention
-    /// that has a red zone says at `-O0` when nobody on the command line has said otherwise.
+    /// nothing in the frame sharing with anything, no scheduling and code that is meant to be fast
+    /// rather than small, which is what a convention that has a red zone says at `-O0` when nobody
+    /// on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -270,6 +287,7 @@ impl Default for Flags {
             schedule: false,
             accurate: None,
             verify: false,
+            goal: Goal::Speed,
         }
     }
 }
@@ -578,7 +596,7 @@ pub fn compile_recording(
     // read. Running in front would see writes the output does not have and turn down rewrites that
     // are allowed. Nothing here moves an instruction or changes a block, so being behind the
     // layout's freeze costs it nothing.
-    shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names);
+    shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names, flags.goal);
     Ok(func)
 }
 

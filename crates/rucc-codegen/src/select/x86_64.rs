@@ -193,11 +193,26 @@ mod tests {
     /// The instructions the size directed peephole writes rather than a rule.
     ///
     /// [`crate::shorten`] turns a comparison of a register against zero into a test of the register
-    /// against itself, which asks the machine the same thing in one byte less. No rule could select
-    /// one, because whether the rewrite says the same thing depends on the constant the comparison
-    /// carries and a pattern binds a value rather than reads a number out of one. The eight bit test
-    /// is not here because the layout writes that one as well and it is on the list below.
-    const PEEPHOLE: &[&str] = &["test_rr_16", "test_rr_32", "test_rr_64"];
+    /// against itself, which asks the machine the same thing in one byte less, and an addition of
+    /// one into the instruction that adds one and says so in its opcode, which is another byte less.
+    /// No rule could select either. Whether the first says the same thing depends on the constant
+    /// the comparison carries and a pattern binds a value rather than reads a number out of one, and
+    /// whether the second does depends on what reads the carry behind it, which is not something a
+    /// pattern sees at all. The eight bit test is not here because the layout writes that one as
+    /// well and it is on the list below.
+    const PEEPHOLE: &[&str] = &[
+        "test_rr_16",
+        "test_rr_32",
+        "test_rr_64",
+        "inc_r_8",
+        "inc_r_16",
+        "inc_r_32",
+        "inc_r_64",
+        "dec_r_8",
+        "dec_r_16",
+        "dec_r_32",
+        "dec_r_64",
+    ];
 
     const LAYOUT: &[&str] = &[
         "test_rr_8",
@@ -805,7 +820,9 @@ mod tests {
     /// instruction nothing writes at all, and this test is what stops that sitting there unnoticed.
     #[test]
     fn every_instruction_exempt_from_a_rule_is_one_the_peephole_really_writes() {
-        let shorter: Vec<&str> = x86_64::SHORT.testing.iter().map(|entry| entry.into).collect();
+        let tests = x86_64::SHORT.testing.iter().map(|entry| entry.into);
+        let steps = x86_64::SHORT.stepping.iter().map(|entry| entry.into);
+        let shorter: Vec<&str> = tests.chain(steps).collect();
         for &opcode in PEEPHOLE {
             assert!(
                 x86_64::form(opcode).is_some(),

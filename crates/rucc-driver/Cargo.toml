@@ -23,6 +23,9 @@ rucc-archive.workspace = true
 rucc-asm.workspace = true
 rucc-base.workspace = true
 rucc-codegen.workspace = true
+# What the level asked for, which the back end is handed on its flags. Named here because the
+# driver is what reads the level and works the answer out.
+rucc-cost.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-lex.workspace = true

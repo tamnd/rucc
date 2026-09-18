@@ -20,6 +20,10 @@ workspace = true
 # are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
 rucc-base.workspace = true
+# What the level asked for, as the two-valued thing a pass below selection can act on rather than as
+# the level itself, which lives above this crate. tamnd/rucc#741 is the issue about the back end
+# never learning it. Rank 3 against this crate's 12, per `xtask/layers.toml`.
+rucc-cost.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-mir.workspace = true

@@ -1321,6 +1321,23 @@ pub static INSTS: &[(&str, Form)] = &[
     ("not_r_16", UnaryR),
     ("not_r_32", UnaryR),
     ("not_r_64", UnaryR),
+    // Adding one and taking one away, which no rule selects and the size directed peephole writes
+    // instead. An addition of one against a register is three bytes, one for the opcode, one saying
+    // which register and one for the number, and these are two, since the number is in the opcode.
+    //
+    // They are not the same instruction as the addition and that is why a rule cannot have them.
+    // An addition writes the carry and these leave it as they found it, so whether the exchange is
+    // allowed is a question about what reads the carry behind them, which is a question about the
+    // instructions around one rather than about the instruction. `crate::short` is where a target
+    // says which addition has one of these, and `rucc_codegen::shorten` is the walk that asks.
+    ("inc_r_8", UnaryR),
+    ("inc_r_16", UnaryR),
+    ("inc_r_32", UnaryR),
+    ("inc_r_64", UnaryR),
+    ("dec_r_8", UnaryR),
+    ("dec_r_16", UnaryR),
+    ("dec_r_32", UnaryR),
+    ("dec_r_64", UnaryR),
     // The multiply that keeps both halves of its product, signed and unsigned. No rule selects one,
     // and the reason is that nothing in the IR asks for a product wider than its operands: a C
     // multiply of two values of a type is a value of that type, and the wide product is something
@@ -2067,7 +2084,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 603);
+        assert_eq!(described, 611);
     }
 
     #[test]

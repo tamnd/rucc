@@ -18,6 +18,7 @@ use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
+use rucc_cost::Goal;
 use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
@@ -803,6 +804,11 @@ fn generate(
         // The same flag that turns the IR verifier on in a release build, since what it says is
         // that this run should check itself and the back end has checks of its own.
         verify: opts.verify_each,
+        // What the level asked for. The back end had no way to know until now, which is
+        // tamnd/rucc#741: `-Os` picked a shorter list of middle end passes and then compiled the
+        // result exactly as `-O2` would have. The level is asked whether it optimizes for size
+        // rather than matched against, so a level added later answers this without editing it.
+        goal: Goal::for_size(opts.opt_level.is_size()),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

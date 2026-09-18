@@ -2,10 +2,10 @@
 //!
 //! Design: `spec/optimizer/37-machine-level-optimization.md` section 37.4, which calls these the
 //! size directed peepholes and puts them after register allocation. tamnd/rucc#741 is the issue
-//! about the back end never learning what it is compiling for, and names this rewrite as one of the
-//! ones that is free before any of that is settled.
+//! about the back end never learning what it is compiling for, and names three of these as free
+//! before any of that is settled and one as waiting for it.
 //!
-//! Three rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Four rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -27,6 +27,19 @@
 //! test writes the condition state exactly as the comparison does: both leave the sign, the zero
 //! and the parity of what is in the register and both clear the carry and the overflow, so every
 //! condition this machine jumps on reads the same answer behind either of them.
+//!
+//! And an addition of one to a register becomes the instruction that adds one and says so in its
+//! opcode. `addl $1, %eax` is three bytes, one for the opcode, one saying which register and one
+//! for the number, and `incl %eax` is two. A subtraction of one becomes the instruction that takes
+//! one away, and each of the two is also what the other one written against minus one becomes.
+//!
+//! That fourth one is the only one here that is not free, and it is the only one that reads the
+//! goal. An addition writes the carry and an increment leaves the carry as it found it, so the
+//! machine has to merge what was left with what the next instruction writes, which costs a little
+//! where the code is hot and is worth a byte where the goal is size. gcc writes the addition at
+//! `-O2` and the increment at `-Os`, and so does this. The goal arriving here at all is the first
+//! half of tamnd/rucc#741: before it, `-Os` was a shorter list of middle end passes and the back
+//! end compiled what came out of it exactly as `-O2` would have.
 //!
 //! The numbers over the corpus at `-Os` before this pass existed: rucc wrote a move of zero into a
 //! register 21,304 times and GCC 16 wrote it 9 times, and GCC wrote the exclusive or 23,729 times
@@ -77,9 +90,18 @@
 //! buys is that if some later pass starts writing that shape, this pass stops rather than starts
 //! being wrong.
 //!
-//! Down for the exclusive or alone. The narrower move reads no condition state and writes none and
-//! the test writes the same state the comparison it replaces wrote, so where a state is alive is
-//! not a question either of them has to ask, and a function this turns down still gets both.
+//! Down for the exclusive or and the increment. The narrower move reads no condition state and
+//! writes none and the test writes the same state the comparison it replaces wrote, so where a
+//! state is alive is not a question either of them has to ask, and a function this turns down still
+//! gets both.
+//!
+//! What the walk carries for the increment is a second answer beside the first, which is whether
+//! anything behind reads the carry rather than whether anything behind reads the state. The two are
+//! not the same question and neither implies the other: a jump on whether a value was zero reads the
+//! state and not the carry, and an increment already in the code writes the state and not the carry
+//! and so ends the life of neither. That last case is the reason the walk and the check above both
+//! ask the target which instructions leave the carry alone rather than stopping at the flag saying
+//! the state was written.
 //!
 //! # A template a program wrote
 //!
@@ -107,10 +129,18 @@
 //!
 //! Eight bits. `movb $0, %al` and `xorb %al, %al` are both two bytes, so the exchange buys nothing
 //! and would spend the condition state on it. The target's table is where that is written down.
+//!
+//! Write an increment at a level that asked for fast code. That is the goal doing its job rather
+//! than a limit, and it is why the same corpus compiled at `-O2` and at `-Os` now differs by
+//! something other than which middle end passes ran.
+//!
+//! Add or take away anything but one. The machine has an opcode for one and for nothing else, so a
+//! constant of two is already as short as it is going to be written.
 
 use rucc_base::Interner;
+use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{FlagInsts, MachineInsts, ShortInsts};
+use rucc_target::{FlagInsts, MachineInsts, Reads, ShortInsts};
 
 use crate::changes::{self, Changes, Plan};
 
@@ -123,6 +153,7 @@ pub fn shorter(
     flags: &FlagInsts,
     machine: &MachineInsts,
     names: &mut Interner,
+    goal: Goal,
 ) -> usize {
     // Every name a rewrite could want, before the walk rather than inside it, because the walk
     // holds a name it read out of the interner while it edits the function and interning a new one
@@ -130,6 +161,7 @@ pub fn shorter(
     let wanted = short.zeroing.iter().map(|entry| entry.into);
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
     let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
         .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
         .collect();
@@ -139,12 +171,20 @@ pub fn shorter(
     // Whether the rewrite that spends the condition state may be asked for at all. The narrower
     // instruction neither reads the state nor writes it, so it is not asked this and a function
     // this turns down still gets that one.
-    let free = !carried(func, flags, names);
+    let free = !carried(func, short, flags, names);
+    // Whether the rewrite that trades the carry for a byte may be asked for. It is the one thing
+    // here that is not free, so it waits for a level that said it wanted small code.
+    let small = free && goal == Goal::Size;
     for block in func.blocks().collect::<Vec<_>>() {
         // Backwards, because the question each instruction asks is about the ones behind it. The
         // state is dead at the end of a block, which is the invariant [`carried`] has just held the
         // function to.
         let mut live = false;
+        // The same question about the carry alone, which is the part of the state the shorter
+        // addition does not write. It starts false for the reason `live` does and moves separately,
+        // because an instruction that writes the whole state ends the life of both and one that
+        // writes everything but the carry ends the life of neither.
+        let mut carry = false;
         for inst in func.insts(block).collect::<Vec<_>>().into_iter().rev() {
             if free && !live {
                 let into = shorter_form(func, short, names, &opcodes, inst);
@@ -171,20 +211,47 @@ pub fn shorter(
             if into.is_some_and(|op| tested(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
             }
+            // Adding one with the one in the opcode, which is the only rewrite here that is a
+            // trade. It needs the carry to be dead rather than the whole state, since that is the
+            // only part of the state the shorter instruction leaves behind, and it needs the level
+            // to have asked for small code.
+            if small && !carry {
+                let into = stepped_form(func, short, names, &opcodes, inst);
+                if into.is_some_and(|op| stepped(func, &mut counts, machine, names, inst, op)) {
+                    took += 1;
+                    // What stands there now writes everything but the carry, and the carry was
+                    // already dead, so both answers below are the ones they already are and the
+                    // walk past it is the walk it would have taken anyway.
+                }
+            }
             let Some(name) = opcode(func, flags, names, inst) else {
                 // A name the description does not cover may have read the state and may have
                 // written it, and the answer that finds fewer rewrites is that it read it.
                 live = true;
+                carry = true;
                 continue;
             };
             // What it reads before whether it writes, because an instruction can do both and the
             // read it does is a read of what is there now. An add with carry is the one that does,
             // and asking the other way round would call it the end of the state's life and let a
             // rewrite in front of it take the carry away.
-            if flags.reads(name).is_some() {
+            if let Some(reads) = flags.reads(name) {
                 live = true;
-            } else if (flags.writes)(name) {
+                // Which part of the state the condition on it is about. A condition that asks where
+                // a value sits as an unsigned number reads the carry, and so does an instruction
+                // that is adding a carry on rather than asking a question about one.
+                if matches!(reads, Reads::Unsigned | Reads::Carry) {
+                    carry = true;
+                }
+            } else if (flags.writes)(name) && !short.steps(name) {
+                // An instruction that writes the state ends the life of everything in it. One that
+                // writes all of it but the carry ends the life of none of it, which is the second
+                // half of the sentence and is why this asks the description rather than stopping at
+                // the flag. That answer is about `live` as much as about `carry`: a rewrite in front
+                // that spends the state would be spending a carry this instruction was going to
+                // leave for something behind it.
                 live = false;
+                carry = false;
             }
         }
     }
@@ -197,14 +264,19 @@ pub fn shorter(
 /// The passes in front are the ones that promise this does not happen and the promise is theirs to
 /// keep, so what this does is hold them to it rather than restate it. A function where it is broken
 /// gets no rewrites at all, which is the answer that is wrong about nothing.
-fn carried(func: &mir::Func, flags: &FlagInsts, names: &Interner) -> bool {
+///
+/// An instruction that leaves the carry alone does not count as having written the state here, for
+/// the same reason it does not count as having written it in the walk. A block opening with one and
+/// reading a carry afterwards is reading a carry a predecessor left, which is exactly the shape this
+/// is looking for, and stopping at it would be calling that block clean.
+fn carried(func: &mir::Func, short: &ShortInsts, flags: &FlagInsts, names: &Interner) -> bool {
     func.blocks().any(|block| {
         for inst in func.insts(block) {
             let Some(name) = opcode(func, flags, names, inst) else { return true };
             if flags.reads(name).is_some() {
                 return true;
             }
-            if (flags.writes)(name) {
+            if (flags.writes)(name) && !short.steps(name) {
                 return false;
             }
         }
@@ -368,6 +440,43 @@ fn zeroed(
     set.commit(func, counts, names, machine).is_ok()
 }
 
+/// The shorter addition this one has, when it has one and the number it carries is the number that
+/// shorter instruction is about.
+///
+/// Both halves again, and the second one is doing more work here than anywhere else in this pass.
+/// One addition has two shorter instructions, one for each of the two numbers a machine has an
+/// opcode for, and a subtraction has the same two the other way round, so the number is what says
+/// which of the two is meant rather than only whether either is.
+fn stepped_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let into = short.stepped(name, func[func[inst].imm?].0)?;
+    opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// Rewrites the addition into the one that carries its number in its opcode.
+///
+/// The operands are the ones it had, for the reason [`tested`] keeps them: both instructions write
+/// one register and read that same register, and what changes is the number, which the shorter one
+/// does not carry. So the constant goes and nothing else does.
+fn stepped(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, imm: None, ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
+}
+
 /// The name this target knows an instruction by, for an instruction that is one of this target's.
 ///
 /// The opcode in machine IR carries the target's prefix, because a function in the middle of being
@@ -402,9 +511,14 @@ mod tests {
         mir::Opcode::new(names.intern(&format!("{}{name}", SHORT.prefix)))
     }
 
-    /// The pass, over the machine this crate has a backend for.
+    /// The pass, over the machine this crate has a backend for, at a level that wanted fast code.
     fn takes(func: &mut mir::Func, names: &mut Interner) -> usize {
-        shorter(func, &SHORT, &FLAGS, &MACHINE, names)
+        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Speed)
+    }
+
+    /// The same pass at a level that wanted small code, which is the only one that steps.
+    fn small(func: &mut mir::Func, names: &mut Interner) -> usize {
+        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Size)
     }
 
     /// What every instruction in a block came to, as opcodes with the target's prefix taken off.
@@ -418,6 +532,19 @@ mod tests {
                     .to_owned()
             })
             .collect()
+    }
+
+    /// The destination of a two-address instruction, which the description constrains to the same
+    /// register as the first source. The builder's own `def` leaves the constraint off, and the
+    /// change framework holds a rewrite to the shape the target asks for, so a test that built one
+    /// without it would be a test of a function the allocator could not have produced.
+    fn reuse(reg: mir::Reg) -> mir::Operand {
+        mir::Operand {
+            reg,
+            class: GPR,
+            role: Role::Def,
+            constraint: rucc_mir::Constraint::Reuse(1),
+        }
     }
 
     /// The registers an instruction names, in the order its operands do.
@@ -687,6 +814,173 @@ mod tests {
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, first), ["test_rr_32"]);
         assert_eq!(shape(&func, &names, second), ["set_e"]);
+    }
+
+    /// The fourth rewrite, at every width and in both directions. An addition of one and a
+    /// subtraction of minus one are the instruction that adds one, and the other two are the one
+    /// that takes one away. The register is the one it had and the number is gone, the shorter
+    /// instruction being the one that carries the number in its opcode.
+    #[test]
+    fn adding_or_taking_away_one_becomes_the_instruction_that_says_so_in_its_opcode() {
+        for (name, by, into) in [
+            ("add_ri_8", 1, "inc_r_8"),
+            ("add_ri_16", 1, "inc_r_16"),
+            ("add_ri_32", 1, "inc_r_32"),
+            ("add_ri_64", 1, "inc_r_64"),
+            ("add_ri_8", -1, "dec_r_8"),
+            ("add_ri_16", -1, "dec_r_16"),
+            ("add_ri_32", -1, "dec_r_32"),
+            ("add_ri_64", -1, "dec_r_64"),
+            ("sub_ri_8", 1, "dec_r_8"),
+            ("sub_ri_16", 1, "dec_r_16"),
+            ("sub_ri_32", 1, "dec_r_32"),
+            ("sub_ri_64", 1, "dec_r_64"),
+            ("sub_ri_8", -1, "inc_r_8"),
+            ("sub_ri_16", -1, "inc_r_16"),
+            ("sub_ri_32", -1, "inc_r_32"),
+            ("sub_ri_64", -1, "inc_r_64"),
+        ] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let add = op(&mut names, name);
+            let inst =
+                func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(by).finish();
+
+            assert_eq!(small(&mut func, &mut names), 1, "{name} {by}");
+            assert_eq!(shape(&func, &names, block), [into], "{name} {by}");
+            assert_eq!(regs(&func, inst), [value, value], "{name} {by}");
+            assert_eq!(imm(&func, inst), None, "{name} {by}");
+        }
+    }
+
+    /// The same function at a level that asked for fast code, which is the goal doing its job. This
+    /// is the only rewrite in the pass that asks it, and it is the only one that is a trade.
+    #[test]
+    fn a_level_that_wanted_fast_code_keeps_the_addition() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_32");
+        let inst = func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_32"]);
+        assert_eq!(imm(&func, inst), Some(1));
+    }
+
+    /// Any other number. The machine has an opcode that means one and none that means anything
+    /// else, so the constant is written out either way and the addition is already as short as it
+    /// gets.
+    #[test]
+    fn adding_anything_but_one_stays_an_addition() {
+        for by in [0, 2, -2, 7, 255, i64::from(i32::MIN)] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let add = op(&mut names, "add_ri_32");
+            func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(by).finish();
+
+            assert_eq!(small(&mut func, &mut names), 0, "{by}");
+            assert_eq!(shape(&func, &names, block), ["add_ri_32"], "{by}");
+        }
+    }
+
+    /// What the rewrite is really conditional on. Something behind it reading where the value sits
+    /// as an unsigned number is something reading the carry, and the carry is the one part of the
+    /// condition state the shorter instruction does not write.
+    #[test]
+    fn an_addition_whose_carry_something_reads_stays_an_addition() {
+        for reader in ["set_b", "set_be", "set_a", "set_ae", "adc_ri_32"] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let add = op(&mut names, "add_ri_32");
+            let reads = op(&mut names, reader);
+            func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+            func.build(block, reads).def(byte, GPR).finish();
+
+            assert_eq!(small(&mut func, &mut names), 0, "{reader}");
+            assert_eq!(shape(&func, &names, block), ["add_ri_32", reader], "{reader}");
+        }
+    }
+
+    /// A reader of any other part of the state, which the shorter instruction writes exactly as the
+    /// addition did. So the rewrite is not about whether the state is read, it is about which part.
+    #[test]
+    fn an_addition_whose_zero_or_sign_something_reads_still_steps() {
+        for reader in ["set_e", "set_ne", "set_l", "set_le", "set_g", "set_ge"] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let add = op(&mut names, "add_ri_32");
+            let reads = op(&mut names, reader);
+            func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+            func.build(block, reads).def(byte, GPR).finish();
+
+            assert_eq!(small(&mut func, &mut names), 1, "{reader}");
+            assert_eq!(shape(&func, &names, block), ["inc_r_32", reader], "{reader}");
+        }
+    }
+
+    /// The carry read behind an instruction that writes the rest of the state, which is what the
+    /// walk asking the description rather than the flag is for. The addition in front of the
+    /// comparison stays, because the comparison writes the carry the reader wants and the addition
+    /// would not have to, and the addition behind it goes, because nothing reads a carry after it.
+    #[test]
+    fn a_write_of_the_state_ends_the_life_of_the_carry_and_a_step_does_not() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_32");
+        let cmp = op(&mut names, "cmp_rr_32");
+        let below = op(&mut names, "set_b");
+        let first = func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+        func.build(block, cmp).uses(value, GPR).uses(value, GPR).finish();
+        func.build(block, below).def(byte, GPR).finish();
+
+        assert_eq!(small(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["inc_r_32", "cmp_rr_32", "set_b"]);
+        assert_eq!(imm(&func, first), None);
+    }
+
+    /// An instruction that leaves the carry alone is not a write of the condition state as far as
+    /// the walk is concerned, which is what stops one of them from hiding a carry read behind it.
+    /// The increment here is one a program wrote in a template rather than one this put there, and
+    /// the addition in front of it is the only thing that sets the carry the reader wants, so the
+    /// addition stays.
+    #[test]
+    fn a_step_does_not_hide_the_carry_read_behind_it() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_32");
+        let step = op(&mut names, "inc_r_32");
+        let below = op(&mut names, "set_b");
+        let first = func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+        func.build(block, step).operand(reuse(value)).uses(value, GPR).finish();
+        func.build(block, below).def(byte, GPR).finish();
+
+        assert_eq!(small(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_32", "inc_r_32", "set_b"]);
+        assert_eq!(imm(&func, first), Some(1));
+    }
+
+    /// Two additions in a row with a carry read behind them. The second one sets the carry the
+    /// reader wants and stays, and the first one goes, because whatever the first leaves the second
+    /// writes over. That is the same walk as the test above arriving at the other answer, and it is
+    /// what says the rule is about the carry rather than about the addition.
+    #[test]
+    fn an_addition_the_next_addition_writes_over_still_steps() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_32");
+        let below = op(&mut names, "set_b");
+        func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+        let second = func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(1).finish();
+        func.build(block, below).def(byte, GPR).finish();
+
+        assert_eq!(small(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["inc_r_32", "add_ri_32", "set_b"]);
+        assert_eq!(imm(&func, second), Some(1));
     }
 
     /// A name the description does not cover, which is anything without this target's prefix. It

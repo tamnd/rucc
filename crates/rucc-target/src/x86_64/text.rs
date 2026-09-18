@@ -486,6 +486,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("not_r_16", &[spell("notw", &[Reg(0, Word)])]),
     ("not_r_32", &[spell("notl", &[Reg(0, Long)])]),
     ("not_r_64", &[spell("notq", &[Reg(0, Quad)])]),
+    ("inc_r_8", &[spell("incb", &[Reg(0, Byte)])]),
+    ("inc_r_16", &[spell("incw", &[Reg(0, Word)])]),
+    ("inc_r_32", &[spell("incl", &[Reg(0, Long)])]),
+    ("inc_r_64", &[spell("incq", &[Reg(0, Quad)])]),
+    ("dec_r_8", &[spell("decb", &[Reg(0, Byte)])]),
+    ("dec_r_16", &[spell("decw", &[Reg(0, Word)])]),
+    ("dec_r_32", &[spell("decl", &[Reg(0, Long)])]),
+    ("dec_r_64", &[spell("decq", &[Reg(0, Quad)])]),
     // The multiply that keeps both halves of its product, signed and unsigned. One instruction each
     // and one argument each, which is what tells them from the divisions below: a division on this
     // machine is written as two instructions because the high half of the dividend has to be filled
