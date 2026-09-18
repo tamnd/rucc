@@ -225,7 +225,12 @@ fn windows_on_aarch64_gets_no_answer_rather_than_the_almost_right_one() {
 static S390X_ELF: AbiDescription = AbiDescription {
     name: "s390x ELF",
     banks: Banks { integer: 5, float: 4, shared: false, integer_width: 8, float_width: 8 },
-    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::Anything, Travel::ByReference),

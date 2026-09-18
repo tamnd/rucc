@@ -632,6 +632,33 @@ mod tests {
         }
     }
 
+    /// `long double twice(long double);` on mingw, where both the argument and the return value
+    /// are addresses and the signature the IR writes has two pointers in it and returns nothing.
+    ///
+    /// The type is the one the environment settles: it is sixteen bytes of x87 under mingw and a
+    /// `double` under MSVC, so the same declaration is two pointers on one Windows target and two
+    /// `double`s on the other.
+    #[test]
+    fn a_wide_scalar_on_windows_travels_as_an_address_both_ways() {
+        let types = Types::new();
+        let mingw = target("x86_64-pc-windows-gnu");
+        let msvc = target("x86_64-pc-windows-msvc");
+        let wide = types.float(FloatKind::LongDouble);
+        let both = plan(&types, &mingw, wide, &[wide], &[], false).expect("a plan");
+        assert!(both.returns_through_memory());
+        assert_eq!(both.ret.pass, Pass::Reference);
+        assert_eq!(both.args[0].pass, Pass::Reference);
+        assert_eq!(both.args[0].types, vec![Type::PTR]);
+        assert!(both.signature.returns.is_empty());
+        assert_eq!(both.signature.params.len(), 2);
+        assert_eq!(both.signature.params[0].abi, Abi::Sret { size: 16, align: 16 });
+
+        let narrow = plan(&types, &msvc, wide, &[wide], &[], false).expect("a plan");
+        assert_eq!(narrow.args[0].pass, Pass::Direct);
+        assert_eq!(narrow.args[0].types, vec![Type::float(Float::F64)]);
+        assert!(!narrow.returns_through_memory());
+    }
+
     #[test]
     fn the_same_declaration_travels_differently_on_two_targets() {
         let mut types = Types::new();

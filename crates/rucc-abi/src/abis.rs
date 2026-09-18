@@ -68,7 +68,12 @@ use crate::shape::Format;
 pub static SYSV_AMD64: AbiDescription = AbiDescription {
     name: "SysV AMD64",
     banks: Banks { integer: 6, float: 8, shared: false, integer_width: 8, float_width: 16 },
-    scalars: Scalars { in_memory: Some(Format::X87Extended), wide_integer_is_all_or_nothing: true },
+    scalars: Scalars {
+        in_memory: Some(Format::X87Extended),
+        wide_integer_is_all_or_nothing: true,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::X87Stack, Travel::AsFound),
@@ -95,7 +100,12 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
 const AAPCS64_BASE: AbiDescription = AbiDescription {
     name: "AAPCS64",
     banks: Banks { integer: 8, float: 8, shared: false, integer_width: 8, float_width: 16 },
-    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::Homogeneous { limit: 4 }, Travel::AsFound),
@@ -174,10 +184,20 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
 /// the callee uses them, is a frame fact and lives with the frame code. Forgetting it corrupts
 /// the caller's frame, which is `spec/cross-compile/06-abis.md` section 6.4's first bullet and a good reason
 /// for the description to say so somewhere the frame code can find it.
+///
+/// The size rule is the whole rule, so it reaches a scalar as well. A `long double`, a
+/// `_Float128` and an `__int128` are sixteen bytes here and none of the four positions holds one,
+/// so each of them travels as the address of a copy the caller made and comes back through the
+/// address the caller passed, which is what [`Scalars::wide_is_by_reference`] says.
 pub static WIN64: AbiDescription = AbiDescription {
     name: "Windows x64",
     banks: Banks { integer: 4, float: 0, shared: true, integer_width: 8, float_width: 16 },
-    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_is_by_reference: true,
+        wide_integer_returns_in: Some(Format::Quad),
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsOneInteger),
@@ -215,7 +235,12 @@ pub static WIN64: AbiDescription = AbiDescription {
 pub static RISCV_LP64D: AbiDescription = AbiDescription {
     name: "RISC-V LP64D",
     banks: Banks { integer: 8, float: 8, shared: false, integer_width: 8, float_width: 8 },
-    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::FloatPair, Travel::AsFound),
@@ -266,7 +291,12 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
 pub static I386_SYSV: AbiDescription = AbiDescription {
     name: "i386 SysV",
     banks: Banks { integer: 0, float: 0, shared: false, integer_width: 4, float_width: 8 },
-    scalars: Scalars { in_memory: None, wide_integer_is_all_or_nothing: false },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::Anything, Travel::ByReference),

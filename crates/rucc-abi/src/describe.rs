@@ -113,6 +113,24 @@ pub struct Scalars {
     /// and taking one of them would spend a register on half a value and deny it to an argument
     /// after it that could have used the whole thing.
     pub wide_integer_is_all_or_nothing: bool,
+    /// Whether a scalar of a size no register holds travels as the address of a copy the caller
+    /// made, the way an aggregate of that size does.
+    ///
+    /// True on Windows x64, whose one rule is about the size of the object and not about what is
+    /// inside it: anything that is not one, two, four or eight bytes is an address, and a
+    /// `long double`, a `_Float128` and an `__int128` are all sixteen bytes there. False on the
+    /// other four, where a wide scalar has registers to travel in or a place in the argument area
+    /// of its own, which is what [`Scalars::in_memory`] says for the one that puts it there.
+    pub wide_is_by_reference: bool,
+    /// The format a wide integer comes back in, where the ABI brings one back in a vector
+    /// register rather than through the address the caller passed.
+    ///
+    /// `Some(Format::Quad)` on Windows x64, and for an integer only: gcc returns an `__int128`
+    /// in xmm0 there, which is its own answer to a convention that has no 128-bit integer in it,
+    /// and brings the two floating point types of the same size back through the address like
+    /// everything else that size. `None` everywhere else, including on the ABIs where a wide
+    /// integer is not by reference to begin with.
+    pub wide_integer_returns_in: Option<Format>,
 }
 
 /// Where the address of a return value that comes back in memory travels.
