@@ -18,6 +18,11 @@
 //! holds the files that differ by architecture and is searched first, and
 //! [`Sysroot::generic_include`] holds the copy that every architecture shares.
 //!
+//! A Windows target has one rather than two, because mingw-w64's tree is the same files whatever
+//! the machine is and there is nothing for the first directory to hold. That is
+//! [`Sysroot::splits_by_arch`], and the reason it is a question about the target rather than a
+//! directory that happens to be empty is that the compiler prints what it searches.
+//!
 //! A Linux target searches four directories and not two, because the kernel's headers are a second
 //! pair with the same split and a different owner. They are [`Kernel`], their root is the cache
 //! rather than a sysroot, and the order is the libc's two and then the kernel's two, which is the
@@ -130,9 +135,33 @@ impl Sysroot {
     /// [`Kernel`] and are not under this root, because they are the same files for every target
     /// that shares an architecture and carrying a copy of them per tuple is nine megabytes times
     /// the size of the table.
+    ///
+    /// One rather than two for a Windows target, which is [`Sysroot::splits_by_arch`].
     #[must_use]
     pub fn includes(&self) -> Vec<PathBuf> {
-        vec![self.arch_include(), self.generic_include()]
+        if self.splits_by_arch() {
+            vec![self.arch_include(), self.generic_include()]
+        } else {
+            vec![self.generic_include()]
+        }
+    }
+
+    /// Whether this target's headers are split by architecture at all.
+    ///
+    /// Section 8.3's second split is a libc's, and mingw-w64 has not got one. Measured rather than
+    /// assumed: installing mingw-w64 14.0.0's headers for `x86_64-w64-mingw32`,
+    /// `i686-w64-mingw32` and `aarch64-w64-mingw32` gives three trees of 1702 files that `diff -rq`
+    /// finds no difference between, because what a Windows header would branch on is the API level
+    /// the program asked for with `_WIN32_WINNT` rather than the machine it is being compiled for.
+    ///
+    /// So a Windows sysroot has `include/generic` and nothing beside it, and this is what keeps the
+    /// search path from naming a directory that a producer was never going to write. A path that is
+    /// simply absent would cost nothing at lookup time, which is why this is about honesty rather
+    /// than about speed: `-print-search-dirs` and `-E -v` print what is searched, and a directory
+    /// nobody publishes is a line that sends a person looking for a tree that does not exist.
+    #[must_use]
+    pub fn splits_by_arch(&self) -> bool {
+        self.target.os() != Os::Windows
     }
 
     /// The link inputs: the start files, the libc archive or its generated stubs, and the

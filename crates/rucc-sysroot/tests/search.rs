@@ -191,13 +191,16 @@ fn a_target_behind_a_licence_wall_is_never_given_a_tree_of_ours() {
         assert_eq!(found[0].origin, Origin::Compiler, "{tuple}");
     }
     // And the mingw-w64 target beside the MSVC one does get one, because its headers are ours to
-    // ship and that is the whole reason it is the default Windows environment.
+    // ship and that is the whole reason it is the default Windows environment. One directory rather
+    // than two, because mingw-w64 has no per architecture half and `Sysroot::splits_by_arch` is
+    // where that is argued.
     let gnu = target("x86_64-pc-windows-gnu");
     let bundled = Sysroot::in_cache(Path::new("/cache"), gnu);
     let found =
         include_paths(gnu, None, &Options { bundled: Some(&bundled), ..Options::default() });
     assert!(found.iter().all(|entry| entry.origin == Origin::Bundled));
-    assert_eq!(found.len(), 2);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, bundled.generic_include());
 }
 
 #[test]
@@ -387,12 +390,15 @@ fn nostdinc_removes_the_kernel_headers_with_the_rest_of_step_three() {
 }
 
 #[test]
-fn a_target_without_a_kernel_tree_searches_the_two_directories_it_always_did() {
+fn a_target_without_a_kernel_tree_searches_the_libcs_own_directories_and_nothing_after_them() {
     // The field is an `Option` and the driver fills it from `Kernel::for_target`, so a Windows or a
-    // freestanding target passes `None` and step 3 is the libc's two directories. Asserted here as
+    // freestanding target passes `None` and step 3 is the libc's own directories. Asserted here as
     // well as in the layout tests, because the absence has to hold in the list and not only in the
     // function that decides it.
-    for tuple in ["x86_64-pc-windows-gnu", "armv7m-none-eabi"] {
+    //
+    // Two for the freestanding row and one for the Windows row, which is the layout's own answer
+    // rather than anything this list does: mingw-w64 has no per architecture half.
+    for (tuple, directories) in [("x86_64-pc-windows-gnu", 1), ("armv7m-none-eabi", 2)] {
         let target = target(tuple);
         let bundled = Sysroot::in_cache(Path::new("/cache"), target);
         assert!(Kernel::for_target(Path::new("/cache"), target).is_none());
@@ -402,7 +408,7 @@ fn a_target_without_a_kernel_tree_searches_the_two_directories_it_always_did() {
             None,
             &Options { bundled: Some(&bundled), kernel: None, ..Options::default() },
         );
-        assert_eq!(found.len(), 2, "{tuple} searches more than the libc's two");
+        assert_eq!(found.len(), directories, "{tuple} searches more than the libc's own");
         assert!(found.iter().all(|entry| entry.origin == Origin::Bundled));
     }
 }
