@@ -81,8 +81,17 @@
 //! different from passing a pointer the callee must not keep, and the argument area is where the
 //! convention says that copy goes. So the bytes are read out of the object and written into the
 //! area a word at a time, in front of the call, with the words chosen by the same function that
-//! chooses them for a `memcpy`. An object with more words than that unrolls to is turned down,
-//! because the copy it wants is a call to the runtime and one call cannot be built inside another.
+//! chooses them for a `memcpy`. An object with more words than that unrolls to is copied by a call
+//! to the runtime's `memcpy` instead, written in front of the outer call in the same block.
+//!
+//! That is one call built in the middle of building another, which sounds worse than it is.
+//! Nothing of the outer call is in a physical register when the copy is written: every argument
+//! that travels in one is still a virtual register, and the register it has to end up in is a
+//! constraint on an operand of the call instruction, which is not built until every copy in front
+//! of it has been. So what the inner call destroys is what any call destroys, and the allocator
+//! keeps the outer call's values out of those registers the same way it does across a call the
+//! program wrote. The arguments already stored into the outgoing area are safe for a plainer
+//! reason: the inner call's own frame is below the stack pointer and that area is above it.
 //!
 //! The call still reports how many bytes it needed, because the frame reserves as many as the
 //! widest call in the function asked for and cannot know that until every call has been seen.
@@ -93,6 +102,7 @@ use rucc_mir as mir;
 use rucc_target::x86_64;
 use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 
+use crate::capability;
 use crate::varargs::Area;
 
 /// Why a parameter could not be brought in.
@@ -109,9 +119,11 @@ pub enum Missing {
     /// convention with fewer of them returns such a structure through a hidden pointer instead. So
     /// this is what a signature the classification did not produce would get.
     NoRoom,
-    /// It is an object whose bytes travel in the argument area and there are more of them than a
-    /// copy a word at a time is worth. Such a copy belongs in a call to the runtime, and the place
-    /// this is decided is in the middle of building a call, where another one cannot go.
+    /// It is an object whose bytes travel in the argument area and there are more of them than
+    /// any count of them can be written down as. A copy too long to unroll is a call to the
+    /// runtime and not a refusal, so what is left here is an object of two gigabytes or more,
+    /// which is a size the immediate holding the byte count has nowhere to put and a structure no
+    /// program passes.
     TooBig,
 }
 
@@ -126,7 +138,7 @@ impl Missing {
             Missing::OnX87 => "is on the x87 stack",
             Missing::Width => "is a width no argument register holds",
             Missing::NoRoom => "takes more registers than this convention has for it",
-            Missing::TooBig => "is more bytes than a copy into the argument area unrolls to",
+            Missing::TooBig => "is more bytes than a count of them can be written down as",
         }
     }
 }
@@ -551,9 +563,12 @@ pub fn call(
             let Where::Stack(up) = places.on_stack(size, align) else {
                 unreachable!("an object in the argument area is in the argument area")
             };
-            let plan = crate::expand::plan(u64::from(size), align, conv.word)
-                .ok_or(refused(Missing::TooBig))?;
-            as_bytes.push((reg, up, plan));
+            // Nothing here refuses a plan it did not get, because a copy the words give up on is
+            // a call to the runtime below. What the byte count has to fit in is the immediate the
+            // call passes it as, and an object that large is what is left of the old refusal.
+            let plan = crate::expand::plan(u64::from(size), align, conv.word);
+            let count = i32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
+            as_bytes.push((reg, up, count, plan));
             continue;
         }
         let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
@@ -617,14 +632,24 @@ pub fn call(
         build.uses(reg, class).mem(mir::Mem::at(sp).plus(up)).finish();
     }
 
+    // How many bytes the copies below needed for calls of their own, which is nothing on a
+    // convention that passes three pointers in registers and thirty two bytes on the one that
+    // reserves a place for them anyway. The frame has to hear about it, since a call built here is
+    // still a call this function makes.
+    let mut nested = 0u32;
+
     // And the objects whose bytes go there, as a load and a store for each word of each of them.
     // This is the copy the caller owes a callee that takes a structure by value: the callee is
     // free to write to what it was handed, so what it was handed cannot be the caller's own copy,
     // and the argument area is where the convention says the caller's copy goes. The words are the
     // same words `crate::expand` would have chosen for a `memcpy` of the same block, because they
     // are chosen by the same function.
-    for (from, up, plan) in as_bytes {
+    for (from, up, count, plan) in as_bytes {
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
+        let Some(plan) = plan else {
+            nested = nested.max(by_runtime(out, block, conv, names, from, up, count));
+            continue;
+        };
         for (at, width) in plan {
             let ty = Type::int(width * 8);
             let at = i32::try_from(at).expect("an object under two gigabytes");
@@ -717,7 +742,63 @@ pub fn call(
         build = build.operand(operand);
     }
     build.finish();
-    Ok(Made { results, outgoing: places.size() })
+    Ok(Made { results, outgoing: places.size().max(nested) })
+}
+
+/// One object with more words than a copy into the argument area unrolls to, copied there by a
+/// call to the runtime, and how many bytes that call itself needed below the stack pointer.
+///
+/// Which routine it is is [`crate::capability`]'s answer and not a name written here, because a
+/// call standing in for an operation the machine has no instruction for is what that table is a
+/// list of, and a copy too large to unroll is already on it: this is the same row `crate::expand`
+/// reads for a `memcpy` in the IR of the same size.
+fn by_runtime(
+    out: &mut mir::Func,
+    block: mir::Block,
+    conv: &CallRegs,
+    names: &mut Interner,
+    from: mir::Reg,
+    up: i32,
+    count: i32,
+) -> u32 {
+    let routine = capability::libcall(rucc_ir::Opcode::Memcpy, "big")
+        .expect("the runtime copies a block too large to unroll");
+
+    // Where the copy goes, which is a distance up the outgoing area and so is the stack pointer
+    // plus that distance. A `lea` rather than an add, because the stack pointer is not this
+    // function's to move and what the call wants is the address in a register of the allocator's
+    // choosing.
+    let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+    let into = out.new_vreg(conv.int_class);
+    let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+    out.build(block, lea).def(into, conv.int_class).mem(mir::Mem::at(sp).plus(up)).finish();
+
+    // And how many bytes, which C takes as a `size_t` and this has as a number. A thirty two bit
+    // move carries it, because writing the low half of a general purpose register clears the high
+    // half, so the sixty four bit count it becomes is the count as long as the count fits in the
+    // immediate, which is what the caller checked before anything was built.
+    let bytes = out.new_vreg(conv.int_class);
+    let mov = mir::Opcode::new(names.intern("x64.mov_ri_32"));
+    out.build(block, mov).def(bytes, conv.int_class).imm(i64::from(count)).finish();
+
+    let args = [
+        Passing { ty: Type::PTR, reg: into, abi: Abi::Plain },
+        Passing { ty: Type::PTR, reg: from, abi: Abi::Plain },
+        Passing { ty: Type::int(conv.word * 8), reg: bytes, abi: Abi::Plain },
+    ];
+    let made = Calling {
+        callee: Callee::Named(names.intern(routine)),
+        args: &args,
+        returns: &[],
+        variadic: false,
+        named: args.len(),
+    };
+    // Three pointer sized arguments and nothing coming back is a call every convention here has
+    // registers for, so the only way this could refuse is a convention with fewer than three
+    // argument registers, and there is no such convention.
+    call(out, block, &made, conv, names)
+        .expect("the runtime's copy passes three words and takes nothing back")
+        .outgoing
 }
 
 /// Which register each value comes back in, walked the way the arguments are.
@@ -1426,17 +1507,36 @@ mod tests {
     }
 
     #[test]
-    fn an_object_too_large_to_copy_a_word_at_a_time_is_reported_rather_than_passed() {
-        let (_, _, made) = pass_bytes(1, 4096, 8, &SYSV);
+    fn an_object_too_large_to_copy_a_word_at_a_time_is_copied_by_the_runtime() {
+        let (names, func, made) = pass_bytes(1, 4096, 8, &SYSV);
+        let made = made.expect("an object the runtime copies");
 
-        // Five hundred and twelve words is past what unrolling is worth, and the copy that size
-        // wants is a call to the runtime, which cannot be built in the middle of building a call.
-        // Saying so is the point: the alternative is a call that passes the address of the object
-        // where the callee is going to read the object.
+        // Five hundred and twelve words is past what unrolling is worth, so the copy is the call
+        // the same size of `memcpy` in the IR becomes: the address in the outgoing area, the
+        // address of the object, and the count, and then the call the object was an argument of.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.lea_64 [$rsp]"), "{text}");
+        assert!(text.contains("x64.mov_ri_32 4096"), "{text}");
+        assert_eq!(text.matches("x64.call").count(), 2, "the copy and the call: {text}");
+        assert!(text.find("@memcpy") < text.find("@g"), "the copy comes first: {text}");
+
+        // And the argument area is the object, because a call passing three words in registers
+        // needs none of its own.
+        assert_eq!(made.outgoing, 4096);
+    }
+
+    #[test]
+    fn an_object_too_large_to_count_the_bytes_of_is_reported_rather_than_passed() {
+        let (_, _, made) = pass_bytes(1, 1 << 31, 8, &SYSV);
+
+        // Two gigabytes is more than the immediate the byte count travels in holds, and a count
+        // that does not fit is the whole of what is left to refuse. No program passes a structure
+        // that size by value, and one that tried would rather hear about it than be handed a copy
+        // of the low part of it.
         assert_eq!(made, Err(Refused { argument: Some(1), missing: Missing::TooBig }));
         assert_eq!(
             Missing::TooBig.why(),
-            "is more bytes than a copy into the argument area unrolls to"
+            "is more bytes than a count of them can be written down as"
         );
     }
 
