@@ -1899,7 +1899,7 @@ mod tests {
         // with no plane read at all, and the answers are the ones the plane would have given,
         // which is what makes this a shortcut rather than a second check.
         let ptr = alloc(64);
-        let made = crate::recover::made(ptr);
+        let made = recover::made(ptr);
         for offset in [0, 8, 32, 60] {
             assert!(!refused(|| within(at(ptr, offset), 4, &made)), "offset {offset}");
         }
@@ -1916,7 +1916,7 @@ mod tests {
         // pointer was made for. So it sends the question to the planes rather than refusing, and
         // the planes permit a read that is inside the block whatever the capability said.
         let ptr = alloc(64);
-        let member = crate::recover::made(ptr).narrowed(8, 16);
+        let member = recover::made(ptr).narrowed(8, 16);
         assert!(!refused(|| within(at(ptr, 8), 16, &member)));
         assert!(!refused(|| within(at(ptr, 40), 4, &member)));
         // What the planes refuse they still refuse, which is the access that leaves the block.
