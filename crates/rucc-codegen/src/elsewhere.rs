@@ -55,8 +55,8 @@ use rucc_target::ObjectFormat;
 /// and a name marked hidden or protected, which is the reason `-fPIC -fvisibility=hidden` is the
 /// combination a library that cares about its own speed is built with.
 ///
-/// Both ways in are shut on a format with no such table, which is COFF. See [`Self::table`] for
-/// why the question has a different answer there rather than no answer.
+/// Both ways in are shut on a format with no such table, which is COFF. See `Self::table` for why
+/// the question has a different answer there rather than no answer.
 ///
 /// A name this module has never heard of is not in here. Nothing the front end writes produces one,
 /// and treating an unknown name as a function would put the addresses the instrumentation takes of

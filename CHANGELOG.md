@@ -8,6 +8,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A comparison of a value with itself is decided without comparing. Ten predicates, one name written in two places, and every one of them settled by the shape of the term: a value equals itself, is not below itself and is not above itself, so `eq`, `le` and `ge` are true and `ne`, `lt` and `gt` are false, at both readings of the bits and at all four widths. Nobody writes that comparison, which is why it is worth having a rule for: it is what another rewrite leaves behind, and `x >> 0 != x` in `gcc.c-torture/execute/shiftopt-1.c` is exactly the shape, since the shift becomes `x` and then the comparison has one value on both sides. Without the rule the machine compares a register against itself and branches on the answer. No floating point comparison is here and none could be, because a value is not equal to itself when it is a NaN, so the shape alone does not decide an `fcmp` and a rule for one would have to know the operand is not a NaN. Section 13.4 of `spec/optimizer/13-rewrite-rules.md` has listed this among the tier one identities since the tier was written, so it is a line of that list getting an implementation rather than a new claim. Five tests in `crate::simplify` used a comparison of one value with itself as filler for a test about something else and now take two values, since the filler is a thing that folds. Closes tamnd/rucc#1440.
 
+### Fixed
+
+- `cargo doc` failed on `rucc-codegen`, where a doc comment on the public `Elsewhere` linked to the private `Self::table`. Rustdoc runs with `-D warnings` here and a private link is an error under it, so the sentence names the method in a code span instead.
+- `cargo xtask size` reads section 13.1 of `spec/cross-compile/13-distribution.md` and matches each row of it against a key, and the mingw row was renamed and moved below the base line without the key following it, so the task and its test both said the row was claimed by nobody. The key now matches the new wording, and the row is out of the base rather than absent, which is what moving it below the line means.
+
 ## 0.10.61
 
 ### Added
