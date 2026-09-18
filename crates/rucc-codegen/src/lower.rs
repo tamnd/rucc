@@ -3254,10 +3254,10 @@ impl<'a> Lowering<'a> {
     }
 
     /// The block one of the template's labels made, and the parameters it takes.
-    fn went<'a>(
-        labels: &'a [(&str, mir::Block, Vec<mir::Reg>)],
+    fn went<'b>(
+        labels: &'b [(&str, mir::Block, Vec<mir::Reg>)],
         name: &str,
-    ) -> Option<(mir::Block, &'a [mir::Reg])> {
+    ) -> Option<(mir::Block, &'b [mir::Reg])> {
         labels
             .iter()
             .find(|(had, ..)| *had == name)
