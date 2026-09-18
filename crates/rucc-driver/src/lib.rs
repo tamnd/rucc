@@ -3988,12 +3988,15 @@ mod tests {
     #[test]
     fn a_cross_compile_to_something_that_is_not_linux_reads_no_kernel_headers() {
         // The other side of the same answer. Windows has its own system headers and no `linux/` at
-        // all, so the list is the libc's two and the question never arises, which is the `None` that
+        // all, so the list is the libc's own and the question never arises, which is the `None` that
         // `link::cross_kernel` returns rather than a directory nothing would be found in.
+        //
+        // The libc's own is one directory rather than two here, because mingw-w64 publishes a single
+        // header tree for every architecture and `Sysroot::splits_by_arch` says so.
         let (opts, _) = compile(&["--target=x86_64-pc-windows-gnu", "-c", "a.c"]);
         let dirs: Vec<&std::path::Path> =
             opts.search.dirs().iter().map(|d| d.path.as_path()).collect();
-        assert_eq!(dirs.len(), 3, "{dirs:?}");
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
         assert!(!dirs.iter().any(|dir| dir.ends_with("kernel-headers")), "{dirs:?}");
     }
 
