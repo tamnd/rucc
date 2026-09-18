@@ -263,7 +263,7 @@ impl Reader {
             // another object is and the only way it gets into the symbol table at all.
             self.sym(&name);
             let sum = Sum {
-                constant: 0,
+                constant: hole.addend,
                 terms: vec![
                     Term { coeff: 1, what: What::Symbol(name) },
                     Term { coeff: -1, what: What::Here { part, at: end as i64 } },
@@ -1864,6 +1864,31 @@ mod tests {
         assert_eq!(relocs[0].addend, -4);
         let out = assembled("\t.text\n\tmovq counter@GOTTPOFF(%rip), %rax\n");
         assert_eq!(out.parts[0].relocs[0].kind, Reference::Thread);
+    }
+
+    /// A name reached with something added to it, which is a table indexed by a value that does not
+    /// start at zero.
+    ///
+    /// The number belongs to the linker along with the name, so it lands in the addend rather than
+    /// in the bytes, and the minus four the machine already wanted is on top of it.
+    #[test]
+    fn a_number_beside_a_name_in_a_displacement_is_part_of_what_the_linker_is_asked_for() {
+        let out = assembled("\t.text\n\tleaq -512+table(%rip), %r8\n\t.globl table\n");
+        let relocs = &out.parts[0].relocs;
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].symbol, "table");
+        assert_eq!(relocs[0].addend, -516);
+        // And the name is the name, rather than the whole of what was written in front of the
+        // bracket, which is what a symbol table full of things nothing defines used to look like.
+        let named: Vec<&str> = out.names.iter().map(|name| name.name.as_str()).collect();
+        assert_eq!(named, ["table"]);
+    }
+
+    #[test]
+    fn a_name_taken_away_from_something_in_a_displacement_is_refused() {
+        // There is no relocation for the distance back from something, so this is a mistake rather
+        // than a thing to hand on to the linker.
+        refused("\t.text\n\tleaq 512-table(%rip), %r8\n");
     }
 
     #[test]
