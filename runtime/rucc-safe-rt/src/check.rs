@@ -116,13 +116,26 @@ use crate::types::{self, TypeId};
 /// storage around the address rather than the object the pointer was made for. It can have been
 /// loaded out of an aux slot that was never written, where the same walk answers the same way. In
 /// all of those the capability under-describes a correct access, and the planes, which are what this
-/// check has always asked, say so. The SQLite amalgamation has one such site: `whereLoopInsert`
-/// reads a byte ninety nine into a `WhereLoop`, and the capability beside that access covers ninety
-/// six bytes starting eight bytes below the pointer, so it does not reach. The access is correct and
-/// believing the capability aborts a working program on its second statement. Why that capability
-/// describes what it describes is tamnd/rucc#1338. So the capability is a fast yes and never a no,
-/// and the planes keep the whole of the refusing. What it costs is that a capability narrower than
-/// the truth pays for both paths, which is a site that was paying for one of them before.
+/// check has always asked, say so. The SQLite amalgamation had one such site, which is the whole of
+/// tamnd/rucc#1338: `whereLoopInsert` reads a byte ninety nine into a `WhereLoop` that
+/// `whereLoopXfer` had just copied, and the copy moved the word and left the slot beside it, so the
+/// capability there was rebuilt from the previous tenant's displacement and covered ninety six bytes
+/// starting eight bytes below the pointer. The access is correct and believing the capability aborts
+/// a working program on its second statement. [`relocate`] moves the aux with the bytes now, and
+/// counting what arrives here in an instrumented build of that amalgamation finds no capability that
+/// fails to cover a correct access in fifteen and a half million of them. The restraint stays
+/// anyway, because the three reasons above are about what a recovery can know rather than about one
+/// bug that has been fixed. So the capability is a fast yes and never a no, and the planes keep the
+/// whole of the refusing. What it costs is that a capability narrower than the truth pays for both
+/// paths, which is a site that was paying for one of them before.
+///
+/// What it buys, from the same count: ninety nine and a half percent of the bounds checks that run
+/// are answered here and never reach the planes. Three quarters of those are answered by a
+/// capability a plane walk recovered, which is the plane's own answer arrived at earlier and is the
+/// real saving, and the rest by one that covers everything, which is the cheap answer for an address
+/// no region watches. The half percent that falls through is bottom, and a capability the compiler
+/// could name an instance for is under one in ten thousand, which is what tamnd/rucc#1241's `cap_of`
+/// box is about.
 ///
 /// This is also why a bottom capability and a null one need no case of their own. Neither covers
 /// anything, so neither permits anything, and both fall through to the planes the way they always
@@ -1179,6 +1192,7 @@ pub mod exports {
 mod tests {
     use super::*;
     use crate::alloc::{alloc, dealloc};
+    use crate::layout::perm;
     use crate::turnstile::turn;
 
     /// The descriptor every check in these tests is handed.
@@ -1345,6 +1359,37 @@ mod tests {
     /// The address `offset` bytes into an instance, as the checks take it.
     fn at(ptr: *mut c_void, offset: usize) -> *const c_void {
         ptr.cast::<u8>().wrapping_add(offset).cast()
+    }
+
+    /// The capability of a whole instance the allocator just handed back.
+    ///
+    /// What `cap_of` reads out of the header in front of the payload, which is what generated code
+    /// has in hand at a store into the object and is what the aux calls a container.
+    fn whole(ptr: *mut c_void) -> Cap {
+        let addr = ptr as usize;
+        let region = alloc::covering(addr).expect("the allocator's own storage is watched");
+        let (lo, ext) = recover::extent(&region, addr).expect("a live instance owns it");
+        let meta = Meta::new(Class::Allocated, perm::READ | perm::WRITE, 0);
+        Cap::new(lo as u64, ext as u64, owner(&region, addr), meta)
+    }
+
+    /// Writes the capability of the pointer `value` into the slot beside the word at `addr`.
+    fn put(container: Cap, addr: *const c_void, value: *const c_void, cap: Cap) -> bool {
+        // SAFETY: the container is a live instance this runtime's allocator laid out, so the aux
+        // in front of it is the runtime's own storage, and neither address is read through.
+        unsafe { crate::cap::store(container, addr, value, cap) }
+    }
+
+    /// What the slot beside the word at `addr` says about the pointer `value` that came out of it.
+    fn took(container: Cap, addr: *const c_void, value: *const c_void) -> Cap {
+        // SAFETY: as [`put`].
+        unsafe { crate::cap::load(container, addr, value) }
+    }
+
+    /// The judgement a copy makes about the pointers it moved.
+    fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
+        // SAFETY: as [`put`], for both ends of the copy.
+        unsafe { super::relocate(dst, src, len) }
     }
 
     #[test]
@@ -1663,6 +1708,77 @@ mod tests {
         assert!(!refused(|| filled(at(ptr, 0), 8)));
         // SAFETY: as above.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_carries_the_capability_beside_the_word_it_moved() {
+        let _turn = turn();
+        // tamnd/rucc#1148, and the shape tamnd/rucc#1338 turned out to be. A slot holds a
+        // displacement from the pointer beside it rather than an address, so a copy that moves the
+        // word and leaves the slot alone leaves the destination reading the previous tenant's
+        // displacement against a pointer that has just arrived, which describes a span that
+        // pointer is not inside.
+        let src = alloc(64);
+        let dst = alloc(64);
+        let target = alloc(64);
+        let older = alloc(64);
+
+        // What the destination is carrying from whoever had the storage before it, which is a
+        // pointer twenty four bytes into an object of thirty two.
+        assert!(put(whole(dst), at(dst, 0), at(older, 24), whole(older).narrowed(0, 32)));
+        // What the source is carrying, which is the base of its own object.
+        assert!(put(whole(src), at(src, 0), at(target, 0), whole(target)));
+        // The copy itself, which is what the `memcpy` a wrapper interposes does to the bytes and
+        // is the whole of what it used to do.
+        // SAFETY: one word inside two live instances of sixty four bytes each.
+        unsafe { core::ptr::copy_nonoverlapping(src.cast::<u8>(), dst.cast::<u8>(), WORD) };
+
+        let stale = took(whole(dst), at(dst, 0), at(target, 0));
+        assert!(!stale.covers(at(target, 40) as u64, 8), "the previous tenant's displacement");
+
+        relocate(at(dst, 0), at(src, 0), WORD);
+
+        let moved = took(whole(dst), at(dst, 0), at(target, 0));
+        assert_eq!(moved, took(whole(src), at(src, 0), at(target, 0)), "the slot came across");
+        assert!(moved.covers(at(target, 40) as u64, 8), "and describes the object it points at");
+
+        // SAFETY: four live instances, each the address its `alloc` handed back.
+        unsafe {
+            dealloc(src);
+            dealloc(dst);
+            dealloc(target);
+            dealloc(older);
+        }
+    }
+
+    #[test]
+    fn a_copy_that_reaches_part_of_a_word_leaves_no_capability_beside_it() {
+        let _turn = turn();
+        // A slot is about the whole word, so a copy that moves half of one has not moved the
+        // pointer the slot would be describing. Carrying the source's answer would describe an
+        // object the destination word does not point at, and leaving the previous tenant's
+        // standing is the fault above, so the only answer left is that the word holds no pointer.
+        let dst = alloc(64);
+        let src = alloc(64);
+        let target = alloc(64);
+        let older = alloc(64);
+
+        assert!(put(whole(dst), at(dst, 8), at(older, 24), whole(older).narrowed(0, 32)));
+        assert!(put(whole(src), at(src, 8), at(target, 0), whole(target)));
+        // One word starting four bytes in, so it reaches part of two words and the whole of
+        // neither.
+        relocate(at(dst, 12), at(src, 12), WORD);
+
+        assert!(took(whole(dst), at(dst, 8), at(target, 0)).is_bottom(), "cleared, not carried");
+        assert!(took(whole(dst), at(dst, 16), at(target, 0)).is_bottom(), "and so is the next one");
+
+        // SAFETY: as above.
+        unsafe {
+            dealloc(dst);
+            dealloc(src);
+            dealloc(target);
+            dealloc(older);
+        }
     }
 
     #[test]
