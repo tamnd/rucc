@@ -485,6 +485,21 @@ pub struct Reloc {
     /// bytes between the hole and the end of the instruction, negated. An instruction counts from
     /// where it ends and a relocation counts from where it starts, and this is the difference.
     pub addend: i64,
+    /// How many bytes of the instruction come after the four the linker writes over, which is zero
+    /// for everything except an instruction carrying an immediate behind its displacement.
+    ///
+    /// Already inside [`Self::addend`] and written down again because the two formats disagree about
+    /// which of the two numbers they want. ELF takes the one number and counts from where the hole
+    /// starts, so the difference between that and where the instruction ends is the writer's to fold
+    /// in and nothing after it ever has to be told apart again. COFF counts from where the
+    /// instruction ends and says how far that is in the relocation type itself, which is what
+    /// `IMAGE_REL_AMD64_REL32_1` through `REL32_5` are, so it needs the two apart. A writer cannot
+    /// recover one from the other, since a displacement of minus four and no trailing bytes and a
+    /// displacement of zero and four of them are the same sum.
+    ///
+    /// Zero for a relocation in an image, where there is no instruction and the question does not
+    /// arise.
+    pub after: u8,
 }
 
 /// What kind of thing a relocation is asking the linker for.

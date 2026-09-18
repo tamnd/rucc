@@ -169,6 +169,8 @@ impl Table {
             symbol: func.name.clone(),
             kind: Reference::Data,
             addend: 0,
+            // A table rather than an instruction, so the four bytes are the whole of what is here.
+            after: 0,
         });
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         let len = u32::try_from(func.len).expect("a function this size");

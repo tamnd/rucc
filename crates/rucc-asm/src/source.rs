@@ -958,7 +958,7 @@ impl Reader {
             let line = fixup.line;
             let residue = self.reduce(&fixup.sum).map_err(|why| Trouble { line, why })?;
             let bad = |why: String| Trouble { line, why };
-            let (symbol, kind, addend) = match residue.left.as_slice() {
+            let (symbol, kind, addend, after) = match residue.left.as_slice() {
                 [] => {
                     // A distance a branch carries is signed and nothing else, so a byte of it
                     // reaches a hundred and twenty seven forwards and a hundred and twenty eight
@@ -987,7 +987,7 @@ impl Reader {
                 // The address of something, which is the whole of what a table of pointers holds.
                 [Left { coeff: 1, what: What::Symbol(name), .. }] => {
                     let kind = Reference::Address { bytes: fixup.width };
-                    (name.clone(), kind, residue.constant)
+                    (name.clone(), kind, residue.constant, 0)
                 }
                 // The distance from these bytes to something, which is what a position independent
                 // table of offsets holds and what `.long foo - .` is asking for. The subtracted
@@ -1022,7 +1022,10 @@ impl Reader {
                     // from the end of the instruction they are the last of.
                     let addend = residue.constant + fixup.at as i64 - offset;
                     let kind = if fixup.branch { Reference::Call } else { Reference::Data };
-                    (name.clone(), kind, addend)
+                    // The same distance said the other way, for the format that wants it apart
+                    // from the addend rather than folded into it. See `rucc_object::Reloc`.
+                    let after = (offset - fixup.at as i64 - 4).max(0);
+                    (name.clone(), kind, addend, after as u8)
                 }
                 [Left { coeff: 1, what: What::Here { .. }, .. }] => {
                     return Err(bad(
@@ -1051,6 +1054,7 @@ impl Reader {
                 symbol,
                 kind,
                 addend,
+                after,
             });
         }
         Ok(())

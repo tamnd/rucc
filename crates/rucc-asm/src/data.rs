@@ -148,6 +148,9 @@ impl Globals {
                             symbol: symbol.clone(),
                             kind: Reference::Address { bytes: *bytes },
                             addend: *addend,
+                            // An image rather than an instruction, so there is nothing after the
+                            // hole for the question to be about.
+                            after: 0,
                         });
                         object.bytes.resize(object.bytes.len() + usize::from(*bytes), 0);
                     }
@@ -569,6 +572,7 @@ mod tests {
                 symbol: "y".to_owned(),
                 kind: Reference::Address { bytes: 8 },
                 addend: 16,
+                after: 0,
             }]
         );
     }
