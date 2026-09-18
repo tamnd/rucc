@@ -24,9 +24,12 @@
 //! blocks through a lookaside allocator, and it leans on the type plane harder than anything else
 //! we have. zlib is fifteen small ones that take a few large buffers at the start and then index
 //! them with pointers held inside the caller's own structure, which leans on the capability
-//! instead, and it walks into the init plane the first time it slides its hash table. Neither
-//! reaches the other's paths. The rows here are the projects and the code below is the same for
-//! all of them, which is what makes adding the next one a paragraph of data.
+//! instead, and it walks into the init plane the first time it slides its hash table. Lua is
+//! neither: every value it moves is a tagged union whose payload is sometimes a pointer and
+//! sometimes an integer of the same width, its collector reaches every live object by walking those
+//! unions, and its errors leave through longjmp from the middle of a C stack the interpreter built.
+//! None of the three reaches the others' paths. The rows here are the projects and the code below is
+//! the same for all of them, which is what makes adding the next one a paragraph of data.
 //!
 //! # Why the sources are not in the tree
 //!
@@ -69,8 +72,9 @@ const LEVELS: [&str; 2] = ["-O0", "-O2"];
 
 /// What the link needs beyond the objects and the runtime archive.
 ///
-/// The runtime's own three, which SQLite's configure script asks for as well, so one list covers
-/// both rows and will cover most of the next ones.
+/// The runtime's own three, which SQLite's configure script asks for as well and which are a
+/// superset of what Lua's makefile asks for, so one list covers every row so far and will cover most
+/// of the next ones.
 const LIBRARIES: [&str; 3] = ["-lpthread", "-lm", "-ldl"];
 
 /// A report a library earns honestly, so that the check can tell one from a false positive.
@@ -161,6 +165,53 @@ const PROJECTS: &[Project] = &[
                   the four classes tamnd/rucc#431 is about and it is the first one a second \
                   project produced.",
         }],
+    },
+    Project {
+        name: "lua",
+        variable: "RUCC_LUA_SOURCE",
+        marker: "lua.h",
+        usual: &["lua"],
+        sources: &[
+            "lapi.c",
+            "lauxlib.c",
+            "lbaselib.c",
+            "lcode.c",
+            "lcorolib.c",
+            "lctype.c",
+            "ldblib.c",
+            "ldebug.c",
+            "ldo.c",
+            "ldump.c",
+            "lfunc.c",
+            "lgc.c",
+            "linit.c",
+            "liolib.c",
+            "llex.c",
+            "lmathlib.c",
+            "lmem.c",
+            "loadlib.c",
+            "lobject.c",
+            "lopcodes.c",
+            "loslib.c",
+            "lparser.c",
+            "lstate.c",
+            "lstring.c",
+            "lstrlib.c",
+            "ltable.c",
+            "ltablib.c",
+            "ltm.c",
+            "lundump.c",
+            "lutf8lib.c",
+            "lvm.c",
+            "lzio.c",
+        ],
+        // The one thing Lua's own makefile passes on this platform. It turns on the POSIX bits of
+        // the io and os libraries and the dlopen path in loadlib.c, all of which are library code
+        // this ought to be running rather than stubs. The two files with a main in them, lua.c and
+        // luac.c, are not in the list above, and they are the only ones that would have wanted
+        // readline.
+        defines: &["LUA_USE_LINUX"],
+        known: &[],
     },
 ];
 
@@ -317,13 +368,30 @@ fn found(project: &Project) -> Option<PathBuf> {
 /// being set, since the sentence that prints in that case names the variable and is the right thing
 /// to read either way.
 fn declared(said: &Path, marker: &str) -> Option<PathBuf> {
-    if said.is_dir() && said.join(marker).is_file() {
-        return Some(said.to_path_buf());
+    if let Some(holding) = holds(said, marker) {
+        return Some(holding);
     }
     if said.is_file() && said.file_name()? == marker {
         return Some(said.parent()?.to_path_buf());
     }
     None
+}
+
+/// The directory under `dir` that really holds the sources, which is `dir` itself or the `src` under
+/// it.
+///
+/// Both, because a project is as likely to unpack its C into a `src` directory as to leave it at the
+/// top and the person setting the variable should not have to remember which this one does. Only one
+/// level, for the reason [`usual`] gives about hunting.
+fn holds(dir: &Path, marker: &str) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    if dir.join(marker).is_file() {
+        return Some(dir.to_path_buf());
+    }
+    let inside = dir.join("src");
+    inside.join(marker).is_file().then_some(inside)
 }
 
 /// Where the sources are when nobody said, which is the directory the project's tarball unpacks to
@@ -347,9 +415,8 @@ fn usual(project: &Project) -> Option<PathBuf> {
                 if !name.starts_with(stem) {
                     continue;
                 }
-                let candidate = entry.path();
-                if candidate.join(project.marker).is_file() {
-                    return Some(candidate);
+                if let Some(holding) = holds(&entry.path(), project.marker) {
+                    return Some(holding);
                 }
             }
         }
@@ -590,6 +657,17 @@ mod tests {
         let tests = root().join("tests").join("zlib");
         assert_eq!(declared(&tests, "a-real-workload.c"), Some(tests.clone()));
         assert_eq!(declared(&tests.join("a-real-workload.c"), "a-real-workload.c"), Some(tests));
+    }
+
+    /// Half the projects worth running unpack their C into a `src` directory and half leave it at
+    /// the top, and the person setting the variable should not have to know which this one is.
+    #[test]
+    fn the_sources_are_taken_from_a_src_directory_as_well_as_from_the_top() {
+        let xtask = root().join("xtask");
+        assert_eq!(holds(&xtask, "libraries.rs"), Some(xtask.join("src")));
+        assert_eq!(holds(&xtask, "Cargo.toml"), Some(xtask.clone()));
+        assert_eq!(holds(&xtask, "nothing-of-the-sort.c"), None);
+        assert_eq!(declared(&xtask, "libraries.rs"), Some(xtask.join("src")));
     }
 
     /// The reader has to come back with one entry per site and with the numbers the report wrote,
