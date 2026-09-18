@@ -574,6 +574,10 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
 /// Nothing at all when the destination is not an allocation this runtime laid out, since then there
 /// is no aux in front of it to write.
 ///
+/// A destination word whose capability this call changed is stamped as well, which is `restamped`
+/// and is the epoch plane's half of a copy. A word whose slot ends up saying the same thing it said
+/// before is not, because nothing about that word changed and a stamp is about a change.
+///
 /// # Safety
 ///
 /// Neither address is read through by this function. They may overlap, and the aux is moved with
@@ -589,6 +593,8 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
         return;
     }
     let from = recover::recover(src as *const c_void);
+    let region = alloc::covering(dst as usize);
+    let mut taken = None;
     let word = WORD as u64;
     // Every destination word the copy reaches, including the two at the ends it may only reach part
     // of, walked by the destination's word grid because that grid is the one the aux is laid on.
@@ -599,6 +605,9 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
             let whole = at >= dst && at.wrapping_add(word) <= dst.wrapping_add(len as u64);
             let carried =
                 if whole { aux_slot::address_of(from, src.wrapping_add(at - dst)) } else { None };
+            // SAFETY: the address came from `address_of`, so it is a slot inside the aux of the
+            // instance the recovery found and is a pair of words the runtime owns.
+            let held = unsafe { core::ptr::read(slot as *const [u64; 2]) };
             match carried {
                 // SAFETY: both addresses came from `address_of`, so each is a slot inside the aux
                 // of the instance the recovery found, and a slot is `AUX_PER_WORD` bytes the
@@ -611,8 +620,57 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
                 // what a slot nothing ever wrote already reads as.
                 None => unsafe { core::ptr::write_bytes(slot as *mut u8, 0, AUX_PER_WORD) },
             }
+            // SAFETY: as above, for the slot the branch above has just finished writing.
+            let now = unsafe { core::ptr::read(slot as *const [u64; 2]) };
+            if held != [0, 0] || now != [0, 0] {
+                if let Some(region) = region.as_ref() {
+                    let stamp = *taken.get_or_insert_with(crate::epoch::tick);
+                    if stamp != crate::epoch::NONE {
+                        // SAFETY: the word is inside the region the destination is in, and the
+                        // slot is its own, which `restamped` says why is in the same region.
+                        unsafe { restamped(region, at, slot, stamp) };
+                    }
+                }
+            }
         }
         at = at.wrapping_add(word);
+    }
+}
+
+/// Records this thread as the one that changed a pointer word, on the word and on the slot beside
+/// it.
+///
+/// The epoch half of what an interposed write owes, and the half that was missing until
+/// tamnd/rucc#1307's audit reached this plane. A `memcpy` that moves a pointer into a shared
+/// structure, or a `memset` that takes one out of it, is a store to a pointer word like any other,
+/// and generated code stamps those so that another thread loading the word can be told nothing
+/// ordered the two. A wrapper that did not stamp left whatever the last instrumented store had
+/// written, so the reader compared itself against a stranger that was no longer the writer and the
+/// report went missing. That is a lost report rather than a wrong one, which is why it survived
+/// three rounds of this audit.
+///
+/// Both halves with one stamp, the way [`crate::cap::pair`] writes them. A byte-wise write over a
+/// pointer word is one store that changed both: it put bytes where the pointer was and it took the
+/// capability beside it away. Stamping the word alone would leave the two disagreeing and
+/// [`crate::cap::torn`] would then call a correct program's next load of that word a torn store.
+///
+/// Only a word whose slot this call changed, which is the same granularity generated code has.
+/// [`stamped`] is emitted for a store the compiler knows is pointer shaped, because the plane's
+/// granule is a pointer wide and so a granule two threads share is one holding no pointer.
+/// A wrapper cannot ask the compiler what shape a word is, but it can ask the aux, and a word with
+/// no capability on either side of the call is the same kind of word `stamped` declines to watch.
+/// That is also what keeps this off the cost of an ordinary `memset`, which walks a buffer with no
+/// slots in it and writes no stamps at all.
+///
+/// # Safety
+///
+/// `word` is an address inside `region`, and `slot` is the address of that word's aux slot, which
+/// is inside the same region for the reason [`crate::cap::pair`] gives.
+unsafe fn restamped(region: &Region, word: u64, slot: u64, stamp: crate::epoch::Stamp) {
+    // SAFETY: both addresses are inside the region, whose epoch plane covers every byte of it.
+    unsafe {
+        region.epochs.write(word as usize, stamp);
+        region.epochs.write(slot as usize, stamp);
     }
 }
 
@@ -640,6 +698,11 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
 /// `memset` touches, its aux is already empty, and writing zeroes over zeroes would dirty two bytes
 /// of cache line per byte written and send them to memory.
 ///
+/// A word that really did hold a pointer is stamped as well, which is `restamped` and is the
+/// epoch plane's half of a byte-wise write. That read is what makes the stamping cost nothing on
+/// the buffers this is mostly called about: a `memset` over a buffer with no slots in it writes no
+/// stamps and does not even take one.
+///
 /// # Safety
 ///
 /// The address is not read through by this function.
@@ -652,6 +715,8 @@ pub unsafe fn erase(addr: *const c_void, len: usize) {
     if into.meta.class() != Class::Allocated as u8 {
         return;
     }
+    let region = alloc::covering(addr as usize);
+    let mut taken = None;
     let word = WORD as u64;
     let mut at = addr & !(word - 1);
     let after = addr.wrapping_add(len as u64).wrapping_add(word - 1) & !(word - 1);
@@ -660,10 +725,17 @@ pub unsafe fn erase(addr: *const c_void, len: usize) {
             // SAFETY: the address came from `address_of`, so it is a slot inside the aux of the
             // instance the recovery found, and a slot is `AUX_PER_WORD` bytes the runtime owns and
             // wrote as a pair of words.
-            unsafe {
-                let held = core::ptr::read(slot as *const [u64; 2]);
-                if held != [0, 0] {
-                    core::ptr::write_bytes(slot as *mut u8, 0, AUX_PER_WORD);
+            let held = unsafe { core::ptr::read(slot as *const [u64; 2]) };
+            if held != [0, 0] {
+                // SAFETY: as above.
+                unsafe { core::ptr::write_bytes(slot as *mut u8, 0, AUX_PER_WORD) };
+                if let Some(region) = region.as_ref() {
+                    let stamp = *taken.get_or_insert_with(crate::epoch::tick);
+                    if stamp != crate::epoch::NONE {
+                        // SAFETY: the word is inside the region the range is in, and the slot is
+                        // its own, which `restamped` says why is in the same region.
+                        unsafe { restamped(region, at, slot, stamp) };
+                    }
                 }
             }
         }
@@ -1445,6 +1517,117 @@ mod tests {
     fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
         // SAFETY: as [`put`], for both ends of the copy.
         unsafe { super::relocate(dst, src, len) }
+    }
+
+    /// The judgement a byte-wise write makes about the pointers it wrote over.
+    fn erase(addr: *const c_void, len: usize) {
+        // SAFETY: as [`put`], over a range inside one live instance.
+        unsafe { super::erase(addr, len) }
+    }
+
+    /// What the plane says about the aux slot beside the word at `addr`, which is the other half of
+    /// what `crate::cap::torn` compares.
+    fn slot_stamp(container: Cap, addr: *const c_void) -> crate::epoch::Stamp {
+        let slot = aux_slot::address_of(container, addr as u64).expect("the word has a slot");
+        let region = alloc::covering(addr as usize).expect("the instance is in a watched region");
+        // SAFETY: the slot is in the aux of the block the word is in, which is inside the same
+        // region, for the reason `crate::cap::pair` gives.
+        unsafe { region.epochs.read(slot as usize) }
+    }
+
+    /// Every granule stamp over an instance, so a test can say nothing was written rather than
+    /// saying one address was not.
+    fn stamps(ptr: *mut c_void, size: usize) -> std::vec::Vec<crate::epoch::Stamp> {
+        (0..size).step_by(WORD).map(|offset| stamp_at(at(ptr, offset))).collect()
+    }
+
+    #[test]
+    fn a_byte_wise_write_over_a_pointer_word_records_who_wrote_over_it() {
+        let _turn = turn();
+        // The epoch half of tamnd/rucc#1307's audit. A wrapper taking a pointer out of a shared
+        // structure is a store to a pointer word like any other, and a thread that loads the word
+        // afterwards has to be able to find out that nothing ordered the two. Until this the
+        // wrapper left whatever the last instrumented store had written, so the reader compared
+        // itself against a stranger who was no longer the writer and the report went missing.
+        let pointee = alloc(128);
+        let holder = alloc(64);
+        let word = at(holder, 24);
+        assert!(put(whole(holder), word, pointee, whole(pointee)));
+        let before = stamp_at(word);
+
+        erase(word, 8);
+
+        let after = stamp_at(word);
+        assert_ne!(after, crate::epoch::NONE, "somebody wrote over the pointer");
+        assert_ne!(after, before, "and it was this call rather than the store before it");
+        assert_eq!(
+            slot_stamp(whole(holder), word),
+            after,
+            "both halves wear one stamp, since one call changed both"
+        );
+        assert!(
+            !crate::epoch::torn(after, slot_stamp(whole(holder), word)),
+            "so the next load of that word is not called a torn store"
+        );
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn a_byte_wise_write_over_a_buffer_with_no_pointers_in_it_records_nothing() {
+        let _turn = turn();
+        // Which is nearly every buffer a `memset` is called about, and is why this costs what it
+        // costs. The plane's granule is a pointer wide, so a granule two threads share is one
+        // holding no pointer, and a word with no capability on either side of the call is the same
+        // kind of word generated code's own stamping declines to watch.
+        let ptr = alloc(64);
+        assert!(stamps(ptr, 64).iter().all(|&s| s == crate::epoch::NONE));
+
+        erase(at(ptr, 0), 64);
+
+        assert!(
+            stamps(ptr, 64).iter().all(|&s| s == crate::epoch::NONE),
+            "a walk that found no slots wrote no stamps"
+        );
+
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_copy_that_moves_a_pointer_records_who_moved_it() {
+        let _turn = turn();
+        // The same sentence from the other side. A `memcpy` that puts a pointer into a structure
+        // another thread can reach is a store to a pointer word, and the plane has to say so or a
+        // reader over there has nothing to compare itself against.
+        let pointee = alloc(128);
+        let source = alloc(64);
+        let target = alloc(64);
+        assert!(put(whole(source), at(source, 24), pointee, whole(pointee)));
+        // SAFETY: two live instances of sixty four bytes, copied whole.
+        unsafe { core::ptr::copy_nonoverlapping(source.cast::<u8>(), target.cast::<u8>(), 64) };
+
+        relocate(at(target, 0), at(source, 0), 64);
+
+        let stamp = stamp_at(at(target, 24));
+        assert_ne!(stamp, crate::epoch::NONE, "the copy wrote a pointer word");
+        assert_eq!(slot_stamp(whole(target), at(target, 24)), stamp, "and both halves agree");
+        assert_eq!(
+            stamp_at(at(target, 0)),
+            crate::epoch::NONE,
+            "and said nothing about the words it moved that held no pointer"
+        );
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(source);
+            dealloc(target);
+            dealloc(pointee);
+        }
     }
 
     #[test]
