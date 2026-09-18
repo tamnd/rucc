@@ -19,6 +19,23 @@
 //! `rucc-asm` have their own tests for that, and the comparison that matters is against what gas
 //! writes for the same input, which is a corpus run and not a unit test. What is here is the
 //! driver's half: the right file appears, with the right name, in the right place.
+//!
+//! # The seven that need the host to be the target
+//!
+//! Seven of these link and then run what came out, because an object whose bytes are wrong links
+//! exactly as well as one whose bytes are right and running it is the only thing that says which it
+//! was. Linking needs a libc for `x86_64-linux-gnu` and running needs a machine that executes it,
+//! and a developer on an arm mac has neither: the driver says there is no sysroot for the target and
+//! nothing pins one for it to fetch, which is the right answer to the right question and a failed
+//! test either way. So those seven are compiled on an x86-64 Linux host and nowhere else, which is
+//! the two Linux jobs in CI, one at each profile. The ones that stop at `-c` ask nothing of the host
+//! and are compiled everywhere, which is five of the twelve and the whole of what the reader and the
+//! writer do.
+//!
+//! The gate is `target_os` and `target_arch` rather than a look for the sysroot, because a test that
+//! decides at run time whether to assert is a test that can stop asserting without anybody noticing.
+//! What this says instead is that the machine is wrong for the question, which is a fact about the
+//! machine and is known when it is compiled.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -112,6 +129,7 @@ fn assembly_that_wants_the_preprocessor_first_goes_through_it() {
     assert!(is_an_object(&dir.join("probe.o")), "no object appeared beside the input");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_function_written_in_assembly_is_compiled_and_called() {
     // The other half, end to end and run rather than inspected, because an object whose bytes are
@@ -129,6 +147,7 @@ fn a_function_written_in_assembly_is_compiled_and_called() {
     assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_loop_written_the_way_a_hand_written_library_writes_one_gives_the_right_answer() {
     // The instructions a C expression never compiles to, run rather than inspected. This is the
@@ -165,6 +184,7 @@ fn a_loop_written_the_way_a_hand_written_library_writes_one_gives_the_right_answ
     assert_eq!(out.status.code(), Some(42), "the assembly did not add the way it says");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn the_shapes_a_hand_written_library_reaches_memory_with_give_the_right_answers() {
     // The second half of the same idea. Every instruction here is one the encoder had no row for
@@ -217,6 +237,7 @@ fn the_shapes_a_hand_written_library_reaches_memory_with_give_the_right_answers(
     assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn the_ways_a_hand_written_file_says_a_thing_are_read_and_mean_what_they_say() {
     // The reader's half of the same idea, and the same reason for running it rather than reading
@@ -263,6 +284,7 @@ fn the_ways_a_hand_written_file_says_a_thing_are_read_and_mean_what_they_say() {
     assert_eq!(out.status.code(), Some(42), "the assembly did not do what it says");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_name_with_a_number_added_to_it_reaches_where_the_two_together_say() {
     // GMP's reciprocal lookup writes `-512+table(%rip)`, because the value it indexes by starts at
@@ -304,6 +326,7 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_link_takes_the_object_the_assembly_produced() {
     // The driver schedules an object for the assembly in a temporary directory and hands the path
@@ -322,6 +345,7 @@ fn a_link_takes_the_object_the_assembly_produced() {
     assert!(!said.contains("cannot find"), "the linker was handed a path to nothing:\n{said}");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn an_object_file_is_not_this_and_is_still_passed_through() {
     // The check is on the phases rather than on the kind, and an object has no compile phase
