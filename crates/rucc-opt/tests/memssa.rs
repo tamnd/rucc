@@ -33,7 +33,7 @@ use rucc_ir::{
     Block, Builder, Extra, Flags, Func, Inst, InstData, MemInfo, MemOrder, Module, Opcode,
     Restrict, Signature, Type, Value, verify_func,
 };
-use rucc_opt::{Clobber, Walk, memssa};
+use rucc_opt::{Clobber, Outside, Walk, memssa};
 use rucc_target::{TargetInfo, Triple};
 
 /// How many objects a generated function has, which is how often two accesses collide.
@@ -78,7 +78,8 @@ fn every_clobber_the_walk_names_is_the_one_every_path_agrees_on() {
         }
         let func = &module[id];
         let truth = Truth::of(func, &plan);
-        let mut walk = Walk::new(func, &module);
+        let outside = Outside::of(&module);
+        let mut walk = Walk::new(func, &outside);
         for &load in &truth.loads {
             let answer = walk.clobber(load);
             let want = truth.sees(func, load);

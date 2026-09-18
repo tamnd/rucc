@@ -121,6 +121,7 @@ pub mod nests;
 pub mod nofree;
 pub mod number;
 pub mod optinfo;
+pub mod outside;
 pub mod params;
 pub mod pass;
 pub mod phiopt;
@@ -167,6 +168,7 @@ pub use machine::Machine;
 // because a bare `build` at the top of an optimizer says nothing about what it builds.
 pub use memssa::{Clobber, Step, Walk};
 pub use optinfo::Wants;
+pub use outside::Outside;
 pub use pass::{PASSES, Pass};
 pub use pipeline::{Dump, Dumps, Options, Remark, Report, run};
 // `nofree::Summaries` stays behind its module as well, because a bare `Summaries` at the top of an
