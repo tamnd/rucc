@@ -88,6 +88,30 @@
 //! a second reason: nothing gives a `va_arg` a capability, so a slot filled for one would be a slot
 //! nobody reads.
 //!
+//! # The pointer that comes back
+//!
+//! The same pair with the sides swapped, which [`mod@crate::frame`] is where the frame slot for it
+//! is argued. A callee that holds a capability for the pointer it returns says so with a `cap_yield`
+//! in front of the return, and a caller reads it with a `cap_result` behind the call.
+//!
+//! Both ends are a rewrite in place rather than something new, for the reason the argument side is.
+//! The caller's end is the `cap_of` sitting directly behind the call, which is where
+//! `crate::origin` puts a capability for a value an instruction produced, and turning that into a
+//! `cap_result` swaps a plane walk for a frame read with the same walk behind it as the fallback. A
+//! call whose result nothing in the caller has a capability for is left alone, so a pointer that was
+//! never going to be checked does not start paying for a frame read.
+//!
+//! The callee's end makes nothing either. It yields a capability the function is already holding for
+//! some other reason, and a returned pointer nothing in the body checks has none, so the caller's
+//! fallback is what answers. That is the same restraint as everywhere else here, and it is why the
+//! two ends can be put in independently: a yield with no reader writes a slot nobody looks at, and a
+//! result with no yield reads the bottom capability the publish left and recovers.
+//!
+//! A returned pointer only travels out of a call that published, since the slot it travels in is in
+//! the frame the publish filled. That rules out a callee with nothing left to check, and that is not
+//! a gap for the reason the check count section gives: such a callee holds no capability at all, so
+//! there was never anything for it to yield.
+//!
 //! # What it leaves alone
 //!
 //! A tail call. The frame is an `alloca` in the caller's own stack and a tail call is the caller's
@@ -244,13 +268,19 @@ pub fn arrange(module: &mut Module) -> usize {
     published
 }
 
-/// Both ends of it for one function, callee side first.
+/// Both ends of it for one function: the parameters, then the calls, then the returns.
 ///
-/// The order matters and is the point rather than a detail. A parameter whose `cap_of` becomes a
-/// `cap_arg` is a capability this function now holds, so a pointer it received and passes further
-/// down travels the rest of the way as well, and a chain of functions passing a buffer along asks
-/// the plane once at the top instead of once per call. Doing the caller side first would give the
-/// same chain a bottom capability at every step.
+/// The one bit of order that bites is the table, which is taken before anything here puts a reader
+/// in. `origin::existing` only reports a capability something is going to read anyway, and a publish
+/// and a yield are both readers, so asking after the publishes would report capabilities that are
+/// only alive because this pass handed them somewhere. That is a plane walk this pass created, which
+/// is the thing it exists to stop paying for. Taking the table first makes the answer describe the
+/// function as the optimizer left it.
+///
+/// The rest is a sequence rather than a dependency. All four rewrites keep the value a capability
+/// had, so a pointer that came in as a parameter, went down into a call and came back out of another
+/// is the same value at each step and travels the whole way as a frame read however this is ordered.
+/// Writing it in the order the values flow is for the reader.
 fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
     if checks_left(func) > 0 {
         from_the_frame(func, word);
@@ -264,11 +294,17 @@ fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
             continue;
         }
         match wanted(func, inst, left) {
-            Some(Frame::Checked) => published += usize::from(over(func, inst, &held)),
+            Some(Frame::Checked) => {
+                if over(func, inst, &held) {
+                    published += 1;
+                    from_the_call(func, inst);
+                }
+            }
             Some(Frame::Outside | Frame::Unknown) => empty(func, inst),
             Some(Frame::Elided | Frame::Pointerless) | None => {}
         }
     }
+    giving_back(func, &held);
     published
 }
 
@@ -313,6 +349,76 @@ fn from_the_frame(func: &mut Func, word: Type) -> usize {
         done += 1;
     }
     done
+}
+
+/// Turns the `cap_of` behind a call into the `cap_result` that reads what the callee yielded.
+///
+/// Answers whether it did. Only the one directly behind the call, which is not a restriction being
+/// accepted so much as the shape the two things already have: `crate::origin` puts a capability for
+/// a value an instruction produced immediately behind that instruction, and `crate::frame`'s tie
+/// between a result and its call asks for exactly that position, because a result behind anything
+/// else would be reading whatever the previous call site left in the slot.
+///
+/// In place and without touching the operands, since the two opcodes have the same shape: one
+/// capability out and the pointer it is about in. `cap_result` keeps the pointer for the reason
+/// `cap_arg` keeps one, which is that it is the answer when the callee wrote nothing.
+///
+/// Called only where [`over`] published, so the frame the result reads is one this call site filled.
+fn from_the_call(func: &mut Func, inst: Inst) -> bool {
+    let Some(result) = func[inst].results().next() else { return false };
+    if !func[result].ty.is_ptr() {
+        return false;
+    }
+    let Some(next) = behind(func, inst) else { return false };
+    if func[next].opcode != Opcode::CapOf {
+        return false;
+    }
+    if func[func[next].args].first() != Some(&result) {
+        return false;
+    }
+    func[next].opcode = Opcode::CapResult;
+    true
+}
+
+/// Puts a `cap_yield` in front of each return that gives back a pointer this function has one for.
+///
+/// Answers how many it put in. In front of the return rather than anywhere else, because what the
+/// instruction says is about the value leaving by that one return and a yield on a path that is not
+/// taken would write the caller's frame for a pointer it never receives.
+///
+/// The first pointer among the returned values, since the frame has one slot for the answer. C
+/// returns one value, so the loop is there to make the choice visible rather than because there is
+/// anything to choose between.
+///
+/// Nothing is made here, as everywhere else in this pass: `held` holds the capabilities the function
+/// is paying for already, and a returned pointer that is not in it leaves the caller reading the
+/// bottom capability the publish wrote, which is the recovery the caller was doing anyway.
+fn giving_back(func: &mut Func, held: &HashMap<Value, Value>) -> usize {
+    let mut done = 0;
+    for inst in all(func) {
+        if func[inst].opcode != Opcode::Return {
+            continue;
+        }
+        let returned: Vec<Value> = func[func[inst].args].to_vec();
+        let Some(&pointer) = returned.iter().find(|&&value| func[value].ty.is_ptr()) else {
+            continue;
+        };
+        let Some(cap) = origin::already(func, held, pointer) else { continue };
+        let args = func.push_values(&[cap]);
+        let data = InstData { args, ..InstData::new(Opcode::CapYield) };
+        let made = func.create_inst(data, &[], func.span(inst));
+        func.insert_before(made, inst);
+        done += 1;
+    }
+    done
+}
+
+/// The instruction directly behind `inst` in the block it is in.
+fn behind(func: &Func, inst: Inst) -> Option<Inst> {
+    let block = func.block_of(inst)?;
+    let mut after = func.insts(block).skip_while(|&at| at != inst);
+    after.next();
+    after.next()
 }
 
 /// Puts a `cap_publish` in front of a call, or a `cap_clear` when there is nothing to publish.
@@ -667,5 +773,127 @@ mod tests {
             let func = checking(&mut names, opcode);
             assert_eq!(checks_left(&func), 0, "{opcode:?}");
         }
+    }
+
+    /// The signature of everything below, which takes a pointer and gives one back.
+    fn one_each() -> Signature {
+        Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::PTR])
+    }
+
+    /// A lifetime check of `pointer` through a `cap_of` taken for it right there.
+    ///
+    /// The shape the insertion pass leaves behind, and the check is the part that matters to these
+    /// tests: a capability nothing reads is one [`origin::existing`] will not report, so a producer
+    /// without one would make every assertion below about the wrong thing.
+    fn checked(b: &mut Builder<'_>, pointer: Value) -> Value {
+        let args = b.func().push_values(&[pointer]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = b.func().push_values(&[cap, pointer]);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::CheckLive) }, &[]);
+        cap
+    }
+
+    /// A function named `name` that asks `callee` for a pointer and hands the same one on.
+    ///
+    /// Both ends of the returned pointer in one body, which is how they most often turn up. The
+    /// `cap_of` directly behind the call is where `crate::origin` puts a capability for a value an
+    /// instruction produced. Its own parameter is checked as well, because that is what gives the
+    /// call a capability to publish, and the slot a result is read out of lives in a frame a publish
+    /// filled.
+    fn passing_on(names: &mut Interner, name: &str, callee: Option<&str>, checks: bool) -> Func {
+        let mut func = Func::new(names.intern(name), one_each());
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let sig = func.add_signature(one_each());
+        let callee = callee.map(|each| names.intern(each));
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        if checks {
+            checked(&mut b, p);
+        }
+        let args = b.func().push_values(&[p]);
+        let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
+        let got = b.value(data, Type::PTR);
+        if checks {
+            checked(&mut b, got);
+        }
+        b.ret(&[got]);
+        func
+    }
+
+    /// A module holding `f`, which passes a pointer on, and the `g` it asks for one.
+    fn both_ends(names: &mut Interner, checks: bool) -> Module {
+        let mut module = unit(names);
+        module.add_func(passing_on(names, "f", Some("g"), checks));
+        module.add_func(passing_on(names, "g", Some("h"), true));
+        module
+    }
+
+    #[test]
+    fn a_pointer_a_call_gave_back_is_read_out_of_the_frame_rather_than_recovered() {
+        // The `cap_of` behind the call becomes the `cap_result`, in place, so the value it produced
+        // is the value the check goes on reading. One of the two `cap_of` in the body is over the
+        // parameter and becomes a `cap_arg`, which is what leaves nothing of the opcode behind.
+        let mut names = Interner::new();
+        let mut module = both_ends(&mut names, true);
+        assert_eq!(arrange(&mut module), 1);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapResult), 1);
+        assert_eq!(count(func, Opcode::CapOf), 0);
+        // And the pointer it names is the one the call gave back, which is what the runtime falls
+        // back to when the callee wrote nothing.
+        let args = operands(func, Opcode::CapResult);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], func[only(func)].results().next().expect("the call gives one back"));
+    }
+
+    #[test]
+    fn the_result_sits_behind_a_call_that_was_published_to() {
+        // Which is the whole of the tie the lowering asks for, and the reason it is two back rather
+        // than one: a cleared call has no frame, so there would be nothing in the slot to read.
+        let mut names = Interner::new();
+        let mut module = both_ends(&mut names, true);
+        arrange(&mut module);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert!(crate::frame::given(func, the(func, Opcode::CapResult)));
+    }
+
+    #[test]
+    fn a_function_yields_the_capability_of_the_pointer_it_gives_back() {
+        // The one it already holds, which here is the one it read out of the frame itself, so a
+        // pointer handed along a chain of functions asks the plane once however long the chain is.
+        let mut names = Interner::new();
+        let mut module = both_ends(&mut names, true);
+        arrange(&mut module);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapYield), 1);
+        let args = operands(func, Opcode::CapYield);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], produced(func, Opcode::CapResult));
+        // In front of the return it is about rather than anywhere else in the block.
+        assert!(crate::frame::leaving(func, the(func, Opcode::CapYield)));
+    }
+
+    #[test]
+    fn a_returned_pointer_nothing_holds_a_capability_for_gets_neither_end() {
+        // Nothing is made here, so a call whose result the caller never checks keeps paying nothing
+        // for it, and a function that returns a pointer it holds nothing for leaves the caller the
+        // recovery it was doing anyway.
+        let mut names = Interner::new();
+        let mut module = both_ends(&mut names, false);
+        arrange(&mut module);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapResult), 0);
+        assert_eq!(count(func, Opcode::CapYield), 0);
     }
 }

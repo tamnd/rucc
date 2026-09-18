@@ -147,10 +147,10 @@ pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
     let mut held = HashMap::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
-            // The two that name the pointer they are about. A `cap_narrow` is a capability as well
-            // but it names another capability rather than a pointer, so there is no pointer here to
-            // key it on, and a `cap_null` is the absence of one spelled out.
-            if !matches!(func[inst].opcode, Opcode::CapOf | Opcode::CapArg) {
+            // The three that name the pointer they are about. A `cap_narrow` is a capability as
+            // well but it names another capability rather than a pointer, so there is no pointer
+            // here to key it on, and a `cap_null` is the absence of one spelled out.
+            if !matches!(func[inst].opcode, Opcode::CapOf | Opcode::CapArg | Opcode::CapResult) {
                 continue;
             }
             let Some(&pointer) = func[func[inst].args].first() else { continue };
