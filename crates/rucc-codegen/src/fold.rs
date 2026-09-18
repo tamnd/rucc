@@ -41,9 +41,18 @@
 //! forty times each. One reader keeps the old answer, since there the address word is written once
 //! either way and what goes is the whole `lea`.
 //!
-//! Two indexes. The reader having an index of its own means the composed address wants two scaled
-//! registers and this machine, like every machine, has one. Nothing looks for a way to put them
-//! together because there is not one.
+//! Two indexes. An address and the reader that takes it each having an index means the composed
+//! address wants two scaled registers and this machine, like every machine, has one. Nothing looks
+//! for a way to put them together because there is not one. One index between the two is a
+//! different answer and is folded, whichever of them it came from, since the composed address then
+//! wants exactly the one place the machine has. That is the shape of an array inside something
+//! whose own address had to be worked out, `s.items[i]` on a local and `a[i][j]` on a row, where
+//! the `lea` is a base and a displacement and the reader is what scales the subscript.
+//!
+//! A symbol, where the reader has an index. An address relative to a symbol has the symbol in the
+//! place a base register would go, so what the composed address would be is a symbol and a scaled
+//! register with nothing to be relative to. The one reader rule below still takes those when the
+//! reader is reading a flat address.
 //!
 //! A displacement that does not fit. The two are added as `i64` and the answer has to be an `i32`,
 //! which is what the field holds. It is not a case that comes up in a program anybody wrote, and
@@ -210,11 +219,17 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 /// stays where it is and the frame's offset is added to it later, which is why that write is an
 /// addition rather than an assignment.
 ///
-/// Run after lowering and before allocation. Running it twice can find more than running it once.
-/// Folding a `lea` into a second `lea` leaves that second one foldable in turn, and the walk below
-/// takes those in the one pass since it goes forwards. What it does not take in the one pass is the
-/// other order, where the second `lea` has a reader of its own and goes before the first one's set
-/// is complete, and that is a set the next run finds whole.
+/// Run after lowering and before allocation, and run once. Running it twice can find more than
+/// running it once in principle: folding a `lea` into a second `lea` leaves that second one foldable
+/// in turn, and the walk below takes those in the one pass since it goes forwards, but it does not
+/// take the other order, where the second `lea` has a reader of its own and goes before the first
+/// one's set is complete, and that is a set a second run would find whole.
+///
+/// Measured, it finds nothing. Running this to a fixed point is the same instruction count over the
+/// corpus at every level and one instruction more over the SQLite amalgamation, which is the
+/// allocator taking a different tie break somewhere rather than a fold. So the pipeline runs it once
+/// and this note is here so the next person to notice the same thing does not have to build it to
+/// find out.
 pub fn addresses(
     func: &mut mir::Func,
     insts: &FrameInsts,
@@ -390,14 +405,16 @@ fn touches(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> bool {
         .any(|operand| operand.reg == reg)
 }
 
-/// The register an instruction's memory operand reads as its base, when that is the whole of what
-/// its memory operand is.
+/// The register an instruction's memory operand reads as its base, when the rest of that operand
+/// leaves the composed address somewhere to go.
 ///
-/// A symbol or an index means the two addresses do not compose, and this is where both are turned
-/// down, because the reader is the half of the pair with no room left in it.
+/// A symbol of the reader's own means the two addresses do not compose, and this is where that is
+/// turned down, because the reader is then the half of the pair with no room left in it. An index
+/// of the reader's own is not turned down here, since whether there is room for it depends on the
+/// address as well, which is [`candidate`]'s question and not this one's.
 fn base_reg(func: &mir::Func, inst: mir::Inst) -> Option<mir::Reg> {
     let amode = func[func[inst].mem?];
-    if amode.index.is_some() || amode.symbol.is_some() || amode.reach != mir::Reach::Itself {
+    if amode.symbol.is_some() || amode.reach != mir::Reach::Itself {
         return None;
     }
     Some(func[func[inst].operands].get(usize::from(amode.base?))?.reg)
@@ -424,28 +441,54 @@ struct Folding {
 /// makes of the instruction.
 ///
 /// The operand vector is rebuilt rather than edited because the registers a memory operand names
-/// come last in it, which is the invariant [`mir::InstBuilder::mem`] keeps and the printer and the
-/// allocator both read. Dropping the base the reader had and putting the `lea`'s base and index on
-/// the end keeps it, and the indices in the new addressing mode are worked out from the length
-/// rather than carried over.
+/// come last in it, base and then index, which is the invariant [`mir::InstBuilder::mem`] keeps and
+/// the printer and the allocator both read. Dropping the ones the reader's own address named and
+/// putting the composed address's on the end keeps it, and the indices in the new addressing mode
+/// are worked out from the length rather than carried over.
 fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
     let base = base_reg(func, inst)?;
     let from = open.get(&base)?.from;
     let address = func[func[from].mem?];
-    // The reader holds the base in its last operand, and [`offer`] is what checks that nothing else
-    // in the same instruction names it. So the composed address is the `lea`'s with the reader's
-    // displacement added, and the only thing that can go wrong is the width of the field it goes
-    // in.
-    let disp = i64::from(address.disp) + i64::from(func[func[inst].mem?].disp);
-    let mut amode = mir::Amode { disp: i32::try_from(disp).ok()?, ..address };
-
+    let reading = func[func[inst].mem?];
     let taken = &func[func[from].operands];
     let reader = &func[func[inst].operands];
-    let mut operands = reader.get(..reader.len().checked_sub(1)?)?.to_vec();
-    for (at, into) in [(address.base, &mut amode.base), (address.index, &mut amode.index)] {
-        let Some(at) = at else { continue };
+    // The machine scales one register and the two addresses between them can want two, so this is
+    // where the second one is turned down. Whichever side the index came from decides what it is
+    // multiplied by, so the operand and the scale are carried together.
+    let scaled = match (address.index, reading.index) {
+        (Some(_), Some(_)) => return None,
+        (None, Some(_)) if address.symbol.is_some() => return None,
+        (Some(at), None) => Some((*taken.get(usize::from(at))?, address.scale)),
+        (None, Some(at)) => Some((*reader.get(usize::from(at))?, reading.scale)),
+        (None, None) => None,
+    };
+    // The composed address is the `lea`'s with the reader's displacement added and whichever index
+    // there is, and the only thing that can go wrong is the width of the field the displacement
+    // goes in. [`offer`] is what checks that nothing else in the reader names the base.
+    let disp = i64::from(address.disp) + i64::from(reading.disp);
+    let mut amode = mir::Amode {
+        disp: i32::try_from(disp).ok()?,
+        base: None,
+        index: None,
+        scale: scaled.map_or(1, |(_, scale)| scale),
+        ..address
+    };
+
+    let named = 1 + usize::from(reading.index.is_some());
+    let keeping = reader.len().checked_sub(named)?;
+    // The invariant read out loud, because dropping the wrong operands here would build an address
+    // out of whatever the reader was carrying for its own reasons.
+    if usize::from(reading.base?) != keeping {
+        return None;
+    }
+    let mut operands = reader.get(..keeping)?.to_vec();
+    if let Some(at) = address.base {
         operands.push(*taken.get(usize::from(at))?);
-        *into = Some(u8::try_from(operands.len() - 1).ok()?);
+        amode.base = Some(u8::try_from(operands.len() - 1).ok()?);
+    }
+    if let Some((operand, _)) = scaled {
+        operands.push(operand);
+        amode.index = Some(u8::try_from(operands.len() - 1).ok()?);
     }
     Some(Folding { into: inst, base, operands, amode })
 }
@@ -633,10 +676,11 @@ mod tests {
         }
     }
 
-    /// Three readers and the middle one has an index of its own. Folding into the other two would
-    /// leave the `lea` where it is for the third, so the address would be worked out twice rather
-    /// than once and the two folds would have bought nothing but a longer live range for what it
-    /// reads. All or nothing over the set means none of them.
+    /// Three readers of an indexed address and the middle one has an index of its own, which is the
+    /// pairing there is no room for. Folding into the other two would leave the `lea` where it is
+    /// for the third, so the address would be worked out twice rather than once and the two folds
+    /// would have bought nothing but a longer live range for what it reads. All or nothing over the
+    /// set means none of them.
     #[test]
     fn an_address_one_reader_cannot_take_is_folded_into_none_of_them() {
         let (mut names, mut func, block) = empty();
@@ -647,7 +691,11 @@ mod tests {
         let load = op(&mut names, "mov_rm_32");
         func.build(block, lea)
             .def(address, GPR)
-            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8)
+                    .plus(16),
+            )
             .finish();
         for at in 0..3 {
             let value = func.new_vreg(GPR);
@@ -872,10 +920,43 @@ mod tests {
         assert_eq!(disps, vec![20, 24], "the two loads are at the two composed offsets");
     }
 
-    /// The reader having an index of its own is the one shape that does not compose, since the
-    /// answer would want two scaled registers.
+    /// Both of them having an index is the one shape that does not compose, since the answer would
+    /// want two scaled registers.
     #[test]
-    fn a_reader_that_already_has_an_index_is_left_alone() {
+    fn an_index_on_each_side_is_left_alone() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let row = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(row, GPR), 8)
+                    .plus(16),
+            )
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// The reader having the only index there is between the two, which is `s.items[i]` on a local:
+    /// the `lea` works out where the object starts and the reader scales the subscript. The index
+    /// stays where it is and the base and the displacement arrive from the address.
+    #[test]
+    fn the_reader_s_own_index_is_kept_when_the_address_has_none() {
         let (mut names, mut func, block) = empty();
         let array = func.new_vreg(GPR);
         let index = func.new_vreg(GPR);
@@ -887,6 +968,72 @@ mod tests {
             .def(address, GPR)
             .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
             .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4)
+                    .plus(8),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
+        assert_eq!(left[0].1.disp, 24, "the field is at the sum of the two offsets or nowhere");
+        assert_eq!(
+            left[0].1.scale, 4,
+            "the scale is the reader's, since the index is the reader's"
+        );
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index], "the load reads the wrong pair");
+    }
+
+    /// A store whose own address is indexed, which is the same composition with an operand in front
+    /// of the address that the rebuilt vector has to hold on to.
+    #[test]
+    fn a_store_with_an_index_of_its_own_keeps_the_value_it_is_storing() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(4))
+            .finish();
+        func.build(block, store)
+            .uses(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 2),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let inst = func.insts(block).next().expect("the store is still there");
+        let regs: Vec<mir::Reg> = func[func[inst].operands].iter().map(|op| op.reg).collect();
+        assert_eq!(regs, vec![value, array, index], "the value the store writes went missing");
+        let amode = func[func[inst].mem.expect("a memory operand")];
+        assert_eq!((amode.scale, amode.disp), (2, 4));
+    }
+
+    /// An address relative to a symbol, read by an instruction with an index of its own. The symbol
+    /// is in the place the base would go, so the composed address would be a symbol and a scaled
+    /// register with nothing to be relative to, and there is no such address.
+    #[test]
+    fn a_symbol_is_not_composed_with_a_reader_s_index() {
+        let (mut names, mut func, block) = empty();
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(names.intern("table"))).finish();
         func.build(block, load)
             .def(value, GPR)
             .mem(
