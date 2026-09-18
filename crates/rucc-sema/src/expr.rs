@@ -447,6 +447,36 @@ pub enum ExprKind {
         /// How many bytes to take, which is the only argument.
         size: ExprId,
     },
+    /// `__builtin_setjmp(buf)` and `__builtin_longjmp(buf, 1)`, which save a place in this
+    /// function and come back to it.
+    ///
+    /// One node for both because the two are two ends of one thing and neither means anything
+    /// without the other, which is the reason [`ExprKind::FrameAddress`] is one node for two
+    /// builtins. Neither is a call: the buffer is five words rather than a `jmp_buf`, the pair
+    /// puts a requirement on the function they are written in that no library function could,
+    /// and there is nothing of either name for a call to reach.
+    ///
+    /// The value the save answers is zero where control went past it and one where control came
+    /// back to it, which is the one node in the tree whose value depends on how control got to
+    /// it. See `check/builtin/jump.rs`.
+    Jump {
+        /// Which of the two ends this is.
+        ask: JumpAsk,
+        /// The buffer, which is the first argument of both.
+        buffer: ExprId,
+    },
+}
+
+/// Which end of the jump pair a node is.
+///
+/// The buffer is the same buffer and the two are written against each other, which is why they are
+/// one node with a question rather than two nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpAsk {
+    /// `__builtin_setjmp`, which writes the place down and answers zero.
+    Save,
+    /// `__builtin_longjmp`, which reads it back and goes there, and never answers at all.
+    Restore,
 }
 
 /// Which of the two things about a frame one of the address builtins asks for.

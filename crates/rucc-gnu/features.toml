@@ -1087,6 +1087,26 @@ tests = ["rucc-driver::an_alloca_takes_the_bytes_off_the_stack_pointer_and_answe
 notes = "The stack pointer moved down by the size rounded up to sixteen, which is the same instruction a variable length array is and a different promise about how long the bytes last: these live until the function returns and an array lives until the end of its block. That is what an alloca in a loop means and it is the whole reason to write one. The lowering keeps the promise by taking every scope open where the call was written out of the business of restoring the stack pointer, which is what gcc 16.2.0 at -O0 does, measured rather than read off the manual. The signature is kept because the call is checked against it and is where the conversion of the argument to a size_t comes from, and the node is put in its place after that in check/builtin/alloca.rs. The alignment of the answer is sixteen because the builtin says nothing about what the bytes will hold, so the only safe answer is one that suits every type the target has. The plain name alloca means this too, under the rule the absolute value family is answered by: only where the callee is a function with external linkage declared with exactly the type the C library gives it, and not under -fno-builtin or -ffreestanding. gcc expands the plain name inline as well, and gcc.c-torture/execute/20010122-1.c is a program that would fail to link if it did not."
 
 [[feature]]
+name = "__builtin_setjmp"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "int(void *)"
+used_by = []
+tests = ["rucc-driver::the_pair_that_saves_a_place_lowers_to_the_two_markers"]
+notes = "Writes down where this function is and answers zero, and answers one where control came back to it through a __builtin_longjmp over the same buffer. Not the library's setjmp: there is no function of the name to call, the buffer is five words rather than a jmp_buf, and nothing about the signal mask is promised either way. The buffer holds the frame pointer, the address to come back to, and the stack pointer, which is the shape gcc 16.2.0 writes at -O0, measured rather than read off the manual. It lowers to one setjmp_marker rather than to a branch and a block, because the edge a longjmp travels is not an edge of this function and a block standing where control comes back would be a block nothing reaches. What is not done yet is the code generation and the rule that nothing live across one stays in a register, which is tamnd/rucc#223."
+
+[[feature]]
+name = "__builtin_longjmp"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "void(void *, int)"
+used_by = []
+tests = ["rucc-driver::the_pair_that_saves_a_place_lowers_to_the_two_markers", "rucc-driver::a_longjmp_whose_second_argument_is_not_one_is_turned_down"]
+notes = "Reads a buffer a __builtin_setjmp wrote and goes back there, and never comes back. The second argument has to be the constant 1 and is a place-holder: this pair does not carry a value back the way the library's longjmp does, since what the matching save answers is decided by which way control reached it, and gcc 16.2.0 refuses every other value with the same sentence check/builtin/jump.rs reports under E0710. It lowers to one longjmp_marker, which is not a terminator, so what follows it is written and never reached. The code generation is tamnd/rucc#223."
+
+[[feature]]
 name = "__builtin_va_list"
 kind = "builtin"
 gcc_version = "2.0"

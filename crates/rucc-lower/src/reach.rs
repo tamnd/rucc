@@ -212,6 +212,7 @@ impl Reach<'_> {
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
             | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::Jump { buffer: base, .. }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

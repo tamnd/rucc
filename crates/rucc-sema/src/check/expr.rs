@@ -678,6 +678,12 @@ impl Checker<'_> {
         if let Some(value) = self.alloca_builtin(callee, function, &args, signature.ret, span) {
             return value;
         }
+        // The pair that saves a place in this function and comes back to it, which is not a call
+        // and not the library's `setjmp` either. In `check/builtin/jump.rs`, with why the two ends
+        // are one node and why the second argument of the restore has only one allowed value.
+        if let Some(value) = self.jump_builtin(function, &args, signature.ret, span) {
+            return value;
+        }
         // Where the running thread's own storage starts, which is a register read and not a call
         // to anything. In `check/builtin/thread.rs`, with what a program writes one for.
         if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {
