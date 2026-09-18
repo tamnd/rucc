@@ -287,6 +287,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 builtins: opts.builtins && opts.hosted,
                 no_builtin: &opts.no_builtin,
                 short_enums: opts.short_enums,
+                ms_extensions: sess.ms_extensions(),
                 trapping_math: opts.trapping_math,
             },
         );
@@ -2206,6 +2207,38 @@ decl #0 x : int object external static defined
         let windows = run(&opts, "int f(int a) { return a; }\n").text().to_owned();
         assert!(windows.contains("$rcx"), "{windows}");
         assert!(!windows.contains("$rdi"), "{windows}");
+    }
+
+    /// And it reaches the front end, where it decides what an anonymous member is.
+    ///
+    /// This is the shape `<objidl.h>` writes and the Windows headers are full of: the union inside
+    /// `STGMEDIUM` closes with `} DUMMYUNIONNAME;`, and the macro expands to nothing unless the
+    /// program defined `NONAMELESSUNION`, so what is left is a union with a tag and no name. On a
+    /// Windows target that is an anonymous member, and reading it as a declaration of nothing
+    /// drops it, which loses the names and the eight bytes the member takes up both.
+    #[test]
+    fn a_tagged_member_with_no_name_is_a_member_on_windows_and_nothing_on_linux() {
+        let source = concat!(
+            "struct S { union U { int i; void *p; }; unsigned long tymed; };\n",
+            "int size(void) { return sizeof(struct S); }\n",
+            "int f(struct S *s) { s->i = 1; return s->i; }\n",
+        );
+
+        let mut opts = options();
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        let windows = run(&opts, source);
+        assert!(windows.messages.is_empty(), "{:?}", windows.messages);
+
+        let linux = run(&options(), source);
+        assert_eq!(linux.messages.len(), 3, "{:?}", linux.messages);
+        assert!(linux.messages[0].contains("does not declare anything"), "{:?}", linux.messages);
+
+        // And the flag answers for either of them, so a program built for Linux against a header
+        // written for Windows can be read the way the header meant it.
+        let mut opts = options();
+        opts.ms_extensions = Some(true);
+        let asked = run(&opts, source);
+        assert!(asked.messages.is_empty(), "{:?}", asked.messages);
     }
 
     /// A target with no back end says so rather than generating something for another machine.

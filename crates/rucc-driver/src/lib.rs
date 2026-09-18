@@ -863,6 +863,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // the ABI rather than the code.
             "-fshort-enums" => opts.short_enums = true,
             "-fno-short-enums" => opts.short_enums = false,
+            // And Microsoft's reading of an anonymous member, which changes the layout of every
+            // record that writes a tag on one. Nothing is set until one of them is given, because
+            // the target is the answer otherwise: gcc's mingw build has this on and its Linux
+            // build has it off.
+            "-fms-extensions" => opts.ms_extensions = Some(true),
+            "-fno-ms-extensions" => opts.ms_extensions = Some(false),
             // And the request, which is the one that cannot be granted. It is a real difference and
             // not a preference: two files each writing `int g;` link under `-fcommon` and are a
             // duplicate definition without it, which is the whole reason the flag survives.
@@ -4707,6 +4713,26 @@ mod tests {
 
         let (opts, _) = compile(&["-c", "-fno-short-enums", "-fshort-enums", "a.c"]);
         assert!(opts.short_enums);
+    }
+
+    /// And Microsoft's reading of an anonymous member, which the target answers where the command
+    /// line said nothing. gcc's mingw build has it on and its Linux build has it off, so a header
+    /// that closes a nameless union with a macro that expands to nothing is read the way the
+    /// compiler that platform ships would read it.
+    #[test]
+    fn the_microsoft_reading_of_a_member_follows_the_target_until_it_is_asked_for() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!Session::new(*opts).ms_extensions());
+
+        let (opts, _) = compile(&["-c", "--target=x86_64-pc-windows-gnu", "a.c"]);
+        assert!(Session::new(*opts).ms_extensions());
+
+        let (opts, _) = compile(&["-c", "-fms-extensions", "a.c"]);
+        assert!(Session::new(*opts).ms_extensions());
+
+        let (opts, _) =
+            compile(&["-c", "--target=x86_64-pc-windows-gnu", "-fno-ms-extensions", "a.c"]);
+        assert!(!Session::new(*opts).ms_extensions());
     }
 
     /// And a value nothing means is refused rather than taken for the nearest thing it looks like.
