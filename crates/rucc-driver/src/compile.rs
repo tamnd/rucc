@@ -1633,6 +1633,73 @@ decl #0 x : int object external static defined
         assert!(!nested.contains(", align 4,"), "{nested}");
     }
 
+    /// The other way an access gets an alignment its type would not have given it, which is a
+    /// typedef that lowered one.
+    ///
+    /// `aligned` raises on a declaration and replaces on a typedef, so `typedef aligned(1) U32
+    /// unalign32` really is a four byte integer that may sit anywhere. Reading a word out of a
+    /// buffer nothing aligned is what every compression library does and this is how they write
+    /// it: zstd's `lib/common/mem.h` is four typedefs of exactly this shape and `MEM_read32` is
+    /// `*(const unalign32 *)ptr`.
+    ///
+    /// What made this worth a test is where it went wrong. `__alignof__` was right the whole time,
+    /// because that asks about the type and the type knew. The access was wrong, because the type
+    /// of `*p` was worked out by resolving every typedef in `p`'s type rather than only the one on
+    /// the pointer, so the thing being read came back as the `unsigned int` the typedef stands for
+    /// and the alignment came off that. The number on the access is what judgement J1 tests, so
+    /// the monitor refused fifty six of zstd's reads, all of them correct.
+    #[test]
+    fn an_access_through_a_typedef_that_lowered_its_alignment_says_the_one_the_typedef_asked_for() {
+        let through = body(concat!(
+            "typedef __attribute__((aligned(1))) unsigned int unalign32;\n",
+            "unsigned int f(const void *p) { return *(const unalign32 *)p; }\n",
+        ));
+        assert!(through.contains("load.i32 %0, align 1,"), "{through}");
+        // A subscript is `*(p + i)` and a member through an arrow is a dereference and then an
+        // offset, so both read the pointee the same way and both have to come out the same.
+        let stepped = body(concat!(
+            "typedef __attribute__((aligned(1))) unsigned int unalign32;\n",
+            "unsigned int f(unalign32 *p, int i) { return p[i]; }\n",
+        ));
+        assert!(stepped.contains(", align 1,"), "{stepped}");
+        assert!(!stepped.contains(", align 4,"), "{stepped}");
+        // And the same typedef without the attribute, which is where the type's own answer is the
+        // right one and nothing above should have changed it.
+        let plain = body(concat!(
+            "typedef unsigned int word;\n",
+            "unsigned int f(const void *p) { return *(const word *)p; }\n",
+        ));
+        assert!(plain.contains("load.i32 %0, align 4,"), "{plain}");
+    }
+
+    /// The same thing where the object does not fit in a register, which is what `_mm_loadu_si128`
+    /// is and is the reason the intrinsic header exists at all.
+    ///
+    /// `__m128i_u` is `__m128i` with `aligned(1)` on it and `_mm_loadu_si128` is one line,
+    /// `return *(const __m128i_u *)__p;`. Two things had to be right for that to come out as the
+    /// unaligned read it is. The dereference has to keep the typedef, which is what the test above
+    /// covers, and then the return has to read the object as aligned as the object is rather than
+    /// as aligned as the type it is being returned as: a vector comes back in registers on this
+    /// ABI, so the sixteen bytes are read as two pieces of eight and the ABI's own alignment is
+    /// what lays the two pieces out rather than what either read may claim.
+    #[test]
+    fn a_vector_read_through_a_typedef_that_lowered_its_alignment_comes_back_a_piece_at_a_time() {
+        let prefix = concat!(
+            "typedef long long v2di __attribute__((__vector_size__(16)));\n",
+            "typedef long long v2di_u __attribute__((__vector_size__(16), __aligned__(1)));\n",
+        );
+        let loaded = body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"));
+        assert_eq!(loaded.matches("align 1\n").count(), 2, "{loaded}");
+        assert!(!loaded.contains("align 16"), "{loaded}");
+        // The store side, which travels as a copy into whatever the pointer names and so carries
+        // one number for both ends of it.
+        let stored = body(&format!("{prefix}void f(void *p, v2di b) {{ *(v2di_u *)p = b; }}"));
+        assert!(stored.contains("memcpy %0, %3, size 16, align 1"), "{stored}");
+        // And the aligned spelling of the same two, which is where sixteen is the right answer.
+        let aligned = body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"));
+        assert!(aligned.contains("align 16"), "{aligned}");
+    }
+
     /// The same attribute on a declaration rather than on a type, which asks that this object or
     /// this function be at a multiple of that, and which is where a program that has to hand a
     /// buffer to hardware or keep two counters off one cache line writes it.

@@ -124,6 +124,34 @@ pub fn pointee(types: &Types, id: TypeId) -> Option<TypeId> {
     }
 }
 
+/// The same, with whatever the pointee was written as still on it.
+///
+/// [`pointee`] answers through [`Types::canonical`], which resolves every typedef in the whole
+/// type and not only the one on the pointer, so a `u1 *` where `u1` is a typedef comes back as
+/// what `u1` stands for. That is the right answer for every question about what kind of thing is
+/// being pointed at and the wrong one for the two questions a typedef can change the answer to:
+/// how aligned an object of it is, which `__attribute__((aligned))` on a typedef sets rather than
+/// raises, and how a diagnostic spells the type.
+///
+/// So this resolves the sugar on the pointer and stops there. `*p` has the type the pointee was
+/// declared with, which is what makes `*(const unalign32 *)p` a one byte aligned read of four
+/// bytes: zlib, zstd and every other library that reads an unaligned word writes exactly that,
+/// and without this the read is a four byte aligned one and the safety monitor refuses it.
+#[must_use]
+pub fn pointee_as_written(types: &Types, id: TypeId) -> Option<TypeId> {
+    let mut id = id;
+    loop {
+        match types.kind(id) {
+            TypeKind::Pointer(inner) => return Some(inner),
+            // The two shapes that can sit over a pointer without being one. An `_Atomic` pointer
+            // is a pointer to whatever it was written over, and a typedef stands for what it was
+            // declared as, which may be another typedef.
+            TypeKind::Typedef { underlying, .. } | TypeKind::Atomic(underlying) => id = underlying,
+            _ => return None,
+        }
+    }
+}
+
 /// An array type.
 #[must_use]
 pub fn is_array(types: &Types, id: TypeId) -> bool {
