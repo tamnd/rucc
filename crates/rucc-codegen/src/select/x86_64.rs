@@ -372,6 +372,29 @@ mod tests {
     /// what libgmp does in `gmp-impl.h` to put a limb the other way round.
     const SWAP: &[&str] = &["bswap_32", "bswap_64"];
 
+    /// The multiply that keeps both halves of its product, which a template asks for and nothing
+    /// else does.
+    ///
+    /// A third reason again, and the plainest of the three. A search is unselected because its
+    /// answer depends on the processor and a reversal because a choice was made to build one out of
+    /// arithmetic. This one is unselected because there is nothing in the IR to select it from: a
+    /// multiply in C takes two values of a type and produces a value of that type, so the term a
+    /// rule would match on is the narrow product, and the wide product is not a term at all. A rule
+    /// that fired on the narrow one and wrote this would be writing an instruction that computes
+    /// twice as much as was asked for and leaves the rest in a register nobody asked about.
+    ///
+    /// So the only thing that reaches one is a program that wrote the name in a template, which is
+    /// what `umul_ppmm` in libgmp's `longlong.h` does, and what every library that is building
+    /// arithmetic out of limbs does somewhere.
+    const WIDE: &[&str] = &[
+        "mul_wide_16",
+        "mul_wide_32",
+        "mul_wide_64",
+        "imul_wide_16",
+        "imul_wide_32",
+        "imul_wide_64",
+    ];
+
     /// The instructions that produce two values, which is one more than a rule can name.
     ///
     /// A rule replaces a term with a term, and a term is the value one instruction computes. A
@@ -693,7 +716,7 @@ mod tests {
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
                 continue;
             }
-            if SEARCH.contains(&opcode) || SWAP.contains(&opcode) {
+            if SEARCH.contains(&opcode) || SWAP.contains(&opcode) || WIDE.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {
@@ -813,6 +836,36 @@ mod tests {
         for &(opcode, form) in x86_64::INSTS {
             if form == x86_64::Form::Swap {
                 assert!(SWAP.contains(&opcode), "{opcode} is a reversal and is not on the list");
+            }
+        }
+    }
+
+    /// The same claim about the widening multiply, read both ways round and with the thing that puts
+    /// it out of reach of a rule checked rather than asserted in prose: it writes two registers, and
+    /// a rule replaces a term with a term, so there is no way to say the second answer in the rule
+    /// language at all. That is the same bar the compare and exchange is exempt at, and this list is
+    /// separate from that one because the reason it is nobody's to select is different: an atomic is
+    /// written by name where it is needed, and nothing in this compiler needs one of these.
+    #[test]
+    fn every_instruction_exempt_from_a_rule_because_only_a_template_wants_both_halves_writes_two() {
+        let written = heads();
+        for &opcode in WIDE {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert_eq!(form, x86_64::Form::MulWide, "{opcode} is not a widening multiply");
+            let defs = form.operands().iter().filter(|desc| desc.role.is_def()).count();
+            assert_eq!(defs, 2, "{opcode} writes {defs} registers and a wide product takes two");
+            assert!(
+                !written.contains(&format!("{PREFIX}{opcode}").as_str()),
+                "a rule in {} selects {opcode}, which only a template asks for",
+                TABLE.source
+            );
+        }
+        for &(opcode, form) in x86_64::INSTS {
+            if form == x86_64::Form::MulWide {
+                assert!(
+                    WIDE.contains(&opcode),
+                    "{opcode} is a wide multiply and is not on the list"
+                );
             }
         }
     }

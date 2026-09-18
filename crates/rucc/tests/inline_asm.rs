@@ -194,6 +194,33 @@ fn a_byte_reversal_in_a_template_is_the_one_instruction_that_does_it() {
 }
 
 #[test]
+fn a_multiply_that_keeps_both_halves_reads_the_operand_a_number_tied_to_its_output() {
+    // `umul_ppmm` out of libgmp's `longlong.h`, which is how the library multiplies two limbs and
+    // keeps all hundred and twenty eight bits of the answer. Written exactly as the header writes
+    // it, matching constraint and all: the low half comes back in `rax`, the high half in `rdx`,
+    // and one of the multiplicands has to be in `rax` on the way in, which the program says by
+    // tying it to the output that is already there rather than by naming the register twice.
+    //
+    // So the instruction reads a register whose text names nothing, and the thing that says what is
+    // in it is a constraint on one operand and a number on another. Reading only the letter would
+    // find an output with no value to read and give up, and what a template gets when nothing is
+    // found is a register of its own with a zero put in it, which is a library that multiplies
+    // every pair of limbs to nothing.
+    let source = "\
+unsigned long f(unsigned long a, unsigned long b, unsigned long *hi) {
+  unsigned long low, high;
+  asm (\"mulq %3\" : \"=a\" (low), \"=d\" (high) : \"%0\" (a), \"rm\" (b));
+  *hi = high;
+  return low;
+}
+";
+    let body = body(&asm("umul-ppmm", source), "f");
+    assert!(body.contains("mulq"), "the multiply never reached the listing:\n{body}");
+    assert!(!body.contains("imulq"), "the unsigned multiply became the signed one:\n{body}");
+    assert!(!body.contains("$0"), "a multiplicand was zeroed rather than read:\n{body}");
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong

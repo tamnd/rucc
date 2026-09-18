@@ -139,6 +139,13 @@ fn plain(form: Form) -> Timing {
         // the load is the part there is not.
         CmpRm => (1 + LOAD, Unit::Load),
         CmpSetRm => (2 + LOAD, Unit::Load),
+        // The multiply that keeps both halves of its product, on the one multiplier. Four cycles
+        // rather than the three a multiply that keeps the low half costs, because the high half is
+        // a cycle behind the low one on every core in this family and the number here is what
+        // something waiting on the instruction waits for. A program that asks for both halves is
+        // waiting on the later of them, which is what makes four the honest answer rather than the
+        // pessimistic one.
+        MulWide => (4, Unit::Mul),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
         DivQuo | DivRem => (26, Unit::Div),
@@ -220,7 +227,11 @@ fn slow(name: &str, form: Form) -> Option<Timing> {
         // An integer multiply, on the one multiplier. Three cycles at every width this target
         // writes one at, including the eight bit one, which is written as a thirty two bit
         // multiply and so costs what that costs.
-        "imul" => Some(Timing {
+        //
+        // Not the signed multiply that keeps both halves, which shares this stem and is a cycle
+        // slower. Its number is on its form in `plain`, beside the unsigned one, so that the two
+        // spellings of one instruction do not get two different answers.
+        "imul" if form != Form::MulWide => Some(Timing {
             latency: if form == Form::AluRm { 3 + LOAD } else { 3 },
             unit: Unit::Mul,
         }),
