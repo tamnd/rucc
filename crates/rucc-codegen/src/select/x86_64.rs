@@ -507,7 +507,9 @@ mod tests {
     /// at length.
     fn combine() -> Vec<&'static str> {
         let loads = crate::combine::FOLDS.iter().map(|fold| fold.into);
-        loads.chain(crate::combine::UPDATES.iter().map(|update| update.into)).collect()
+        let stores = crate::combine::UPDATES.iter().map(|update| update.into);
+        let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
+        loads.chain(stores).chain(constants).collect()
     }
 
     #[test]
@@ -603,6 +605,28 @@ mod tests {
     #[test]
     fn the_instruction_a_computed_goto_is_exempt_for_is_the_one_the_target_names() {
         assert_eq!(LABELS, [x86_64::BRANCH.indirect]);
+    }
+
+    /// The rows of the constant table that take nothing yet are exactly the narrow ones waiting on
+    /// the width narrowing, so the day `NARROW` shrinks is the day this says so.
+    ///
+    /// `crate::combine::BUMPS` has a row per instruction this machine has, which is the whole five
+    /// operations at the whole four widths. Four of those instructions arrive out of a rule that is
+    /// not written yet, so four of the rows sit there taking nothing. That is a fact worth holding
+    /// rather than a thing to notice again later.
+    #[test]
+    fn the_constant_runs_that_take_nothing_are_the_ones_no_rule_selects_yet() {
+        let written = heads();
+        let mut waiting = Vec::new();
+        for bump in crate::combine::BUMPS {
+            if !written.contains(&format!("{PREFIX}{}", bump.from).as_str()) {
+                waiting.push(bump.from);
+            }
+        }
+        assert_eq!(waiting, ["or_ri_8", "or_ri_16", "xor_ri_8", "xor_ri_16"]);
+        for from in waiting {
+            assert!(NARROW.contains(&from), "{from} is unselected and is not on the list");
+        }
     }
 
     #[test]
