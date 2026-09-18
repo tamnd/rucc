@@ -523,12 +523,6 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // declarations with `#ifndef WINNT`, so a compiler that leaves it undefined
             // preprocesses `windows.h` to a different set of functions than gcc does, which is
             // what the token comparison against a real mingw install found.
-            //
-            // One gcc defines that is deliberately not here is `__SEH__`. mingw's `setjmp.h`
-            // reads it to choose the two argument `_setjmp`, whose second argument is
-            // `__builtin_frame_address(0)`, and that builtin is not lowered for a Windows frame
-            // yet: defining the macro turns every `setjmp` on this target into E0653. It goes in
-            // with the lowering rather than before it.
             d.flag("_WIN32");
             d.flag("__WIN32");
             d.flag("__WIN32__");
@@ -542,6 +536,20 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 d.flag("__WIN64");
                 d.flag("__WIN64__");
                 d.flag("__MINGW64__");
+            }
+            // Which kind of exception machinery the platform has, and on this one there is only
+            // the one: a table the operating system reads rather than anything the prologue
+            // registers. mingw's `setjmp.h` reads this to choose the two argument `_setjmp`,
+            // whose second argument is `__builtin_frame_address(0)` and becomes the frame
+            // `longjmp` asks `RtlUnwindEx` to unwind to. That is the same address the function's
+            // own unwind record reports, because the record names the frame pointer with an
+            // offset of zero and the prologue leaves the pointer holding the body's stack
+            // pointer, so the number the builtin answers with and the number the walk arrives at
+            // are the same number by construction. Only for the architecture whose records this
+            // compiler writes: x86_64-w64-mingw32-gcc defines it and i686-w64-mingw32-gcc does
+            // not, because a thirty two bit Windows unwinds some other way.
+            if triple.arch == Arch::X86_64 && target.pointer_width == 64 {
+                d.flag("__SEH__");
             }
             // Which C runtime the headers are configured for. The sysroot this compiler fetches
             // is built `--with-default-msvcrt=msvcrt` to match the link line, which names
@@ -1850,29 +1858,27 @@ mod tests {
         // WINNT` and `rpcdcep.h` guards six `I_Rpc` declarations with `#ifndef WINNT`.
         let windows = set_for("x86_64-pc-windows-gnu");
         let every = "_WIN32 __WIN32 __WIN32__ __WINNT __WINNT__ __MINGW32__ \
-                     _WIN64 __WIN64 __WIN64__ __MINGW64__ __MSVCRT__ WIN32 WIN64 WINNT";
+                     _WIN64 __WIN64 __WIN64__ __MINGW64__ __MSVCRT__ __SEH__ WIN32 WIN64 WINNT";
         for name in every.split_whitespace() {
             assert!(has(&windows, &format!("#define {name} 1")), "no {name}");
         }
         assert!(has(&windows, "#define _INTEGRAL_MAX_BITS 64"));
-        // `__SEH__` is gcc's and is deliberately not ours yet, because mingw's `setjmp.h` reads
-        // it to reach a `_setjmp` whose second argument is `__builtin_frame_address(0)`, which
-        // has no lowering for a Windows frame.
-        assert!(!has(&windows, "#define __SEH__ 1"));
     }
 
     #[test]
     fn a_thirty_two_bit_windows_is_not_told_its_pointer_is_sixty_four_bits_wide() {
         // `_WIN64` is about the pointer rather than the processor, and i686-w64-mingw32-gcc
-        // defines neither it nor `__MINGW64__`. The target is made by hand because the three
-        // field triple has no 32-bit row yet, so `i686-windows-gnu` predefines nothing at all
-        // and there is no other way to reach this arm.
+        // defines neither it nor `__MINGW64__`, nor `__SEH__`, since the unwind records this
+        // compiler writes are the sixty four bit format and a thirty two bit Windows unwinds
+        // some other way. The target is made by hand because the three field triple has no
+        // 32-bit row yet, so `i686-windows-gnu` predefines nothing at all and there is no other
+        // way to reach this arm.
         let mut target = TargetInfo::new("x86_64-pc-windows-gnu".parse().expect("a triple"));
         target.pointer_width = 32;
         let windows = built_in(&target, &Predef::new());
         assert!(has(&windows, "#define _WIN32 1"));
         assert!(has(&windows, "#define __MINGW32__ 1"));
-        for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "WIN64"] {
+        for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "__SEH__", "WIN64"] {
             assert!(!has(&windows, &format!("#define {name} 1")), "{name} on a 32 bit target");
         }
     }
