@@ -150,6 +150,29 @@ fn the_architecture_specific_headers_are_searched_before_the_generic_ones() {
 }
 
 #[test]
+fn a_windows_sysroot_searches_one_directory_because_mingw_has_no_per_architecture_half() {
+    // Measured rather than assumed. Installing mingw-w64 14.0.0's headers for `x86_64-w64-mingw32`,
+    // `i686-w64-mingw32` and `aarch64-w64-mingw32` gives three trees of 1702 files that `diff -rq`
+    // finds no difference between, because a Windows header branches on the API level the program
+    // asked for with `_WIN32_WINNT` rather than on the machine it is compiled for. tamnd/rucc#1360.
+    let cache = Path::new("/cache");
+    for tuple in ["x86_64-windows-gnu", "i686-windows-gnu", "aarch64-windows-gnu"] {
+        let sysroot = Sysroot::in_cache(cache, target(tuple));
+        assert!(!sysroot.splits_by_arch(), "{tuple}");
+        let includes = sysroot.includes();
+        assert_eq!(includes, vec![sysroot.generic_include()], "{tuple}");
+        assert!(includes[0].ends_with("include/generic"));
+    }
+
+    // And every other target still has both, so this is one libc's layout rather than a change to
+    // the model. An msvc target is behind the microsoft-sdk wall and never reads a tree of ours at
+    // all, which is why it is not the interesting case either way.
+    let linux = Sysroot::in_cache(cache, target("x86_64-linux-gnu"));
+    assert!(linux.splits_by_arch());
+    assert_eq!(linux.includes().len(), 2);
+}
+
+#[test]
 fn everything_is_under_the_root_and_nothing_is_absolute_from_somewhere_else() {
     // A sysroot that reached outside its own directory would be a cache entry that could not be
     // deleted, moved or copied, and the cache in `spec/cross-compile/13-distribution.md` does all
