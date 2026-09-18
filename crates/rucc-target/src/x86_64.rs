@@ -424,7 +424,9 @@ pub static FLAGS: FlagInsts = FlagInsts {
 /// machine: a move, an address computation, a load, a store, a conversion between widths, a
 /// constant into a register, a push, a pop, a `setcc` and a `cmovcc` are the instructions Intel's
 /// description of each says nothing about the flags in, and the vector unit's arithmetic writes its
-/// own status word rather than this one. The last two read the state and leave it alone, which is
+/// own status word rather than this one. A byte reversal is on the list for the same reason and is
+/// the only one on it that computes something: it is the one instruction on this machine that takes
+/// a register apart and puts it back and still says nothing about the state. The last two read the state and leave it alone, which is
 /// what puts them in this list and in the one below it both. An alignment is here for a reason none
 /// of the others is: it is not an instruction, so there is nothing for it to have done to the state.
 /// Everything else writes them, and so does every name this target does
@@ -450,6 +452,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Nop
             | Form::Align
             | Form::Landing
+            | Form::Swap
             | Form::Prefetch
             | Form::RetVal
             | Form::RetVal2

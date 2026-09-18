@@ -183,6 +183,17 @@ fn a_repeat_prefix_in_front_of_a_bit_search_is_the_count_and_not_the_search() {
 }
 
 #[test]
+fn a_byte_reversal_in_a_template_is_the_one_instruction_that_does_it() {
+    // What libgmp writes in `gmp-impl.h` to put a limb the other way round. Nothing in this compiler
+    // selects the instruction, because a byte reversal is built out of shifts and masks so that
+    // every target gives the same answer, so the only way to reach it is to name it.
+    let source = "long f(long x) { asm (\"bswap %q0\" : \"+r\" (x)); return x; }\n";
+    let body = body(&asm("bswap", source), "f");
+    assert!(body.contains("bswapq"), "the reversal never reached the listing:\n{body}");
+    assert!(!body.contains("shrq"), "the template was built out of shifts instead:\n{body}");
+}
+
+#[test]
 fn a_template_this_cannot_place_still_says_what_is_missing() {
     // Refused rather than dropped. A template nothing here can place is a program this compiler
     // cannot build, and a template quietly left out is a program that builds and does the wrong
