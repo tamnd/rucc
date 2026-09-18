@@ -522,6 +522,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("_WIN64");
             d.flag("__WIN64__");
             d.flag("__MINGW32__");
+            windows_spellings(d, opts);
         }
         Os::None => {
             // Freestanding. `__ELF__` still holds, because the object format is a property of
@@ -581,6 +582,36 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__pie__", "2");
         }
     }
+}
+
+/// The five spellings a Windows header writes a calling convention and an attribute in.
+///
+/// `int __cdecl f(void);` is the second declaration in mingw-w64's `stdio.h` and it stops a parser
+/// that has never heard of `__cdecl`, which reads it as the name being declared and then finds a
+/// second one. None of the five is a keyword, though: gcc defines every one of them as a macro over
+/// the GNU spelling of the same thing, which is why they are keywords on Windows and nowhere else
+/// without anything in its lexer being told what the target is. `-dM -E` on a mingw-w64 gcc prints
+/// exactly the lines below.
+///
+/// `__declspec(x)` being the GNU spelling of its argument is the part worth saying out loud, since
+/// it means `__declspec(dllimport)` and `__attribute__((dllimport))` cannot come to mean different
+/// things: there is one attribute and two ways of writing it, and everything that reads attributes
+/// reads both.
+///
+/// On x86-64 all four conventions name the one convention the target has, so the attributes go
+/// where every attribute nothing implements goes, which is left on the declaration. On i386 they
+/// differ over who pops the arguments and the choice is written into the symbol name, which is
+/// document 06.5 and is that target's work when there is one.
+fn windows_spellings(d: &mut Defs, opts: &Predef) {
+    for name in ["cdecl", "stdcall", "fastcall", "thiscall"] {
+        d.set(&format!("__{name}"), &format!("__attribute__((__{name}__))"));
+        // The single underscore spellings are not in the reserved namespace, so an implementation
+        // may not take them in a strict ISO mode and gcc does not.
+        if opts.gnu_extensions {
+            d.set(&format!("_{name}"), &format!("__attribute__((__{name}__))"));
+        }
+    }
+    d.set("__declspec(x)", "__attribute__((x))");
 }
 
 /// `__CHAR_BIT__`, the `__SIZEOF_*__` family and the alignment macros.
@@ -1172,6 +1203,34 @@ mod tests {
         assert!(has(&linux, "#define __SIZE_TYPE__ long unsigned int"));
         assert!(has(&linux, "#define __INT64_TYPE__ long int"));
         assert!(has(&linux, "#define __LP64__ 1"));
+    }
+
+    #[test]
+    fn windows_spells_a_calling_convention_and_an_attribute_as_macros() {
+        // The second declaration in mingw-w64's stdio.h is `int __cdecl __mingw_sscanf(...)`, so
+        // a Windows target where these are missing reads no header at all.
+        let windows = set_for("x86_64-pc-windows-gnu");
+        assert!(has(&windows, "#define __cdecl __attribute__((__cdecl__))"));
+        assert!(has(&windows, "#define __stdcall __attribute__((__stdcall__))"));
+        assert!(has(&windows, "#define __fastcall __attribute__((__fastcall__))"));
+        assert!(has(&windows, "#define __thiscall __attribute__((__thiscall__))"));
+        assert!(has(&windows, "#define _cdecl __attribute__((__cdecl__))"));
+        assert!(has(&windows, "#define __declspec(x) __attribute__((x))"));
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(!has(&linux, "#define __cdecl __attribute__((__cdecl__))"));
+        assert!(!has(&linux, "#define __declspec(x) __attribute__((x))"));
+    }
+
+    #[test]
+    fn a_strict_mode_keeps_the_spellings_that_are_not_the_implementations_to_take() {
+        // `_cdecl` is a name a program may use and `__cdecl` is not, so gcc defines the first
+        // only where the extensions are on and the second everywhere.
+        let mut opts = Predef::new();
+        opts.gnu_extensions = false;
+        let triple: Triple = "x86_64-pc-windows-gnu".parse().expect("a triple");
+        let strict = built_in(&TargetInfo::new(triple), &opts);
+        assert!(has(&strict, "#define __cdecl __attribute__((__cdecl__))"));
+        assert!(!has(&strict, "#define _cdecl __attribute__((__cdecl__))"));
     }
 
     #[test]
