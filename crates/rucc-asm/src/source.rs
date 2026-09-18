@@ -34,6 +34,10 @@ use rucc_object::{
     Array, Assembled, Binding, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
 };
 
+/// What an instruction says about the place in it that names something, under a name that does not
+/// collide with the [`Sort`] an ELF symbol has.
+use crate::instruction::Sort as Reach;
+
 /// A file this could not read, and where in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trouble {
@@ -78,6 +82,9 @@ struct Sym {
     sort: Sort,
     binding: Binding,
     visibility: Visibility,
+    /// Whether this is a numbered local label, which is a place in the file rather than a name and
+    /// so is resolved like one and then left out of the symbol table.
+    numbered: bool,
 }
 
 /// A place in a section whose bytes are an expression that could not be worked out yet.
@@ -87,9 +94,10 @@ struct Fixup {
     at: u64,
     width: u8,
     sum: Sum,
-    /// Whether these are the four bytes a jump or a call goes by, which a linker is allowed to
-    /// satisfy with a stub and a load of a datum is not.
-    branch: bool,
+    /// Which of the four things these bytes are, since a jump is allowed to go through a stub and a
+    /// load of a datum is not, and a name reached through a table is a relocation however near it
+    /// turns out to be. A directive writes [`Reach::Near`], which is the plain one.
+    reach: Reach,
     line: usize,
 }
 
@@ -107,6 +115,9 @@ struct Reader {
     before: Option<usize>,
     syms: Vec<Sym>,
     known: HashMap<String, usize>,
+    /// How many times each numbered local label has been written so far, which is what `1b` counts
+    /// back from and what `1f` counts forward from.
+    counts: HashMap<String, usize>,
     /// Which sections have a name pointing into them, so that an empty one that something is
     /// defined in survives and an empty one nothing mentions does not.
     labelled: std::collections::HashSet<usize>,
@@ -247,14 +258,14 @@ impl Reader {
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
         for hole in written.holes {
-            let branch = hole.sort == crate::instruction::Sort::Branch;
+            let name = self.numbered(&hole.name)?.unwrap_or(hole.name);
             // Written down as a name the file mentions, which is what a call to something in
             // another object is and the only way it gets into the symbol table at all.
-            self.sym(&hole.name);
+            self.sym(&name);
             let sum = Sum {
                 constant: 0,
                 terms: vec![
-                    Term { coeff: 1, what: What::Symbol(hole.name) },
+                    Term { coeff: 1, what: What::Symbol(name) },
                     Term { coeff: -1, what: What::Here { part, at: end as i64 } },
                 ],
             };
@@ -263,7 +274,7 @@ impl Reader {
                 at: at + hole.at as u64,
                 width: hole.width,
                 sum,
-                branch,
+                reach: hole.sort,
                 line: self.line,
             });
         }
@@ -274,7 +285,17 @@ impl Reader {
     fn label(&mut self, name: &str) -> Result<(), Trouble> {
         let at = self.at();
         let part = self.here;
-        let sym = self.sym(name);
+        // A numbered one is a place and not a name, so each writing of it is its own entry and
+        // writing the same number again is what the file is for rather than a mistake.
+        let numbered = name.bytes().all(|byte| byte.is_ascii_digit());
+        let held = if numbered {
+            let count = self.counts.entry(name.to_owned()).or_insert(0);
+            *count += 1;
+            counted(name, *count)
+        } else {
+            name.to_owned()
+        };
+        let sym = self.sym(&held);
         if self.syms[sym].at != Held::Undefined {
             let what = format!("'{name}' is defined twice");
             return Err(self.bad(&what));
@@ -282,6 +303,31 @@ impl Reader {
         self.syms[sym].at = Held::In { part, offset: at };
         self.labelled.insert(part);
         Ok(())
+    }
+
+    /// The place `1b` or `2f` means, if the word is one of those.
+    ///
+    /// Backwards is the last writing of that number above this line and forwards is the next one
+    /// below it, which is why a file can use the same number over and over and why neither spelling
+    /// says anything on its own. Backwards with nothing above it is refused here. Forwards with
+    /// nothing below it cannot be seen yet, so it is refused where the places are worked out.
+    fn numbered(&self, word: &str) -> Result<Option<String>, Trouble> {
+        let Some(number) = word.strip_suffix(['b', 'f']) else {
+            return Ok(None);
+        };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Ok(None);
+        }
+        let count = self.counts.get(number).copied().unwrap_or(0);
+        if word.ends_with('b') {
+            if count == 0 {
+                let what =
+                    format!("'{word}' goes back to a '{number}:' and there is none above it");
+                return Err(self.bad(&what));
+            }
+            return Ok(Some(counted(number, count)));
+        }
+        Ok(Some(counted(number, count + 1)))
     }
 
     /// Everything that starts with a dot.
@@ -557,7 +603,7 @@ impl Reader {
                 return Err(self.bad(&what));
             }
             self.put(&vec![0u8; width as usize])?;
-            self.fixups.push(Fixup { part, at, width, sum, branch: false, line: self.line });
+            self.fixups.push(Fixup { part, at, width, sum, reach: Reach::Near, line: self.line });
         }
         Ok(())
     }
@@ -767,6 +813,9 @@ impl Reader {
             // asked to find is a contradiction.
             binding: Binding::Local,
             visibility: Visibility::Default,
+            // Read off the name, since the one byte no source file can write is exactly what says
+            // this entry came from a numbered local label rather than from something a file named.
+            numbered: name.contains('\u{1}'),
         });
         self.known.insert(name.to_owned(), at);
         at
@@ -866,6 +915,13 @@ impl Reader {
             });
         }
         for sym in self.syms {
+            // A numbered local label is a place and not a name. Everything that went to one has been
+            // resolved to a number in the bytes by now, and gas writes no symbol for one either, so
+            // an object this assembles has the same table as an object gas assembles from the same
+            // file rather than a table with a made up name in it.
+            if sym.numbered {
+                continue;
+            }
             let at = match sym.at {
                 Held::In { part, offset } => Held::In { part: moved[part], offset },
                 other => other,
@@ -956,8 +1012,38 @@ impl Reader {
     fn resolve_fixups(&mut self) -> Result<(), Trouble> {
         for fixup in std::mem::take(&mut self.fixups) {
             let line = fixup.line;
-            let residue = self.reduce(&fixup.sum).map_err(|why| Trouble { line, why })?;
             let bad = |why: String| Trouble { line, why };
+            // A name reached through the global offset table, or through the one entry of it a
+            // thread-local variable has, is a relocation whatever else is true of it. What goes in
+            // the bytes is the distance to a word the linker makes, and the linker only knows where
+            // it put that word, so working the sum out here would answer a different question. The
+            // sum is the one the instruction made two paragraphs up, which is the name minus the
+            // end of the instruction, so the addend comes out the way it does for every other
+            // rip-relative reference and is minus four.
+            if matches!(fixup.reach, Reach::Table | Reach::Thread) {
+                let [
+                    Term { coeff: 1, what: What::Symbol(name) },
+                    Term { coeff: -1, what: What::Here { at: end, .. } },
+                ] = fixup.sum.terms.as_slice()
+                else {
+                    return Err(bad(
+                        "a reach through the global offset table in something other than an \
+                         instruction, which is not an expression this compiler writes"
+                            .to_owned(),
+                    ));
+                };
+                let kind =
+                    if fixup.reach == Reach::Table { Reference::Got } else { Reference::Thread };
+                self.parts[fixup.part].relocs.push(Reloc {
+                    at: fixup.at as usize,
+                    symbol: name.clone(),
+                    kind,
+                    addend: fixup.sum.constant + fixup.at as i64 - end,
+                    after: (end - fixup.at as i64 - 4).max(0) as u8,
+                });
+                continue;
+            }
+            let residue = self.reduce(&fixup.sum).map_err(|why| Trouble { line, why })?;
             let (symbol, kind, addend, after) = match residue.left.as_slice() {
                 [] => {
                     // A distance a branch carries is signed and nothing else, so a byte of it
@@ -970,8 +1056,11 @@ impl Reader {
                     let width = fixup.width as usize;
                     let room = 8 * width as u32;
                     let low = -(1i64 << (room - 1));
-                    let high =
-                        if fixup.branch { (1i64 << (room - 1)) - 1 } else { (1i64 << room) - 1 };
+                    let high = if fixup.reach == Reach::Branch {
+                        (1i64 << (room - 1)) - 1
+                    } else {
+                        (1i64 << room) - 1
+                    };
                     if width < 8 && (residue.constant < low || residue.constant > high) {
                         return Err(bad(format!(
                             "{} written into {width} bytes, which does not reach it",
@@ -1021,7 +1110,11 @@ impl Reader {
                     // way round, and it is minus four for a call, whose four bytes are counted
                     // from the end of the instruction they are the last of.
                     let addend = residue.constant + fixup.at as i64 - offset;
-                    let kind = if fixup.branch { Reference::Call } else { Reference::Data };
+                    let kind = if fixup.reach == Reach::Branch {
+                        Reference::Call
+                    } else {
+                        Reference::Data
+                    };
                     // The same distance said the other way, for the format that wants it apart
                     // from the addend rather than folded into it. See `rucc_object::Reloc`.
                     let after = (offset - fixup.at as i64 - 4).max(0);
@@ -1042,6 +1135,17 @@ impl Reader {
                     ));
                 }
             };
+            // A numbered local label that got this far was never written, which for `1f` is the one
+            // way of getting it wrong that nothing above can see: the file said go to the next `1:`
+            // and there was no next one. It is not a name, so there is nothing to ask the linker.
+            if let Some(&sym) = self.known.get(&symbol) {
+                if self.syms[sym].numbered {
+                    let number = symbol.split('\u{1}').next().unwrap_or(&symbol);
+                    return Err(bad(format!(
+                        "'{number}f' goes on to a '{number}:' and there is none below it"
+                    )));
+                }
+            }
             if matches!(kind, Reference::Address { bytes } if bytes != 4 && bytes != 8) {
                 return Err(bad(format!(
                     "the address of '{symbol}' written into {} bytes, and this machine relocates \
@@ -1567,11 +1671,13 @@ fn escape(rest: &str) -> Result<(u8, usize), String> {
 
 /// The name of the label at the start of this text, if it starts with one.
 ///
-/// A colon after a name and nothing else. `.L1:` is one and so is `foo:`, and `1:` is not, because
-/// a numbered label is a local one that is referred to as `1b` or `1f` and neither is read here.
+/// A colon after a name and nothing else. `.L1:` is one, so is `foo:`, and so is `1:`, which is a
+/// numbered local label and is a place rather than a name: it may be written as many times in a file
+/// as the file likes and what refers to it is `1b` for the last one above and `1f` for the next one
+/// below.
 fn labelled(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
-    if bytes.is_empty() || !starts(bytes[0]) {
+    if bytes.is_empty() || !(starts(bytes[0]) || bytes[0].is_ascii_digit()) {
         return None;
     }
     let end = text.find(|ch: char| !carries_on(ch as u8))?;
@@ -1590,6 +1696,16 @@ fn starts(byte: u8) -> bool {
 /// Whether a name may go on with this.
 fn carries_on(byte: u8) -> bool {
     starts(byte) || byte.is_ascii_digit()
+}
+
+/// The name a numbered local label is kept under while the file is being read.
+///
+/// A file writes `1:` over and over and each one is a different place, so what goes in the table has
+/// to say which of them this is. The byte in the middle is one no name in a source file can hold, so
+/// nothing a file writes its own way can collide with one of these, and none of them reaches the
+/// symbol table at the end.
+fn counted(number: &str, nth: usize) -> String {
+    format!("{number}\u{1}{nth}")
 }
 
 /// The text with its quotes taken off, if it had any.
@@ -1682,6 +1798,72 @@ mod tests {
     /// What a file this could not read said about it.
     fn refused(text: &str) -> Trouble {
         read(text).err().unwrap_or_else(|| panic!("this was read and should not have been"))
+    }
+
+    /// A numbered local label, which is a place a file may write as often as it likes.
+    ///
+    /// `1:` three times is three places and the jumps between them say which by counting, so `1b`
+    /// is the one above and `1f` is the one below. None of the three is a name, which is why the
+    /// symbol table at the end holds the one thing this file actually called something.
+    #[test]
+    fn a_number_is_a_label_a_file_may_write_as_many_times_as_it_likes() {
+        let out =
+            assembled("\t.text\nfoo:\n1:\tnop\n\tjmp 1b\n1:\tnop\n\tjmp 1f\n\tnop\n1:\tret\n");
+        let text = bytes(&out, ".text");
+        // `nop`, then a jump back over both of them, then `nop`, then a jump forward over the
+        // `nop` behind it, then that `nop`, then `ret`.
+        assert_eq!(
+            text,
+            vec![0x90, 0xe9, 0xfa, 0xff, 0xff, 0xff, 0x90, 0xe9, 0x01, 0, 0, 0, 0x90, 0xc3]
+        );
+        assert!(out.parts[0].relocs.is_empty(), "{:?}", out.parts[0].relocs);
+        // One name, and it is the one the file wrote as a name.
+        let written: Vec<&str> = out.names.iter().map(|name| name.name.as_str()).collect();
+        assert_eq!(written, vec!["foo"]);
+    }
+
+    #[test]
+    fn a_numbered_label_with_nothing_on_the_side_it_names_is_refused() {
+        let back = refused("\t.text\n\tjmp 1b\n1:\tret\n");
+        assert!(back.why.contains("none above it"), "{}", back.why);
+        let forward = refused("\t.text\n1:\tnop\n\tjmp 1f\n\tret\n");
+        assert!(forward.why.contains("none below it"), "{}", forward.why);
+    }
+
+    /// A prefix written on a line of its own, which is how gas takes one and how GMP writes them.
+    ///
+    /// `rep;bsf %rdx, %rcx` is two statements on one line, and the first of them is an instruction
+    /// with no operands whose whole encoding is the byte that goes in front of the next one. The
+    /// reader needs nothing for this beyond the rows, because a statement is already a statement
+    /// whether a semicolon or a newline ended the one before it.
+    #[test]
+    fn a_prefix_is_a_statement_of_its_own_and_the_byte_goes_in_front() {
+        let out = assembled("\t.text\n\trep;bsf %rdx, %rcx\n");
+        assert_eq!(bytes(&out, ".text"), vec![0xf3, 0x48, 0x0f, 0xbc, 0xca]);
+        let split = assembled("\t.text\n\trep\n\tmovsq\n");
+        assert_eq!(bytes(&split, ".text"), vec![0xf3, 0x48, 0xa5]);
+        let lock = assembled("\t.text\n\tlock;incl (%rdi)\n");
+        assert_eq!(bytes(&lock, ".text"), vec![0xf0, 0xff, 0x07]);
+    }
+
+    /// A name reached through the global offset table, which is a relocation however near it is.
+    ///
+    /// What the four bytes hold is the distance to a slot the linker makes, so there is nothing for
+    /// the reader to work out even when the name is defined three lines further down. That is the
+    /// difference from a plain rip-relative reference, which cancels to a number whenever both ends
+    /// are in the same section.
+    #[test]
+    fn a_reach_through_the_table_is_a_relocation_even_when_this_file_defines_the_name() {
+        let out = assembled("\t.text\n\tmovq table@GOTPCREL(%rip), %rdx\ntable:\n\t.quad 0\n");
+        let relocs = &out.parts[0].relocs;
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].symbol, "table");
+        assert_eq!(relocs[0].kind, Reference::Got);
+        // The four bytes are the last four of the instruction and the machine counts them from the
+        // end of it, so the addend is minus four.
+        assert_eq!(relocs[0].addend, -4);
+        let out = assembled("\t.text\n\tmovq counter@GOTTPOFF(%rip), %rax\n");
+        assert_eq!(out.parts[0].relocs[0].kind, Reference::Thread);
     }
 
     #[test]
