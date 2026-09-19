@@ -336,6 +336,14 @@ fn widened_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
     let readers = if left == right { 2 } else { 1 };
     let lhs = side(func, left, uses, readers)?;
     let rhs = side(func, right, uses, readers)?;
+    // Two constants is arithmetic on two numbers, which the folder owns and answers outright.
+    // This shape is here to reach past a widening, and with nothing widened on either side there
+    // is nothing to reach past. `0u % 2u` is the case: the folder turns the remainder into an
+    // `and` against one before it turns the `and` into a number, and for that one moment the
+    // operation is two bits sitting next to each other with nothing behind them.
+    if matches!((&lhs, &rhs), (Plan::Constant(_), Plan::Constant(_))) {
+        return None;
+    }
     let extra = Extra::None;
     let bit = Redo { opcode: data.opcode, extra, ty: Type::int(1), lhs, rhs: Some(rhs) };
     let Some(ty) = back else { return Some(bit) };
@@ -1250,6 +1258,24 @@ mod tests {
             let want = (Opcode::And, vec![Type::int(1), Type::int(1)]);
             assert_eq!(shape(&func, bit), want, "{kind:?}");
         }
+    }
+
+    /// A bitwise operation on two bit constants, which is a number the folder knows and not a
+    /// widening this has any way of reaching past.
+    #[test]
+    fn a_bitwise_operation_on_two_bit_constants_is_left_to_the_folder() {
+        let (mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let zero = build.iconst(Type::int(32), 0);
+        let one = build.iconst(Type::int(32), 1);
+        let both = build.binary(Opcode::And, zero, one, Flags::NONE);
+        let wider = build.unary(Opcode::ZExt, both, Type::int(64));
+        build.ret(&[wider]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
     }
 
     /// The second question rewrites an extension into an extension, so the pass has to be asked
