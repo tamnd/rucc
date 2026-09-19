@@ -661,6 +661,12 @@ impl Checker<'_> {
         if let Some(node) = self.trap_builtin(function, span) {
             return node;
         }
+        // The pair that forwards a function's anonymous arguments, which is answered here only to
+        // refuse it where nothing could forward them. In `check/builtin/pack.rs`, with why the one
+        // place it is accepted needs no forwarding.
+        if let Some(node) = self.argument_pack_builtin(function, span) {
+            return node;
+        }
         // The hint about an address, which is one instruction and promises nothing. In
         // `check/builtin/prefetch.rs`, with why its two optional arguments have to be constants.
         if let Some(node) = self.prefetch_builtin(function, &args, span) {
