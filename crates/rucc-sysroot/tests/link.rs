@@ -131,9 +131,11 @@ fn the_libc_the_target_names_picks_the_line() {
     // glibc is linked against dynamically, so what goes on the line is the generated `libc.so`
     // rather than an archive, and musl's is the real `libc.a`. The shape is the same and the files
     // are not, which is why the dispatch is one function.
-    let gnu = LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic, Some(&builtins()));
+    let gnu =
+        LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic, Some(&builtins()));
     assert_eq!(names(&gnu.libraries), ["libc.so", "librucc_builtins.a"]);
-    let musl = LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static, Some(&builtins()));
+    let musl =
+        LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static, Some(&builtins()));
     assert_eq!(names(&musl.libraries), ["libc.a", "librucc_builtins.a"]);
 }
 
@@ -154,7 +156,8 @@ fn the_cases_of_section_8_2_are_that_many_different_lines() {
 
     // And a freestanding line is our runtime and nothing else, with no start files at either end,
     // because the files that would be there come from a libc this target does not have.
-    let bare = LinkLine::for_target(&sysroot("armv7m-none-eabi"), LinkMode::Static, Some(&builtins()));
+    let bare =
+        LinkLine::for_target(&sysroot("armv7m-none-eabi"), LinkMode::Static, Some(&builtins()));
     assert!(bare.start.is_empty());
     assert!(bare.end.is_empty());
     assert_eq!(names(&bare.libraries), ["librucc_builtins.a"]);
@@ -165,7 +168,8 @@ fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
     // The import library case, which is the same idea as a stub in a different container and a
     // different number of files. There is no `crti.o` and no `crtn.o` either, because PE has no
     // `.init` and `.fini` sections for a pair of files to open and close.
-    let line = LinkLine::for_target(&sysroot("x86_64-windows-gnu"), LinkMode::Dynamic, Some(&builtins()));
+    let line =
+        LinkLine::for_target(&sysroot("x86_64-windows-gnu"), LinkMode::Dynamic, Some(&builtins()));
     assert_eq!(names(&line.start), ["crt2.o"]);
     assert!(line.end.is_empty());
     assert_eq!(
@@ -188,7 +192,8 @@ fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
 fn the_builtins_are_searched_after_the_libc_that_calls_them() {
     // An archive searched before the thing that needs it contributes nothing, and musl calls some
     // of the builtins.
-    let line = LinkLine::musl(&sysroot("armv7a-linux-musleabihf"), LinkMode::Static, Some(&builtins()));
+    let line =
+        LinkLine::musl(&sysroot("armv7a-linux-musleabihf"), LinkMode::Static, Some(&builtins()));
     let libraries = names(&line.libraries);
     let libc = libraries.iter().position(|name| name == "libc.a").expect("a libc");
     let builtins =

@@ -209,11 +209,7 @@ impl LinkLine {
     /// out of one.
     #[must_use]
     pub fn freestanding(builtins: Option<&Path>) -> Self {
-        LinkLine {
-            start: Vec::new(),
-            libraries: ours(builtins),
-            end: Vec::new(),
-        }
+        LinkLine { start: Vec::new(), libraries: ours(builtins), end: Vec::new() }
     }
 
     /// The line for a musl link against this sysroot.
