@@ -70,6 +70,8 @@ fn is_root(node: &Decl) -> bool {
         // answer of its own, and until it is asked this has to assume every one of them is there.
         DeclKind::Object => true,
         DeclKind::Function => node.linkage == Linkage::External,
+        // A name for a type is a place to evaluate a size at, and nothing is emitted for it.
+        DeclKind::Type => false,
     }
 }
 

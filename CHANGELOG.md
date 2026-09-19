@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The size in a block-scope `typedef` of a variably modified type is evaluated where the typedef stands. `int h(int n){ typedef char T[n]; n++; return sizeof(T); }` answered 8 where gcc 16.2.0 answers 7, and C23 6.7.7.3p12 says the size expression of a variable length array type is evaluated when the declaration of that type is reached, so `T` is an array of seven characters for as long as the name is in scope and the increment under it changes nothing. An object already had this right, `int a[n]`, and so did a pointer to one, `int (*p)[n]`, because both leave a declaration in the tree and the lowering evaluates the sizes in a type where it meets one. A typedef left nothing there, since the checker bound the name and returned without adding a declaration, so the size was worked out the first time something asked for it and cached from then on. It now leaves one, `DeclKind::Type`, which declares no object, is emitted for nothing, and is made only for a block-scope typedef of a variably modified type: a file-scope one is refused already and there is no run time at file scope to evaluate a size in. The name is still bound as a typedef, so nothing resolves an expression to the new declaration. Two more answers change with it. `typedef char T[n]; n++; T a;` gives `a` the length the typedef had rather than the one `n` holds where `a` is declared, which is the same rule read from the other end. And a jump into the scope of one of these is now the error gcc gives it, `jump into scope of identifier with variably modified type`, because what a jump is checked against is the list of declarations a block makes and the typedef was not in it. Closes tamnd/rucc#1498.
+
 ## 0.10.69
 
 ### Added
