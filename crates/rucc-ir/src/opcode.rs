@@ -968,6 +968,62 @@ impl Opcode {
             )
     }
 
+    /// Whether the only memory this touches is the safety planes.
+    ///
+    /// The planes are storage the runtime keeps for itself, one entry per range of program bytes,
+    /// laid out by `spec/safe-memory/05-representation.md` section 5.2. What matters here is that
+    /// no name in the program reaches one. A plane write and a program store can never be the same
+    /// byte, and neither can a plane read and a program load, so an alias oracle that knows this
+    /// answers no to every pair with one of each.
+    ///
+    /// The aux plane sits in the same allocation as the object rather than in a map of its own, so
+    /// an address far enough outside an object does land in somebody's plane. That is an access
+    /// outside the bounds of the thing it was derived from, which is the access every check in this
+    /// list exists to refuse, and it is undefined before it is refused. An optimizer is entitled to
+    /// the assumption that the program does not make one, and this is that assumption and not a
+    /// second one.
+    ///
+    /// Nothing above can work that out by looking at the access, which is why this is here. The
+    /// address operand of one of these is a locator and not the memory it touches: `meta_init %p`
+    /// writes the entry the plane keeps for `%p` and does not write `%p`, so an oracle reading the
+    /// operand the ordinary way sees a write to exactly the bytes a load of `%p` wants.
+    ///
+    /// A list of what does rather than the exceptions to it, which is the other way round from
+    /// [`Opcode::touches_memory`] and for the same reason: an opcode added later and left out of
+    /// this one is an opcode the oracle says nothing about, which costs a missed optimization,
+    /// and an opcode added later that lands in here without anybody reading what it does would be
+    /// a wrong answer about memory in the safety pass of all places.
+    ///
+    /// Three families are deliberately not here even though their names look like they belong.
+    /// The capability instructions other than the two extent queries go through a slot in the
+    /// caller's frame, which is a local like any other. The `restrict` markers take the block's own
+    /// stack slot as an operand and write their record into it. The synchronization edges say
+    /// something about the ordering of program memory rather than only about a plane, and a wrong
+    /// answer there is a false report rather than a missed one.
+    #[must_use]
+    pub const fn touches_only_planes(self) -> bool {
+        matches!(
+            self,
+            Self::CheckBounds
+                | Self::CheckLive
+                | Self::CheckType
+                | Self::CheckInit
+                | Self::CheckDeriv
+                | Self::CheckRace
+                | Self::CheckFree
+                | Self::CapExtent
+                | Self::CapExtentBack
+                | Self::MetaBegin
+                | Self::MetaEnd
+                | Self::MetaType
+                | Self::MetaTypeCopy
+                | Self::MetaInit
+                | Self::MetaInitCopy
+                | Self::MetaEpoch
+                | Self::MetaTransfer
+        )
+    }
+
     /// How many values this produces, for the opcodes where the count is fixed.
     ///
     /// `None` means the count comes from somewhere else: a call takes it from its signature,
@@ -1486,6 +1542,24 @@ impl IntPred {
     pub const fn is_signed(self) -> bool {
         matches!(self, Self::Slt | Self::Sle | Self::Sgt | Self::Sge)
     }
+
+    /// The predicate that asks the same question with the bits read as unsigned.
+    ///
+    /// Each ordering has a counterpart the other way round and equality is the same question at
+    /// both readings, so every predicate has one and nothing here is a refusal. What it is for is
+    /// operands known not to be negative: the two readings agree on those, so a signed comparison
+    /// of two of them is the unsigned comparison of them, and the unsigned one is the one that
+    /// still holds when the same values are looked at in fewer bits.
+    #[must_use]
+    pub const fn unsigned(self) -> Self {
+        match self {
+            Self::Slt => Self::Ult,
+            Self::Sle => Self::Ule,
+            Self::Sgt => Self::Ugt,
+            Self::Sge => Self::Uge,
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for IntPred {
@@ -1838,6 +1912,61 @@ mod tests {
     }
 
     #[test]
+    fn what_only_touches_a_plane_touches_memory_and_is_not_an_access() {
+        // Two halves. Everything in the list is on the memory chain, because an instruction the
+        // chain does not carry is one the walk never sees and saying anything about it would be
+        // saying it about nothing. And everything in the list comes from the safety lowering,
+        // because the planes are the lowering's own storage and an opcode from somewhere else
+        // claiming to touch only them is the claim being made about the wrong memory.
+        for opcode in Opcode::all() {
+            if !opcode.touches_only_planes() {
+                continue;
+            }
+            let name = opcode.name();
+            assert!(opcode.touches_memory(), "{name}");
+            let instrumentation = name.starts_with("check_")
+                || name.starts_with("meta_")
+                || name.starts_with("cap_extent");
+            assert!(instrumentation, "{name}");
+        }
+        for opcode in [Opcode::MetaInit, Opcode::MetaType, Opcode::CheckBounds, Opcode::CapExtent] {
+            assert!(opcode.touches_only_planes(), "{opcode}");
+        }
+    }
+
+    #[test]
+    fn what_goes_through_a_frame_slot_is_not_a_plane_access() {
+        // The three families the list leaves out on purpose, and the reason is the same each time:
+        // an operand of one of these is memory the program has a name for. The capability
+        // instructions other than the two extent queries go through a slot in the frame, and the
+        // `restrict` markers write their record into the block's own slot. The synchronization
+        // edges are left out for a different reason, which is that they say something about the
+        // ordering of program memory and not only about a plane.
+        let outside = [
+            Opcode::CapLoad,
+            Opcode::CapStore,
+            Opcode::CapCopy,
+            Opcode::CapRecover,
+            Opcode::CheckRestrictRead,
+            Opcode::CheckRestrictWrite,
+            Opcode::RestrictEnter,
+            Opcode::RestrictLeave,
+            Opcode::MetaRelease,
+            Opcode::MetaAcquire,
+            Opcode::MetaFenceRelease,
+            Opcode::MetaFenceAcquire,
+        ];
+        for opcode in outside {
+            assert!(!opcode.touches_only_planes(), "{opcode}");
+        }
+        // And nothing ordinary is in it either, since a store answering yes would be the whole
+        // optimizer told that program memory is unreachable.
+        for opcode in [Opcode::Load, Opcode::Store, Opcode::Call, Opcode::Memcpy, Opcode::Fence] {
+            assert!(!opcode.touches_only_planes(), "{opcode}");
+        }
+    }
+
+    #[test]
     fn memory_has_effects_and_arithmetic_does_not() {
         for op in [Opcode::Load, Opcode::Store, Opcode::Call, Opcode::Alloca, Opcode::Fence] {
             assert!(op.has_effects(), "{op}");
@@ -1866,6 +1995,23 @@ mod tests {
         assert_eq!(IntPred::Slt.inverse(), IntPred::Sge);
         assert_eq!(IntPred::Slt.swapped(), IntPred::Sgt);
         assert_eq!(IntPred::from_name("lt"), None);
+    }
+
+    #[test]
+    fn an_integer_predicate_has_an_unsigned_counterpart_that_asks_the_same_way_round() {
+        for pred in IntPred::all() {
+            let unsigned = pred.unsigned();
+            assert!(!unsigned.is_signed(), "{pred}");
+            assert_eq!(unsigned.unsigned(), unsigned, "{pred}");
+            // The same way round, so inverting or swapping either first gives the same answer.
+            assert_eq!(pred.inverse().unsigned(), unsigned.inverse(), "{pred}");
+            assert_eq!(pred.swapped().unsigned(), unsigned.swapped(), "{pred}");
+        }
+        assert_eq!(IntPred::Slt.unsigned(), IntPred::Ult);
+        assert_eq!(IntPred::Sge.unsigned(), IntPred::Uge);
+        // Equality is the same question at both readings, so it is already its own counterpart.
+        assert_eq!(IntPred::Eq.unsigned(), IntPred::Eq);
+        assert_eq!(IntPred::Ne.unsigned(), IntPred::Ne);
     }
 
     #[test]
