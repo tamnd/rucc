@@ -56,12 +56,18 @@
 //! tamnd/rucc#326, so a function converting at that width is left alone here and refused below the
 //! way every function of this width used to be.
 //!
-//! The call is built with the halves already in it, four parameters of sixty four bits for the two
-//! operands of a divide and two results for the answer, or two parameters and a float, or a float
-//! and two results, which is the shape this pass gives a call it found in the program anyway. Both
-//! ends agree because the convention puts a `__int128` argument in two registers in a row and hands
-//! out argument registers in order, which is the same sentence the section below about crossing the
-//! boundary is.
+//! The call is asked for with the halves already in it, four parameters of sixty four bits for the
+//! two operands of a divide and two results for the answer, or two parameters and a float, or a
+//! float and two results, which is the shape this pass gives a call it found in the program anyway.
+//! Both ends agree because the convention puts a `__int128` argument in two registers in a row and
+//! hands out argument registers in order, which is the same sentence the section below about
+//! crossing the boundary is.
+//!
+//! That is the shape on every convention that has registers for a value this wide and it is not the
+//! shape on Windows x64, where such a value travels as the address of a copy the caller made and an
+//! integer this wide comes back whole in a vector register. The one place the two are told apart is
+//! where the call is built, by asking the ABI the same question a call in the program is asked, so
+//! everything above it goes on describing the call in halves and nothing above it names a target.
 
 use std::collections::{HashMap, HashSet};
 
@@ -691,11 +697,12 @@ enum Operand {
 /// address becomes a slot passed as the leading `sret` argument with the load out of it standing for
 /// the call's result.
 ///
-/// An answer of this width is the one shape that is not handled here and it is not an oversight:
-/// mingw brings a sixteen byte integer back in `xmm0` rather than through an address, so `__fixtfti`
-/// answers in a vector register, and this pass has nowhere to put a value at a width it exists to
-/// take apart. That leaves the four division routines and the two conversions down to this width
-/// refused by name on Windows, which is where they were, and is `tamnd/rucc#1367`'s remaining half.
+/// An answer at this width is the third shape and the one that reads strangely. mingw brings a
+/// sixteen byte integer back in `xmm0` rather than through an address, which is gcc's answer to a
+/// convention that has no integer that size in it, so the call is written as returning one value at
+/// the quad float format and the two halves are read back out of a slot it is stored into. The
+/// format is a name for sixteen bytes in a vector register and says nothing about what is in them,
+/// which is the same thing the routine's own `movaps` says.
 fn runtime(
     func: &mut Func,
     names: &mut Interner,
@@ -707,23 +714,33 @@ fn runtime(
 ) -> Vec<Value> {
     let mut params: Vec<Param> = Vec::new();
     let mut values: Vec<Value> = Vec::new();
-    let mut out = None;
-    // The answer first, because the address it comes back through is the first argument.
-    if let [ty] = *results {
-        let size = bytes(ty);
-        if abi.scalar_is_by_reference(size) {
+    let mut answer = Answer::Registers;
+    // The answer first, because an address it comes back through is the first argument.
+    match *results {
+        [ty] if abi.scalar_is_by_reference(bytes(ty)) => {
+            let size = bytes(ty);
             let align = align(size);
             let slot = room(func, inst, size, align);
             params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align }));
             values.push(slot);
-            out = Some((slot, ty));
+            answer = Answer::Slot(slot, ty);
         }
+        [low, high] if low == half() && high == half() => {
+            if let Some(format) = packed(abi) {
+                answer = Answer::Packed(format);
+            }
+        }
+        _ => {}
     }
     for &arg in args {
         handed(func, abi, inst, arg, &mut params, &mut values);
     }
-    let returns =
-        if out.is_some() { Vec::new() } else { results.iter().map(|&ty| Param::new(ty)).collect() };
+    let answers = match answer {
+        Answer::Registers => results.to_vec(),
+        Answer::Slot(..) => Vec::new(),
+        Answer::Packed(format) => vec![Type::float(format)],
+    };
+    let returns = answers.iter().map(|&ty| Param::new(ty)).collect();
     let signature = func.add_signature(Signature { params, returns, variadic: false });
     let callee = Some(names.intern(routine));
     let varargs = func.push_abis(&[]);
@@ -731,11 +748,11 @@ fn runtime(
     let pushed = func.push_values(&values);
     let span = func.span(inst);
     let data = InstData { args: pushed, extra, ..InstData::new(Opcode::Call) };
-    let answers: Vec<Type> = if out.is_some() { Vec::new() } else { results.to_vec() };
     let made = func.create_inst(data, &answers, span);
     func.insert_before(made, inst);
-    match out {
-        Some((slot, ty)) => {
+    match answer {
+        Answer::Registers => func[made].results().collect(),
+        Answer::Slot(slot, ty) => {
             let size = bytes(ty);
             let info = whole(size, align(size));
             let extra = Extra::Mem(func.add_mem(info));
@@ -743,8 +760,52 @@ fn runtime(
             let data = InstData { args, extra, ..InstData::new(Opcode::Load) };
             vec![written(func, inst, data, ty)]
         }
-        None => func[made].results().collect(),
+        Answer::Packed(format) => unpacked(func, inst, made, format),
     }
+}
+
+/// Where the answer of such a call is, once the convention has been asked about it.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// In the registers the signature's own result types name, which is every convention that has
+    /// registers for a value of the width being asked about.
+    Registers,
+    /// In a frame slot whose address went over as the leading `sret` argument, with the type the
+    /// call was meant to answer with.
+    Slot(Value, Type),
+    /// Whole in a vector register, at a format that is this many bytes and is not what is in them.
+    Packed(Float),
+}
+
+/// The format a wide integer answer comes back in on this convention, where it comes back in a
+/// register at all, as the IR spells a format.
+///
+/// [`None`] everywhere but Windows x64. The question is asked of the ABI rather than of the target
+/// name for the reason the rest of this pass asks it there: a second list of which targets do this
+/// is a list that can disagree with the one the classifier reads.
+fn packed(abi: &'static AbiDescription) -> Option<Float> {
+    let format = abi.wide_integer_returns_in(u64::from(WIDE / 8))?;
+    Float::from_bits(format.width())
+}
+
+/// The two halves of an answer that came back whole in a register, read out of a slot it is stored
+/// into.
+///
+/// A store and two loads rather than anything cleverer because the value in hand is at a float
+/// format and the halves wanted are integers, and the frame is the only place this compiler moves
+/// bits between the two files without saying something about them. It is what gcc writes for the
+/// same call.
+fn unpacked(func: &mut Func, inst: Inst, call: Inst, format: Float) -> Vec<Value> {
+    let Some(value) = func[call].first_result else { return Vec::new() };
+    let size = bytes(Type::float(format));
+    let align = align(size);
+    let slot = room(func, inst, size, align);
+    let info = whole(size, align);
+    write(func, inst, value, slot, info, Flags::NONE);
+    let low = read(func, inst, slot, word(info, 0), Flags::NONE);
+    let up = stepped(func, inst, slot);
+    let high = read(func, inst, up, word(info, STEP), Flags::NONE);
+    vec![low, high]
 }
 
 /// One operand of such a call, in the form the convention hands it over in.
@@ -1827,6 +1888,42 @@ mod tests {
         assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__floattidf(%0, %1)"), "both halves in registers: {text}");
+        assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
+    }
+
+    /// An answer at this width on Windows, which comes back whole in a vector register and is taken
+    /// apart through a slot rather than read out of two of them.
+    #[test]
+    fn on_windows_a_wide_answer_comes_back_in_one_register_and_is_split_on_the_frame() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.binary(Opcode::SDiv, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &MINGW64), "there is a width to split");
+        let text = printed(&func, &mut names);
+        // The call answers one value and it is at the quad format, which is the name this compiler
+        // has for sixteen bytes in a vector register.
+        assert!(text.contains("call @__divti3(%4, %7) : (ptr, ptr) -> f128"), "{text}");
+        assert_eq!(text.matches(" = call").count(), 1, "one answer: {text}");
+        // Two slots for the two operands and one more to take the answer apart in.
+        assert_eq!(text.matches("alloca").count(), 3, "three slots: {text}");
+        assert_eq!(text.matches(" = load").count(), 2, "the two halves: {text}");
+    }
+
+    /// The same division where the convention has a pair of registers for the answer.
+    #[test]
+    fn the_convention_with_registers_for_the_answer_reads_both_halves_out_of_them() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.binary(Opcode::SDiv, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__divti3(%0, %1, %2, %3)"), "four halves over: {text}");
         assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
     }
 }
