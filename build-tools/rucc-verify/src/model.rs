@@ -40,7 +40,10 @@
 //!
 //! Every term is some number of bits wide and [`Widths`] is what says how many. A head that ends
 //! in `.iN` is N bits wide, anything else is as wide as the term it sits inside, and a name is as
-//! wide as the place in the pattern that bound it. That is enough for a rule to convert between
+//! wide as the place in the pattern that bound it. A number is the one thing with no width of its
+//! own: written beside something it is as wide as that, and given to a head it is as wide as the
+//! head's body uses the parameter it was given to, which is a fact about the entry rather than
+//! about the rule that reached it. That is enough for a rule to convert between
 //! widths, which is what `sext`, `zext` and `trunc` all are, and those conversions are written
 //! the way `spec/10-backend.md` writes them: `(sign_extend 32 64 x)` and `(extract 31 0 x)`, with
 //! the widths spelled out rather than left to be inferred.
@@ -87,6 +90,7 @@
 //! thing this file decides on their behalf. That is the one fact about memory access that no
 //! amount of testing on one machine will catch.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -606,6 +610,48 @@ struct Meaning {
     params: Vec<String>,
     /// What it computes.
     body: Term,
+    /// The file the body was read from.
+    ///
+    /// A term carries the line and column it was written at and not the file, and the file it was
+    /// written in is not the file that used it: a rule in `x86-64.rules` reaching a head defined
+    /// in `x86-64.model` is the ordinary case. Without this, a complaint about the body was
+    /// reported at the model's line with the rule file's name on it, which names a line that is
+    /// either somewhere else entirely or is not there at all.
+    path: String,
+}
+
+/// What a parameter of a model head stands for while its body is being written out.
+#[derive(Debug)]
+enum Bound {
+    /// A term already written, with the width it came out.
+    ///
+    /// Everything but a number is this. A register, a conversion, an application: each of them
+    /// says how wide it is on its own, so it is written once where the head was applied and the
+    /// text is used wherever the body names it.
+    Written(String, Sort),
+    /// A number, held as a number until the body says how wide to write it.
+    ///
+    /// A number has no width of its own, so writing it where the head was applied means writing
+    /// it at the width the rule happens to run at, which is nothing to do with the parameter. It
+    /// is written where the body names it instead, at the width the body uses it at, and the
+    /// width that turned out to be is kept so that a body using one parameter two ways says so.
+    Number(i128, Cell<Option<u32>>),
+}
+
+/// What each parameter of the head being expanded stands for, while its body is written out.
+type Bindings<'a> = HashMap<&'a str, Bound>;
+
+/// Whether this term is a number, either written as one or standing in for one.
+///
+/// The rules about what width a number takes are the same whether it was written where it is read
+/// or was handed to a model head and named there, so both are this. Before a head could be given a
+/// number this was one pattern match on the term, and a name was always a thing with a width.
+fn numberish(term: &Term, bound: &Bindings<'_>) -> bool {
+    match &term.kind {
+        TermKind::Int(_) => true,
+        TermKind::Var(name) => matches!(bound.get(name.as_str()), Some(Bound::Number(..))),
+        TermKind::App { .. } => false,
+    }
 }
 
 /// A model this one is written on top of, and where it said so.
@@ -708,7 +754,7 @@ impl Model {
                 errors.push(fail(path, &args[0], said));
                 continue;
             }
-            let meaning = Meaning { params: names, body: args[1].clone() };
+            let meaning = Meaning { params: names, body: args[1].clone(), path: path.to_owned() };
             if model.heads.insert(name.clone(), meaning).is_some() {
                 let said = format!("`{name}` is given a meaning twice");
                 errors.push(fail(path, &args[0], said));
@@ -796,11 +842,30 @@ impl Model {
         term: &Term,
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         match &term.kind {
             TermKind::Var(name) => match bound.get(name.as_str()) {
-                Some((already, sort)) => Ok((already.clone(), *sort)),
+                Some(Bound::Written(already, sort)) => Ok((already.clone(), *sort)),
+                Some(Bound::Number(value, at)) => {
+                    // Here is where a number given to a head is written, and the width it is
+                    // written at is the one the body uses the parameter at rather than the one
+                    // the rule runs in. A body that uses one parameter at two widths means two
+                    // things by one name, which would already have been caught by the sorts
+                    // disagreeing if the caller had passed anything but a number, so the number
+                    // is not let past quietly either.
+                    if let Some(before) = at.get() {
+                        if before != context {
+                            let said = format!(
+                                "`{name}` is a number and this body uses it at {before} bits and \
+                                 at {context} bits"
+                            );
+                            return Err(fail(path, term, said));
+                        }
+                    }
+                    at.set(Some(context));
+                    Ok((literal(*value, context), Sort::Bits(context)))
+                }
                 None => Ok((name.clone(), widths.of_name(name).unwrap_or(Sort::Bits(context)))),
             },
             TermKind::Int(value) => Ok((literal(*value, context), Sort::Bits(context))),
@@ -832,7 +897,20 @@ impl Model {
                 let own = widths.suffix(head).unwrap_or(context);
                 let mut written = Vec::with_capacity(args.len());
                 for arg in args {
-                    written.push(self.write_at(path, arg, own, widths, bound)?);
+                    // A number is carried into the body rather than written out here. Everything
+                    // else says how wide it is on its own and a number does not, so writing one
+                    // here means writing it at whatever width surrounds the application, which is
+                    // a fact about the rule and not about the parameter it is being given to.
+                    // `(amode_base_index_scale a i 4)` in a rule that loads an `i32` is the case
+                    // that found this: the four belongs beside a sixty four bit index and was
+                    // written at thirty two. This is tamnd/rucc#915.
+                    match arg.kind {
+                        TermKind::Int(value) => written.push(Bound::Number(value, Cell::new(None))),
+                        _ => {
+                            let (text, sort) = self.write_at(path, arg, own, widths, bound)?;
+                            written.push(Bound::Written(text, sort));
+                        }
+                    }
                 }
                 let Some(meaning) = self.heads.get(head) else {
                     let said = format!("nothing in the model says what `{head}` means");
@@ -846,9 +924,12 @@ impl Model {
                     );
                     return Err(fail(path, term, said));
                 }
-                let inner: HashMap<&str, (String, Sort)> =
+                let inner: Bindings<'_> =
                     meaning.params.iter().map(String::as_str).zip(written).collect();
-                let (text, sort) = self.write_at(path, &meaning.body, own, widths, &inner)?;
+                // The body's own file, because that is where its lines are. Everything from here
+                // down is a complaint about the model rather than about the rule that reached it.
+                let (text, sort) =
+                    self.write_at(&meaning.path, &meaning.body, own, widths, &inner)?;
                 // An opcode that names a width has to mean something that wide. This is the
                 // model being held to what the rules say about it: `add.i32` over registers
                 // that are sixty four bits wide means an add of their low halves, and a model
@@ -896,7 +977,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         // A number has no width of its own and takes the width of what it sits beside. Every
         // rule written before memory arrived had one width throughout, so this changed nothing
@@ -913,7 +994,7 @@ impl Model {
         };
         let mut written = Vec::with_capacity(args.len());
         for arg in args {
-            let at = if matches!(arg.kind, TermKind::Int(_)) { beside } else { context };
+            let at = if numberish(arg, bound) { beside } else { context };
             written.push(self.write_at(path, arg, at, widths, bound)?);
         }
         let Some((_, first)) = written.first() else {
@@ -962,7 +1043,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() != takes {
             let said = format!("`{head}` takes {takes} arguments and this gives it {}", args.len());
@@ -1011,7 +1092,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() != takes {
             let said = format!("`{head}` takes {takes} arguments and this gives it {}", args.len());
@@ -1058,7 +1139,7 @@ impl Model {
         head: &str,
         args: &[Term],
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() != 2 {
             let said =
@@ -1124,7 +1205,7 @@ impl Model {
         head: &str,
         args: &[Term],
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() != 3 {
             let said = format!(
@@ -1176,18 +1257,23 @@ impl Model {
     /// The width the numbers among a head's arguments should take, which is the width of the
     /// first argument that has one of its own. Nothing when they are all numbers, in which case
     /// the surrounding width is as good an answer as there is.
+    ///
+    /// A name a model head's caller gave a number to counts as a number here rather than as a
+    /// thing with a width. It is spelled as a name and there is nothing behind the name but a
+    /// number, so treating it as sized would mean taking the width of the term it sits in, which
+    /// is the answer this is written to avoid.
     fn beside(
         &self,
         path: &str,
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<u32, Error> {
-        if !args.iter().any(|arg| matches!(arg.kind, TermKind::Int(_))) {
+        if !args.iter().any(|arg| numberish(arg, bound)) {
             return Ok(context);
         }
-        let Some(sized) = args.iter().find(|arg| !matches!(arg.kind, TermKind::Int(_))) else {
+        let Some(sized) = args.iter().find(|arg| !numberish(arg, bound)) else {
             return Ok(context);
         };
         let (_, sort) = self.write_at(path, sized, context, widths, bound)?;
@@ -1204,7 +1290,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         // The memory a rule starts from, which is one constant and takes no arguments. It is
         // written `(mem)` for the reason `(result)` is: a head applied to nothing is still an
@@ -1225,7 +1311,7 @@ impl Model {
         }
         let mut written = Vec::with_capacity(args.len());
         for arg in args {
-            let at = if matches!(arg.kind, TermKind::Int(_)) { widths.address() } else { context };
+            let at = if numberish(arg, bound) { widths.address() } else { context };
             written.push(self.write_at(path, arg, at, widths, bound)?);
         }
         // The sorts of the three positions, which is the whole of what an array is: a memory, an
@@ -1258,7 +1344,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() < 2 {
             let said = format!("`concat` puts two or more things together and this gives it {}", {
@@ -1291,7 +1377,7 @@ impl Model {
         args: &[Term],
         context: u32,
         widths: &Widths,
-        bound: &HashMap<&str, (String, Sort)>,
+        bound: &Bindings<'_>,
     ) -> Result<(String, Sort), Error> {
         if args.len() != 3 {
             let said = format!("`{head}` takes two numbers and a value, and this gives it {}", {
