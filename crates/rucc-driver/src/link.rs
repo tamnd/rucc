@@ -227,6 +227,19 @@ pub enum Error {
         /// can name a command that would fix it.
         pinned: bool,
     },
+    /// The linker was found and cannot do this target's link.
+    ///
+    /// Separate from [`Error::NoLinker`] because the linker is there and runs, and separate from
+    /// [`Error::Refused`] because the refusal is ours rather than its own: this is the case the
+    /// linker would not complain about at all.
+    TooOld {
+        /// What it was found as, which is what to look for when replacing it.
+        name: String,
+        /// The major version it reported.
+        found: u32,
+        /// The target whose link it cannot do.
+        target: String,
+    },
     /// The linker was found and could not be started.
     Spawn {
         /// Where it was.
@@ -271,6 +284,17 @@ impl std::fmt::Display for Error {
                  against, and this release pins none for it to fetch. Pass --sysroot=<dir> to name \
                  a tree you have already, or see spec/cross-compile/13-distribution.md section \
                  13.2 for the cache that will hold one"
+            ),
+            // The whole message, because the person reading it has a linker that works, a link that
+            // succeeded on their last try, and no reason to suspect the thing that is wrong.
+            Error::TooOld { name, found, target } => write!(
+                f,
+                "{name} is lld {found} and cannot link for {target}. mingw-w64 writes a few hundred \
+                 of its aliases, `_crt_atexit == atexit` among them, as IMPORT_NAME_EXPORTAS \
+                 records in its import libraries, which lld learned to read in {LLD_EXPORTAS}. An \
+                 older one neither reads them nor says so: it writes an import by ordinal zero, the \
+                 link succeeds, and the program dies at startup. Install lld {LLD_EXPORTAS} or \
+                 newer, or name one with -fuse-ld="
             ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
             Error::Refused { status } => write!(f, "the linker {status}"),
@@ -580,6 +604,71 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
         Some(name) => Err(Error::Named { name: name.clone() }),
         None => Err(Error::NoLinker { tried }),
     }
+}
+
+/// The first lld that reads `IMPORT_NAME_EXPORTAS`, which is what a windows-gnu link needs.
+///
+/// 18 does not read it and does not say so, so the number is not a convenience: below it the
+/// answer is wrong rather than absent. tamnd/rucc#1515.
+pub const LLD_EXPORTAS: u32 = 19;
+
+/// Whether a found linker can do this target's link, asked before it is handed anything.
+///
+/// Section 11.6's rule is that suitable is checked and not assumed, and this is the one check that
+/// cannot be made by looking at a file. A windows-gnu link reads import libraries that mingw-w64's
+/// `==` aliases compiled into `IMPORT_NAME_EXPORTAS` records, which lld reads from
+/// [`LLD_EXPORTAS`] on. An older lld writes an import by ordinal zero instead, without a warning
+/// and with a successful exit, so nothing later in the toolchain has anything to notice: the
+/// program is wrong at startup and the link that made it said nothing. Ubuntu 24.04 is the current
+/// LTS and ships 18, so the machine this happens on is an ordinary one.
+///
+/// Every other target is left alone, and so is anything that is not an lld, because this is the one
+/// version of the one linker that is known to answer wrongly rather than not at all.
+///
+/// A linker that will not run or whose version cannot be read is allowed through. What the check
+/// can establish is that a specific old lld is here, and it should not turn every unusual linker
+/// into a refusal on the strength of failing to recognise it.
+///
+/// # Errors
+///
+/// [`Error::TooOld`] when the linker is an lld older than [`LLD_EXPORTAS`] and the target is
+/// windows-gnu.
+pub fn suitable(target: Triple, linker: &Linker) -> Result<(), Error> {
+    if (target.os, target.env) != (Os::Windows, Env::Gnu) {
+        return Ok(());
+    }
+    let Some(found) = lld_major(&reported_version(&linker.path)) else { return Ok(()) };
+    if found >= LLD_EXPORTAS {
+        return Ok(());
+    }
+    Err(Error::TooOld {
+        name: linker.name.clone(),
+        found,
+        target: target.tuple().to_canonical_string(),
+    })
+}
+
+/// What `<linker> --version` prints, or an empty string when it will not say.
+///
+/// A linker that cannot be started is not this function's problem to report, because the link is
+/// about to start it again and say so properly. What this returns for such a one is nothing to
+/// read, which is the same as a linker that ran and said something unrecognisable.
+fn reported_version(path: &Path) -> String {
+    let Ok(out) = Command::new(path).arg("--version").output() else { return String::new() };
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The major version in an lld's `--version`, when the program that printed it was an lld.
+///
+/// What lld prints is `LLD 18.1.8 (compatible with GNU linkers)`, with a distribution's own prefix
+/// in front of it often enough that the word is looked for rather than the line starting with it:
+/// Ubuntu's says `Ubuntu LLD 18.1.3`. Binutils prints `GNU ld (GNU Binutils for Ubuntu) 2.42` and
+/// mold prints its own name, and neither has the word, so both come back as [`None`] and are left
+/// alone.
+fn lld_major(text: &str) -> Option<u32> {
+    let mut words = text.split_whitespace();
+    words.find(|word| *word == "LLD")?;
+    words.next()?.split('.').next()?.parse().ok()
 }
 
 /// The first executable of that name on `PATH`.
@@ -1496,6 +1585,71 @@ mod tests {
         let args = cross_line(target, &without, &one("a.o"), "a.exe", &a_sysroot(target))
             .expect("a line without ours on it");
         assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+    }
+
+    #[test]
+    fn the_version_an_lld_prints_is_read_and_nothing_elses_is() {
+        // What each of these programs actually prints, because the word being in the line is the
+        // whole of how one is told from another.
+        assert_eq!(lld_major("LLD 18.1.8 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("Ubuntu LLD 18.1.3 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("LLD 20.1.2 (compatible with GNU linkers)\n"), Some(20));
+
+        // Binutils and mold do not have it, and neither of them has this problem, so the answer
+        // for both is that this check has nothing to say about them.
+        assert_eq!(lld_major("GNU ld (GNU Binutils for Ubuntu) 2.42\n"), None);
+        assert_eq!(lld_major("mold 2.4.1 (compatible with GNU ld)\n"), None);
+        assert_eq!(lld_major(""), None);
+    }
+
+    /// A program that prints `text` and exits, which is as much of a linker as this check reads.
+    ///
+    /// Named after what it says, so that two of them in one test are two files.
+    #[cfg(unix)]
+    fn a_linker_that_says(tag: &str, text: &str) -> Linker {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("rucc-link-ld-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join(format!("ld.lld-{tag}"));
+        fs::write(&path, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("an executable one");
+        Linker { name: "ld.lld".to_owned(), path }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_too_old_to_read_exportas_is_refused_for_windows_gnu_and_nowhere_else() {
+        // The failure this replaces has no diagnostic at all: 18 writes an import by ordinal zero,
+        // exits successfully, and the program dies at startup under wine. tamnd/rucc#1515.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let old = a_linker_that_says("18", "LLD 18.1.8 (compatible with GNU linkers)");
+        let error = suitable(windows, &old).expect_err("18 cannot link this");
+        let Error::TooOld { name, found, target } = &error else { panic!("{error:?}") };
+        assert_eq!((name.as_str(), *found, target.as_str()), ("ld.lld", 18, "x86_64-windows-gnu"));
+        assert!(error.to_string().contains("IMPORT_NAME_EXPORTAS"), "{error}");
+
+        // The same linker for a target whose import libraries have no such records in them, which
+        // is every other target, since this is one encoding in one format.
+        let linux = Triple::new(Arch::X86_64, Os::Linux, Env::Musl);
+        assert_eq!(suitable(linux, &old), Ok(()));
+
+        // And the first one that reads them.
+        let new = a_linker_that_says("19", "LLD 19.1.0 (compatible with GNU linkers)");
+        assert_eq!(suitable(windows, &new), Ok(()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_linker_that_will_not_say_what_it_is_is_left_alone() {
+        // Every linker that is not an lld reaches this check too, and what it can establish is
+        // that a specific old lld is here rather than that anything else is fit. Turning "I did
+        // not recognise this" into a refusal would break machines this problem never touched.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let quiet = a_linker_that_says("gnu", "GNU ld (GNU Binutils for Ubuntu) 2.42");
+        assert_eq!(suitable(windows, &quiet), Ok(()));
+
+        let missing = Linker { name: "ld.lld".to_owned(), path: PathBuf::from("/no/such/linker") };
+        assert_eq!(suitable(windows, &missing), Ok(()));
     }
 
     #[test]

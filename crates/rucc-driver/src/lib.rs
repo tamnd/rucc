@@ -2455,6 +2455,13 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         Ok(linker) => linker,
         Err(why) => return complain(why),
     };
+    // And whether the one that was found can do this link, which for one linker and one target is
+    // a question only the linker itself can answer. Here rather than inside the search, because
+    // what it does is refuse rather than move on to the next candidate: nothing else in the list
+    // links a produced Windows sysroot either.
+    if let Err(why) = link::suitable(opts.target, &linker) {
+        return complain(why);
+    }
 
     let scratch = match Scratch::new() {
         Ok(scratch) => scratch,
