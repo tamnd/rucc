@@ -122,12 +122,21 @@ pub enum Reason {
     Restrict,
     /// The callee's attributes say it does not touch memory this way.
     Attribute,
+    /// One of them touches only the safety planes, which nothing the program can name reaches.
+    Plane,
 }
 
 impl Reason {
     /// Every reason, which is what a report walks.
-    pub const ALL: [Self; 6] =
-        [Self::Distinct, Self::Escape, Self::Offset, Self::Tbaa, Self::Restrict, Self::Attribute];
+    pub const ALL: [Self; 7] = [
+        Self::Distinct,
+        Self::Escape,
+        Self::Offset,
+        Self::Tbaa,
+        Self::Restrict,
+        Self::Attribute,
+        Self::Plane,
+    ];
 
     /// How many there are, which is the width of a [`Counts`].
     pub const COUNT: usize = Self::ALL.len();
@@ -142,6 +151,7 @@ impl Reason {
             Self::Tbaa => 3,
             Self::Restrict => 4,
             Self::Attribute => 5,
+            Self::Plane => 6,
         }
     }
 
@@ -155,6 +165,7 @@ impl Reason {
             Self::Tbaa => "tbaa",
             Self::Restrict => "restrict",
             Self::Attribute => "attribute",
+            Self::Plane => "plane",
         }
     }
 
@@ -168,6 +179,7 @@ impl Reason {
             Self::Tbaa => "no object has both of those types",
             Self::Restrict => "restrict says those two pointers do not reach the same object",
             Self::Attribute => "the callee is declared not to touch memory that way",
+            Self::Plane => "that one touches only the planes, which the program cannot name",
         }
     }
 }
@@ -664,6 +676,15 @@ impl<'a> Alias<'a> {
     }
 
     fn decide_call(&self, reference: &Access, call: Inst, writing: bool) -> Answer {
+        // Not always a call. The memory chain sends everything that touches memory without an
+        // access saying what through here, and the safety instrumentation is most of that: a check
+        // reads a plane and a `meta_` writes one. Neither is memory the program can name, so
+        // neither is what this reference covers, and [`Opcode::touches_only_planes`] is the whole
+        // argument. It is first because it is a match on an opcode and the layers under it are not.
+        if self.func[call].opcode.touches_only_planes() {
+            return Answer::No(Reason::Plane);
+        }
+
         // Everything a call reaches, it reaches through an address, and an object whose address
         // never left this function is not one it has. Reaching here means the address was not
         // handed to this call either, because that would have been an escape.
@@ -1428,6 +1449,57 @@ mod tests {
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
         assert_eq!(alias.read_by(&reference, call), Answer::May);
+    }
+
+    #[test]
+    fn a_plane_write_is_not_a_write_to_the_address_it_names() {
+        // The one that was costing the memory passes everything on a safety build. `meta_init %p`
+        // writes the entry the lifetime plane keeps for `%p`, and the oracle reading its operand
+        // the ordinary way sees a write to exactly the bytes a load of `%p` wants, which is the
+        // worst possible wrong answer: the instrumentation blocking the optimization of the code
+        // it was put in to check.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let outside = param(&f, 0);
+        let mut build = builder(&mut f);
+        build.load(Type::int(32), outside, plain(4), Flags::NONE);
+        let width = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[outside, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
+        let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
+        let plane = first(&f, Opcode::MetaInit);
+        assert_eq!(alias.clobbered_by(&reference, plane), Answer::No(Reason::Plane));
+        // And it does not read it either, so a store the program made is not kept alive by one.
+        assert_eq!(alias.read_by(&reference, plane), Answer::No(Reason::Plane));
+    }
+
+    #[test]
+    fn a_check_reads_a_plane_and_not_what_it_is_about() {
+        // The reading half of the same fact, which is what a walk back over memory runs into
+        // first: a check between a store and a load of the same address is on the chain, and
+        // answering `May` for it is a load kept for no reason.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let outside = param(&f, 0);
+        let mut build = builder(&mut f);
+        build.load(Type::int(32), outside, plain(4), Flags::NONE);
+        let width = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[outside, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckBounds) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
+        let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
+        let check = first(&f, Opcode::CheckBounds);
+        assert_eq!(alias.clobbered_by(&reference, check), Answer::No(Reason::Plane));
+        assert_eq!(alias.read_by(&reference, check), Answer::No(Reason::Plane));
     }
 
     #[test]

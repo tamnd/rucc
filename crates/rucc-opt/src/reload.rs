@@ -543,4 +543,40 @@ block2:
         assert_eq!(stats.count(crate::stats::Kind::Note, STEPS), 1);
         assert_eq!(stats.count(crate::stats::Kind::Note, EXHAUSTED), 0);
     }
+
+    #[test]
+    fn the_safety_instrumentation_between_them_does_not_stop_the_forward() {
+        // What a safety build looks like by the time the optimizer sees it, which is the shape
+        // above with the lifetime plane written and then read between the store and the load.
+        // Both of those are on the memory chain and both have `%0` as an operand, so the walk
+        // goes through them and has to be told they are not about `%0`.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    %3 = iconst.i64 4
+    meta_init %0, %3
+    br_if %1, block1, block2
+
+block1:
+    %4 = cap_of %0
+    check_bounds %4, %0, size 4, align 4
+    jump block2
+
+block2:
+    %5 = load.i32 %0, align 4
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        // And the instrumentation is still there, because this pass forwards loads and is not
+        // entitled to an opinion about whether a check was worth running.
+        assert_eq!(count_of(func, Opcode::MetaInit), 1);
+        assert_eq!(count_of(func, Opcode::CheckBounds), 1);
+    }
 }
