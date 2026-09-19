@@ -38,7 +38,7 @@ mod stubs;
 mod unwind;
 mod wide;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{fmt, fs, io};
@@ -1005,12 +1005,78 @@ fn version() -> Result<()> {
         }
     }
 
+    problems.extend(stale_lock(&root)?);
+
     if problems.is_empty() {
         println!("version: {want}, {checked} crates agree");
         Ok(())
     } else {
         Err(Error::Failed { task: "version", problems })
     }
+}
+
+/// The workspace members the lockfile has at a version other than the manifest's.
+///
+/// The third place the number is repeated and the only one of the three that stops a release. The
+/// publish step passes `--locked`, so cargo refuses to write the lockfile and refuses to publish
+/// instead, and the whole of what it says is `cannot update the lock file because --locked was
+/// passed`. It went stale at 0.10.63, which nobody saw until the tag was already pushed, and the
+/// version before that is what crates.io has.
+///
+/// It is cheap to keep right. `cargo update --workspace` after the manifest is edited writes one
+/// line per member and nothing else, which is thirty seven lines and no dependency moving.
+///
+/// The committed file and not the one on the disk, which is the only version of this check that can
+/// ever fail. `cargo xtask` is run through `cargo run`, and resolving the workspace is the first
+/// thing that does: cargo notices the stale lockfile, rewrites it, and the task starts with a file
+/// that agrees with the manifest however wrong the repository is. So the question is put to git,
+/// which is also the honest place for it, since a release builds a tag and a tag carries what was
+/// committed. Nothing is said where there is no git to ask, because a source tarball has no history
+/// and the file in it is whatever the tag had.
+///
+/// The manifest comes from there as well, rather than from the `want` the rest of this task works
+/// with, so that the two sides of the comparison are the same commit. Asking whether a committed
+/// lockfile matches an uncommitted manifest is a question with no useful answer: it is yes for
+/// everybody a minute after they edit one file, and this task would spend that minute saying so.
+fn stale_lock(root: &Path) -> Result<Vec<String>> {
+    let (Some(text), Some(manifest)) =
+        (committed(root, "Cargo.lock"), committed(root, "Cargo.toml"))
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(want) = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("version = "))
+        .map(|v| v.trim().trim_matches('"').to_owned())
+    else {
+        return Ok(Vec::new());
+    };
+    let want = want.as_str();
+    let members: HashSet<String> = read_crates(root)?.into_iter().map(|c| c.name).collect();
+    let mut problems = Vec::new();
+    let mut name = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let value =
+            |prefix: &str| line.strip_prefix(prefix).map(|v| v.trim_matches('"').to_owned());
+        if let Some(found) = value("name = ") {
+            name = found;
+        } else if let Some(at) = value("version = ") {
+            if members.contains(&name) && at != want {
+                problems.push(format!("Cargo.lock:{}: {name} is {at} and not {want}", n + 1));
+            }
+        }
+    }
+    Ok(problems)
+}
+
+/// One file as `HEAD` has it, or [`None`] where there is no repository to ask.
+fn committed(root: &Path, path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["show", &format!("HEAD:{path}")])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
