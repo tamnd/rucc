@@ -34,8 +34,13 @@
 //! several tables of positions over one buffer at once and switches between them by strategy, so the
 //! same storage is indexed three ways in one compression, and its dictionary builder sorts a suffix
 //! array, which is the only code here that sorts pointers into a buffer instead of walking them.
-//! None of the five reaches the others' paths. The rows here are the projects and the code below is
-//! the same for all of them, which is what makes adding the next one a paragraph of data.
+//! libwebp is the first one whose subject is a rectangle rather than a run of bytes: it indexes its
+//! storage by two numbers multiplied by a stride the caller chose, and it picks which version of
+//! every inner loop to run by asking the processor what it is at startup and filling in a table of
+//! function pointers, so nearly every call into its pixel code goes through a pointer that was
+//! stored once and is read from everywhere after. None of the six reaches the others' paths. The
+//! rows here are the projects and the code below is the same for all of them, which is what makes
+//! adding the next one a paragraph of data.
 //!
 //! # Why the sources are not in the tree
 //!
@@ -366,6 +371,222 @@ const PROJECTS: &[Project] = &[
              tamnd/rucc#1429, and they were an alignment this compiler got wrong rather than \
              anything zstd does.",
         ),
+    },
+    Project {
+        name: "libwebp",
+        variable: "RUCC_LIBWEBP_SOURCE",
+        marker: "src/webp/decode.h",
+        usual: &["libwebp"],
+        sources: &[
+            "sharpyuv/sharpyuv.c",
+            "sharpyuv/sharpyuv_cpu.c",
+            "sharpyuv/sharpyuv_csp.c",
+            "sharpyuv/sharpyuv_dsp.c",
+            "sharpyuv/sharpyuv_gamma.c",
+            "sharpyuv/sharpyuv_neon.c",
+            "sharpyuv/sharpyuv_sse2.c",
+            "src/dec/alpha_dec.c",
+            "src/dec/buffer_dec.c",
+            "src/dec/frame_dec.c",
+            "src/dec/idec_dec.c",
+            "src/dec/io_dec.c",
+            "src/dec/quant_dec.c",
+            "src/dec/tree_dec.c",
+            "src/dec/vp8_dec.c",
+            "src/dec/vp8l_dec.c",
+            "src/dec/webp_dec.c",
+            "src/demux/anim_decode.c",
+            "src/demux/demux.c",
+            "src/dsp/alpha_processing.c",
+            "src/dsp/alpha_processing_mips_dsp_r2.c",
+            "src/dsp/alpha_processing_neon.c",
+            "src/dsp/alpha_processing_sse2.c",
+            "src/dsp/alpha_processing_sse41.c",
+            "src/dsp/cost.c",
+            "src/dsp/cost_mips32.c",
+            "src/dsp/cost_mips_dsp_r2.c",
+            "src/dsp/cost_neon.c",
+            "src/dsp/cost_sse2.c",
+            "src/dsp/cpu.c",
+            "src/dsp/dec.c",
+            "src/dsp/dec_clip_tables.c",
+            "src/dsp/dec_mips32.c",
+            "src/dsp/dec_mips_dsp_r2.c",
+            "src/dsp/dec_msa.c",
+            "src/dsp/dec_neon.c",
+            "src/dsp/dec_sse2.c",
+            "src/dsp/dec_sse41.c",
+            "src/dsp/enc.c",
+            "src/dsp/enc_mips32.c",
+            "src/dsp/enc_mips_dsp_r2.c",
+            "src/dsp/enc_msa.c",
+            "src/dsp/enc_neon.c",
+            "src/dsp/enc_sse2.c",
+            "src/dsp/enc_sse41.c",
+            "src/dsp/filters.c",
+            "src/dsp/filters_mips_dsp_r2.c",
+            "src/dsp/filters_msa.c",
+            "src/dsp/filters_neon.c",
+            "src/dsp/filters_sse2.c",
+            "src/dsp/lossless.c",
+            "src/dsp/lossless_avx2.c",
+            "src/dsp/lossless_enc.c",
+            "src/dsp/lossless_enc_avx2.c",
+            "src/dsp/lossless_enc_mips32.c",
+            "src/dsp/lossless_enc_mips_dsp_r2.c",
+            "src/dsp/lossless_enc_msa.c",
+            "src/dsp/lossless_enc_neon.c",
+            "src/dsp/lossless_enc_sse2.c",
+            "src/dsp/lossless_enc_sse41.c",
+            "src/dsp/lossless_mips_dsp_r2.c",
+            "src/dsp/lossless_msa.c",
+            "src/dsp/lossless_neon.c",
+            "src/dsp/lossless_sse2.c",
+            "src/dsp/lossless_sse41.c",
+            "src/dsp/rescaler.c",
+            "src/dsp/rescaler_mips32.c",
+            "src/dsp/rescaler_mips_dsp_r2.c",
+            "src/dsp/rescaler_msa.c",
+            "src/dsp/rescaler_neon.c",
+            "src/dsp/rescaler_sse2.c",
+            "src/dsp/ssim.c",
+            "src/dsp/ssim_sse2.c",
+            "src/dsp/upsampling.c",
+            "src/dsp/upsampling_mips_dsp_r2.c",
+            "src/dsp/upsampling_msa.c",
+            "src/dsp/upsampling_neon.c",
+            "src/dsp/upsampling_sse2.c",
+            "src/dsp/upsampling_sse41.c",
+            "src/dsp/yuv.c",
+            "src/dsp/yuv_mips32.c",
+            "src/dsp/yuv_mips_dsp_r2.c",
+            "src/dsp/yuv_neon.c",
+            "src/dsp/yuv_sse2.c",
+            "src/dsp/yuv_sse41.c",
+            "src/enc/alpha_enc.c",
+            "src/enc/analysis_enc.c",
+            "src/enc/backward_references_cost_enc.c",
+            "src/enc/backward_references_enc.c",
+            "src/enc/config_enc.c",
+            "src/enc/cost_enc.c",
+            "src/enc/filter_enc.c",
+            "src/enc/frame_enc.c",
+            "src/enc/histogram_enc.c",
+            "src/enc/iterator_enc.c",
+            "src/enc/near_lossless_enc.c",
+            "src/enc/picture_csp_enc.c",
+            "src/enc/picture_enc.c",
+            "src/enc/picture_psnr_enc.c",
+            "src/enc/picture_rescale_enc.c",
+            "src/enc/picture_tools_enc.c",
+            "src/enc/predictor_enc.c",
+            "src/enc/quant_enc.c",
+            "src/enc/syntax_enc.c",
+            "src/enc/token_enc.c",
+            "src/enc/tree_enc.c",
+            "src/enc/vp8l_enc.c",
+            "src/enc/webp_enc.c",
+            "src/mux/anim_encode.c",
+            "src/mux/muxedit.c",
+            "src/mux/muxinternal.c",
+            "src/mux/muxread.c",
+            "src/utils/bit_reader_utils.c",
+            "src/utils/bit_writer_utils.c",
+            "src/utils/color_cache_utils.c",
+            "src/utils/filters_utils.c",
+            "src/utils/huffman_encode_utils.c",
+            "src/utils/huffman_utils.c",
+            "src/utils/palette.c",
+            "src/utils/quant_levels_dec_utils.c",
+            "src/utils/quant_levels_utils.c",
+            "src/utils/random_utils.c",
+            "src/utils/rescaler_utils.c",
+            "src/utils/thread_utils.c",
+            "src/utils/utils.c",
+        ],
+        // Where the public headers are, so the workload writes `#include <webp/encode.h>` the way
+        // any caller of this library does. The library's own files reach each other from the top of
+        // the tree, which the always searched source directory already covers.
+        includes: &["src"],
+        // Nothing, which is the interesting part. libwebp's configure looks for a threading library
+        // and for four image format libraries it can read and write files with, and none of that is
+        // wanted here: the workload hands the encoder a buffer it built itself and reads the answer
+        // back out of another buffer, so there is no file and no format to decode one from, and
+        // without WEBP_USE_THREAD the one file that would have started threads takes the path it
+        // takes on a machine with no threads. What is left is the codec, which is what this row is
+        // for.
+        defines: &[],
+        // Seven, and two stories. The first two are the init plane over a lane libwebp leaves alone
+        // on purpose and then loads anyway, and the other five are the type plane over a run of
+        // pixels the lossless decoder fills eight bytes at a time and reads back four at a time.
+        known: &[
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "AccumulateRGB in src/enc/picture_csp_enc.c writes three of every four \
+                      uint16_t of the row it averages into and leaves the fourth alone, because \
+                      the fourth is where the alpha would go and there is no alpha on this path. \
+                      What reads the row back is ConvertRGBA32ToUV_SSE2 in src/dsp/yuv_sse2.c, \
+                      which takes sixteen bytes at a time and so reads the lane nobody wrote along \
+                      with the three it wants. The value is shuffled out again and no answer \
+                      depends on it, and the read still happened, which is what the init plane \
+                      says. libwebp knows about it: the loop has a WEBP_MSAN arm that zeroes the \
+                      lane for this reason and names https://crbug.com/webp/573 beside it. Same \
+                      class as zlib's slide_hash above, and the second project to produce it. This \
+                      is the low half of the sixteen bytes.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The high half of the same load. Two reports rather than eight because the \
+                      four loads that helper makes all go through one out of line _mm_loadu_si128, \
+                      so every load of every row of the image arrives at the same two check sites.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 4,
+                why: "CopySmallPattern32b in src/dec/vp8l_dec.c fills a run of pixels from a back \
+                      reference one or two pixels behind it by casting the uint32_t* destination \
+                      to uint64_t* and storing the repeated pattern eight bytes at a time. That \
+                      leaves eight bytes described as one eight byte object, and every later read \
+                      of one of those pixels as a uint32_t asks for a four byte one and is told \
+                      no. The cast is the defect rather than the read: after the store the storage \
+                      has an effective type of uint64_t and 6.5p7 does not let it be read as \
+                      anything else. Every compiler in practice does what libwebp wants here and \
+                      every answer this workload checks is right. Five sites read those pixels \
+                      back, and this is CopyBlock32b itself, where a later back reference copies \
+                      pixel by pixel over a run an earlier pattern copy wrote.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 4,
+                why: "The same pattern copy read back by ReadHuffmanCodes in src/dec/vp8l_dec.c, \
+                      which walks the decoded huffman image a uint32_t at a time to find out how \
+                      many trees the picture has.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 4,
+                why: "The same pattern copy read back by DecodeImageData in src/dec/vp8l_dec.c, \
+                      which hands every pixel it has emitted to VP8LColorCacheInsert as a uint32_t \
+                      once the run that produced it is finished.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 4,
+                why: "The same pattern copy read back by ColorSpaceInverseTransform_C in \
+                      src/dsp/lossless.c, which undoes the cross colour transform a pixel at a \
+                      time over a row the decoder built.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 4,
+                why: "The same pattern copy read back by PredictorInverseTransform_C in \
+                      src/dsp/lossless.c, which is the other inverse transform over the same rows \
+                      and reads the row above as well as the row it is writing.",
+            },
+        ],
+        pending: None,
     },
 ];
 
