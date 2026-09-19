@@ -1361,22 +1361,28 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
     Ok(archive)
 }
 
-/// Every `.c` under `runtime/builtins`, in the order their names sort in.
+/// Every `.c` and `.S` under `runtime/builtins`, in the order their names sort in.
 ///
 /// Sorted rather than in whatever order the file system hands them back, because the members of an
 /// archive come out in the order they went in and `spec/cross-compile/13-distribution.md` section
 /// 13.6 asks for the same bytes from the same tree on any machine.
 ///
+/// The assembly is here rather than under a build rule of its own because the compiler reads a `.S`
+/// the way it reads a `.c`, through the preprocessor and then through its own assembler, so one
+/// command line still compiles the whole directory. A capital `S` and not a small one: every file
+/// here is guarded by what the target is, and a small `s` is the extension that says the
+/// preprocessor does not run. See `runtime/builtins/chkstk.S`.
+///
 /// # Errors
 ///
-/// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is no C in it
-/// at all, which would otherwise write an empty archive and call it a success.
+/// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is nothing to
+/// compile in it at all, which would otherwise write an empty archive and call it a success.
 fn builtin_sources() -> Result<Vec<PathBuf>> {
     let dir = root().join("runtime").join("builtins");
     let mut sources = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))? {
         let path = entry.map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?.path();
-        if path.extension().is_some_and(|e| e == "c") {
+        if path.extension().is_some_and(|e| e == "c" || e == "S") {
             sources.push(path);
         }
     }
@@ -1384,7 +1390,7 @@ fn builtin_sources() -> Result<Vec<PathBuf>> {
     if sources.is_empty() {
         return Err(Error::Failed {
             task: "builtins",
-            problems: vec![format!("there is no C to compile in {}", dir.display())],
+            problems: vec![format!("there is nothing to compile in {}", dir.display())],
         });
     }
     Ok(sources)

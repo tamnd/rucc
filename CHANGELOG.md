@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `runtime/builtins/chkstk.S` is the `___chkstk_ms` stack probe a Windows prologue calls, which this compiler has emitted calls to for as long as it has had a Windows convention and nothing here defined. A thread on Windows is given a stack of which only a little is committed and a guard page below that whose whole job is to be touched, so a frame larger than a page has to be reached a page at a time or the guard is stepped over. It cannot be C: the size arrives in `rax`, which is not a register any argument arrives in, and every register the routine was entered with has to still hold what it held on the way out, `rax` included, because the caller subtracts it from the stack pointer afterwards. The callers are not only ours either, since mingw-w64's own `libmingw32.a` and `libmingwex.a` call it, which is how every program that calls `printf` reaches it. It is the first file in `runtime/builtins` that is not C and it is beside the C rather than in a directory of its own, because `cargo xtask builtins` hands the whole directory to one compiler invocation and the compiler reads a `.S` the way it reads a `.c`, so the guard at the top preprocesses the file away to nothing on every target it is not for. The sequence is gcc's and disassembles instruction for instruction the same apart from the two jumps, which we write long because relaxation is not written yet. Checked as a program rather than as bytes alone: `hello.c` compiled for `x86_64-windows-gnu` against a fetched sysroot, linked with `librucc_builtins.a` and no `libgcc.a` anywhere on the line, runs under wine and has in it exactly the two probes this routine has. Part of tamnd/rucc#1514.
+
+### Fixed
+
+- `rucc --target=x86_64-windows-gnu -c file.S` writes an object instead of refusing with "there is no object writer for x86_64-windows-gnu in this compiler yet", which is what it said while a `.c` for the same target compiled and linked. The path from assembly to an object file had its own copy of the format decisions with an ELF only refusal in front of it, and it asks `rucc_object::file::Flavour` now, the same short list of format opinions the compiled path has always asked, so the section flags, the relocation, the visibility and the stack marker are decided in one place for both paths. The message was a second cost of the copy: what it sounded like was a whole back end being absent rather than one path through one that is there.
+
+- A `.globl` on a label with no `.type` beside it came out as a local symbol on COFF. ELF keeps how far a name reaches and what kind of thing it is in separate fields, COFF has one field for both, and the writer underneath maps a name of no type to `IMAGE_SYM_CLASS_LABEL` whatever its binding says, so the same two lines of assembly gave `T` on ELF and `t` on COFF and a linker cannot see a `t`. What the mapping is asked is the type and the binding together now, and an untyped global or weak name on COFF is written as the kind that carries an external storage class. ELF is unchanged, since there the answer to one of those questions was never the answer to the other.
+
 ## 0.10.67
 
 ### Added
