@@ -22,8 +22,8 @@
 //! here what a program already said, and a wrong answer about which section something is in is not
 //! visible until a link or a load.
 //!
-//! The two views meet at the [`object`] crate's writer, which is what both call, and at
-//! [`crate::file::Flavour`], which is what both ask where the two formats answer differently. So
+//! The two views meet at the [`object`] crate's writer, which is what both call, and at the short
+//! list of format opinions beside it, which is what both ask where the formats differ. So
 //! there is one place that knows how an object file is laid out and one that knows what each format
 //! calls the things in it.
 
@@ -235,8 +235,8 @@ pub struct Assembled {
 
 /// That, as a relocatable object in whichever of the two formats the target wants.
 ///
-/// Both formats, the same two [`crate::file`] writes a compilation into, and the differences
-/// between them are the same [`Flavour`] answers there. That is the whole reason this is not two
+/// Both formats, the same two the module that writes a compilation writes it into, and the
+/// differences between them are the same answers there. That is the whole reason this is not two
 /// functions: a file of assembly names its own sections and a compilation does not, but what a
 /// relocation is called and whether a symbol has anywhere to keep a visibility are facts about the
 /// format rather than about where the bytes came from, and a second set of answers to them would
@@ -244,7 +244,7 @@ pub struct Assembled {
 ///
 /// What a [`Part`] carries is the section type and flags the source wrote in as many words. ELF has
 /// a field for each of them and they are written down as they stand. COFF has no field they map
-/// onto, so what the section is comes from [`Shape::kind`] and the writer underneath turns that
+/// onto, so what the section is comes from the kind on the shape and the writer underneath turns it
 /// into the characteristics every other Windows assembler writes. A program that means a Windows
 /// section to be something other than what its name says is a program that has to say so some other
 /// way, which is what `.section` with COFF's own letters is for and what tamnd/rucc#1514 left open.
