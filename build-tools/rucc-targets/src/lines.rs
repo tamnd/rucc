@@ -34,6 +34,12 @@ use crate::CACHE;
 /// Where the recorded lines live, relative to the workspace root.
 const DIR: &str = "tests/link-lines";
 
+/// The placeholder the recorded lines name our own runtime under.
+///
+/// Beside the compiler on a real machine, which is a path per machine, so the files say so in one
+/// word instead. The same reason [`CACHE`] is a placeholder.
+const BUILTINS_DIR: &str = "<builtins>";
+
 /// The modes, in the order they are recorded.
 ///
 /// All five, for every target, because what the line is for a mode a target cannot use is as much
@@ -127,11 +133,18 @@ fn render(target: TargetTuple) -> String {
     // recorded is what would actually be run and a reader can see where the caller's own files land
     // among the start files and the libraries.
     let inputs = [Item::File(PathBuf::from("main.o"))];
+    // Our own runtime under a placeholder, for the reason the cache directory is one. Where it is
+    // is a fact about the machine the compiler is on rather than about the target: it is this
+    // compiler's output, the driver finds it in a `-B` prefix or beside the compiler, and writing
+    // whichever of those it was here would be a file that is out of date everywhere else. It is on
+    // the line rather than left off so that a reader can see where it lands among the libraries.
+    let builtins = PathBuf::from(BUILTINS_DIR).join(rucc_sysroot::link::BUILTINS);
     for (mode, name) in MODES {
         let options = Invocation {
             inputs: &inputs,
             output: Some(Path::new("main")),
             mode: *mode,
+            builtins: Some(&builtins),
             ..Invocation::default()
         };
         let _ = writeln!(out);

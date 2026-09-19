@@ -470,6 +470,26 @@ fn cross_line(
         })
         .collect();
     let output = PathBuf::from(output);
+    // Ours, from beside the compiler, because that is where `cargo xtask builtins` writes it and a
+    // fetched sysroot will never hold it. The cross line used to name it inside the sysroot, which
+    // is a file nothing puts there, so every cross link either failed at the linker or quietly ran
+    // against somebody else's `libgcc` copied in under the name. tamnd/rucc#1514.
+    let ours = builtins_archive(target, &opts.prefixes);
+    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib {
+        // Said here rather than left to the linker, which on a Windows target says `___chkstk_ms`
+        // is undefined and names mingw-w64's objects as the callers, and on a musl one says
+        // `__udivti3` is. Neither of those is a person's first guess at a missing archive.
+        let tuple = target.tuple().to_canonical_string();
+        return Err(Error::Cross {
+            why: format!(
+                "a cross link ends with librucc_builtins.a, this compiler's own runtime for \
+                 {tuple}, and there is none beside the compiler or under a -B prefix. A sysroot \
+                 does not carry it, because it is our output rather than the platform's. Build it \
+                 with `cargo xtask builtins --target={tuple}`, or pass -fno-builtins-lib to link \
+                 without it"
+            ),
+        });
+    }
     let invocation = argv::Invocation {
         inputs: &inputs,
         output: Some(&output),
@@ -478,6 +498,7 @@ fn cross_line(
         no_startfiles: !opts.wants_startfiles(),
         no_defaultlibs: !opts.wants_defaultlibs(),
         no_builtins_lib: opts.no_builtins_lib,
+        builtins: ours.as_deref(),
         export_dynamic: opts.export_dynamic,
         strip: opts.strip,
     };
@@ -503,7 +524,11 @@ fn cross_line(
 /// it would be linked against is not there.
 pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
-    cross_line(target, opts, &[], "a.out", &sysroot)?;
+    // Whether there is a line for this target and mode at all, asked with our own runtime left off
+    // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
+    // report the same thing, and the archive is the smaller of the two problems by a long way.
+    let shape = LinkOptions { no_builtins_lib: true, ..opts.clone() };
+    cross_line(target, &shape, &[], "a.out", &sysroot)?;
     // The library directory rather than the root, because the root of a cache directory that has
     // been created and never populated is there and holds nothing. Section 11.6's rule is that
     // suitable is checked and not assumed, and this is the cheapest form of that.
@@ -515,6 +540,9 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
             target: tuple,
         });
     }
+    // And now the whole line, which is the sysroot's files plus ours, so that a missing runtime is
+    // said here rather than by the linker after everything has been compiled.
+    cross_line(target, opts, &[], "a.out", &sysroot)?;
     Ok(())
 }
 
@@ -853,7 +881,9 @@ fn version_key(dir: &Path) -> Vec<u64> {
 /// `-B` prefix is asked first, because that is what a `-B` prefix is for.
 #[must_use]
 pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf> {
-    const NAME: &str = "librucc_builtins.a";
+    // The name from the crate that puts it on a line, rather than a second spelling of it here,
+    // which is what that constant asks of anybody who needs the name.
+    const NAME: &str = rucc_sysroot::link::BUILTINS;
     let triple = target.to_string();
     let mut places: Vec<PathBuf> = Vec::new();
     for prefix in prefixes {
@@ -1309,8 +1339,28 @@ mod tests {
     }
 
     /// A command line that has a cache to find generated sysroots in, which a real one always has.
+    ///
+    /// And a `-B` prefix with our runtime in it, because a cross link refuses without one and
+    /// every machine that does this for real has the archive `cargo xtask builtins` wrote. What
+    /// happens when it is missing is its own test below.
     fn cached() -> LinkOptions {
-        LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() }
+        LinkOptions {
+            cache: Some(PathBuf::from("/cache")),
+            prefixes: vec![a_builtins_dir()],
+            ..LinkOptions::default()
+        }
+    }
+
+    /// A directory with our runtime archive in it, so that a test can say what a machine where the
+    /// runtime was built looks like without building one.
+    ///
+    /// One directory for every test rather than one each, since none of them writes to it and the
+    /// name of the file is the whole of what they read.
+    fn a_builtins_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rucc-link-ours-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
+        dir
     }
 
     /// Where that cache would keep this target's sysroot.
@@ -1407,6 +1457,45 @@ mod tests {
         let names = cross_order(target);
         assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
         assert!(names.contains(&"x86_64-w64-mingw32-ld".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    fn our_runtime_comes_from_beside_the_compiler_rather_than_from_inside_the_sysroot() {
+        // The two halves of tamnd/rucc#1514. The line used to name it under the sysroot's `lib`,
+        // where nothing ever put it: it is this compiler's output for the target and a sysroot
+        // fetched from a release holds the platform's files and not ours. So the path on the line
+        // is the one the driver found, and the only `librucc_builtins.a` on the line is that one.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let sysroot = a_sysroot(target);
+        let opts = cached();
+        let args = cross_line(target, &opts, &one("a.o"), "a.exe", &sysroot).expect("a line");
+        let ours: Vec<&String> =
+            args.iter().filter(|arg| arg.ends_with("librucc_builtins.a")).collect();
+        assert_eq!(ours.len(), 1, "{args:?}");
+        assert_eq!(ours[0], &opts.prefixes[0].join("librucc_builtins.a").display().to_string());
+        assert!(!ours[0].starts_with(&sysroot.lib().display().to_string()), "{args:?}");
+        // And it is still last, after everything that calls into it.
+        assert_eq!(args.last(), Some(ours[0]), "{args:?}");
+    }
+
+    #[test]
+    fn a_cross_link_with_no_runtime_to_find_says_which_command_writes_one() {
+        // What the linker would say instead is that `___chkstk_ms` is undefined, referenced from
+        // mingw-w64's own objects, which is tamnd/rucc#1513 and is nobody's first guess at a
+        // missing archive.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { prefixes: Vec::new(), ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect_err("there is no runtime for it to find");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("cargo xtask builtins"), "{why}");
+        assert!(why.contains("-fno-builtins-lib"), "{why}");
+
+        // And that flag is the way through it, for somebody who meant to link without ours.
+        let without = LinkOptions { no_builtins_lib: true, ..opts };
+        let args = cross_line(target, &without, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line without ours on it");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
     }
 
     #[test]

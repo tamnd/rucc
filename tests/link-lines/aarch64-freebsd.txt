@@ -31,7 +31,7 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   -L<cache>/sysroots/aarch64-freebsd/lib
   main.o
   <cache>/sysroots/aarch64-freebsd/lib/libc.so
-  <cache>/sysroots/aarch64-freebsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o
 
 [dynamic-no-pie]
@@ -55,7 +55,7 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   -L<cache>/sysroots/aarch64-freebsd/lib
   main.o
   <cache>/sysroots/aarch64-freebsd/lib/libc.so
-  <cache>/sysroots/aarch64-freebsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o
 
 [shared]
@@ -78,5 +78,5 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   -L<cache>/sysroots/aarch64-freebsd/lib
   main.o
   <cache>/sysroots/aarch64-freebsd/lib/libc.so
-  <cache>/sysroots/aarch64-freebsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o

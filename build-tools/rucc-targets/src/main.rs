@@ -312,7 +312,10 @@ fn sysroot(target: TargetTuple) {
         (LinkMode::DynamicNoPie, "dynamic-no-pie"),
         (LinkMode::Shared, "shared"),
     ] {
-        let line = LinkLine::for_target(&sysroot, mode);
+        // Our own runtime under the name alone, since this prints names and where the file is on
+        // somebody's machine is the driver's answer rather than the line's.
+        let ours = PathBuf::from(rucc_sysroot::link::BUILTINS);
+        let line = LinkLine::for_target(&sysroot, mode, Some(&ours));
         let names: Vec<String> = line
             .with_objects(&[PathBuf::from("main.o")])
             .iter()

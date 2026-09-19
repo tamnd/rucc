@@ -33,7 +33,7 @@ sysroot   <cache>/sysroots/loongarch64-linux-gnu
   -L<cache>/sysroots/loongarch64-linux-gnu/lib
   main.o
   <cache>/sysroots/loongarch64-linux-gnu/lib/libc.so
-  <cache>/sysroots/loongarch64-linux-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/loongarch64-linux-gnu/lib/crtn.o
 
 [dynamic-no-pie]
@@ -59,7 +59,7 @@ sysroot   <cache>/sysroots/loongarch64-linux-gnu
   -L<cache>/sysroots/loongarch64-linux-gnu/lib
   main.o
   <cache>/sysroots/loongarch64-linux-gnu/lib/libc.so
-  <cache>/sysroots/loongarch64-linux-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/loongarch64-linux-gnu/lib/crtn.o
 
 [shared]
@@ -82,5 +82,5 @@ sysroot   <cache>/sysroots/loongarch64-linux-gnu
   -L<cache>/sysroots/loongarch64-linux-gnu/lib
   main.o
   <cache>/sysroots/loongarch64-linux-gnu/lib/libc.so
-  <cache>/sysroots/loongarch64-linux-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/loongarch64-linux-gnu/lib/crtn.o

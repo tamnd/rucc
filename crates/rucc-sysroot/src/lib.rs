@@ -94,7 +94,9 @@
 //!
 //! // A static link needs three start files, and `crtn.o` goes after the libraries rather than
 //! // with the other two.
-//! let line = LinkLine::musl(&sysroot, LinkMode::Static);
+//! // Our own runtime is a path the caller hands in, because it is the compiler's output for the
+//! // target rather than anything a sysroot holds, and `None` leaves it off the line.
+//! let line = LinkLine::musl(&sysroot, LinkMode::Static, None);
 //! assert_eq!(line.start.last().unwrap().file_name().unwrap(), "crti.o");
 //! assert_eq!(line.end.first().unwrap().file_name().unwrap(), "crtn.o");
 //!
