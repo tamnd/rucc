@@ -62,6 +62,18 @@ Pull requests describe the problem, then the change, then how it was verified. I
 
 Rebase rather than merge. The history is meant to be bisectable, and `spec/14-target-ladder.md` says that a commit which breaks a climbed rung gets reverted rather than fixed forward, which only works if reverting is easy.
 
+## Cutting a release
+
+The version is written in five places and every one of them has been the one that got forgotten. `cargo xtask version` checks three of them and the gate runs it, but it runs after the edit rather than instead of it, so the list is here.
+
+1. `CHANGELOG.md`. Put a `## <version>` heading under `## Unreleased`, so that the entries which were unreleased are now the release and `## Unreleased` is empty again.
+2. `Cargo.toml`. The workspace version at the top, and the exact pins between our own crates further down, which is the same number about thirty times.
+3. Every published crate's `html_root_url`, one line in each `crates/*/src/lib.rs`. A stale one sends a reader of the docs to the wrong version and says nothing while doing it.
+4. `Cargo.lock`, with `cargo update --workspace`. The publish step passes `--locked`, so a stale lockfile does not warn, it refuses, and `cannot update the lock file because --locked was passed` is the whole of what it says.
+5. `PROVENANCE`, whose header carries the release. `cargo xtask provenance` rewrites it and the gate's provenance check fails if it was not.
+
+Then the gate, then the pull request, then the merge, then `git tag -a v<version>` on the merge commit and push the tag. The release workflow starts from the tag and checks it against the workspace manifest before it builds anything, so a tag that does not match what was merged fails at the first job rather than publishing something wrong.
+
 ## Reporting a miscompilation
 
 This is the most valuable kind of bug report the project can get, so it gets its own issue template and its own handling.
