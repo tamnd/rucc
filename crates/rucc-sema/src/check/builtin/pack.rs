@@ -95,9 +95,91 @@ impl Checker<'_> {
 
 #[cfg(test)]
 mod tests {
+    use rucc_ast::Ast;
+    use rucc_base::Interner;
     use rucc_gnu::{Kind, Status};
+    use rucc_session::Std;
+    use rucc_target::{TargetInfo, Triple};
+    use rucc_types::IntKind;
 
     use super::*;
+    use crate::check::Context;
+    use crate::check::stmt::Enclosing;
+
+    /// What a checker needs to exist, since it borrows all of it for as long as it lives, plus the
+    /// one call every test here checks.
+    ///
+    /// The call is built before the checker, because the tree is what the checker borrows and a
+    /// test that wants a second checker over the same call cannot be adding to the tree by then.
+    struct Fixture {
+        ast: Ast,
+        names: Interner,
+        target: TargetInfo,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let target =
+                TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
+            Fixture { ast: Ast::new(), names: Interner::new(), target }
+        }
+
+        /// A call to the named builtin with no arguments, which is how both of them are written.
+        fn call(&mut self, name: &str) -> rucc_ast::ExprId {
+            let name = self.names.intern(name);
+            let callee = self.ast.expr(rucc_ast::Expr::Name(name), Span::DUMMY);
+            let args = self.ast.add_expr_list(&[]);
+            self.ast.expr(rucc_ast::Expr::Call { callee, args }, Span::DUMMY)
+        }
+
+        fn checker(&self) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+        }
+    }
+
+    /// Checks the call inside a body of the given shape and gives back what was reported.
+    ///
+    /// The body is opened by hand rather than by checking a definition, because the pairing these
+    /// turn on is the whole of what a definition would be contributing.
+    fn reported(f: &Fixture, call: rucc_ast::ExprId, variadic: bool, emitted: bool) -> Vec<String> {
+        let mut c = f.checker();
+        let ret = c.types.int(IntKind::Int);
+        c.open_body(Enclosing { variadic, emitted, ..Enclosing::returning(ret) });
+        c.check_expr(call);
+        c.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
+    }
+
+    /// The pairing is the rule, so all four shapes of a body are worth asking about and so is being
+    /// outside one, where there is no argument pack to talk about at all. Both names answer the
+    /// same, since neither can be filled in for the same reason.
+    #[test]
+    fn the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it() {
+        for name in [PACK, LENGTH] {
+            let mut f = Fixture::new();
+            let call = f.call(name);
+
+            assert!(
+                reported(&f, call, true, false).is_empty(),
+                "{name} in a variadic body nothing is emitted for"
+            );
+
+            for (variadic, emitted) in [(true, true), (false, false), (false, true)] {
+                let messages = reported(&f, call, variadic, emitted);
+                assert_eq!(
+                    messages,
+                    vec![format!(
+                        "'{name}' is only accepted in a variadic function nothing is emitted for, \
+                         since this compiler does not inline and has nothing to forward"
+                    )],
+                    "{name} in a body with variadic {variadic} and emitted {emitted}"
+                );
+            }
+
+            let mut c = f.checker();
+            c.check_expr(call);
+            assert_eq!(c.errors.diagnostics().len(), 1, "{name} outside a function");
+        }
+    }
 
     /// Both names have to be rows of the table carrying a signature, because the signature is what
     /// the call is checked against before this is asked about it, and neither may be implemented,
