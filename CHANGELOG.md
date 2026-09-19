@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `CONTRIBUTING.md` says how a release is cut. The version is written in five places, the workspace manifest, the exact pins between our own crates, every published crate's `html_root_url`, the lockfile and `PROVENANCE`, and each of those has been the one that got forgotten on some release. `cargo xtask version` checks three of them and the gate runs it, but it runs after the edit rather than instead of it, so the list is written down where somebody cutting a release will read it, along with what goes wrong when each one is missed: a stale `html_root_url` sends a reader of the docs to the wrong version without saying anything, and a stale lockfile does not warn but refuses, since the publish step passes `--locked`.
+
 ## 0.10.68
 
 ### Added
