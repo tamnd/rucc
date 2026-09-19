@@ -259,18 +259,39 @@ pub(crate) fn command_line(opts: &Predef) -> String {
     d.text
 }
 
+/// What this compiler says its own version is.
+///
+/// Read from the manifest at build time rather than written here, because a number written in a
+/// second place is a number that goes stale: these five macros said 0.1.0 through sixty seven
+/// releases. A program testing `__rucc_major__` for a feature was told the answer for a version
+/// nobody has run since, and a build log recording `__VERSION__` recorded the wrong compiler.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// One dotted field of a version, as the digits at the front of it.
+///
+/// `0.10.68-rc.1` has a patch level of 68 and not of `68-rc`, and a field that is not there at all
+/// is zero, which is what a two field version means by its third. Neither shape is one this
+/// workspace publishes, and a macro that expands to something no `#if` can read is worse than a
+/// macro that is approximately right.
+fn field(version: &str, n: usize) -> &str {
+    let part = version.split('.').nth(n).unwrap_or("0");
+    let digits = part.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let end = digits.find(|c: char| !c.is_ascii_digit()).unwrap_or(digits.len());
+    if end == 0 { "0" } else { &digits[..end] }
+}
+
 /// Who the compiler says it is.
 fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.flag("__rucc__");
-    d.set("__rucc_version__", "\"0.1.0\"");
-    d.set("__rucc_major__", "0");
-    d.set("__rucc_minor__", "1");
-    d.set("__rucc_patchlevel__", "0");
+    d.set("__rucc_version__", &format!("\"{VERSION}\""));
+    d.set("__rucc_major__", field(VERSION, 0));
+    d.set("__rucc_minor__", field(VERSION, 1));
+    d.set("__rucc_patchlevel__", field(VERSION, 2));
     // The promise from section 4.5. Everything in the matrix hangs off this line.
     d.set("__GNUC__", &opts.gnuc.major.to_string());
     d.set("__GNUC_MINOR__", &opts.gnuc.minor.to_string());
     d.set("__GNUC_PATCHLEVEL__", &opts.gnuc.patch.to_string());
-    d.set("__VERSION__", "\"rucc 0.1.0\"");
+    d.set("__VERSION__", &format!("\"rucc {VERSION}\""));
     // Not `__clang__`, deliberately. Section 4.5 says so, and a header that takes the Clang
     // path expects Clang's extension surface rather than GCC's.
     //
@@ -1239,6 +1260,38 @@ mod tests {
 
     fn has(text: &str, line: &str) -> bool {
         text.lines().any(|l| l == line)
+    }
+
+    #[test]
+    fn the_version_macros_say_the_version_this_compiler_was_built_at() {
+        // They said 0.1.0 through sixty seven releases, because the number was written here as
+        // well as in the manifest, so a program asking which rucc it was is now told.
+        let text = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&text, &format!("#define __rucc_version__ \"{VERSION}\"")), "{text}");
+        assert!(has(&text, &format!("#define __VERSION__ \"rucc {VERSION}\"")), "{text}");
+        assert!(has(&text, &format!("#define __rucc_major__ {}", field(VERSION, 0))));
+        assert!(has(&text, &format!("#define __rucc_minor__ {}", field(VERSION, 1))));
+        assert!(has(&text, &format!("#define __rucc_patchlevel__ {}", field(VERSION, 2))));
+
+        // And what each of them expands to is something an `#if` can read, which is the whole
+        // reason the three numbers are separate macros from the string.
+        for n in 0..3 {
+            assert!(field(VERSION, n).parse::<u32>().is_ok(), "{}", field(VERSION, n));
+        }
+    }
+
+    #[test]
+    fn a_version_field_is_the_digits_at_the_front_of_it() {
+        assert_eq!(
+            (field("0.10.68", 0), field("0.10.68", 1), field("0.10.68", 2)),
+            ("0", "10", "68")
+        );
+
+        // A pre-release suffix belongs to the string and not to the number an `#if` compares, and
+        // a field that is not there at all is what a two field version means by its third.
+        assert_eq!(field("0.10.68-rc.1", 2), "68");
+        assert_eq!(field("1.0", 2), "0");
+        assert_eq!(field("", 0), "0");
     }
 
     #[test]
