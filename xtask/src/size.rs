@@ -76,7 +76,7 @@ const ROWS: &[(&str, How)] = &[
     ),
     ("base distribution", How::Total),
     (
-        "mingw-w64 header tree",
+        "mingw-w64 sysroot",
         How::OutOfBase("section 13.2 fetches it, so it is out of the base and not produced here"),
     ),
     ("linker (on demand)", How::OutOfBase("document 11.2 keeps it out of the binary")),
