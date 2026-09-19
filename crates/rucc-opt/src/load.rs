@@ -39,12 +39,18 @@
 //!
 //! # What throws the table away
 //!
-//! Anything that could write anywhere, and what that means is the alias oracle's answer. A call and
-//! a store each take out the entries the oracle says they may write and leave the rest standing.
-//! Everything else that touches memory, which is an atomic, a fence, a `memcpy` and anything else
-//! [`Opcode::touches_memory`] is true of, empties the table and records nothing. That predicate is
-//! the conservative one, so an opcode added to the IR later throws the table away rather than being
-//! quietly assumed harmless.
+//! Anything that could write anywhere, and what that means is the alias oracle's answer. A call, a
+//! store and a safety plane access each take out the entries the oracle says they may write and
+//! leave the rest standing. Everything else that touches memory, which is an atomic, a fence, a
+//! `memcpy` and anything else [`Opcode::touches_memory`] is true of, empties the table and records
+//! nothing. That predicate is the conservative one, so an opcode added to the IR later throws the
+//! table away rather than being quietly assumed harmless.
+//!
+//! The plane access is there because of what it costs to leave it out. On a build with
+//! `-fsafety=detect` there is a `meta_` or a `check_` beside almost every access in the program, so
+//! a pass that empties the table at each of them has an empty table almost all of the time. None of
+//! them is a write to the address it names, which is what [`Opcode::touches_only_planes`] says and
+//! what the oracle now answers with.
 //!
 //! The oracle arrived late and this pass is the first consumer it has ever had. Until tamnd/rucc#1467
 //! a call and a store both emptied the whole table, because `crate::alias` wanted the module and a
@@ -152,7 +158,7 @@ impl Pass for LoadForward {
                     match act(func, inst) {
                         Act::Ignore => {}
                         Act::Forget => known.clear(),
-                        Act::Called => {
+                        Act::Ask => {
                             known.retain(|_, held| alias.clobbered_by(&held.access, inst).is_no());
                         }
                         Act::Wrote { address, value, ty } => {
@@ -242,8 +248,8 @@ enum Act {
     Ignore,
     /// It could write anywhere the oracle cannot rule out, and nothing here says what it wrote.
     Forget,
-    /// A call, which writes whatever the oracle cannot say it does not.
-    Called,
+    /// The oracle is asked what it wrote, because nothing about its shape says.
+    Ask,
     /// It writes this value of this type at this address, and may write elsewhere.
     Wrote { address: Value, value: Value, ty: Type },
     /// It reads a value of this type from this address into this result.
@@ -258,9 +264,15 @@ enum Act {
 /// here as something to forward, and neither does a load carrying a memory token, which is what
 /// more than one result would mean.
 ///
-/// A call is its own answer rather than a `Forget`, because the oracle is asked a different
-/// question about one: `Alias::clobbered_by` rather than `Alias::query`, since a call has no access
-/// of its own and what it may write is what its attributes and its arguments say.
+/// `Ask` is what an instruction that writes memory without an access saying where gets, and the
+/// oracle is asked a different question about one of those: `Alias::clobbered_by` rather than
+/// `Alias::query`, since there is no access of its own to hand over. A call is the obvious member
+/// and what it may write is what its attributes and its arguments say. The safety instrumentation
+/// is the other one, and there the answer is about the opcode rather than about the callee: a
+/// plane write is not a write to the address it names, which is what [`Opcode::touches_only_planes`]
+/// is for. Sending those to `Forget` instead is what this pass used to do, and it meant that on a
+/// build with `-fsafety=detect` the table was emptied beside almost every access and the pass did
+/// close to nothing, which is tamnd/rucc#1501.
 fn act(func: &Func, inst: Inst) -> Act {
     let data = &func[inst];
     if !data.opcode.touches_memory() {
@@ -271,7 +283,8 @@ fn act(func: &Func, inst: Inst) -> Act {
     }
     let args = &func[data.args];
     match data.opcode {
-        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Act::Called,
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Act::Ask,
+        other if other.touches_only_planes() => Act::Ask,
         Opcode::Load => {
             let mut results = data.results();
             let (Some(&address), Some(result), None) =
@@ -519,6 +532,72 @@ mod tests {
         let stats = run(&mut func);
         assert!(!stats.changed(), "every volatile read has to happen");
         assert_eq!(loads(&func), 3);
+    }
+
+    #[test]
+    fn the_safety_instrumentation_between_two_reads_leaves_the_table_standing() {
+        // A safety build puts a plane write and then a plane read beside almost every access, and
+        // for as long as those emptied the table this pass did close to nothing at
+        // `-fsafety=detect`. Neither is a write to the address it names, so the second load is
+        // still the first one's value.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        let width = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[slot, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+        let args = build.func().push_values(&[slot]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, slot]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[]);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        let stats = run(&mut func);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(loads(&func), 1);
+        assert_eq!(returned(&func), vec![first, first]);
+    }
+
+    #[test]
+    fn a_fence_between_two_reads_still_empties_the_table() {
+        // The other side of the line above. A fence touches memory, says nothing about where, and
+        // is not one of the plane opcodes, so it falls where everything unrecognized falls.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.inst(InstData::new(Opcode::Fence), &[]);
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        let stats = run(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(loads(&func), 2);
+    }
+
+    #[test]
+    fn a_volatile_plane_access_is_read_as_volatile_first() {
+        // The volatile test comes before the opcode does, and it has to stay that way: an access
+        // the program asked to happen exactly as written happens, whatever the opcode would have
+        // said about which memory it is.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build);
+        let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        let width = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[slot, width]);
+        build.inst(
+            InstData { args, flags: Flags::VOLATILE, ..InstData::new(Opcode::MetaInit) },
+            &[],
+        );
+        let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
+        build.ret(&[first, second]);
+
+        let stats = run(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(loads(&func), 2);
     }
 
     #[test]
