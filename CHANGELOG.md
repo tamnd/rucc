@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html) with the caveat in `spec/18-package-layout.md` section 18.6: pre-1.0 versions carry no compatibility promise at all.
 
+## Unreleased
+
+### Fixed
+
+- An `__int128` answer from a runtime routine is taken out of the register the target brings it back in, which on Windows finishes tamnd/rucc#1367. The two changes before this one fixed the operand side of a call to libgcc on that target, and what was left was the answer. mingw returns a sixteen byte integer in xmm0 rather than through the address the caller passed, which is gcc's answer to a convention that has no integer that size in it and is the opposite of what the same convention does with a sixteen byte float, so `__divti3` answers in a vector register while `__addtf3` answers through `rcx`. `crates/rucc-codegen/src/wide.rs` exists to take a value at that width apart into the two halves the machine holds it in and asked for two sixty four bit results, which Windows x64 has nowhere to put because a call there comes back in one register, so the four division and remainder routines and the two conversions down to this width all refused by name with E0653. The call is now written as answering one value at the quad float format, which is this compiler's name for sixteen bytes in a vector register and says nothing about what is in them, and the two halves are read back out of a slot it is stored into, which is a store and two loads and is what gcc writes for the same call. Which of the two shapes to use is the new `AbiDescription::wide_integer_returns_in`, the companion to the `scalar_is_by_reference` the operand side asks and a separate question from it because the one ABI that says yes to either gives different answers to the two. `__int128` division and remainder in both signednesses and the conversions from a `_Float128` down to that width, compiled by rucc for `x86_64-pc-windows-gnu` and linked against mingw-w64 gcc 13's libgcc, now print the same sixteen bytes under wine as the same source compiled entirely by that gcc, over sixty four operand pairs built from both extremes and a spread of ordinary values. Nothing changes on SysV, where the answer still comes back in the pair of registers the signature names and no slot is allocated, checked the same way against a native build. Closes tamnd/rucc#1367.
+
 ## 0.10.66
 
 ### Added
