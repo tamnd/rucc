@@ -134,9 +134,11 @@ impl Call {
     ///
     /// The size rule of the one ABI that does this is written over the size of the object and
     /// says nothing about what is in it, so it is asked here the same way and of the same sizes
-    /// the aggregate rules in [`crate::abis`] are written with.
+    /// the aggregate rules in [`crate::abis`] are written with. That is also why the rule itself
+    /// is on the description rather than here: a back end pass writing a call to a runtime routine
+    /// has to ask the same question with a width and no C type behind it.
     fn by_reference(&self, scalar: Scalar) -> bool {
-        self.abi.scalars.wide_is_by_reference && !matches!(scalar.size, 1 | 2 | 4 | 8)
+        self.abi.scalar_is_by_reference(scalar.size)
     }
 
     /// How a scalar argument travels, which is as itself wherever a register holds it, and what it

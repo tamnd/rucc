@@ -37,7 +37,7 @@
 use rucc_abi::abis;
 
 #[doc(inline)]
-pub use rucc_abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use rucc_abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
 
 use crate::TargetInfo;
 
@@ -54,7 +54,7 @@ impl TargetInfo {
     /// the call says so instead.
     #[must_use]
     pub fn call(&self) -> Option<Call> {
-        abis::for_target(self.tuple).map(rucc_abi::AbiDescription::call)
+        abis::for_target(self.tuple).map(AbiDescription::call)
     }
 }
 
