@@ -64,7 +64,7 @@ pub(crate) enum Flavour {
 
 impl Flavour {
     /// Which one a target wants, and nothing for the two formats that are not written.
-    fn of(target: &TargetInfo) -> Option<Flavour> {
+    pub(crate) fn of(target: &TargetInfo) -> Option<Flavour> {
         match target.object_format {
             ObjectFormat::Elf => Some(Flavour::Elf),
             ObjectFormat::Coff => Some(Flavour::Coff),
@@ -73,7 +73,7 @@ impl Flavour {
     }
 
     /// The format the writer underneath is asked for.
-    fn binary(self) -> BinaryFormat {
+    pub(crate) fn binary(self) -> BinaryFormat {
         match self {
             Flavour::Elf => BinaryFormat::Elf,
             Flavour::Coff => BinaryFormat::Coff,
@@ -84,7 +84,7 @@ impl Flavour {
     ///
     /// `after` is how many bytes of the instruction come after the four the linker writes over,
     /// which ELF has already folded into the addend and COFF wants told apart. See [`crate::Reloc`].
-    fn reloc(self, reference: Reference, after: u8) -> Option<RelocationFlags> {
+    pub(crate) fn reloc(self, reference: Reference, after: u8) -> Option<RelocationFlags> {
         match self {
             Flavour::Elf => elf::r_type(reference).map(|r_type| RelocationFlags::Elf { r_type }),
             Flavour::Coff => coff::reloc(reference, after),
@@ -96,7 +96,13 @@ impl Flavour {
     /// Nothing on COFF, where a symbol has nowhere to keep it. A file built with
     /// `-fvisibility=hidden` for Windows is a file where that flag changed nothing, which is what
     /// gcc does there as well.
-    fn see(self, obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibility: Visibility) {
+    pub(crate) fn see(
+        self,
+        obj: &mut Writer<'_>,
+        id: SymbolId,
+        binding: Binding,
+        visibility: Visibility,
+    ) {
         match self {
             Flavour::Elf => elf::see(obj, id, binding, visibility),
             Flavour::Coff => {}
@@ -125,8 +131,49 @@ impl Flavour {
         }
     }
 
+    /// The header fields a file of assembly stated about one of its own sections, where the format
+    /// has fields to put them in.
+    ///
+    /// ELF has one for each of the letters, so what the source wrote is written down as it stands
+    /// and the section kind handed to the writer alongside is only a summary of it. COFF has no
+    /// field the letters map onto one for one, and the characteristics the writer works out from
+    /// that kind are the ones every other Windows assembler produces, so there is nothing to add and
+    /// saying so is [`None`] rather than a word built out of guesses.
+    pub(crate) fn stated(self, shape: crate::source::Shape) -> Option<SectionFlags> {
+        match self {
+            Flavour::Elf => {
+                Some(SectionFlags::Elf { sh_type: shape.sh_type(), sh_flags: shape.sh_flags() })
+            }
+            Flavour::Coff => None,
+        }
+    }
+
+    /// What kind of symbol a name out of a file of assembly is, given what `.type` said about it and
+    /// how far it reaches.
+    ///
+    /// The binding is a parameter because on COFF the two are not separable. ELF keeps the type and
+    /// the binding in different halves of a byte, so a name that nothing stated a type for is
+    /// `STT_NOTYPE` whether it is local or global, and that is what gas writes for a plain label.
+    /// COFF has no type field of that sort: what the writer underneath calls a label is storage
+    /// class `LABEL`, which is a name inside this file and nothing a linker will resolve against, so
+    /// a `.globl` with no `.type` under it would quietly stop being offered. The kind with no
+    /// function type on it and an external storage class is the data one, which is what gas for this
+    /// platform writes for the same input, so that is what an untyped global becomes here.
+    pub(crate) fn sort(self, sort: crate::source::Sort, binding: Binding) -> SymbolKind {
+        match sort {
+            crate::source::Sort::Func => SymbolKind::Text,
+            crate::source::Sort::Object => SymbolKind::Data,
+            crate::source::Sort::Thread => SymbolKind::Tls,
+            crate::source::Sort::File => SymbolKind::File,
+            crate::source::Sort::Untyped => match (self, binding) {
+                (Flavour::Coff, Binding::Global | Binding::Weak) => SymbolKind::Data,
+                _ => SymbolKind::Label,
+            },
+        }
+    }
+
     /// The marker a linker looks for in every input, where there is one.
-    fn marker(self, obj: &mut Writer<'_>) {
+    pub(crate) fn marker(self, obj: &mut Writer<'_>) {
         match self {
             Flavour::Elf => elf::marker(obj),
             Flavour::Coff => coff::marker(obj),

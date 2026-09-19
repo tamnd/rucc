@@ -22,18 +22,17 @@
 //! here what a program already said, and a wrong answer about which section something is in is not
 //! visible until a link or a load.
 //!
-//! The two views meet at the [`object`] crate's writer, which is what both call, so there is one
-//! place that knows how an ELF file is laid out.
+//! The two views meet at the [`object`] crate's writer, which is what both call, and at
+//! [`crate::file::Flavour`], which is what both ask where the two formats answer differently. So
+//! there is one place that knows how an object file is laid out and one that knows what each format
+//! calls the things in it.
 
 use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
-use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionFlags, SectionKind,
-    SymbolFlags, SymbolKind, elf,
-};
-use rucc_target::{ObjectFormat, TargetInfo};
+use object::{Architecture, Endianness, SectionKind, SymbolFlags, elf};
+use rucc_target::TargetInfo;
 use rucc_tuple::Arch;
 
-use crate::file::Error;
+use crate::file::{Error, Flavour};
 use crate::section::{Array, Binding, Reloc, Visibility};
 
 /// One section, as a file of assembly describes one.
@@ -234,22 +233,32 @@ pub struct Assembled {
     pub names: Vec<Name>,
 }
 
-/// That, as a relocatable ELF object.
+/// That, as a relocatable object in whichever of the two formats the target wants.
 ///
-/// ELF only, where the rest of this crate writes COFF as well. What a [`Part`] carries is the
-/// section type and flags the source wrote in as many words, which are ELF's and which a COFF
-/// section header has no field for, so a file of assembly for a Windows target is refused here
-/// rather than written with the flags guessed back from the name.
+/// Both formats, the same two [`crate::file`] writes a compilation into, and the differences
+/// between them are the same [`Flavour`] answers there. That is the whole reason this is not two
+/// functions: a file of assembly names its own sections and a compilation does not, but what a
+/// relocation is called and whether a symbol has anywhere to keep a visibility are facts about the
+/// format rather than about where the bytes came from, and a second set of answers to them would
+/// be a second set to get wrong.
+///
+/// What a [`Part`] carries is the section type and flags the source wrote in as many words. ELF has
+/// a field for each of them and they are written down as they stand. COFF has no field they map
+/// onto, so what the section is comes from [`Shape::kind`] and the writer underneath turns that
+/// into the characteristics every other Windows assembler writes. A program that means a Windows
+/// section to be something other than what its name says is a program that has to say so some other
+/// way, which is what `.section` with COFF's own letters is for and what tamnd/rucc#1514 left open.
 ///
 /// # Errors
 ///
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for a
-/// relocation against a name the list does not hold or one this machine has no relocation for.
+/// relocation against a name the list does not hold or one this format has no relocation for.
 pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Error> {
-    if target.tuple.arch() != Arch::X86_64 || target.object_format != ObjectFormat::Elf {
-        return Err(Error::Format { triple: target.tuple.to_string() });
-    }
-    let mut obj = Writer::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let flavour = match Flavour::of(target) {
+        Some(flavour) if target.tuple.arch() == Arch::X86_64 => flavour,
+        _ => return Err(Error::Format { triple: target.tuple.to_string() }),
+    };
+    let mut obj = Writer::new(flavour.binary(), Architecture::X86_64, Endianness::Little);
 
     // Every section first, because a symbol says which one it is in and a relocation says which one
     // it is written into, so both need the whole list before either can be added.
@@ -258,9 +267,11 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
         let id = obj.add_section(Vec::new(), part.name.clone().into_bytes(), part.shape.kind());
         // The flags in full rather than whatever the kind implied, because the kind is a summary of
         // them and the source said them exactly. A section the program wrote `"ax"` on is executable
-        // whether or not its name is one this compiler would have made executable.
-        obj.section_mut(id).flags =
-            SectionFlags::Elf { sh_type: part.shape.sh_type(), sh_flags: part.shape.sh_flags() };
+        // whether or not its name is one this compiler would have made executable. Only where the
+        // format has the fields: see [`Flavour::stated`].
+        if let Some(flags) = flavour.stated(part.shape) {
+            obj.section_mut(id).flags = flags;
+        }
         let align = part.align.max(1);
         if part.shape.bits {
             obj.append_section_data(id, &part.bytes, align);
@@ -295,13 +306,13 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
             name: name.name.clone().into_bytes(),
             value,
             size,
-            kind: sort_of(name.sort),
+            kind: flavour.sort(name.sort, name.binding),
             scope: crate::file::scope_of(name.binding),
             weak: name.binding == Binding::Weak,
             section,
             flags: SymbolFlags::None,
         });
-        crate::elf::see(&mut obj, id, name.binding, name.visibility);
+        flavour.see(&mut obj, id, name.binding, name.visibility);
         // The writer underneath records a common symbol as `STT_COMMON` and gas records the same
         // symbol as `STT_OBJECT`. Both are a request for storage and a linker reads either, and the
         // one gas writes is written here, because an object that says the same thing a different
@@ -322,7 +333,7 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
                     format!("'{}' is named by a relocation and by nothing else", reloc.symbol);
                 return Err(Error::Refused { why });
             };
-            let r_type = crate::elf::r_type(reloc.kind).ok_or_else(|| Error::Refused {
+            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
             obj.add_relocation(
@@ -331,7 +342,7 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
                     offset: reloc.at as u64,
                     symbol: *symbol,
                     addend: reloc.addend,
-                    flags: RelocationFlags::Elf { r_type },
+                    flags,
                 },
             )
             .map_err(|why| Error::Refused { why: why.to_string() })?;
@@ -340,9 +351,10 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
 
     // The same marker every other object this compiler writes gets, and for the same reason: a
     // linker that does not find it in every input marks the stack executable. Not a second one if
-    // the file already said it, which a file written by hand for a linker that cares often does.
+    // the file already said it, which a file written by hand for a linker that cares often does,
+    // and nothing at all on a format whose answer to the question is in the finished image.
     if !input.parts.iter().any(|part| part.name == ".note.GNU-stack") {
-        obj.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Metadata);
+        flavour.marker(&mut obj);
     }
 
     obj.write().map_err(|why| Error::Refused { why: why.to_string() })
@@ -363,35 +375,25 @@ pub fn assembled_defines(input: &Assembled) -> Vec<String> {
         .collect()
 }
 
-/// What the writer underneath calls one of these.
-///
-/// `Label` is the one that is not obvious from its name. It is what that writer turns into
-/// `STT_NOTYPE`, which is what gas records for a label nobody stated a type for, and it says
-/// nothing about whether the name is local: `Unknown` would have been the reading of the name, and
-/// that writer refuses a defined one of those outright.
-fn sort_of(sort: Sort) -> SymbolKind {
-    match sort {
-        Sort::Func => SymbolKind::Text,
-        Sort::Object => SymbolKind::Data,
-        Sort::Thread => SymbolKind::Tls,
-        Sort::File => SymbolKind::File,
-        Sort::Untyped => SymbolKind::Label,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use object::read::elf::{FileHeader as _, Sym as _};
     use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use object::{RelocationFlags, SectionFlags};
     use rucc_target::{Arch as TargetArch, Env, Os, Triple};
 
     use crate::section::Reference;
 
-    /// A linux x86-64 target, which is the only one this writes.
+    /// A linux x86-64 target, which is the one most of these are written against.
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(TargetArch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// The same machine under mingw-w64, which is the target the COFF cases below are about.
+    fn windows() -> TargetInfo {
+        TargetInfo::new(Triple::new(TargetArch::X86_64, Os::Windows, Env::Gnu))
     }
 
     /// One section of that name holding those bytes, with the flags the name implies.
@@ -654,5 +656,89 @@ mod tests {
         let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
         assert!(format!("{why}").contains("aarch64"), "{why}");
+    }
+
+    #[test]
+    fn a_file_of_assembly_for_windows_is_written_as_coff() {
+        // What tamnd/rucc#1514 was about. `runtime/builtins/chkstk.S` is a file of assembly for a
+        // Windows target, and until this it was refused with a message about there being no object
+        // writer for the triple, which read as the whole back end being missing rather than this
+        // one path through it.
+        let input = Assembled { parts: vec![part(".text", vec![0xc3])], names: Vec::new() };
+        let bytes = assembled(&input, &windows()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(file.format(), object::BinaryFormat::Coff);
+        let section = file.section_by_name(".text").expect("the section");
+        assert_eq!(section.data().expect("the bytes"), &[0xc3]);
+        assert_eq!(section.kind(), SectionKind::Text);
+        assert!(
+            file.section_by_name(".note.GNU-stack").is_none(),
+            "a format with no marker got one anyway"
+        );
+    }
+
+    #[test]
+    fn a_global_label_with_no_type_under_it_is_still_offered_on_coff() {
+        // The case a `.globl` and a label is, which is most of what a hand written file says. On
+        // ELF that is `STT_NOTYPE` and the binding is a separate field, so the name is global
+        // whatever its type. COFF has no such split: what the writer underneath calls a label is
+        // storage class `LABEL`, which is a name inside one file, and a symbol written that way is
+        // one no linker resolves against. `___chkstk_ms` came out of the archive as a local under
+        // that mapping and mingw-w64's own objects went on wanting it.
+        let input = Assembled {
+            parts: vec![part(".text", vec![0; 8])],
+            names: vec![
+                at("offered", 0, Sort::Untyped, Binding::Global),
+                at("ours", 4, Sort::Untyped, Binding::Local),
+            ],
+        };
+        let bytes = assembled(&input, &windows()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let offered = file.symbols().find(|s| s.name() == Ok("offered")).expect("the label");
+        assert!(offered.is_global(), "a `.globl` label came out local");
+        let ours = file.symbols().find(|s| s.name() == Ok("ours")).expect("the other label");
+        assert!(!ours.is_global(), "a label nothing offered came out global");
+        // And the same input on ELF is still what gas writes there, which is the half of this that
+        // would otherwise have been changed to fix the other half.
+        let bytes = assembled(&input, &target()).expect("an object");
+        assert_eq!(st_info(&bytes, "offered") & 0xf, elf::STT_NOTYPE.0);
+    }
+
+    #[test]
+    fn a_relocation_on_coff_says_how_much_of_the_instruction_comes_after_it() {
+        // The one real difference between the two formats' relocations. ELF folds the distance
+        // between the hole and the end of the instruction into the addend and has one type. COFF
+        // counts from the end of the instruction and has no addend field, so the count is in the
+        // type: `IMAGE_REL_AMD64_REL32_4` is four bytes of immediate behind the displacement.
+        let mut text = part(".text", vec![0; 16]);
+        text.relocs.push(Reloc {
+            at: 2,
+            symbol: "elsewhere".to_owned(),
+            kind: Reference::Data,
+            addend: -8,
+            after: 4,
+        });
+        let input = Assembled {
+            parts: vec![text],
+            names: vec![Name {
+                name: "elsewhere".to_owned(),
+                at: Held::Undefined,
+                size: 0,
+                sort: Sort::Untyped,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+            }],
+        };
+        let bytes = assembled(&input, &windows()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".text").expect("the section");
+        let (at, reloc) = section.relocations().next().expect("the relocation");
+        assert_eq!(at, 2);
+        assert_eq!(
+            reloc.flags(),
+            RelocationFlags::Coff {
+                typ: object::pe::RelocationType(object::pe::IMAGE_REL_AMD64_REL32.0 + 4)
+            }
+        );
     }
 }
