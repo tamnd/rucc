@@ -66,6 +66,16 @@ int evaluated_once(void) {
   return (int)sizeof a + use(a);
 }
 
+// A name for one of these is a declaration as well, with nothing to make a slot for and a length
+// to read where it stands. C23 6.7.7.3p12 says the size is evaluated where the declaration of the
+// type is reached, so `sizeof(T)` answers with what `n` was at the typedef and the assignment
+// under it changes nothing.
+long a_name_for_one(int n) {
+  typedef char T[n];
+  n = 0;
+  return (long)sizeof(T);
+}
+
 // A scope that ends by leaving the function gives nothing back, since returning gives back the
 // whole frame.
 int returned_from(int n) {

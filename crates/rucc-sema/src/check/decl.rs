@@ -567,8 +567,7 @@ impl Checker<'_> {
         let span = node.name_span;
         let specs = self.ast[specs];
         if specs.is_typedef() {
-            self.typedef(name, ty, &specs, item, span);
-            return None;
+            return self.typedef(name, ty, &specs, item, span);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
         let (linkage, duration) = self.placement(&specs, kind, name, span);
@@ -673,6 +672,10 @@ impl Checker<'_> {
     }
 
     /// A `typedef`, which declares a name for a type and nothing that exists at run time.
+    ///
+    /// It gives back a declaration only for the one typedef that has something to do where it
+    /// stands, which is a block-scope name for a variably modified type. Every other one is
+    /// resolved where it is written and leaves nothing in the tree.
     fn typedef(
         &mut self,
         name: Symbol,
@@ -680,7 +683,7 @@ impl Checker<'_> {
         specs: &ast::DeclSpecs,
         item: ast::InitDeclarator,
         span: Span,
-    ) {
+    ) -> Option<DeclId> {
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(
@@ -731,19 +734,63 @@ impl Checker<'_> {
             Some(Binding::Typedef(previous)) if compatible(&self.types, previous, ty) => {}
             Some(Binding::Typedef(_)) => {
                 self.conflicting_types(name, ty, None, span);
-                return;
+                return None;
             }
             Some(Binding::Decl(previous)) => {
                 self.different_kind(name, Some(previous), span);
-                return;
+                return None;
             }
             Some(Binding::Enumerator { .. }) => {
                 self.different_kind(name, None, span);
-                return;
+                return None;
             }
             None => {}
         }
         self.declare_typedef(name, ty);
+        self.type_decl(name, ty, span)
+    }
+
+    /// The declaration a typedef of a variably modified type leaves behind.
+    ///
+    /// 6.7.7.3p12 says the size expression in one of these is evaluated where the declaration is
+    /// reached, so `typedef char T[n]` fixes what `sizeof(T)` answers for as long as the name is
+    /// in scope and an `n++` under it changes nothing. The lowering does that where it meets a
+    /// declaration, so the typedef has to be one, and this is the declaration it is: no object,
+    /// nothing emitted, and a name that is still bound as a typedef so that nothing resolves an
+    /// expression to it.
+    ///
+    /// A file-scope typedef needs none of it, since a variably modified type is refused there and
+    /// there is no run time to evaluate a size in.
+    fn type_decl(&mut self, name: Symbol, ty: TypeId, span: Span) -> Option<DeclId> {
+        if self.scopes.at_file_scope() || !self.is_variably_modified(ty) {
+            return None;
+        }
+        Some(self.tast.decl(
+            Decl {
+                name: Some(name),
+                ty,
+                kind: DeclKind::Type,
+                linkage: Linkage::None,
+                duration: StorageDuration::Automatic,
+                state: Definition::Declared,
+                alignment: None,
+                constant: false,
+                retained: false,
+                asm_label: None,
+                alias: None,
+                inline: Emission::Silent,
+                gnu_inline: false,
+                noreturn: false,
+                visibility: None,
+                weak: false,
+                startup: Startup::default(),
+                init: None,
+                cleanup: None,
+                params: DeclList::EMPTY,
+                body: None,
+            },
+            span,
+        ))
     }
 
     /// The linkage and the storage duration, which the scope and the keyword decide together.
