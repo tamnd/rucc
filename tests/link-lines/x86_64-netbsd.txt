@@ -31,7 +31,7 @@ sysroot   <cache>/sysroots/x86_64-netbsd
   -L<cache>/sysroots/x86_64-netbsd/lib
   main.o
   <cache>/sysroots/x86_64-netbsd/lib/libc.so
-  <cache>/sysroots/x86_64-netbsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-netbsd/lib/crtn.o
 
 [dynamic-no-pie]
@@ -55,7 +55,7 @@ sysroot   <cache>/sysroots/x86_64-netbsd
   -L<cache>/sysroots/x86_64-netbsd/lib
   main.o
   <cache>/sysroots/x86_64-netbsd/lib/libc.so
-  <cache>/sysroots/x86_64-netbsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-netbsd/lib/crtn.o
 
 [shared]
@@ -78,5 +78,5 @@ sysroot   <cache>/sysroots/x86_64-netbsd
   -L<cache>/sysroots/x86_64-netbsd/lib
   main.o
   <cache>/sysroots/x86_64-netbsd/lib/libc.so
-  <cache>/sysroots/x86_64-netbsd/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-netbsd/lib/crtn.o

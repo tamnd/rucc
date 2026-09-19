@@ -25,7 +25,7 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o
   <cache>/sysroots/aarch64-linux-musl/lib/libc.a
-  <cache>/sysroots/aarch64-linux-musl/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-linux-musl/lib/crtn.o
 
 [static-pie]
@@ -51,7 +51,7 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o
   <cache>/sysroots/aarch64-linux-musl/lib/libc.a
-  <cache>/sysroots/aarch64-linux-musl/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-linux-musl/lib/crtn.o
 
 [dynamic]
@@ -77,7 +77,7 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o
   <cache>/sysroots/aarch64-linux-musl/lib/libc.a
-  <cache>/sysroots/aarch64-linux-musl/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-linux-musl/lib/crtn.o
 
 [dynamic-no-pie]
@@ -103,7 +103,7 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o
   <cache>/sysroots/aarch64-linux-musl/lib/libc.a
-  <cache>/sysroots/aarch64-linux-musl/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-linux-musl/lib/crtn.o
 
 [shared]
@@ -126,5 +126,5 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o
   <cache>/sysroots/aarch64-linux-musl/lib/libc.a
-  <cache>/sysroots/aarch64-linux-musl/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-linux-musl/lib/crtn.o

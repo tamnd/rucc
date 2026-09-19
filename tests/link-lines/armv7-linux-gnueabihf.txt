@@ -33,7 +33,7 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
 
 [dynamic-no-pie]
@@ -59,7 +59,7 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
 
 [shared]
@@ -82,5 +82,5 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o

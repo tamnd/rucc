@@ -20,6 +20,14 @@ fn sysroot(tuple: &str) -> Sysroot {
     Sysroot::in_cache(Path::new("/cache"), target(tuple))
 }
 
+/// Where our own runtime is, which on a real machine is beside the compiler and here is a path
+/// that is plainly not inside any sysroot. The lines take it as a parameter now, for the reason
+/// `rucc_sysroot::link::BUILTINS` gives: it is the compiler's own output and nothing puts it in a
+/// sysroot.
+fn builtins() -> PathBuf {
+    PathBuf::from("/beside/the/compiler/librucc_builtins.a")
+}
+
 /// The file names of a list of paths, which is what the assertions are about.
 fn names(paths: &[PathBuf]) -> Vec<String> {
     paths
@@ -34,7 +42,7 @@ fn crtn_goes_after_the_libraries_and_crti_goes_before_them() {
     // `.fini`, so anything contributing to those has to land between them. Getting it wrong
     // produces a binary that links, runs, and does not run its static constructors, which is a
     // failure nobody attributes to the link line.
-    let line = LinkLine::musl(&sysroot("aarch64-linux-musl"), LinkMode::Static);
+    let line = LinkLine::musl(&sysroot("aarch64-linux-musl"), LinkMode::Static, Some(&builtins()));
     let objects = [PathBuf::from("main.o")];
     assert_eq!(
         names(&line.with_objects(&objects)),
@@ -54,7 +62,7 @@ fn the_modes_differ_in_the_first_start_file() {
         (LinkMode::DynamicNoPie, Some("crt1.o")),
         (LinkMode::Shared, None),
     ] {
-        let line = LinkLine::musl(&sysroot("x86_64-linux-musl"), mode);
+        let line = LinkLine::musl(&sysroot("x86_64-linux-musl"), mode, Some(&builtins()));
         let names = names(&line.start);
         assert_eq!(names.first().map(String::as_str), first.or(Some("crti.o")), "{mode:?}");
         assert_eq!(names.last().map(String::as_str), Some("crti.o"), "{mode:?}");
@@ -123,9 +131,11 @@ fn the_libc_the_target_names_picks_the_line() {
     // glibc is linked against dynamically, so what goes on the line is the generated `libc.so`
     // rather than an archive, and musl's is the real `libc.a`. The shape is the same and the files
     // are not, which is why the dispatch is one function.
-    let gnu = LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic);
+    let gnu =
+        LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic, Some(&builtins()));
     assert_eq!(names(&gnu.libraries), ["libc.so", "librucc_builtins.a"]);
-    let musl = LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static);
+    let musl =
+        LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static, Some(&builtins()));
     assert_eq!(names(&musl.libraries), ["libc.a", "librucc_builtins.a"]);
 }
 
@@ -146,7 +156,8 @@ fn the_cases_of_section_8_2_are_that_many_different_lines() {
 
     // And a freestanding line is our runtime and nothing else, with no start files at either end,
     // because the files that would be there come from a libc this target does not have.
-    let bare = LinkLine::for_target(&sysroot("armv7m-none-eabi"), LinkMode::Static);
+    let bare =
+        LinkLine::for_target(&sysroot("armv7m-none-eabi"), LinkMode::Static, Some(&builtins()));
     assert!(bare.start.is_empty());
     assert!(bare.end.is_empty());
     assert_eq!(names(&bare.libraries), ["librucc_builtins.a"]);
@@ -157,7 +168,8 @@ fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
     // The import library case, which is the same idea as a stub in a different container and a
     // different number of files. There is no `crti.o` and no `crtn.o` either, because PE has no
     // `.init` and `.fini` sections for a pair of files to open and close.
-    let line = LinkLine::for_target(&sysroot("x86_64-windows-gnu"), LinkMode::Dynamic);
+    let line =
+        LinkLine::for_target(&sysroot("x86_64-windows-gnu"), LinkMode::Dynamic, Some(&builtins()));
     assert_eq!(names(&line.start), ["crt2.o"]);
     assert!(line.end.is_empty());
     assert_eq!(
@@ -180,7 +192,8 @@ fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
 fn the_builtins_are_searched_after_the_libc_that_calls_them() {
     // An archive searched before the thing that needs it contributes nothing, and musl calls some
     // of the builtins.
-    let line = LinkLine::musl(&sysroot("armv7a-linux-musleabihf"), LinkMode::Static);
+    let line =
+        LinkLine::musl(&sysroot("armv7a-linux-musleabihf"), LinkMode::Static, Some(&builtins()));
     let libraries = names(&line.libraries);
     let libc = libraries.iter().position(|name| name == "libc.a").expect("a libc");
     let builtins =
@@ -204,12 +217,27 @@ fn x32_has_its_own_loader_because_it_is_its_own_abi() {
 }
 
 #[test]
-fn every_path_on_the_line_is_inside_the_sysroot() {
+fn every_path_on_the_line_is_inside_the_sysroot_except_our_own_runtime() {
     // A link line that reached outside the sysroot would be a link that depended on the machine,
-    // which is the failure the whole of section 8.5 is written against, one layer down.
+    // which is the failure the whole of section 8.5 is written against, one layer down. Our runtime
+    // is the one exception and it is not that failure: it is this compiler's own output for the
+    // target rather than anything the platform ships, so it is beside the compiler and a caller
+    // that has one hands the path in.
     let sysroot = sysroot("s390x-linux-musl");
-    let line = LinkLine::musl(&sysroot, LinkMode::Static);
+    let ours = builtins();
+    let line = LinkLine::musl(&sysroot, LinkMode::Static, Some(&ours));
     for path in line.with_objects(&[]) {
+        if path == ours {
+            continue;
+        }
+        assert!(path.starts_with(sysroot.root()), "{} escaped the sysroot", path.display());
+    }
+
+    // And with no runtime found there is simply one fewer library, which is what the driver hands
+    // in when it looked and there was none.
+    let without = LinkLine::musl(&sysroot, LinkMode::Static, None);
+    assert_eq!(names(&without.libraries), ["libc.a"]);
+    for path in without.with_objects(&[]) {
         assert!(path.starts_with(sysroot.root()), "{} escaped the sysroot", path.display());
     }
 }
