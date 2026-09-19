@@ -75,6 +75,21 @@ pub struct AbiDescription {
     pub stack_args: StackArgs,
 }
 
+impl AbiDescription {
+    /// Whether a scalar of this size travels as the address of a copy the caller made.
+    ///
+    /// The size rule of the one ABI that does this is written over the size of the object and says
+    /// nothing about what is in it, which is why this takes a number rather than a [`Scalar`]: a
+    /// pass writing a call to a runtime routine has a width in hand and no C type behind it, and the
+    /// answer is the same for both askers because there is only the one rule.
+    ///
+    /// [`Scalar`]: crate::shape::Scalar
+    #[must_use]
+    pub const fn scalar_is_by_reference(&self, size: u64) -> bool {
+        self.scalars.wide_is_by_reference && !matches!(size, 1 | 2 | 4 | 8)
+    }
+}
+
 /// The registers a call starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Banks {

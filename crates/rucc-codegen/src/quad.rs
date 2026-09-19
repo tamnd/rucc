@@ -58,9 +58,10 @@
 
 use rucc_base::Interner;
 use rucc_ir::{
-    CallInfo, Extra, Flags, Float, FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo,
-    MemOrder, Opcode, Restrict, Signature, Type, Value,
+    Abi, CallInfo, Extra, Flags, Float, FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo,
+    MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
+use rucc_target::AbiDescription;
 
 use crate::capability;
 
@@ -82,6 +83,7 @@ const MODE: &str = "f128";
 
 /// How wide it is, in bits and then in bytes.
 const BITS: u32 = 128;
+const BYTES: u64 = (BITS / 8) as u64;
 
 /// The two widths the runtime has an integer conversion at, which are the two a C program on a
 /// machine with sixty four bit registers has integers of.
@@ -92,21 +94,21 @@ const WORD: u32 = 64;
 ///
 /// The instructions are collected before any of them is touched, because a rewrite puts
 /// instructions in front of the one it replaces and the walk would otherwise see its own work.
-pub fn calls(func: &mut Func, names: &mut Interner) {
+pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription) {
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
-                arithmetic(func, names, inst);
+                arithmetic(func, names, abi, inst);
             }
-            Opcode::FNeg => negate(func, names, inst),
-            Opcode::FCmp => compare(func, names, inst),
+            Opcode::FNeg => negate(func, names, abi, inst),
+            Opcode::FCmp => compare(func, names, abi, inst),
             Opcode::FConst => constant(func, inst),
-            Opcode::FPExt => widen(func, names, inst),
-            Opcode::FPTrunc => narrow(func, names, inst),
-            Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, inst),
-            Opcode::FPToSI | Opcode::FPToUI => to_integer(func, names, inst),
+            Opcode::FPExt => widen(func, names, abi, inst),
+            Opcode::FPTrunc => narrow(func, names, abi, inst),
+            Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, abi, inst),
+            Opcode::FPToSI | Opcode::FPToUI => to_integer(func, names, abi, inst),
             _ => {}
         }
     }
@@ -128,7 +130,7 @@ fn produced(func: &Func, inst: Inst) -> Option<Type> {
 /// the function reads is the value it already read and nothing has to be substituted anywhere.
 /// That works here and not in [`crate::wide`] because the answer is one value of the same type:
 /// nothing about this format is split, it simply is not computed.
-fn arithmetic(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     if !quad(ty) {
         return;
@@ -140,7 +142,7 @@ fn arithmetic(func: &mut Func, names: &mut Interner, inst: Inst) {
     let opcode = func[inst].opcode;
     let (Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv) = opcode else { return };
     let Some(routine) = capability::libcall(opcode, MODE) else { return };
-    into_call(func, names, inst, routine, &[a, b]);
+    into_call(func, names, abi, inst, routine, &[a, b]);
 }
 
 /// The negation, which is a call here and an exclusive or at the two narrower formats.
@@ -149,13 +151,13 @@ fn arithmetic(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// and the exchange that makes that worth doing runs out at this width twice over: the integer that
 /// would hold the bits has no register either, and the mask would want a constant pool that nothing
 /// else in this back end needs. libgcc has the routine, so the routine is what this is.
-fn negate(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn negate(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !quad(ty) {
         return;
     }
-    into_call(func, names, inst, routine(Opcode::FNeg, MODE), &[arg]);
+    into_call(func, names, abi, inst, routine(Opcode::FNeg, MODE), &[arg]);
 }
 
 /// A comparison, as the call that answers it and the test of that answer against zero.
@@ -178,7 +180,7 @@ fn negate(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// the negation of that and is the same two calls with the other connective. gcc emits the pair for
 /// them too. Neither is a shape C's operators produce, since `!(a == b)` is unordered or not equal
 /// and not this, but the optimizer may fold its way to one and the back end has to have an answer.
-fn compare(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn compare(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     if !quad(func[a].ty) || !quad(func[b].ty) {
@@ -186,7 +188,7 @@ fn compare(func: &mut Func, names: &mut Interner, inst: Inst) {
     }
     let Extra::FloatPred(pred) = func[inst].extra else { return };
     if let Some((routine, test)) = single(pred) {
-        let answer = call(func, names, inst, routine, &[a, b], Type::int(NARROW));
+        let answer = call(func, names, abi, inst, routine, &[a, b], Type::int(NARROW));
         let zero = ahead_const(func, inst, Imm::int(0, Type::int(NARROW)), Type::int(NARROW));
         let extra = Extra::IntPred(test);
         becomes(func, inst, Opcode::ICmp, extra, &[answer, zero]);
@@ -202,8 +204,10 @@ fn compare(func: &mut Func, names: &mut Interner, inst: Inst) {
         return;
     }
     let (FloatPred::One | FloatPred::Ueq) = pred else { return };
-    let ordered = pair(func, names, inst, routine(Opcode::FCmp, "uno.f128"), a, b, IntPred::Eq);
-    let different = pair(func, names, inst, routine(Opcode::FCmp, "une.f128"), a, b, IntPred::Ne);
+    let uno = routine(Opcode::FCmp, "uno.f128");
+    let une = routine(Opcode::FCmp, "une.f128");
+    let ordered = pair(func, names, abi, inst, uno, &[a, b], IntPred::Eq);
+    let different = pair(func, names, abi, inst, une, &[a, b], IntPred::Ne);
     // Ordered and different, or the negation of it, which by De Morgan is unordered or the same.
     let (opcode, args) = if pred == FloatPred::One {
         (Opcode::And, [ordered, different])
@@ -243,13 +247,13 @@ fn single(pred: FloatPred) -> Option<(&'static str, IntPred)> {
 fn pair(
     func: &mut Func,
     names: &mut Interner,
+    abi: &'static AbiDescription,
     inst: Inst,
     routine: &str,
-    a: Value,
-    b: Value,
+    args: &[Value],
     test: IntPred,
 ) -> Value {
-    let answer = call(func, names, inst, routine, &[a, b], Type::int(NARROW));
+    let answer = call(func, names, abi, inst, routine, args, Type::int(NARROW));
     let zero = ahead_const(func, inst, Imm::int(0, Type::int(NARROW)), Type::int(NARROW));
     let args = func.push_values(&[answer, zero]);
     let extra = Extra::IntPred(test);
@@ -286,19 +290,8 @@ fn constant(func: &mut Func, inst: Inst) {
         return;
     }
     let bits = func[imm].bits();
-    let bytes = u64::from(BITS / 8);
-    let whole = MemInfo {
-        size: bytes,
-        align: BITS / 8,
-        order: MemOrder::NotAtomic,
-        tbaa: None,
-        owns: 0,
-        restrict: Restrict::NONE,
-    };
-    let slot = {
-        let extra = Extra::Mem(func.add_mem(whole));
-        written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
-    };
+    let whole = whole();
+    let slot = slot(func, inst);
     let half = u64::from(WORD / 8);
     let word = Type::int(WORD);
     let low = ahead_const(func, inst, Imm::int(bits as i128, word), word);
@@ -317,7 +310,7 @@ fn constant(func: &mut Func, inst: Inst) {
 /// Only from the two formats the runtime has a routine from. A `_Float16` widening straight to this
 /// format is not one of them and neither is the eighty bit format, which this machine has no
 /// register for anyway, and both are left alone and refused below.
-fn widen(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn widen(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !quad(ty) {
@@ -329,11 +322,11 @@ fn widen(func: &mut Func, names: &mut Interner, inst: Inst) {
         _ => return,
     };
     let routine = routine(Opcode::FPExt, mode);
-    into_call(func, names, inst, routine, &[arg]);
+    into_call(func, names, abi, inst, routine, &[arg]);
 }
 
 /// A quad becoming a narrower float, which is the other direction of the same pair and rounds.
-fn narrow(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !quad(func[arg].ty) {
@@ -345,7 +338,7 @@ fn narrow(func: &mut Func, names: &mut Interner, inst: Inst) {
         _ => return,
     };
     let routine = routine(Opcode::FPTrunc, mode);
-    into_call(func, names, inst, routine, &[arg]);
+    into_call(func, names, abi, inst, routine, &[arg]);
 }
 
 /// An integer becoming a quad, which is a widening to a width the runtime has a routine at and then
@@ -365,7 +358,7 @@ fn narrow(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// into a call of its own, to the one routine in this family whose answer is not exact: a hundred
 /// and thirteen significant bits hold every integer the four below deal in and do not hold every
 /// value of a `__int128`, so that one rounds and these four do not.
-fn from_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn from_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     let from = func[arg].ty;
@@ -383,7 +376,7 @@ fn from_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
         let args = func.push_values(&[arg]);
         written(func, inst, InstData { args, ..InstData::new(opcode) }, Type::int(width))
     };
-    into_call(func, names, inst, routine, &[value]);
+    into_call(func, names, abi, inst, routine, &[value]);
 }
 
 /// A quad becoming an integer, which is the routine at a width the runtime has one at and then a
@@ -399,7 +392,7 @@ fn from_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// differential can hold both implementations to rather than as a promise a program may read, and
 /// nothing here makes it one: no test goes in front of the call, the same way nothing tests a
 /// divisor for zero in front of `__divti3`.
-fn to_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
+fn to_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !quad(func[arg].ty) || !ty.is_int() || !ty.is_scalar() {
@@ -410,10 +403,10 @@ fn to_integer(func: &mut Func, names: &mut Interner, inst: Inst) {
     let opcode = if signed { Opcode::FPToSI } else { Opcode::FPToUI };
     let routine = routine(opcode, if width == NARROW { "f128.i32" } else { "f128.i64" });
     if ty.bits() == width {
-        into_call(func, names, inst, routine, &[arg]);
+        into_call(func, names, abi, inst, routine, &[arg]);
         return;
     }
-    let answer = call(func, names, inst, routine, &[arg], Type::int(width));
+    let answer = call(func, names, abi, inst, routine, &[arg], Type::int(width));
     becomes(func, inst, Opcode::Trunc, Extra::None, &[answer]);
 }
 
@@ -439,32 +432,153 @@ fn holder(bits: u32) -> Option<u32> {
 /// instruction already produced, so every reader of it goes on reading the same value. What the
 /// program said about rounding and about not a numbers is dropped, since a call carries none of it
 /// and the routine has its own answers, which are libgcc's.
-fn into_call(func: &mut Func, names: &mut Interner, inst: Inst, routine: &str, args: &[Value]) {
+///
+/// Where the convention brings the answer back through an address the instruction becomes the load
+/// of it instead, which is in place in the same sense: it is still one instruction producing the
+/// one value every reader already reads.
+fn into_call(
+    func: &mut Func,
+    names: &mut Interner,
+    abi: &'static AbiDescription,
+    inst: Inst,
+    routine: &str,
+    args: &[Value],
+) {
     let Some(ty) = produced(func, inst) else { return };
-    let params: Vec<Type> = args.iter().map(|&value| func[value].ty).collect();
-    let signature = func.add_signature(Signature::new().with_params(&params).with_returns(&[ty]));
-    let callee = Some(names.intern(routine));
-    let varargs = func.push_abis(&[]);
-    let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
-    becomes(func, inst, Opcode::Call, extra, args);
+    let shape = shaped(func, abi, inst, args, ty);
+    let extra = signature(func, names, routine, &shape, ty);
+    let Some(out) = shape.out else {
+        becomes(func, inst, Opcode::Call, extra, &shape.values);
+        return;
+    };
+    made(func, inst, extra, &shape.values);
+    let read = Extra::Mem(func.add_mem(whole()));
+    becomes(func, inst, Opcode::Load, read, &[out]);
 }
 
 /// A call to a runtime routine written in front of an instruction, and the value it answers.
 fn call(
     func: &mut Func,
     names: &mut Interner,
+    abi: &'static AbiDescription,
     inst: Inst,
     routine: &str,
     args: &[Value],
     ty: Type,
 ) -> Value {
-    let params: Vec<Type> = args.iter().map(|&value| func[value].ty).collect();
-    let signature = func.add_signature(Signature::new().with_params(&params).with_returns(&[ty]));
+    let shape = shaped(func, abi, inst, args, ty);
+    let extra = signature(func, names, routine, &shape, ty);
+    let Some(out) = shape.out else {
+        let args = func.push_values(&shape.values);
+        return written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Call) }, ty);
+    };
+    made(func, inst, extra, &shape.values);
+    let extra = Extra::Mem(func.add_mem(whole()));
+    let args = func.push_values(&[out]);
+    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, ty)
+}
+
+/// A call that produces nothing, put in front of an instruction.
+///
+/// Nothing rather than one value because the answer is not coming back in a register: the routine
+/// writes it through the address it was handed, so what the call has is an effect and the value is
+/// the load after it.
+fn made(func: &mut Func, inst: Inst, extra: Extra, values: &[Value]) {
+    let span = func.span(inst);
+    let args = func.push_values(values);
+    let data = InstData { args, extra, ..InstData::new(Opcode::Call) };
+    let call = func.create_inst(data, &[], span);
+    func.insert_before(call, inst);
+}
+
+/// A call's operands once the convention has been asked about each of them.
+///
+/// What it is for is the one rule `tamnd/rucc#1331` put in the ABI description: a scalar of a size
+/// no register holds travels as the address of a copy the caller made. That is a rule about a call,
+/// so it applies to a call this pass writes exactly as it applies to one the program wrote, and on
+/// Windows x64 every `_Float128` in and out of these routines is sixteen bytes and therefore an
+/// address. Writing the SysV shape there is not a wrong answer that a test catches, it is a routine
+/// reading three registers nothing was put in.
+struct Shape {
+    /// What each operand is in the signature, which is `ptr` for the ones that became an address.
+    params: Vec<Param>,
+    /// The values the call instruction actually reads, in the same order.
+    values: Vec<Value>,
+    /// Where the answer is written, on a convention that brings it back through an address.
+    out: Option<Value>,
+}
+
+/// The operands of one call, with everything the convention passes by address spilled to the frame.
+///
+/// A slot per value rather than one slot reused, because the two operands of `__addtf3` are live at
+/// the same instruction and the routine is entitled to write through the address it was handed. The
+/// slots are fixed size `alloca`s, so a call inside a loop costs the stores and nothing that grows,
+/// which is the same bargain [`constant`] already makes.
+fn shaped(
+    func: &mut Func,
+    abi: &'static AbiDescription,
+    inst: Inst,
+    args: &[Value],
+    ty: Type,
+) -> Shape {
+    let mut shape = Shape { params: Vec::new(), values: Vec::new(), out: None };
+    if quad(ty) && abi.scalar_is_by_reference(BYTES) {
+        let out = slot(func, inst);
+        shape.params.push(Param::with_abi(Type::PTR, Abi::Sret { size: BYTES, align: BITS / 8 }));
+        shape.values.push(out);
+        shape.out = Some(out);
+    }
+    for &value in args {
+        let ty = func[value].ty;
+        let size = u64::from(ty.bits().div_ceil(8));
+        if quad(ty) && abi.scalar_is_by_reference(size) {
+            let copy = slot(func, inst);
+            write(func, inst, value, copy, whole());
+            shape.params.push(Param::new(Type::PTR));
+            shape.values.push(copy);
+        } else {
+            shape.params.push(Param::new(ty));
+            shape.values.push(value);
+        }
+    }
+    shape
+}
+
+/// The call this shape is, as the `Extra` an instruction carries it in.
+fn signature(
+    func: &mut Func,
+    names: &mut Interner,
+    routine: &str,
+    shape: &Shape,
+    ty: Type,
+) -> Extra {
+    let mut built = Signature::new();
+    built.params = shape.params.clone();
+    if shape.out.is_none() {
+        built.returns = vec![Param::new(ty)];
+    }
+    let signature = func.add_signature(built);
     let callee = Some(names.intern(routine));
     let varargs = func.push_abis(&[]);
-    let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
-    let args = func.push_values(args);
-    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Call) }, ty)
+    Extra::Call(func.add_call(CallInfo { callee, signature, varargs }))
+}
+
+/// A frame slot the size of the format, put in front of an instruction.
+fn slot(func: &mut Func, inst: Inst) -> Value {
+    let extra = Extra::Mem(func.add_mem(whole()));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+}
+
+/// An access to the whole of one value of the format.
+fn whole() -> MemInfo {
+    MemInfo {
+        size: BYTES,
+        align: BITS / 8,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    }
 }
 
 /// A constant put in front of an instruction.
@@ -505,9 +619,20 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[Va
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Module, Signature};
-    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+    use rucc_target::{AbiDescription, Arch, Env, Os, TargetInfo, Triple, x86_64};
 
     use super::{BITS, Flags, Float, FloatPred, Func, Opcode, Type, Value, calls};
+
+    /// The convention nearly every test here runs under, which is the one that passes and returns
+    /// a value of this format in a vector register.
+    fn sysv() -> &'static AbiDescription {
+        x86_64::SYSV.abi
+    }
+
+    /// The one that does not, where sixteen bytes of anything is the address of a copy.
+    fn win64() -> &'static AbiDescription {
+        x86_64::WIN64.abi
+    }
 
     /// The format the pass is about, as a type, which is what every test builds with.
     fn quad() -> Type {
@@ -534,23 +659,33 @@ mod tests {
 
     /// The pass run over a function of two quads whose one instruction is that binary operation.
     fn binary(opcode: Opcode) -> String {
+        binary_on(opcode, sysv())
+    }
+
+    /// The same, under the convention given rather than under the usual one.
+    fn binary_on(opcode: Opcode, abi: &'static AbiDescription) -> String {
         let mut names = Interner::new();
         let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[quad()]);
         let mut build = Builder::new(&mut func, entry);
         let answer = build.binary(opcode, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, abi);
         printed(&func, &mut names)
     }
 
     /// The pass run over a function of two quads whose one instruction is that comparison.
     fn compared(pred: FloatPred) -> String {
+        compared_on(pred, sysv())
+    }
+
+    /// The same, under the convention given rather than under the usual one.
+    fn compared_on(pred: FloatPred, abi: &'static AbiDescription) -> String {
         let mut names = Interner::new();
         let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[Type::I1]);
         let mut build = Builder::new(&mut func, entry);
         let answer = build.fcmp(pred, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, abi);
         printed(&func, &mut names)
     }
 
@@ -578,7 +713,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::FNeg, params[0], quad());
         build.ret(&[answer]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, sysv());
         let text = printed(&func, &mut names);
         assert!(text.contains("@__negtf2"), "{text}");
         assert!(!text.contains("xor"), "no sign flip in a register: {text}");
@@ -673,7 +808,7 @@ mod tests {
         // wrote one of them into the wrong half is a different answer rather than the same zero.
         let value = build.fconst(quad(), (3u128 << 64) | 5);
         build.ret(&[value]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, sysv());
         let text = printed(&func, &mut names);
         assert!(!text.contains("fconst"), "the constant is gone: {text}");
         assert_eq!(text.matches("alloca").count(), 1, "one slot: {text}");
@@ -699,7 +834,7 @@ mod tests {
             let opcode = if to == Float::F128 { Opcode::FPExt } else { Opcode::FPTrunc };
             let answer = build.unary(opcode, params[0], Type::float(to));
             build.ret(&[answer]);
-            calls(&mut func, &mut names);
+            calls(&mut func, &mut names, sysv());
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
         }
@@ -720,7 +855,7 @@ mod tests {
             let mut build = Builder::new(&mut func, entry);
             let answer = build.unary(opcode, params[0], quad());
             build.ret(&[answer]);
-            calls(&mut func, &mut names);
+            calls(&mut func, &mut names, sysv());
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
             if extend.is_empty() {
@@ -740,7 +875,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::FPToSI, params[0], Type::int(16));
         build.ret(&[answer]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, sysv());
         let text = printed(&func, &mut names);
         assert!(text.contains("@__fixtfsi"), "{text}");
         assert_eq!(text.matches(" = trunc").count(), 1, "cut down afterwards: {text}");
@@ -753,7 +888,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::SIToFP, params[0], quad());
         build.ret(&[answer]);
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, sysv());
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "no routine is called: {text}");
         assert!(text.contains("sitofp"), "the conversion is still there to be refused: {text}");
@@ -770,10 +905,54 @@ mod tests {
         let answer = build.fcmp(FloatPred::Olt, sum, params[1], Flags::NONE);
         build.ret(&[sum]);
         let _ = answer;
-        calls(&mut func, &mut names);
+        calls(&mut func, &mut names, sysv());
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "nothing became a call: {text}");
         assert!(text.contains("fadd"), "the add is still an add: {text}");
         assert!(text.contains("fcmp"), "the comparison is still a comparison: {text}");
+    }
+
+    /// The convention decides the shape of the call, and on one of them that shape is addresses.
+    ///
+    /// Windows x64 passes a scalar of a size no register holds as the address of a copy the caller
+    /// made, and returns one the same way, so `__addtf3` there takes three pointers and answers
+    /// nothing. libgcc's routine is compiled to that convention on that target and reads those three
+    /// registers, so writing the other shape is not a difference a test catches later, it is a
+    /// routine reading registers nothing was put in.
+    #[test]
+    fn on_windows_the_operands_and_the_answer_all_travel_as_addresses() {
+        let text = binary_on(Opcode::FAdd, win64());
+        assert!(text.contains("@__addtf3"), "{text}");
+        // Three slots: one per operand, because the routine is entitled to write through an address
+        // it was handed, and one for the answer.
+        assert_eq!(text.matches("alloca").count(), 3, "three slots: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a copy of each operand: {text}");
+        // The call produces nothing, so the value the rest of the function reads is the load after
+        // it rather than the call itself.
+        assert_eq!(text.matches(" = call").count(), 0, "the call answers nothing: {text}");
+        assert_eq!(text.matches("call ").count(), 1, "and there is one of them: {text}");
+        assert_eq!(text.matches(" = load").count(), 1, "read back out of the slot: {text}");
+    }
+
+    /// A comparison answers an `int`, which is a register on every convention, so only the operands
+    /// change shape.
+    #[test]
+    fn on_windows_a_comparison_hands_over_its_operands_and_keeps_its_answer() {
+        let text = compared_on(FloatPred::Oeq, win64());
+        assert!(text.contains("@__eqtf2"), "{text}");
+        assert_eq!(text.matches("alloca").count(), 2, "one slot per operand: {text}");
+        assert_eq!(text.matches("store").count(), 2, "and a copy into each: {text}");
+        assert_eq!(text.matches(" = call").count(), 1, "the answer is still a result: {text}");
+        assert!(text.contains("icmp eq"), "read the same way: {text}");
+    }
+
+    /// The same function on the convention that has registers wide enough is the plain shape.
+    #[test]
+    fn the_convention_that_holds_one_in_a_register_puts_nothing_on_the_frame() {
+        let text = binary_on(Opcode::FAdd, sysv());
+        assert!(text.contains("@__addtf3"), "{text}");
+        assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
+        assert!(!text.contains("store"), "nothing is copied: {text}");
+        assert_eq!(text.matches(" = call").count(), 1, "the call is the value: {text}");
     }
 }
