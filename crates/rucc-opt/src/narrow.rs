@@ -320,6 +320,14 @@ fn widened_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
     if !bit_at_a_time(data.opcode) {
         return None;
     }
+    // The operation has to be wider than a bit, because this shape is a narrowing and an
+    // operation already at one bit has nowhere to go. Saying so is what stops the second of the
+    // two questions rewriting for ever: an extension stays an extension after the rewrite, so
+    // without this it would ask again about the one bit operation it was just given and write
+    // another one just like it every time the pass ran.
+    if func[data.results().next()?].ty.bits() <= 1 {
+        return None;
+    }
     let args = &func[data.args];
     let (&left, &right) = (args.first()?, args.get(1)?);
     // An operand the operation reads twice is read twice by it and by nothing else, which is the
@@ -1242,6 +1250,25 @@ mod tests {
             let want = (Opcode::And, vec![Type::int(1), Type::int(1)]);
             assert_eq!(shape(&func, bit), want, "{kind:?}");
         }
+    }
+
+    /// The second question rewrites an extension into an extension, so the pass has to be asked
+    /// twice before it has said it stops. What it is handed the second time is an operation
+    /// already at one bit, which is not a narrowing and is left where it is.
+    #[test]
+    fn a_bitwise_operation_already_at_one_bit_is_not_done_again() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::Xor, wide_p, wide_q, Flags::NONE);
+        let wider = build.unary(Opcode::SExt, both, Type::int(64));
+        build.ret(&[wider]);
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(Narrow.run(&mut func, &mut an, &mut Fuel::unlimited()).changed());
+        assert!(!Narrow.run(&mut func, &mut an, &mut Fuel::unlimited()).changed());
     }
 
     /// `(long long)(p & 1)`, where the constant comes over at one bit the same as it does under a
