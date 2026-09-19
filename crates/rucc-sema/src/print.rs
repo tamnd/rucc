@@ -109,6 +109,7 @@ impl<'a> Printer<'a> {
         head.push_str(match node.kind {
             DeclKind::Object => " object",
             DeclKind::Function => " function",
+            DeclKind::Type => " type",
         });
         head.push_str(match node.linkage {
             Linkage::None => "",

@@ -194,16 +194,25 @@ pub struct Decl {
     pub body: Option<StmtId>,
 }
 
-/// Whether a declaration declares an object or a function.
+/// Whether a declaration declares an object, a function or a name for a type.
 ///
-/// A `typedef` and an enumerator are neither: one is a name for a type and the other is a
-/// constant, and both have been resolved by the time anything reads this.
+/// An enumerator is none of them, since what the program can do with one is what it can do with
+/// the number it stands for, and it has been resolved by the time anything reads this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeclKind {
     /// An object, which includes parameters, block-scope variables and compound literals.
     Object,
     /// A function.
     Function,
+    /// A name for a type, which is a `typedef` and declares nothing that exists at run time.
+    ///
+    /// Nearly every typedef is resolved where it is written and is not in the tree at all. The
+    /// one that is here is a block-scope typedef of a variably modified type, `typedef char
+    /// T[n]`, which is in the tree because there is something to do where it stands: 6.7.7.3p12
+    /// says the size is evaluated when the declaration is reached, so the walk has to reach it.
+    /// Nothing is emitted for one and nothing can name it as an expression, since the name is
+    /// bound as a typedef rather than as a declaration.
+    Type,
 }
 
 /// Whether the definition of a name is emitted, which is what `inline` decides.
