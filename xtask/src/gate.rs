@@ -3,7 +3,7 @@
 //! The gate is thirty odd checks and it used to be a list of them run one after another. Measured
 //! on an eight core machine with everything already built, that list is around ten minutes, and
 //! almost none of it is eight cores busy: `cargo doc` is rustdoc walking a deep chain of crates,
-//! the nine checks that compile C programs and run them are each one process doing one thing at a
+//! the ten checks that compile C programs and run them are each one process doing one thing at a
 //! time, and the dozen checks that read the tree finish in under a second each and were still
 //! taking their turn in a queue.
 //!
@@ -25,13 +25,13 @@
 //!
 //! # A compiler to run programs through
 //!
-//! The nine checks that compile C and run it all want `target/release/rucc`, so they cannot start
+//! The ten checks that compile C and run it all want `target/release/rucc`, so they cannot start
 //! until the spine has built it. Once it exists they want nothing from each other, they each work
 //! in a directory of their own under `target/`, and they are started all at once. That is the
 //! moment the compiler is built and not the moment the spine is finished, so they run beside the
 //! test run rather than after it, which is the difference between a warm gate of two minutes and
 //! one of ninety seconds. They are told where the compiler is for the same reason: left to
-//! themselves each would ask cargo to build it, and nine of those waiting behind the tests for
+//! themselves each would ask cargo to build it, and ten of those waiting behind the tests for
 //! the lock would put the lane back where it started.
 //!
 //! # Nothing at all
@@ -118,7 +118,7 @@ enum Verdict {
     ///
     /// The check itself says so by exiting with `COULD_NOT_RUN`, which is what the two halves of
     /// the error type have always meant and never had to say out loud before the gate started
-    /// every check as a process. A machine with no container cannot run the nine that compile C
+    /// every check as a process. A machine with no container cannot run the ten that compile C
     /// and run it, and a copy of the tree that is not a checkout cannot run `paths`, and both of
     /// those are the same answer.
     Skipped,
@@ -242,7 +242,7 @@ fn tree() -> Result<Vec<Step>> {
 ///
 /// Clippy first because it is the cheapest thing in the gate that says no, six seconds against the
 /// tests' minute or two, and there is no sense compiling a corpus with a compiler that did not
-/// pass it. The compiler second because it is what the nine checks after this need and nothing
+/// pass it. The compiler second because it is what the ten checks after this need and nothing
 /// else in the gate does, and getting it built is what lets them start while the tests are still
 /// running.
 fn head() -> Vec<Step> {
@@ -290,26 +290,39 @@ fn generated() -> Result<Vec<Step>> {
 /// Every one of them wants `target/release/rucc` and none of them wants anything from another, and
 /// they each work in a directory of their own under `target/` and under `/tmp`, so they are
 /// started together as soon as the compiler exists. That is while the tests are still running, and
-/// it is worth the contention: they are one process each doing one thing at a time, so nine of
+/// it is worth the contention: they are one process each doing one thing at a time, so ten of
 /// them beside a test run is a machine kept busy rather than a machine oversubscribed. The order
 /// is still cheapest first, because that is the order the report reads best in when they all pass
 /// and the order the failures arrive in when they do not.
 ///
 /// `libraries` is last because it is the longest by a wide margin, nine megabytes of SQLite
 /// compiled twice and then zlib on top of it, and because it is the only one of them that does
-/// nothing at all on a machine without somebody else's sources on it.
+/// nothing at all on a machine without somebody else's sources on it. `lines` is second last for
+/// the same reason on both counts: the same amalgamation through both compilers, and a much
+/// smaller answer on a machine that does not have it.
 ///
 /// They are also told where the compiler is, so that none of them goes back to cargo for it.
 fn programs() -> Result<Vec<Step>> {
     // Each of these would otherwise ask cargo to build the compiler before using it, and asking
-    // while the tests hold the build directory's lock is nine waits for a build that already
+    // while the tests hold the build directory's lock is ten waits for a build that already
     // happened. The spine built it, so the lane is told where rather than left to find out.
     let built = root().join("target").join("release").join("rucc");
     let built = built.display().to_string();
-    ["repeatable", "unwind", "quad", "wide", "fuzz", "safety", "dso", "accounting", "libraries"]
-        .iter()
-        .map(|name| Ok(Step::task(name, &[])?.with("RUCC_XTASK_COMPILER", &built)))
-        .collect()
+    [
+        "repeatable",
+        "unwind",
+        "quad",
+        "wide",
+        "fuzz",
+        "safety",
+        "dso",
+        "accounting",
+        "lines",
+        "libraries",
+    ]
+    .iter()
+    .map(|name| Ok(Step::task(name, &[])?.with("RUCC_XTASK_COMPILER", &built)))
+    .collect()
 }
 
 /// Prints one check's line, and its output where there is a reason to read it.
@@ -385,7 +398,7 @@ pub(crate) fn ci() -> Result<()> {
         let ran = scope.spawn(move || match hear.recv() {
             Ok(true) => together(&programs),
             // Either the compiler did not build or the spine stopped before it got that far, and
-            // in both cases the failure is the spine's to report rather than nine more of it.
+            // in both cases the failure is the spine's to report rather than ten more of it.
             _ => Ok(Vec::new()),
         });
         let head = in_order(&head);

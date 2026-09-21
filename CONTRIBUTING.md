@@ -25,6 +25,7 @@ cargo xtask layers      # the dependency graph against xtask/layers.toml
 cargo xtask style       # prose against the house rules
 cargo xtask dso         # build a shared library out of what we emit, link a program to it, run it
 cargo xtask unwind      # walk a stack through frames we wrote and count what came back
+cargo xtask lines       # our line table against the system compiler's, function by function
 cargo xtask safety      # tests/safety, each program against the verdict written in it
 cargo xtask accounting  # the same programs at -O2, with the check elimination on and off
 cargo fmt --all --check

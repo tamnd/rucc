@@ -243,6 +243,14 @@ impl Assembler<'_> {
     /// The blocks, and then the jumps between them once every block has a place.
     fn func(&mut self) -> Result<(), Error> {
         self.blocks = vec![usize::MAX; self.func.block_count()];
+        // The prologue, first, because nothing in it has a span of its own. The pushes, the frame
+        // and the moves that put the arguments where the body expects them came from no expression
+        // in the source, so without this the front of every function is the one part of it no row
+        // covers, and a program counter in there gets no answer at all rather than a slightly
+        // early one. Where the function was declared is what gcc says over those bytes.
+        if self.wants && !self.func.declared.is_dummy() {
+            self.lines.push(Row { at: 0, span: self.func.declared });
+        }
         let end = self.func.cfi_end();
         for block in self.func.blocks() {
             self.blocks[block.index()] = self.text.bytes.len();
@@ -909,6 +917,39 @@ mod tests {
             out.lines,
             vec![vec![
                 Row { at: 0, span: Span::new(0, 3) },
+                Row { at: 2, span: Span::new(10, 13) },
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_function_that_knows_where_it_was_declared_says_so_over_its_prologue() {
+        // The front of a function is instructions no expression in the source asked for, so
+        // nothing there carries a span and the bytes would be covered by nothing. The declaration
+        // is what gcc puts over them and it is what this puts over them too, as a row at zero in
+        // front of everything the body produced.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        func.declared = Span::new(100, 104);
+        let block = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        // The first with no span, the way every instruction a prologue is made of has none, and
+        // the second with one, the way an instruction the body asked for does.
+        for span in [Span::DUMMY, Span::new(10, 13)] {
+            func.build(block, add)
+                .at(span)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .finish();
+        }
+
+        let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
+        assert_eq!(
+            out.lines,
+            vec![vec![
+                Row { at: 0, span: Span::new(100, 104) },
+                Row { at: 0, span: Span::DUMMY },
                 Row { at: 2, span: Span::new(10, 13) },
             ]]
         );
