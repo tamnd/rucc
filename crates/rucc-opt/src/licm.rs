@@ -99,9 +99,12 @@
 //! and an alias query needs the module, which a pass holding one function does not have. It is the
 //! half with the risk and it should arrive with the measurement section 27.7 asks for.
 //!
-//! Hoisting a call, for the same reason from the other side: a call is safe to move when it is
-//! `const`, and what a call is comes from the attributes on the callee, which live in the module.
-//! [`crate::purity`] has the answer and nothing hands it to a pass.
+//! Hoisting every call. The one that moves now is the call whose summary says the callee touches
+//! no memory, which is document 34's answer handed to this pass and read in `untouched` and in
+//! [`speculate::why_not`]. It moves on a division's argument rather than a load's: it cannot fault
+//! and it cannot be observed, so what is left is whether the program was going to reach it. What
+//! does not move yet is the callee that writes nothing and the callee that writes only through its
+//! arguments, and both of those need a walk against what the callee may read rather than a line.
 
 use std::collections::HashSet;
 
@@ -114,7 +117,7 @@ use crate::dom::{Dominators, PostDominators};
 use crate::live::Liveness;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
-use crate::modref::Summaries;
+use crate::modref::{Summaries, Summary};
 use crate::outside::Outside;
 use crate::pressure::{Class, Pressure, class_of};
 use crate::range::query::Ranges;
@@ -262,18 +265,30 @@ struct Job<'a> {
 /// walk below would be answering it by accident. And a shape [`Alias::reads`] does not describe
 /// is refused, which is 874 of the 7828 and is the honest answer rather than a guess.
 ///
+/// A call is the one exception to the first of those, and it is tamnd/rucc#1571. A call writes
+/// memory by opcode whatever the callee does, and tamnd/rucc#1530 counted 838 of them left in a
+/// loop by that line with nothing having asked which memory. A summary that says the callee
+/// touches nothing settles it without the oracle: a callee that reads nothing cannot read what the
+/// loop wrote, so there is no write in the loop worth asking about and the answer is yes.
+///
 /// The lifetime boundaries are asked about one at a time for the same reason the writes are.
 /// `bounds_a_lifetime` is a per loop answer as well, and a loop with any call in it that is not
 /// `nofree` has one, which is most loops with a call in them. What a boundary threatens is a load
 /// of the object whose boundary it is, so the object is what gets asked about.
 fn untouched(
     func: &Func,
+    modref: &Summaries,
     inst: Inst,
     writers: &[Inst],
     boundaries: &[Inst],
     oracle: Option<&mut Alias<'_>>,
     asked: &mut usize,
 ) -> Clear {
+    if func[inst].opcode == Opcode::Call
+        && modref.at(func, inst).is_some_and(Summary::touches_nothing)
+    {
+        return Clear::Yes;
+    }
     if func[inst].opcode.writes_memory() {
         return Clear::No;
     }
@@ -476,7 +491,7 @@ impl Job<'_> {
                 // header cannot get past says every entry to the loop arrives here. `reaching`
                 // says nothing in front of it stops the program on the way.
                 let runs = reaching && entered;
-                if !goes_on(func, inst, &mut ranges, block) {
+                if !goes_on(func, self.modref, inst, &mut ranges, block) {
                     reaching = false;
                 }
                 if func.is_terminator(inst) {
@@ -511,8 +526,15 @@ impl Job<'_> {
                     && func[inst].opcode.touches_memory()
                     && func.mem_in(inst).is_none()
                 {
-                    let answer =
-                        untouched(func, inst, &writers, &boundaries, oracle.as_mut(), &mut asked);
+                    let answer = untouched(
+                        func,
+                        self.modref,
+                        inst,
+                        &writers,
+                        &boundaries,
+                        oracle.as_mut(),
+                        &mut asked,
+                    );
                     match answer {
                         Clear::Yes => (),
                         Clear::No => {
@@ -526,7 +548,8 @@ impl Job<'_> {
                     }
                 }
                 let cost = cost(func, inst);
-                match movement(speculate::why_not(func, inst, &mut ranges, preheader)) {
+                let why = speculate::why_not(func, self.modref, inst, &mut ranges, preheader);
+                match movement(why) {
                     Move::Anywhere => (),
                     Move::IfItWasGoingToRun if runs => (),
                     Move::IfItWasGoingToRun => {
@@ -615,10 +638,16 @@ fn trim(func: &Func, plan: Vec<Inst>, passengers: &HashSet<Inst>, stats: &mut St
 fn movement(why: Option<&'static str>) -> Move {
     match why {
         None => Move::Anywhere,
-        // The three that are only a problem on a run that was not going to reach them.
-        Some(speculate::BY_ZERO | speculate::OVERFLOW | speculate::ADDRESS) => {
-            Move::IfItWasGoingToRun
-        }
+        // The four that are only a problem on a run that was not going to reach them. The call is
+        // the one of them that is not about this function at all: it is here because the summaries
+        // say the callee touches no memory, and what is left of the question is whether the
+        // program comes back from it.
+        Some(
+            speculate::BY_ZERO
+            | speculate::OVERFLOW
+            | speculate::ADDRESS
+            | speculate::MIGHT_NOT_RETURN,
+        ) => Move::IfItWasGoingToRun,
         Some(_) => Move::Nowhere,
     }
 }
@@ -628,9 +657,10 @@ fn movement(why: Option<&'static str>) -> Move {
 /// Post-dominance answers a question about the shape of the function and this answers the other
 /// half, which is about what the instructions in front do. A block the header cannot get past is
 /// still a block the program never arrives at if something on the way stops it, and there are two
-/// ways to stop it. One is a call, since a callee may exit, may loop forever or may jump out, and
-/// what a call does comes from the module, which a pass holding one function does not have, so
-/// every call is one that might not come back. The other is an instruction that traps, which is
+/// ways to stop it. One is a call, since a callee may exit, may loop forever or may jump out, so
+/// every call is one that might not come back. The summaries do not change that and are not asked
+/// here: what they say is which memory a callee touches, and a callee that touches none of it can
+/// still spin forever. The other is an instruction that traps, which is
 /// exactly the instruction this pass is careful about moving, read here at the block it is in
 /// rather than at the preheader because the question is whether it traps where it stands.
 ///
@@ -638,7 +668,13 @@ fn movement(why: Option<&'static str>) -> Move {
 /// that calls `exit` and then divides by zero, and the division is invariant, so a pass that asked
 /// only whether the body post-dominates the header would work it out in front of the loop and
 /// crash a program that returns.
-fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool {
+fn goes_on(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    ranges: &mut Ranges<'_>,
+    at: Block,
+) -> bool {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => false,
         // A promise that control does not get here, so nothing after it runs either.
@@ -647,7 +683,7 @@ fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool 
         // there is no after.
         Opcode::Trap => false,
         Opcode::SDiv | Opcode::SRem | Opcode::UDiv | Opcode::URem | Opcode::Load => {
-            movement(speculate::why_not(func, inst, ranges, at)) != Move::IfItWasGoingToRun
+            movement(speculate::why_not(func, modref, inst, ranges, at)) != Move::IfItWasGoingToRun
         }
         _ => true,
     }
@@ -1485,6 +1521,65 @@ mod tests {
         // might fault where the program did not. That is section 27.1's question and not this one.
         assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
         assert_eq!(lives_in(&it.func, read), it.body);
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_touches_nothing_comes_out_of_the_loop() {
+        // tamnd/rucc#1571. The call is in the header, which is the one block of an unrotated loop
+        // that runs on every entry, so the program was going to make it. Moving it to the
+        // preheader makes it once instead of once a time round.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the summary answered it");
+        assert_eq!(it.func.block_of(call), Some(it.entry), "it is in front of the loop now");
+    }
+
+    #[test]
+    fn the_same_call_stays_where_the_loop_might_not_reach_it() {
+        // The body of an unrotated loop is a block the loop may never run, and a callee that
+        // touches no memory can still exit or spin forever, so making the call in front of a loop
+        // that runs zero times is a program that stops where the original returned. The memory
+        // rule let it through and the speculation rule is what keeps it, which is what the two
+        // remarks say.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.body).call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(it.func.block_of(call), Some(it.body));
+    }
+
+    #[test]
+    fn a_call_with_no_summary_stays_in_the_loop_on_the_memory_rule() {
+        // The same call in the same place as the one that moves, with nothing known about `g`.
+        // The remark is the memory one rather than the speculation one, because the memory rule
+        // is asked first and nothing here says which memory the callee writes.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
     }
 
     #[test]
