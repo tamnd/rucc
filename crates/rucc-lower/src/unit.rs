@@ -281,6 +281,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         labels: HashMap::new(),
         done: HashSet::new(),
         aliases: Vec::new(),
+        sets: Vec::new(),
         aliased: HashSet::new(),
         starts: Vec::new(),
         reachable: reach::reachable(tast),
@@ -342,6 +343,12 @@ pub(crate) struct Unit<'a> {
     /// written below it and whether anything defines it is a question only the whole file
     /// answers.
     aliases: Vec<DeclId>,
+    /// The names a `.set` in an `asm` at file scope gave to something else, with the block each
+    /// one was written in, in the order the file wrote them.
+    ///
+    /// Held back for the reason above and written out beside the aliases, since the two are the
+    /// same thing said two ways: a second symbol at an address this object already has.
+    sets: Vec<(directives::Set, Span)>,
     /// The symbols something in the file is a second name for.
     ///
     /// A `static` function nothing calls is not emitted, and being what an alias points at is a
@@ -415,6 +422,10 @@ impl Unit<'_> {
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
+        for index in 0..self.sets.len() {
+            let (set, span) = self.sets[index].clone();
+            self.equated(&set, span);
+        }
         self.startups();
     }
 
@@ -430,8 +441,8 @@ impl Unit<'_> {
         for index in 0..self.tast.file_asms().len() {
             let asm = self.tast.file_asms()[index];
             let template = self.spelled(asm.template);
-            let pieces = match directives::assemble(&template, &mut *self.read) {
-                Ok(pieces) => pieces,
+            let read = match directives::assemble(&template, &mut *self.read) {
+                Ok(read) => read,
                 Err(directives::Failed::Unsupported(what)) => {
                     self.unsupported(&format!("{what} in an `asm` at file scope"), asm.span);
                     continue;
@@ -442,8 +453,16 @@ impl Unit<'_> {
                     continue;
                 }
             };
-            for piece in pieces {
+            for piece in read.pieces {
                 self.piece(piece);
+            }
+            // Held back until the file has been walked, because a name a block equates may be
+            // defined below the block, and remembered as a name something points at, because a
+            // `static` function an equate is the only reference to is one that has to be emitted.
+            for set in read.sets {
+                let target = self.names.intern(&set.target);
+                self.aliased.insert(target);
+                self.sets.push((set, asm.span));
             }
         }
     }
@@ -670,26 +689,7 @@ impl Unit<'_> {
         let name = self.symbol_of(decl);
         let spelling = self.spelled(written);
         let target = self.names.intern(&spelling);
-        let spelled = self.names.resolve(name).to_owned();
-        if name == target {
-            let what = format!("'{spelled}' is aliased to itself");
-            self.diagnostics.push(Diagnostic::error(what, span).with_code("E0697"));
-            return;
-        }
-        let defined = match self.module.lookup(target) {
-            Some(SymbolRef::Func(id)) => !self.module[id].is_declaration(),
-            Some(SymbolRef::Global(id)) => self.module[id].init.is_some(),
-            // A chain of them is a thing gcc takes and this does not yet, because resolving one
-            // wants the aliases put in an order that the file they were written in need not be
-            // in. It is reported rather than written out as a name pointing at a name.
-            Some(SymbolRef::Alias(_)) | None => false,
-        };
-        if !defined {
-            let what = format!("'{spelled}' is aliased to undefined symbol '{spelling}'");
-            let note = "the target of an alias has to be defined in this same file, since an \
-                        alias is a second name for an address and not a reference to one";
-            let refused = Diagnostic::error(what, span).with_code("E0697");
-            self.diagnostics.push(refused.note(note, span));
+        if self.no_address(name, target, span) {
             return;
         }
         // Something already under this name, which is the program defining one symbol twice. The
@@ -706,6 +706,63 @@ impl Unit<'_> {
         // and one whose target is merely declared was refused a few lines above.
         alias.visibility = self.seen(decl, true);
         self.module.add_alias(alias);
+    }
+
+    /// One name a `.set` in an `asm` at file scope gave to something else.
+    ///
+    /// The same thing as the alias above it and written out the same way, with the two answers
+    /// about the name coming from the directives around the `.set` rather than from an attribute:
+    /// `.globl` and `.weak` say how the linker sees it, `.hidden` and `.protected` say how far it
+    /// reaches, and a name no directive spoke about is local, which is what an assembler does with
+    /// one. A name the file also defines keeps its own definition, which is the rule everything
+    /// else here follows and is what gcc's output shows for a `.set` written above a definition of
+    /// the same name.
+    fn equated(&mut self, set: &directives::Set, span: Span) {
+        let name = self.names.intern(&set.name);
+        let target = self.names.intern(&set.target);
+        if self.no_address(name, target, span) {
+            return;
+        }
+        if self.module.lookup(name).is_some() {
+            return;
+        }
+        let mut alias = Alias::new(name, target);
+        alias.linkage = set.linkage;
+        alias.visibility = set.visibility;
+        self.module.add_alias(alias);
+    }
+
+    /// Whether there is no address for a second name to be at, reporting why when there is not.
+    ///
+    /// The target has to be defined here and not merely declared, because an alias is a symbol at
+    /// another symbol's address and a name this file does not define has no address in it. A
+    /// program that writes one of these about something in another object wants a reference rather
+    /// than a definition, and gcc turns that down as well.
+    fn no_address(&mut self, name: Symbol, target: Symbol, span: Span) -> bool {
+        let spelled = self.names.resolve(name).to_owned();
+        if name == target {
+            let what = format!("'{spelled}' is aliased to itself");
+            self.diagnostics.push(Diagnostic::error(what, span).with_code("E0697"));
+            return true;
+        }
+        let defined = match self.module.lookup(target) {
+            Some(SymbolRef::Func(id)) => !self.module[id].is_declaration(),
+            Some(SymbolRef::Global(id)) => self.module[id].init.is_some(),
+            // A chain of them is a thing gcc takes and this does not yet, because resolving one
+            // wants the aliases put in an order that the file they were written in need not be
+            // in. It is reported rather than written out as a name pointing at a name.
+            Some(SymbolRef::Alias(_)) | None => false,
+        };
+        if !defined {
+            let spelling = self.names.resolve(target).to_owned();
+            let what = format!("'{spelled}' is aliased to undefined symbol '{spelling}'");
+            let note = "the target of an alias has to be defined in this same file, since an \
+                        alias is a second name for an address and not a reference to one";
+            let refused = Diagnostic::error(what, span).with_code("E0697");
+            self.diagnostics.push(refused.note(note, span));
+            return true;
+        }
+        false
     }
 
     /// The list of functions to run around `main`, written out as the entries that run them.
