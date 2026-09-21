@@ -22,9 +22,18 @@
 //! A fuzz target is one function, `LLVMFuzzerTestOneInput`, and of the six projects only zstd ships
 //! its targets in the tarball the libraries table already points at. libwebp's are C++, which this
 //! compiler does not compile, and the rest live in a git tree or in the OSS-Fuzz repository. So the
-//! harnesses under `tests/replay` are written here, each doing what the upstream target does and
-//! no more, and each row names the target it stands in for so the two can be read side by side.
-//! Twenty lines is not what is being borrowed. The corpus is.
+//! harnesses under `tests/replay` are written here, and each row names the target it stands in for
+//! so that the two can be read side by side. Twenty lines is not what is being borrowed. The corpus
+//! is.
+//!
+//! Written here means transliterated rather than reinvented, and the difference matters more than
+//! it sounds. A corpus is a set of inputs selected for reaching new code in one particular harness,
+//! so a harness that does something reasonable but different replays those inputs through a door
+//! most of them were not chosen for. The brotli target is the case that taught this: the last byte
+//! of an input picks whether the input is fed to the decoder whole or a few bytes at a time, and a
+//! harness that always feeds it whole never suspends the state machine, which is where a streaming
+//! decoder's bugs are. Each harness here says at the top which upstream file it is and what it
+//! changed, and the changes are C89 declarations and the output ceiling and nothing else.
 //!
 //! # The corpora are not in the tree
 //!
@@ -82,14 +91,24 @@ struct Target {
 }
 
 /// The targets, in the order they are run.
-const TARGETS: &[Target] = &[Target {
-    project: "brotli",
-    harness: "brotli",
-    variable: "RUCC_BROTLI_CORPUS",
-    upstream: "brotli_decode_fuzzer",
-    corpus: "https://storage.googleapis.com/brotli-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/brotli_decode_fuzzer/public.zip",
-    pinned: ("2026-09-19", 4421),
-}];
+const TARGETS: &[Target] = &[
+    Target {
+        project: "brotli",
+        harness: "brotli",
+        variable: "RUCC_BROTLI_CORPUS",
+        upstream: "brotli_decode_fuzzer",
+        corpus: "https://storage.googleapis.com/brotli-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/brotli_decode_fuzzer/public.zip",
+        pinned: ("2026-09-19", 4421),
+    },
+    Target {
+        project: "zlib",
+        harness: "zlib",
+        variable: "RUCC_ZLIB_CORPUS",
+        upstream: "zlib_uncompress_fuzzer",
+        corpus: "https://storage.googleapis.com/zlib-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zlib_uncompress_fuzzer/public.zip",
+        pinned: ("2026-09-21", 1551),
+    },
+];
 
 /// What the driver prints before it hands an input over.
 const INPUT: &str = "<<<input ";
