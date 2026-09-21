@@ -248,6 +248,9 @@ impl Pass for RedundantLoad {
                 if counts.exhausted() > 0 {
                     stats.record(crate::stats::Kind::Note, EXHAUSTED, count(counts.exhausted()));
                 }
+                if counts.rewritten() > 0 {
+                    stats.record(crate::stats::Kind::Note, REWRITTEN, count(counts.rewritten()));
+                }
             }
         }
 
@@ -363,6 +366,13 @@ const STEPS: &str = "memory defs the walks looked at";
 /// a cache. Above one percent of walks and the budget is too small or the alias analysis is too
 /// weak, and both of those are better fixed than cached around.
 const EXHAUSTED: &str = "walks that ran out of budget";
+
+/// Recorded as a note: how many times a walk carried on with the reference `through` rewrote.
+///
+/// Next to the step count because a rewrite starts a walk again and the steps are where that
+/// shows, and on its own because it is the only thing that says whether following a load through
+/// a copy is reaching anything on this build at all.
+const REWRITTEN: &str = "references rewritten to what a copy took them from";
 
 /// A count as the record holds them, which is narrower than the counters are.
 fn count(of: u64) -> u32 {

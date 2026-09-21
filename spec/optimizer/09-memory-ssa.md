@@ -37,6 +37,22 @@ Two parts of its interface are worth copying.
 surprising fraction of GCC's memory optimization. Without it the walk is a stopping condition;
 with it, it is a way to rewrite the question.
 
+A rewritten question is a walk of its own and takes a visited set of its own, which rucc found out
+the hard way. The set the walk keeps so that a cycle is not walked twice is keyed by the version of
+memory, and that is sound only while the walk asks one thing: a version already visited was visited
+asking about somewhere else, and what it answered then says nothing about what is being asked now.
+Carrying it across a rewrite does not repeat an answer, it loses one, because a version declined as
+already seen contributes nothing to the join above it and a join whose paths disagree then comes
+back holding whichever path was walked first rather than unknown. That is a wrong answer out of a
+walk that is otherwise right, and it is worth stating next to `translate` rather than in a comment,
+because it is a property of rewriting the question rather than of any particular caller.
+
+Rewrites are also worth counting, separately from the steps. A rewrite starts the walk again, so it
+is where the work goes when the work goes somewhere surprising, and the count is what says whether
+the callback is reaching anything on a given build at all rather than on the build somebody last
+looked at. rucc has one and it earns its keep in both directions: it is how libwebp's 9309 rewrites
+at `-O2` were found, and it is how the zero on the same amalgamation at `-fsafety=detect` was.
+
 **`limit`.** The walk is budgeted, and the budget is a parameter: `sccvn-max-alias-queries-per-
 access`, default 1000 (`gcc/params.opt:1020`). Exceeding it returns "unknown", not a wrong answer.
 
@@ -179,3 +195,13 @@ compilation of the SQLite amalgamation, and the fraction of walks that terminate
 budget rather than by finding a clobber. If more than 1% of walks hit the budget, the budget is
 too small or the alias analysis is too weak, and both of those are better fixed than cached
 around.
+
+The first time that fraction went over the line it was neither of those two. libwebp put 1.7% of
+its walks over the budget once loads were followed through copies, and what those walks were doing
+was going round: each one spent the whole budget and spent the whole budget whatever the budget was
+set to, so raising it eight times over left exactly the same 363 walks running out of it, forwarded
+not one load more and emitted the same bytes. The cause was the visited set carried across a
+rewrite, per 9.2, and fixing that took those walks from 363 to none and the steps over the same
+library from 574876 to 194120. So the rule earns its keep, and a third answer belongs next to the
+other two: the walk may not be terminating on its own, and a budget cannot tell you that, because a
+walk that is going round and a walk that is merely long both end the same way.
