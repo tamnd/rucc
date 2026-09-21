@@ -35,6 +35,13 @@
 //! decoder's bugs are. Each harness here says at the top which upstream file it is and what it
 //! changed, and the changes are C89 declarations and the output ceiling and nothing else.
 //!
+//! zstd is the one that could have gone the other way and does not, so the reason is here rather
+//! than only in the harness. Its targets are in the tarball, and the one this replays is three
+//! files: the target, the thing that reads parameters off the back of the input, and the part of
+//! the shared helpers those two call. A row names one harness, and changing that so one row can
+//! name three would put a list of one in every other row to buy nothing. So zstd's is written out
+//! like the rest, and the transliteration rule applies to it the same way.
+//!
 //! # The corpora are not in the tree
 //!
 //! Same argument the library sources get, and more so. They are somebody else's bytes, there are
@@ -45,10 +52,11 @@
 //! bucket is live, and two runs over two different corpora are two measurements rather than one.
 //!
 //! An input is a file in the directory the variable points at, and that is the whole rule. Some of
-//! these zips carry a subdirectory beside the inputs, the lua one having a `regressions` directory
-//! of testcases that once crashed something, and neither the count a row is pinned at nor the walk
-//! the driver does goes into it. The reason to say so rather than to quietly include it is that a
-//! pin is only worth writing down if two people unpacking the same zip arrive at the same number.
+//! these zips carry a subdirectory beside the inputs, the lua and zstd ones each having a
+//! `regressions` directory of testcases that once crashed something, and neither the count a row is
+//! pinned at nor the walk the driver does goes into it. The reason to say so rather than to quietly
+//! include it is that a pin is only worth writing down if two people unpacking the same zip arrive
+//! at the same number.
 //!
 //! # One level, and here rather than in a container
 //!
@@ -129,6 +137,14 @@ const TARGETS: &[Target] = &[
         upstream: "fuzz_lua",
         corpus: "https://storage.googleapis.com/lua-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/lua_fuzz_lua/public.zip",
         pinned: ("2026-09-21", 18693),
+    },
+    Target {
+        project: "zstd",
+        harness: "zstd",
+        variable: "RUCC_ZSTD_CORPUS",
+        upstream: "simple_decompress",
+        corpus: "https://storage.googleapis.com/zstd-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zstd_simple_decompress/public.zip",
+        pinned: ("2026-09-21", 17310),
     },
 ];
 
@@ -364,7 +380,7 @@ struct Took {
     /// rather than an input that went wrong.
     timed: bool,
     /// Every distinct report it made, as the judgement and the width.
-    said: Vec<(u32, u32)>,
+    said: Vec<(u32, Option<u32>)>,
 }
 
 /// Reads a replay's output and says what was wrong with it.
@@ -395,7 +411,7 @@ fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
     let died: Vec<&Took> = took.iter().filter(|one| one.killed).collect();
     let timed = took.iter().filter(|one| one.timed).count();
     let noisy = took.iter().filter(|one| !one.said.is_empty()).count();
-    let mut shapes: Vec<(u32, u32, String, usize)> = Vec::new();
+    let mut shapes: Vec<(u32, Option<u32>, String, usize)> = Vec::new();
     for one in &took {
         for &(judgement, bytes) in &one.said {
             match shapes.iter_mut().find(|(j, b, _, _)| *j == judgement && *b == bytes) {
@@ -413,10 +429,12 @@ fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
         shapes.len()
     );
     for (judgement, bytes, first, seen) in &shapes {
-        println!(
-            "{}: J{judgement} over {bytes} bytes, {seen} inputs, first at {first}",
-            target.project
-        );
+        let width = match bytes {
+            Some(bytes) => format!("over {bytes} bytes"),
+            None => "with no access width, so it is about a pointer rather than a read or a write"
+                .to_owned(),
+        };
+        println!("{}: J{judgement} {width}, {seen} inputs, first at {first}", target.project);
     }
     if !shapes.is_empty() {
         println!(
@@ -460,13 +478,20 @@ fn split(out: &str) -> Vec<Took> {
 }
 
 /// Every report in one input's output, as the judgement number and the width of the access.
-fn shapes(body: &str) -> Vec<(u32, u32)> {
+///
+/// The width is optional because not every report is about an access. J2 is a pointer that left the
+/// object it was derived from, and nothing has been read or written at the point it is refused, so
+/// the report says where the pointer is and how far out it went and never says a number of bytes.
+/// This used to require the width and skip a report that had none, which threw away every J2 there
+/// was: on the zstd corpus that was 739 of the 946 inputs that reported anything, counted as zero,
+/// and the summary said 223 inputs and two shapes where the truth was 946 and three.
+fn shapes(body: &str) -> Vec<(u32, Option<u32>)> {
     let mut found = Vec::new();
     for chunk in body.split(BANNER).skip(1) {
         let Some(judgement) = libraries::number_after(chunk, "  judgement J") else {
             continue;
         };
-        let Some(bytes) = libraries::number_before(chunk, " bytes at ") else { continue };
+        let bytes = libraries::number_before(chunk, " bytes at ");
         if !found.contains(&(judgement, bytes)) {
             found.push((judgement, bytes));
         }
@@ -526,10 +551,28 @@ mod tests {
         let took = split(&out);
         assert_eq!(took.len(), 2);
         assert_eq!(took[0].name, "aaa");
-        assert_eq!(took[0].said, vec![(1, 8)]);
+        assert_eq!(took[0].said, vec![(1, Some(8))]);
         assert!(!took[0].killed);
         assert_eq!(took[1].name, "bbb");
         assert!(took[1].killed);
         assert_eq!(took[1].ended, Some(11));
+    }
+
+    /// A report that names no number of bytes is still a report.
+    ///
+    /// J2 is a pointer that went outside the object it came from and it is refused before anything
+    /// is read or written, so there is no access to give a width to, and the only number in it is
+    /// how far out the pointer went. Requiring a width threw all of those away, which on the zstd
+    /// corpus was three quarters of the inputs that said anything.
+    #[test]
+    fn a_report_with_no_access_width_is_counted_rather_than_dropped() {
+        let out = format!(
+            "<<<input aaa>>>\n{BANNER}\n  judgement J2, a pointer derived from another\n  at \
+             0x1\n  which no instance owns\n  which is 11 bytes before the start of it\n<<<ended \
+             0>>>\n<<<status 0>>>\n"
+        );
+        let took = split(&out);
+        assert_eq!(took.len(), 1);
+        assert_eq!(took[0].said, vec![(2, None)]);
     }
 }
