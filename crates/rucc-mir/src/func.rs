@@ -215,6 +215,18 @@ pub struct Func {
     /// machine function that does not carry this is one whose relocation names a symbol nobody
     /// ever defines.
     pub labels: Vec<(Block, Symbol)>,
+    /// Where the function was declared, from the IR function it was lowered from.
+    ///
+    /// Nothing in this crate reads it, and it is here for the reason [`Func::binding`] is here:
+    /// the assembler is handed functions and nothing else. What reads it is the line table, which
+    /// needs a span for the prologue and cannot get one from an instruction, since no instruction
+    /// in a prologue came from any expression in the source. [`Span::DUMMY`] in a function that
+    /// was not lowered from one.
+    ///
+    /// Spelled `declared` rather than `span` because [`Func::span`] is already the span of an
+    /// instruction, and a field and a method of the same name on the same type is a reading
+    /// hazard for no gain.
+    pub declared: Span,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -244,6 +256,7 @@ impl Func {
             cfi: Vec::new(),
             patch: None,
             labels: Vec::new(),
+            declared: Span::DUMMY,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),

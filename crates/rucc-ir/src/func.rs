@@ -62,6 +62,22 @@ pub struct Func {
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
+    /// Where it was declared, which is what a debugger says the prologue is.
+    ///
+    /// Not any instruction's span, and that is the point of it. The pushes, the frame and the
+    /// moves that put the arguments where the body expects them come from no expression in the
+    /// source, so every one of them carries [`Span::DUMMY`], and the front of every function would
+    /// otherwise be the one part of it the line table says nothing about. A program counter in
+    /// there would get no answer rather than a slightly early one, which is the worse of the two
+    /// for whoever is reading a backtrace.
+    ///
+    /// [`Span::DUMMY`] in a function built by something that is not a C source, which is what the
+    /// tests and the IR parser build.
+    ///
+    /// Spelled `declared` rather than `span` because [`Func::span`] is already the span of an
+    /// instruction, and a field and a method of the same name on the same type is a reading
+    /// hazard for no gain.
+    pub declared: Span,
 
     values: Vec<ValueData>,
     insts: Vec<InstData>,
@@ -103,6 +119,7 @@ impl Func {
             section: None,
             align: None,
             attrs: Attrs::NONE,
+            declared: Span::DUMMY,
             values: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),

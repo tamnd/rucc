@@ -769,6 +769,9 @@ impl<'a> Lowering<'a> {
         }
         let mut out = mir::Func::new(name);
         out.align = source.align;
+        // Carried rather than worked out here, because where a function was declared is a fact
+        // about the source and this is a long way past it. What wants it is the line table.
+        out.declared = source.declared;
         out.binding = binding(source.linkage);
         out.visibility = visibility(source.visibility);
         Self {

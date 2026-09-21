@@ -1001,7 +1001,7 @@ fn describe(
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(text.funcs.len());
     for (extent, rows) in text.funcs.iter().zip(lines) {
-        let mut out = Vec::with_capacity(rows.len());
+        let mut out: Vec<rucc_debug::Row> = Vec::with_capacity(rows.len());
         for row in rows {
             if row.span.is_dummy() {
                 continue;
@@ -1024,16 +1024,22 @@ fn describe(
                 line: at.line,
                 column: at.column,
             };
-            out.push(place);
+            // Two rows at one address is one row, and the later of the two wins. It happens at the
+            // front of a function with no prologue to speak of, where the row the assembler writes
+            // for the declaration and the row for the first instruction of the body land on the
+            // same byte. The body's answer is the better one there, because there are no prologue
+            // bytes for the other one to be about.
+            match out.last_mut() {
+                Some(last) if last.at == place.at => *last = place,
+                _ => out.push(place),
+            }
         }
-        // The prologue, which is the pushes, the frame and the moves that put the arguments where
-        // the body expects them. No line of the source asked for any of that, so none of those
-        // instructions has a span and none of them survived the loop above, which leaves the front
-        // of every function as the one part of it no row covers. A program counter in there would
-        // get no answer at all rather than a slightly early one, and no answer is the worse of the
-        // two for anybody reading a backtrace. The first row is moved to the front of the function
-        // instead. gcc says the line the function was declared on over those bytes, which is a
-        // better answer and needs a span that does not reach this far down yet.
+        // And the front of the function, for a function whose declaration had no span to give. The
+        // assembler writes a row there from `Func::declared` and that is the usual way this is
+        // covered, but a function that came from something other than a C source has no such span,
+        // and the front of one is the one part of it no row would otherwise cover. A program
+        // counter in there would get no answer at all rather than a slightly early one, and no
+        // answer is the worse of the two for anybody reading a backtrace.
         if let Some(first) = out.first_mut() {
             first.at = 0;
         }

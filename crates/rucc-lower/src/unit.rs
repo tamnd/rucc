@@ -622,6 +622,12 @@ impl Unit<'_> {
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
+        // Where the body begins, which is the line a debugger names over the prologue. gcc says the
+        // line the opening brace is on rather than the line the declarator is on, and the two
+        // differ in the style that puts the brace underneath. No instruction in a prologue has a
+        // span of its own, so this is the only place the fact can come from. A declaration has no
+        // body and produces no prologue, so it falls back to the declarator and nothing reads it.
+        func.declared = body.map_or(span, |body| tast.stmt_span(body));
         // The larger of what this function asked for and what the command line asked of all of
         // them, since the attribute is a requirement and the flag is a preference, and a
         // preference does not get to move a function off a boundary its own source named.

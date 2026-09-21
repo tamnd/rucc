@@ -115,7 +115,7 @@ pub(crate) struct Project {
     pub(crate) name: &'static str,
     /// The variable somebody points at the sources, which may name the directory or the file inside
     /// it that [`Project::marker`] gives.
-    variable: &'static str,
+    pub(crate) variable: &'static str,
     /// The file that says an unpacked directory really is this project.
     marker: &'static str,
     /// Directory names the project's own tarball unpacks to, under the two places a person is
