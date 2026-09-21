@@ -36,9 +36,9 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, Eval, ExprId, ExprKind, ExprList,
-    FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration,
-    Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, DeclKind, Eval, ExprId, ExprKind,
+    ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId,
+    StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
@@ -1153,6 +1153,11 @@ impl<'u> Body<'_, 'u> {
         // The sizes first, and once: they are what the object is as long as, and what every
         // `sizeof` of it and every step over its rows answers with afterwards.
         self.measure(ty);
+        if tast[decl].kind == DeclKind::Type {
+            // A name for a type, `typedef char T[n]`, which is in the tree for the measuring
+            // above and declares no object to make a slot for.
+            return;
+        }
         if !repr::is_variable_length(self.types(), ty) {
             // A declaration of a variably modified type that is not an array itself, `int
             // (*p)[n]`, whose object is an ordinary pointer with its slot already made. The
@@ -7344,6 +7349,11 @@ impl Scan<'_> {
 
     /// One declaration, and the initializer it has.
     fn decl(&mut self, id: DeclId) {
+        if self.tast[id].kind == DeclKind::Type {
+            // A name for a type is neither a local nor a global. It has no slot, no image and
+            // no initializer, and the sizes in it are evaluated where the walk meets it.
+            return;
+        }
         if self.tast[id].duration == StorageDuration::Automatic {
             self.locals.push(id);
         } else {

@@ -239,17 +239,35 @@ decl #28 evaluated_once : int(void) function external defined
               decl #1 use : int(int *) function
             convert array-decay : int *
               decl #29 a : int[*] lvalue
-decl #31 returned_from : int(int) function external defined
+decl #31 a_name_for_one : long(int) function external defined
   params
     decl #30 n : int object automatic defined
   body
     block
+      decls
+        decl #32 T : char[*] type declared
+      expr
+        assign = : int
+          decl #30 n : int lvalue
+          const 0 : int
+      return
+        cast : long
+          binary * : unsigned long
+            convert arithmetic : unsigned long
+              convert lvalue : int
+                decl #30 n : int lvalue
+            const 1 : unsigned long
+decl #34 returned_from : int(int) function external defined
+  params
+    decl #33 n : int object automatic defined
+  body
+    block
       block
         decls
-          decl #32 a : int[*] object automatic defined
+          decl #35 a : int[*] object automatic defined
         return
           call : int
             convert function-decay : int (*)(int *)
               decl #1 use : int(int *) function
             convert array-decay : int *
-              decl #32 a : int[*] lvalue
+              decl #35 a : int[*] lvalue
