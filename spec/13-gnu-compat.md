@@ -32,7 +32,7 @@ The initial population comes from three sources: [MaskRay's inventory of the GNU
 
 ## 13.3 Statement, expression and declaration extensions
 
-**Statement expressions** (`({ ... })`) are everywhere in the kernel, every `min()`, `max()`, `container_of()` variant uses one. The hard part is not parsing but semantics: the value is that of the last statement, temporaries live until the end of the enclosing full expression, and a `goto` out of one must run cleanups. They interact with VLAs and with `__attribute__((cleanup))` in ways that need explicit handling.
+**Statement expressions** (`({ ... })`) are everywhere in the kernel, every `min()`, `max()`, `container_of()` variant uses one. The hard part is not parsing but semantics: the value is that of the last statement, temporaries live until the end of the enclosing full expression, and a `goto` out of one must run cleanups. They interact with VLAs and with `__attribute__((cleanup))` in ways that need explicit handling. The last statement is still the last statement when it carries a label, so `({ __label__ again; again: n; })` is worth what `({ n; })` is worth, which is how a block that jumps back to its own start and then answers is written and how a block whose value is the address of a label inside it is written. Only a label is looked through that way. A `case` or a `default` in there is a jump into the middle of a statement expression from a `switch` outside it, which gcc refuses and which is not a statement with a value to take.
 
 **`typeof` and `typeof_unqual`** are C23 now, which simplifies matters; `__typeof__` remains as the spelling that works in all modes.
 
