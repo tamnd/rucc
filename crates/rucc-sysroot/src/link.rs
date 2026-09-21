@@ -132,10 +132,26 @@ pub fn libc(target: TargetTuple) -> Libc {
 
 /// Our own runtime library, which every one of the three lines below carries.
 ///
-/// Named once because two callers ask about it by name: the line that puts it on, and
-/// [`crate::argv::argv`] when `-fno-builtins-lib` asks for it to be left off. A second spelling of
-/// the name in the second place is a flag that stops working the day the first one is renamed.
+/// Named once because three callers ask about it by name: the line that puts it on,
+/// [`crate::argv::argv`] when `-fno-builtins-lib` asks for it to be left off, and the driver that
+/// goes looking for the file. A second spelling of the name anywhere is a flag that stops working
+/// the day the first one is renamed.
+///
+/// Where the file is, is not this crate's answer and used to be. Every line below named it inside
+/// the sysroot, as `sysroot.lib().join(BUILTINS)`, and nothing ever put it there: it is this
+/// compiler's own output for the target rather than anything the platform ships, `cargo xtask
+/// builtins` writes it beside the compiler, and a sysroot fetched from a release will never hold
+/// it. So the lines take the path from whoever built them, which is the driver, and this constant
+/// is the name alone. tamnd/rucc#1514.
 pub const BUILTINS: &str = "librucc_builtins.a";
+
+/// Our runtime as a list, which is what every line below puts at the end of its libraries.
+///
+/// One function rather than the same `into_iter` at four call sites, and it takes the whole answer
+/// rather than a path so that a line reads the same whether the file was found or not.
+fn ours(builtins: Option<&Path>) -> Vec<PathBuf> {
+    builtins.map(Path::to_path_buf).into_iter().collect()
+}
 
 /// The inputs to a link, in the three groups a linker needs them in.
 ///
@@ -161,13 +177,17 @@ impl LinkLine {
     /// sysroot we do not produce yet still gets the right shape, because the shape follows from
     /// whether the libc on the target machine is an archive or a shared object and that is known
     /// before any of it is built.
+    ///
+    /// The runtime is a path from the caller rather than a name joined onto the sysroot, and
+    /// [`None`] means it is not on this machine and the line goes without it. Whether that is worth
+    /// refusing over is the driver's question, since the driver is what knows whether it looked.
     #[must_use]
-    pub fn for_target(sysroot: &Sysroot, mode: LinkMode) -> Self {
+    pub fn for_target(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         match libc(sysroot.target()) {
-            Libc::None => LinkLine::freestanding(sysroot),
-            Libc::Archive => LinkLine::musl(sysroot, mode),
-            Libc::Stub => LinkLine::glibc(sysroot, mode),
-            Libc::Import => LinkLine::mingw(sysroot, mode),
+            Libc::None => LinkLine::freestanding(builtins),
+            Libc::Archive => LinkLine::musl(sysroot, mode, builtins),
+            Libc::Stub => LinkLine::glibc(sysroot, mode, builtins),
+            Libc::Import => LinkLine::mingw(sysroot, mode, builtins),
         }
     }
 
@@ -184,14 +204,12 @@ impl LinkLine {
     /// code that does 64-bit arithmetic on a 32-bit target reaches it without asking.
     ///
     /// The mode is not a parameter because it changes nothing here. Every difference between the
-    /// modes is a start file and there are none.
+    /// modes is a start file and there are none. Neither is the sysroot, now that the one file on
+    /// this line is not in it: a freestanding link reads headers out of a sysroot and links nothing
+    /// out of one.
     #[must_use]
-    pub fn freestanding(sysroot: &Sysroot) -> Self {
-        LinkLine {
-            start: Vec::new(),
-            libraries: vec![sysroot.lib().join(BUILTINS)],
-            end: Vec::new(),
-        }
+    pub fn freestanding(builtins: Option<&Path>) -> Self {
+        LinkLine { start: Vec::new(), libraries: ours(builtins), end: Vec::new() }
     }
 
     /// The line for a musl link against this sysroot.
@@ -210,13 +228,11 @@ impl LinkLine {
     /// exercises the whole pipeline, and a shared musl is a second build of it that buys nothing
     /// until somebody asks for a dynamically linked musl program.
     #[must_use]
-    pub fn musl(sysroot: &Sysroot, mode: LinkMode) -> Self {
+    pub fn musl(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         let lib = sysroot.lib();
-        LinkLine {
-            start: start_files(&lib, mode),
-            libraries: vec![lib.join("libc.a"), lib.join(BUILTINS)],
-            end: vec![lib.join("crtn.o")],
-        }
+        let mut libraries = vec![lib.join("libc.a")];
+        libraries.extend(ours(builtins));
+        LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }
     }
 
     /// The line for a link against a generated stub, which is glibc and every other hosted libc that
@@ -251,13 +267,11 @@ impl LinkLine {
     /// [`crate::argv::argv`] refuses that combination by name rather than producing this line with
     /// `-static` in front of it.
     #[must_use]
-    pub fn glibc(sysroot: &Sysroot, mode: LinkMode) -> Self {
+    pub fn glibc(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         let lib = sysroot.lib();
-        LinkLine {
-            start: start_files(&lib, mode),
-            libraries: vec![lib.join("libc.so"), lib.join(BUILTINS)],
-            end: vec![lib.join("crtn.o")],
-        }
+        let mut libraries = vec![lib.join("libc.so")];
+        libraries.extend(ours(builtins));
+        LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }
     }
 
     /// The line for a mingw-w64 link against this sysroot.
@@ -290,13 +304,13 @@ impl LinkLine {
     /// linker resolves archives to a fixed point and does not care about any of this, and writing
     /// the line for the stricter of the two is what makes one line serve both.
     #[must_use]
-    pub fn mingw(sysroot: &Sysroot, mode: LinkMode) -> Self {
+    pub fn mingw(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         let lib = sysroot.lib();
         let start = match mode {
             LinkMode::Shared => "dllcrt2.o",
             _ => "crt2.o",
         };
-        let libraries = [
+        let theirs = [
             "libmingw32.a",
             "libmoldname.a",
             "libmingwex.a",
@@ -305,13 +319,10 @@ impl LinkLine {
             "libshell32.a",
             "libuser32.a",
             "libkernel32.a",
-            BUILTINS,
         ];
-        LinkLine {
-            start: vec![lib.join(start)],
-            libraries: libraries.iter().map(|name| lib.join(name)).collect(),
-            end: Vec::new(),
-        }
+        let mut libraries: Vec<PathBuf> = theirs.iter().map(|name| lib.join(name)).collect();
+        libraries.extend(ours(builtins));
+        LinkLine { start: vec![lib.join(start)], libraries, end: Vec::new() }
     }
 
     /// Every input, in the order they reach the linker, with the caller's objects in the middle.

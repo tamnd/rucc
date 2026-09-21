@@ -262,6 +262,15 @@ block0:
     return %11
 }
 
+func @a_name_for_one(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = sext.i64 %0
+    %3 = iconst.i64 1
+    %4 = mul %2, %3
+    return %4
+}
+
 func @returned_from(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = sext.i64 %0

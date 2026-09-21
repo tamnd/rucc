@@ -35,7 +35,7 @@
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
 
-#![doc(html_root_url = "https://docs.rs/rucc-target/0.10.65")]
+#![doc(html_root_url = "https://docs.rs/rucc-target/0.10.69")]
 
 use std::fmt;
 use std::str::FromStr;
@@ -56,7 +56,7 @@ mod short;
 mod timing;
 pub mod x86_64;
 
-pub use crate::abi::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
@@ -1300,6 +1300,38 @@ mod tests {
         let arm = of("aarch64-unknown-linux-gnu");
         assert!(arm.regs.is_empty());
         assert!(arm.call_regs.is_none());
+    }
+
+    /// The two maps from a triple, held against each other.
+    ///
+    /// A target's registers and a target's ABI are chosen by two separate matches, one here and one
+    /// in `rucc_abi::abis::for_target`, and [`CallRegs::abi`] is the link between them. Two matches
+    /// that can disagree are the thing this crate must not have, so every triple with registers is
+    /// asked both questions and the answers have to be the same description. What it catches is a
+    /// target added to one match and not the other, which is a compiler that puts the value in the
+    /// register one ABI names and the form another one asked for.
+    #[test]
+    fn the_registers_and_the_abi_a_target_gets_are_the_same_convention() {
+        let mut checked = 0;
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
+                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+                    let triple = Triple::new(arch, os, env);
+                    let info = TargetInfo::new(triple);
+                    let Some(regs) = info.call_regs else { continue };
+                    let described = rucc_abi::abis::for_target(info.tuple)
+                        .unwrap_or_else(|| panic!("{triple} has registers and no ABI"));
+                    assert!(
+                        std::ptr::eq(regs.abi, described),
+                        "{triple} has the registers of {} and the ABI of {}",
+                        regs.abi.name,
+                        described.name
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "no target has registers, so this asserted nothing");
     }
 
     /// The timing model, which follows the register file: an architecture with no backend has

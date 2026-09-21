@@ -1133,6 +1133,7 @@ static SSE_ORDER: [PhysReg; 16] = [
 
 /// Where a SysV AMD64 call puts things, per `spec/12-abi-and-runtime.md` section 12.2.
 pub static SYSV: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::SYSV_AMD64,
     int_class: GPR,
     sse_class: XMM,
     int_args: &SYSV_INT_ARGS,
@@ -1209,6 +1210,7 @@ pub static MINGW64: CallRegs = win64(Chkstk { name: "___chkstk_ms", size: RAX })
 /// The Windows convention, given the routine the runtime in question provides.
 const fn win64(chkstk: Chkstk) -> CallRegs {
     CallRegs {
+        abi: &rucc_abi::abis::WIN64,
         int_class: GPR,
         sse_class: XMM,
         int_args: &WIN64_INT_ARGS,

@@ -21,6 +21,8 @@
 
 use std::fmt;
 
+use rucc_abi::AbiDescription;
+
 /// One class of registers, and the registers in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassInfo {
@@ -299,6 +301,17 @@ pub struct Chkstk {
 /// nothing has to count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallRegs {
+    /// The ABI these registers are the register half of.
+    ///
+    /// The two halves of one convention: this structure says which register a value goes in and
+    /// the description says what form it travels in on the way there, and a target that has one
+    /// has the other. It is a link rather than a copy of the fact anybody wants, because a back end
+    /// pass that writes a call to a runtime routine has to ask the same classification question a
+    /// call in the program is asked and there is one place that answers it. A target's registers and
+    /// a target's ABI are still chosen by two separate matches, one in [`crate::TargetInfo`] and one
+    /// in `rucc_abi::abis::for_target`, and the crate's test that walks every triple asking both is
+    /// what holds them together.
+    pub abi: &'static AbiDescription,
     /// The class the general purpose registers named here are in.
     ///
     /// A register is a number inside its class, so a list of them says nothing about which
@@ -680,7 +693,12 @@ mod tests {
         static INT: [PhysReg; 2] = [PhysReg::new(0), PhysReg::new(1)];
         static SSE: [PhysReg; 2] = [PhysReg::new(10), PhysReg::new(11)];
         static NONE: [PhysReg; 0] = [];
+        // The registers are invented and the description is not, so it is picked by the one flag
+        // the two real conventions disagree about, which is the flag these tests vary.
+        let abi: &'static AbiDescription =
+            if shared { &rucc_abi::abis::WIN64 } else { &rucc_abi::abis::SYSV_AMD64 };
         CallRegs {
+            abi,
             int_class: RegClass::new(0),
             sse_class: RegClass::new(1),
             int_args: &INT,

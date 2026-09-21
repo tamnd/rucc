@@ -288,6 +288,13 @@ pub fn origin(func: &Func, mut value: Value) -> (Origin, Option<i64>) {
             // A cast between two pointers moves nothing, so it is the same address as its
             // operand and the walk goes through it.
             Opcode::Bitcast => value = func[data.args][0],
+            // A capability is about the object its pointer is in, so the object at the end of
+            // this walk is the same object either way. It is not an address and nothing loads
+            // through one, so this is never the origin of an access. What it is for is the
+            // escape analysis: once the walk gets here, a use of a capability that could let the
+            // object out is a use this function can see, and [`keeps_address`] is what decides
+            // which uses those are.
+            Opcode::CapOf => value = func[data.args][0],
             _ => return (Origin::Unknown(value), offset),
         }
     }
@@ -413,6 +420,20 @@ pub const fn keeps_address(opcode: Opcode, index: usize) -> bool {
         // Comparing two addresses neither reads them nor keeps them. Note that the answer may
         // not travel the other way: see [`rucc_ir::Restrict::disjoint`].
         (Opcode::ICmp, 0 | 1) => true,
+        // A plane access takes the address as the row to look up and not as somewhere to put it.
+        // [`Opcode::touches_only_planes`] is the argument, and what matters here is the last part
+        // of it: the storage these reach is the runtime's, and no name in the program reaches one,
+        // so nothing the program can run afterwards can get at the object through what one of them
+        // did. Every operand, because every pointer one of them takes is a locator.
+        //
+        (op, _) if op.touches_only_planes() => true,
+        // Asking what object a pointer is in is not letting the pointer out. The capability that
+        // comes back is about the object and the walk in [`origin`] goes through it, which is
+        // what makes this safe: a use of the capability that could let the object out is a use
+        // that arrives back here under its own opcode, and the ones that can are not in this
+        // list. `cap_store` writes one into memory, `cap_copy` moves a run of them, `cap_narrow`
+        // makes a second one from it, and `cap_recover` is the road back to a usable pointer.
+        (Opcode::CapOf, 0) => true,
         _ => false,
     }
 }
@@ -1130,6 +1151,88 @@ mod tests {
         let outside = Outside::of(&module);
         let alias = Alias::new(&f, &outside);
         assert_eq!(alias.escapes().count(), 0);
+    }
+
+    #[test]
+    fn a_plane_write_on_a_local_does_not_let_its_address_out() {
+        // What a `-fsafety=detect` build puts beside the first store into a local. The runtime
+        // writes down that those bytes are now initialised, in storage of its own, and nothing
+        // the program can run afterwards reaches the local through it.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        let width = build.iconst(Type::int(64), 16);
+        let args = build.func().push_values(&[object, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        assert_eq!(alias.escapes().count(), 0);
+    }
+
+    #[test]
+    fn a_local_that_is_only_asked_about_and_checked_does_not_leave_the_function() {
+        // What one bounds check on a local lowers to before `rucc_safety::lower` runs, which is
+        // an `alloca`, the capability of the object it is, and a check that reads a plane. None
+        // of the three hands the address to anything, and before this was written the `cap_of`
+        // in the middle of it escaped every local in a program built with the checks on.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        let args = build.func().push_values(&[object]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, object]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CheckBounds) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        assert_eq!(alias.escapes().count(), 0);
+    }
+
+    #[test]
+    fn a_capability_of_a_local_used_for_anything_else_does_let_it_out() {
+        // The other side of the same line, and the reason the walk goes through `cap_of` rather
+        // than the whitelist naming it on its own. `cap_narrow` makes a second capability from
+        // the first, and where that one ends up is not something this walk follows, so the local
+        // it is about has to count as gone.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        let args = build.func().push_values(&[object]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let base = build.iconst(Type::int(64), 0);
+        let size = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[capability, base, size]);
+        build.value(InstData { args, ..InstData::new(Opcode::CapNarrow) }, Type::CAP);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
+    }
+
+    #[test]
+    fn the_whitelist_says_yes_to_a_plane_access_at_every_operand() {
+        // Asked of the list rather than of a program, because what makes this safe is that every
+        // pointer one of these takes is a row to look up, and a test built out of one instruction
+        // only ever says it about the operand that instruction has.
+        for opcode in Opcode::all().filter(|opcode| opcode.touches_only_planes()) {
+            for index in 0..4 {
+                assert!(keeps_address(opcode, index), "{opcode} at {index}");
+            }
+        }
+        for opcode in [Opcode::CapStore, Opcode::CapCopy, Opcode::CapNarrow, Opcode::CapRecover] {
+            assert!(!keeps_address(opcode, 0), "{opcode}");
+        }
+        assert!(keeps_address(Opcode::CapOf, 0));
     }
 
     #[test]

@@ -22,7 +22,7 @@ sysroot   <cache>/sysroots/armv7-none-eabi
   --build-id=none
   -L<cache>/sysroots/armv7-none-eabi/lib
   main.o
-  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [static-pie]
   -o
@@ -44,7 +44,7 @@ sysroot   <cache>/sysroots/armv7-none-eabi
   --build-id=none
   -L<cache>/sysroots/armv7-none-eabi/lib
   main.o
-  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [dynamic]
   -o
@@ -64,7 +64,7 @@ sysroot   <cache>/sysroots/armv7-none-eabi
   --build-id=none
   -L<cache>/sysroots/armv7-none-eabi/lib
   main.o
-  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [dynamic-no-pie]
   -o
@@ -84,7 +84,7 @@ sysroot   <cache>/sysroots/armv7-none-eabi
   --build-id=none
   -L<cache>/sysroots/armv7-none-eabi/lib
   main.o
-  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [shared]
   -o
@@ -104,4 +104,4 @@ sysroot   <cache>/sysroots/armv7-none-eabi
   --build-id=none
   -L<cache>/sysroots/armv7-none-eabi/lib
   main.o
-  <cache>/sysroots/armv7-none-eabi/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a

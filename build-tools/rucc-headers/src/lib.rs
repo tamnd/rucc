@@ -41,6 +41,8 @@
 //! install ends at. The releases have to be given oldest first, and there have to be at least two,
 //! because merging one release is copying it.
 
+#![doc(html_root_url = "https://docs.rs/rucc-headers/0.10.69")]
+
 pub mod cond;
 pub mod diff;
 pub mod merge;

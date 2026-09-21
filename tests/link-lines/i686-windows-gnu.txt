@@ -27,7 +27,7 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
   <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
   <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
-  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [static-pie]
   -o
@@ -52,7 +52,7 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
   <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
   <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
-  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [dynamic]
   -o
@@ -76,7 +76,7 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
   <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
   <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
-  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [dynamic-no-pie]
   -o
@@ -100,7 +100,7 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
   <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
   <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
-  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
 
 [shared]
   -o
@@ -123,4 +123,4 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   <cache>/sysroots/i686-windows-gnu/lib/libshell32.a
   <cache>/sysroots/i686-windows-gnu/lib/libuser32.a
   <cache>/sysroots/i686-windows-gnu/lib/libkernel32.a
-  <cache>/sysroots/i686-windows-gnu/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a

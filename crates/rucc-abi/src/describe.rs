@@ -75,6 +75,41 @@ pub struct AbiDescription {
     pub stack_args: StackArgs,
 }
 
+impl AbiDescription {
+    /// Whether a scalar of this size travels as the address of a copy the caller made.
+    ///
+    /// The size rule of the one ABI that does this is written over the size of the object and says
+    /// nothing about what is in it, which is why this takes a number rather than a [`Scalar`]: a
+    /// pass writing a call to a runtime routine has a width in hand and no C type behind it, and the
+    /// answer is the same for both askers because there is only the one rule.
+    ///
+    /// [`Scalar`]: crate::shape::Scalar
+    #[must_use]
+    pub const fn scalar_is_by_reference(&self, size: u64) -> bool {
+        self.scalars.wide_is_by_reference && !matches!(size, 1 | 2 | 4 | 8)
+    }
+
+    /// The format an integer of this size comes back in, where the ABI brings one back whole in a
+    /// vector register rather than through the address the caller passed.
+    ///
+    /// The companion to [`AbiDescription::scalar_is_by_reference`] and asked by the same kind of
+    /// caller for the same reason, a pass writing a call to a runtime routine with a width in hand
+    /// and no C type behind it. It is a separate question rather than the same one answered the
+    /// other way because the two disagree on the one ABI that says yes to either: Windows x64
+    /// passes a sixteen byte integer as an address and brings one back in xmm0, so `__fixtfti`
+    /// there takes an address and answers in a vector register.
+    ///
+    /// [`None`] where the size is one a register holds, since then nothing about it is wide, and
+    /// [`None`] on every ABI that does not do this.
+    #[must_use]
+    pub const fn wide_integer_returns_in(&self, size: u64) -> Option<Format> {
+        match self.scalars.wide_integer_returns_in {
+            Some(format) if self.scalar_is_by_reference(size) => Some(format),
+            _ => None,
+        }
+    }
+}
+
 /// The registers a call starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Banks {
@@ -330,4 +365,36 @@ pub enum Short {
     /// the rule reached but the registers did not is classified by the ordinary size rules and
     /// still travels in registers if those find any.
     TryNextRule,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::abis::{AAPCS64, SYSV_AMD64, WIN64};
+    use crate::shape::Format;
+
+    /// The two questions about a wide scalar are asked separately because the one ABI that says
+    /// yes to either gives different answers to them.
+    #[test]
+    fn windows_passes_a_wide_scalar_as_an_address_and_brings_an_integer_back_in_a_register() {
+        assert!(WIN64.scalar_is_by_reference(16));
+        assert_eq!(WIN64.wide_integer_returns_in(16), Some(Format::Quad));
+    }
+
+    /// A size a register holds is not wide, whatever the ABI says about the ones that are.
+    #[test]
+    fn a_size_a_register_holds_is_neither() {
+        for size in [1, 2, 4, 8] {
+            assert!(!WIN64.scalar_is_by_reference(size), "{size} bytes fits a register");
+            assert_eq!(WIN64.wide_integer_returns_in(size), None, "{size} bytes fits a register");
+        }
+    }
+
+    /// Everywhere else a wide scalar has registers to travel in, so neither question applies.
+    #[test]
+    fn the_conventions_with_registers_for_one_say_no_to_both() {
+        for abi in [&SYSV_AMD64, &AAPCS64] {
+            assert!(!abi.scalar_is_by_reference(16), "{}", abi.name);
+            assert_eq!(abi.wide_integer_returns_in(16), None, "{}", abi.name);
+        }
+    }
 }

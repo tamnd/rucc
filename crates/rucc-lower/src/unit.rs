@@ -394,6 +394,9 @@ impl Unit<'_> {
             match self.tast[decl].kind {
                 DeclKind::Function => self.function(decl),
                 DeclKind::Object => self.object(decl),
+                // A name for a type is only in the tree at block scope and nothing is emitted
+                // for one.
+                DeclKind::Type => {}
             }
         }
         for index in 0..self.aliases.len() {
@@ -1336,6 +1339,7 @@ impl Unit<'_> {
             // object with static storage that happens to be one.
             DeclKind::Function => self.function(decl),
             DeclKind::Object => self.object(decl),
+            DeclKind::Type => {}
         }
     }
 

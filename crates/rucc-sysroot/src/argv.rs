@@ -97,6 +97,14 @@ pub struct Invocation<'a> {
     /// passing it with a `-l` of their own is asking for, and the link says so by name if they are
     /// not.
     pub no_builtins_lib: bool,
+    /// Our own runtime archive for this target, if it is on the machine.
+    ///
+    /// A path from the caller rather than a name this crate joins onto the sysroot, because it is
+    /// the compiler's own output for the target and not the platform's, and a fetched sysroot will
+    /// never hold it. The driver is what looks for it, in the `-B` prefixes and then beside the
+    /// compiler, and [`None`] is what it says when there is none: the line goes without it and
+    /// whatever wanted a wide divide is undefined. See [`crate::link::BUILTINS`].
+    pub builtins: Option<&'a Path>,
     /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
     pub export_dynamic: bool,
     /// `-s`, which drops the symbol table.
@@ -357,7 +365,7 @@ fn sysroot_flag(sysroot: &Sysroot) -> String {
 /// [`Item::Linker`] is about.
 fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     let mut args = Vec::new();
-    let line = LinkLine::for_target(sysroot, options.mode);
+    let line = LinkLine::for_target(sysroot, options.mode, options.builtins);
     if !options.no_startfiles {
         args.extend(shown(&line.start));
     }
@@ -572,7 +580,7 @@ pub fn emulation(target: TargetTuple) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use rucc_tuple::TargetTuple;
 
@@ -588,12 +596,20 @@ mod tests {
         Sysroot::in_cache(Path::new("/cache"), target(spelling))
     }
 
+    /// Where our own runtime is, which is beside the compiler on a real machine and therefore
+    /// nowhere near the sysroot. The driver finds it and hands the path in.
+    fn builtins() -> PathBuf {
+        PathBuf::from("/beside/the/compiler/librucc_builtins.a")
+    }
+
     fn line(spelling: &str, mode: LinkMode) -> Vec<String> {
         let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let ours = builtins();
         let options = Invocation {
             inputs: &one,
             output: Some(Path::new("main")),
             mode,
+            builtins: Some(&ours),
             ..Invocation::default()
         };
         argv(target(spelling), &sysroot(spelling), &options).expect("a line")
@@ -619,16 +635,18 @@ mod tests {
     }
 
     #[test]
-    fn every_file_of_ours_is_under_the_sysroot() {
+    fn every_file_of_ours_is_under_the_sysroot_except_the_runtime_the_caller_named() {
         let spelling = "aarch64-linux-musl";
         // The prefix as this host spells it rather than as a literal, because the question is which
         // directory these files are in and a Windows separator is a backslash.
         let root = sysroot(spelling).root().display().to_string();
+        let ours = builtins().display().to_string();
         for arg in line(spelling, LinkMode::Static) {
-            // The caller's own `main.o` is relative and is theirs. Everything this function named
-            // is absolute, and every absolute file on the line is under the sysroot.
-            let ours = arg.starts_with('/') && (arg.ends_with(".o") || arg.ends_with(".a"));
-            assert!(!ours || arg.starts_with(&root), "{arg}");
+            // The caller's own `main.o` is relative and is theirs. Our runtime is absolute and is
+            // also theirs, because it is the compiler's output for the target and the caller is
+            // what knows where it put it. Everything else absolute is under the sysroot.
+            let named = arg.starts_with('/') && (arg.ends_with(".o") || arg.ends_with(".a"));
+            assert!(!named || arg == ours || arg.starts_with(&root), "{arg}");
         }
     }
 
@@ -789,12 +807,16 @@ mod tests {
     #[test]
     fn rdynamic_reaches_the_linker_and_no_builtins_lib_takes_our_runtime_off() {
         let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let ours = builtins();
         let both = Invocation {
             inputs: &one,
             output: Some(Path::new("main")),
             mode: LinkMode::Dynamic,
             export_dynamic: true,
             no_builtins_lib: true,
+            // Found on the machine and still left off, which is what the flag is. A line built
+            // with no runtime to name would pass this test without the flag doing anything.
+            builtins: Some(&ours),
             ..Invocation::default()
         };
         let spelling = "x86_64-linux-musl";

@@ -164,8 +164,8 @@ impl Checker<'_> {
     fn var(&mut self, specs: ast::DeclSpecsId, declarators: ast::InitDeclaratorList) -> DeclList {
         let mut items = self.ast[declarators].to_vec();
         if items.is_empty() {
-            self.empty_declaration(specs);
-            return self.tast.add_decl_refs(&[]);
+            let declared = self.empty_declaration(specs);
+            return self.tast.add_decl_refs(declared.as_slice());
         }
         let node = self.ast[specs];
         if let Some(which) = node.deduces() {
@@ -448,7 +448,12 @@ impl Checker<'_> {
     /// The type is built either way, because `struct S { int x; };` is how every structure in
     /// every header is declared and the body is where the members are checked. What is diagnosed
     /// is the case where a type was named and there was nothing for it to be the type of.
-    fn empty_declaration(&mut self, specs: ast::DeclSpecsId) {
+    ///
+    /// The declaration it hands back is the one a record whose members the program measures
+    /// leaves behind, `struct S { char b[n]; };`, which declares no object and is there so that
+    /// the lowering has somewhere to evaluate `n`. 6.7.7.3p12 wants that done where this stands,
+    /// so that a later `n++` does not change what `sizeof(struct S)` answers.
+    fn empty_declaration(&mut self, specs: ast::DeclSpecsId) -> Option<DeclId> {
         let node = self.ast[specs];
         if matches!(node.ty, ast::TypeSpec::None) {
             // No type was named, so there is none to build and nothing to say about what it
@@ -456,7 +461,7 @@ impl Checker<'_> {
             // and the type builder would otherwise report the missing type as if the
             // declaration had a declarator that needed one.
             self.specifiers_alone(node);
-            return;
+            return None;
         }
         if let ast::TypeSpec::Auto(which) = node.ty {
             // A deduced type with nothing to deduce from. Not a useless type name, because
@@ -467,9 +472,9 @@ impl Checker<'_> {
                 Diagnostic::error(format!("`{word}` in empty declaration"), node.span)
                     .with_code("E0669"),
             );
-            return;
+            return None;
         }
-        self.declared_specs(specs);
+        let ty = self.declared_specs(specs);
         match node.ty {
             // A record with no tag and no declarator names a type nothing can ever refer to,
             // which is a different mistake from naming a type and forgetting the variable.
@@ -500,6 +505,7 @@ impl Checker<'_> {
                 );
             }
         }
+        self.type_decl(None, ty, node.span)
     }
 
     /// A declaration that named no type, no declarator and no tag, which is a `;` and whatever
@@ -582,8 +588,7 @@ impl Checker<'_> {
         let span = node.name_span;
         let specs = self.ast[specs];
         if specs.is_typedef() {
-            self.typedef(name, ty, &specs, item, span);
-            return None;
+            return self.typedef(name, ty, &specs, item, span);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
         let (linkage, duration) = self.placement(&specs, kind, name, span);
@@ -688,6 +693,10 @@ impl Checker<'_> {
     }
 
     /// A `typedef`, which declares a name for a type and nothing that exists at run time.
+    ///
+    /// It gives back a declaration only for the one typedef that has something to do where it
+    /// stands, which is a block-scope name for a variably modified type. Every other one is
+    /// resolved where it is written and leaves nothing in the tree.
     fn typedef(
         &mut self,
         name: Symbol,
@@ -695,7 +704,7 @@ impl Checker<'_> {
         specs: &ast::DeclSpecs,
         item: ast::InitDeclarator,
         span: Span,
-    ) {
+    ) -> Option<DeclId> {
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(
@@ -746,19 +755,63 @@ impl Checker<'_> {
             Some(Binding::Typedef(previous)) if compatible(&self.types, previous, ty) => {}
             Some(Binding::Typedef(_)) => {
                 self.conflicting_types(name, ty, None, span);
-                return;
+                return None;
             }
             Some(Binding::Decl(previous)) => {
                 self.different_kind(name, Some(previous), span);
-                return;
+                return None;
             }
             Some(Binding::Enumerator { .. }) => {
                 self.different_kind(name, None, span);
-                return;
+                return None;
             }
             None => {}
         }
         self.declare_typedef(name, ty);
+        self.type_decl(Some(name), ty, span)
+    }
+
+    /// The declaration a typedef of a variably modified type leaves behind.
+    ///
+    /// 6.7.7.3p12 says the size expression in one of these is evaluated where the declaration is
+    /// reached, so `typedef char T[n]` fixes what `sizeof(T)` answers for as long as the name is
+    /// in scope and an `n++` under it changes nothing. The lowering does that where it meets a
+    /// declaration, so the typedef has to be one, and this is the declaration it is: no object,
+    /// nothing emitted, and a name that is still bound as a typedef so that nothing resolves an
+    /// expression to it.
+    ///
+    /// A file-scope typedef needs none of it, since a variably modified type is refused there and
+    /// there is no run time to evaluate a size in.
+    fn type_decl(&mut self, name: Option<Symbol>, ty: TypeId, span: Span) -> Option<DeclId> {
+        if self.scopes.at_file_scope() || !self.is_variably_modified(ty) {
+            return None;
+        }
+        Some(self.tast.decl(
+            Decl {
+                name,
+                ty,
+                kind: DeclKind::Type,
+                linkage: Linkage::None,
+                duration: StorageDuration::Automatic,
+                state: Definition::Declared,
+                alignment: None,
+                constant: false,
+                retained: false,
+                asm_label: None,
+                alias: None,
+                inline: Emission::Silent,
+                gnu_inline: false,
+                noreturn: false,
+                visibility: None,
+                weak: false,
+                startup: Startup::default(),
+                init: None,
+                cleanup: None,
+                params: DeclList::EMPTY,
+                body: None,
+            },
+            span,
+        ))
     }
 
     /// The linkage and the storage duration, which the scope and the keyword decide together.

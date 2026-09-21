@@ -12,7 +12,7 @@
 //! The promoted shape exists because C says so and not because the machine wants it. This is
 //! issue 375.
 //!
-//! # The two shapes
+//! # The three shapes
 //!
 //! A truncation of arithmetic. The low bits of a sum, a difference, a product, a bitwise
 //! operation or a shift by a constant depend only on the low bits of what went into it, so
@@ -32,9 +32,22 @@
 //! common case and the constant is representable at the narrow width whenever the comparison is
 //! not already decided.
 //!
+//! A bitwise operation on widened bits. That narrows all the way to one bit, which the other two
+//! shapes stop short of on purpose. `and`, `or` and `xor` work a bit at a time, so over two values
+//! a zero extension from one bit produced, which are zero or one and nothing else, the wide result
+//! is zero or one as well and the whole of it is its own bottom bit. That bit is the operation done
+//! on the two bits themselves. Two things ask for it. A comparison against zero at the `ne`
+//! predicate wants it as a truth, which is what `_Bool r = p & q;` is, the comparison rather than a
+//! truncation being the standard speaking: a conversion to `_Bool` gives zero or one according to
+//! whether the value compares equal to zero. An extension wants it back as a number of its own
+//! width, which is what `(long long)(p & q)` is, and since the bits are zero or one a sign
+//! extension of them and a zero extension of them are the same value. This is the shape that gives
+//! the one bit rewrite rules something to match, which is `tamnd/rucc#518`. Here too one side may
+//! be a constant, and here a constant is a bit when it is zero or one.
+//!
 //! # Why it always pays
 //!
-//! Neither shape is applied unless every leaf it reaches narrows for nothing. A leaf is what an
+//! No shape is applied unless every leaf it reaches narrows for nothing. A leaf is what an
 //! extension extended, which is already the narrow value, or a constant, which is written down
 //! again. So the rewrite replaces a wide operation, its extensions and the truncation with one
 //! narrow operation and never leaves a widening behind to pay for a narrowing. Everything in
@@ -68,7 +81,9 @@
 //! narrowed to the widest of them rather than to none. That is the first box of issue 375 and it
 //! wants the analysis manager, which wants the dominator tree, which is the next thing to build.
 
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{
+    Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value, ValueList,
+};
 
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -115,6 +130,7 @@ impl Pass for Narrow {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 let Some(redo) = truncated_arithmetic(func, inst, &uses)
                     .or_else(|| extended_comparison(func, inst))
+                    .or_else(|| widened_bits(func, inst, &uses))
                 else {
                     continue;
                 };
@@ -141,10 +157,10 @@ struct Redo {
     extra: Extra,
     /// The width everything under this is redone at.
     ty: Type,
-    /// The left operand.
+    /// The left operand, or the only one when the instruction written takes one.
     lhs: Plan,
-    /// The right operand.
-    rhs: Plan,
+    /// The right operand, and nothing when the instruction written takes one.
+    rhs: Option<Plan>,
 }
 
 /// What an operand becomes at the narrow width.
@@ -183,6 +199,9 @@ fn truncated_arithmetic(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
 /// that width and it is `and`, `or`, `xor`, a constant and the widening out of one. Narrowing an
 /// `icmp` into it would be asking every target for something no target has, so the floor is the
 /// narrowest width a machine holds a number in.
+///
+/// That list is also why `widened_bits` is allowed below the floor and asks this nothing. What it
+/// writes is one of the three operations the list has, at the one width they are on it for.
 const fn narrowable(ty: Type) -> bool {
     ty.is_int() && ty.is_scalar() && ty.bits() >= 8
 }
@@ -206,7 +225,7 @@ fn redo(func: &Func, value: Value, ty: Type, uses: &[u32], depth: u32) -> Option
         Opcode::Shl => Plan::Constant(count_below(func, right, ty)?),
         _ => plan(func, right, ty, uses, depth)?,
     };
-    Some(Redo { opcode: data.opcode, extra: Extra::None, ty, lhs, rhs })
+    Some(Redo { opcode: data.opcode, extra: Extra::None, ty, lhs, rhs: Some(rhs) })
 }
 
 /// What an operand becomes at that width, or `None` when it would cost something to get there.
@@ -277,7 +296,151 @@ fn extended_comparison(func: &Func, inst: Inst) -> Option<Redo> {
         _ => Plan::Constant(survives(func, right, kind, ty)?),
     };
     let extra = Extra::IntPred(pred);
-    Some(Redo { opcode: Opcode::ICmp, extra, ty, lhs: Plan::Already(narrow), rhs })
+    Some(Redo { opcode: Opcode::ICmp, extra, ty, lhs: Plan::Already(narrow), rhs: Some(rhs) })
+}
+
+/// Whether this is something asking about a bitwise operation on widened bits, and what it
+/// becomes.
+///
+/// A value a zero extension from one bit produced is zero or one and nothing else, and `and`, `or`
+/// and `xor` of two such values are again zero or one, because each works a bit at a time and
+/// every bit above the bottom of both operands is clear. So the whole wide result is its own
+/// bottom bit, and that bit is the operation done on the two bits themselves.
+///
+/// One side may be a constant instead, the way it may in the other two shapes, and here it has to
+/// be zero or one, since that is what being a bit is.
+///
+/// This is the shape that gives the one bit rewrite rules a producer. Nothing in the front end
+/// emits an `and.i1`, so `tamnd/rucc#518` is thirteen rules that no program could reach, and the
+/// reason is that C has no way of writing one: every bitwise operator promotes its operands to
+/// `int` first. That makes it the one narrowing whose payoff is not in the instruction it saves.
+fn widened_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
+    let (wide, back) = asked(func, inst, uses)?;
+    let data = &func[wide];
+    if !bit_at_a_time(data.opcode) {
+        return None;
+    }
+    // The operation has to be wider than a bit, because this shape is a narrowing and an
+    // operation already at one bit has nowhere to go. Saying so is what stops the second of the
+    // two questions rewriting for ever: an extension stays an extension after the rewrite, so
+    // without this it would ask again about the one bit operation it was just given and write
+    // another one just like it every time the pass ran.
+    if func[data.results().next()?].ty.bits() <= 1 {
+        return None;
+    }
+    let args = &func[data.args];
+    let (&left, &right) = (args.first()?, args.get(1)?);
+    // An operand the operation reads twice is read twice by it and by nothing else, which is the
+    // same fact about the subtree as an operand it reads once being read by nothing else. `_Bool
+    // r = p & p;` is that shape, and it is one of the thirteen rules waiting for a producer.
+    let readers = if left == right { 2 } else { 1 };
+    let lhs = side(func, left, uses, readers)?;
+    let rhs = side(func, right, uses, readers)?;
+    // Two constants is arithmetic on two numbers, which the folder owns and answers outright.
+    // This shape is here to reach past a widening, and with nothing widened on either side there
+    // is nothing to reach past. `0u % 2u` is the case: the folder turns the remainder into an
+    // `and` against one before it turns the `and` into a number, and for that one moment the
+    // operation is two bits sitting next to each other with nothing behind them.
+    if matches!((&lhs, &rhs), (Plan::Constant(_), Plan::Constant(_))) {
+        return None;
+    }
+    let extra = Extra::None;
+    let bit = Redo { opcode: data.opcode, extra, ty: Type::int(1), lhs, rhs: Some(rhs) };
+    let Some(ty) = back else { return Some(bit) };
+    let lhs = Plan::Nested(Box::new(bit));
+    Some(Redo { opcode: Opcode::ZExt, extra, ty, lhs, rhs: None })
+}
+
+/// The wide operation an instruction is asking about, and the width the answer is wanted at.
+///
+/// Two instructions ask. A comparison against zero at the `ne` predicate wants the answer as a
+/// truth, so the width it is wanted at is the one bit the operation is redone at and there is
+/// nothing to say. `_Bool r = p & q;` is that: C computes the `and` at `int` because the
+/// promotions say so, and the conversion of the result back to `_Bool` is a comparison against
+/// zero rather than a truncation, because the standard says a conversion to `_Bool` gives zero or
+/// one according to whether the value compares equal to zero.
+///
+/// Only the `ne` predicate. Asking whether the wide result is zero is the negation of this, and a
+/// negation is a second instruction where every other shape here writes one.
+///
+/// An extension wants the answer back at its own width, which is the shape `(long long)(p & q)`
+/// and every other use of the result as a number wider than the `int` the promotions computed it
+/// at. The bits are zero or one either way, so a sign extension of them is the same value as a
+/// zero extension of them and both come out as a zero extension from the one bit. That is the pass
+/// writing an opcode other than the one it read, which it otherwise refuses to do, and it is
+/// allowed here because the operation being rewritten is the extension rather than the bitwise
+/// operation, and what an extension does is decided by what it extends.
+fn asked(func: &Func, inst: Inst, uses: &[u32]) -> Option<(Inst, Option<Type>)> {
+    let data = &func[inst];
+    let args = &func[data.args];
+    match data.opcode {
+        Opcode::ICmp if data.extra == Extra::IntPred(IntPred::Ne) => {
+            let (&left, &right) = (args.first()?, args.get(1)?);
+            let (zero, wide) = constant(func, right)?;
+            (zero.signed(wide) == 0).then_some((read_by(func, left, uses, 1)?, None))
+        }
+        Opcode::ZExt | Opcode::SExt => {
+            let ty = func[data.results().next()?].ty;
+            Some((read_by(func, *args.first()?, uses, 1)?, Some(ty)))
+        }
+        _ => None,
+    }
+}
+
+/// What one operand of that operation is at one bit, or nothing when it is not a bit.
+///
+/// A constant is a bit when it is zero or one, and a constant with anything set above the bottom
+/// bit is refused for the reason the whole rewrite rests on: the wide result would then be able to
+/// come out nonzero with its bottom bit clear, and the nonzero question would be asking about bits
+/// the narrow operation does not have. How many readers the constant has is not asked, because a
+/// constant is written down again rather than kept alive.
+fn side(func: &Func, value: Value, uses: &[u32], readers: u32) -> Option<Plan> {
+    if let Some((imm, wide)) = constant(func, value) {
+        let k = imm.signed(wide);
+        return (k == 0 || k == 1).then_some(Plan::Constant(k));
+    }
+    Some(Plan::Already(widened_bit(func, value, uses, readers)?))
+}
+
+/// The instruction that computed this value, when the readers it has are the ones expected.
+///
+/// A reader beyond those keeps the wide subtree alive, and then the rewrite is an instruction
+/// added rather than a subtree replaced, which is the one thing the profitability argument here
+/// does not allow.
+fn read_by(func: &Func, value: Value, uses: &[u32], readers: u32) -> Option<Inst> {
+    if uses[value.index()] != readers {
+        return None;
+    }
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    Some(inst)
+}
+
+/// Whether an operation works a bit at a time, so that its result at one bit is its result over
+/// the bottom bit of what went in.
+///
+/// The three that do. An `add` of two widened bits is nonzero exactly when their `or` is and a
+/// `mul` of two exactly when their `and` is, and neither is here, because both would be this pass
+/// writing an opcode other than the one it read and that is a different claim from the one above.
+const fn bit_at_a_time(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::And | Opcode::Or | Opcode::Xor)
+}
+
+/// The one bit value this operand is the zero extension of, when that is what it is.
+///
+/// A zero extension and not a sign extension. A sign extension from one bit gives zero or minus
+/// one, so the operation over two of them is again zero or minus one, and the answer to the
+/// nonzero question is still the bottom bit, so the rewrite would hold. Nothing produces one: a
+/// one bit value in this IR is what a comparison answers and the front end widens it with a zero
+/// extension every time, which is what the language says, since a `_Bool` converted to `int` is
+/// zero or one.
+fn widened_bit(func: &Func, value: Value, uses: &[u32], readers: u32) -> Option<Value> {
+    let inst = read_by(func, value, uses, readers)?;
+    let data = &func[inst];
+    if data.opcode != Opcode::ZExt {
+        return None;
+    }
+    let narrow = *func[data.args].first()?;
+    (func[narrow].ty == Type::int(1)).then_some(narrow)
 }
 
 /// The extension this value is, as the kind, the width it came from and the value it extended.
@@ -342,14 +505,11 @@ fn survives(func: &Func, value: Value, kind: Opcode, ty: Type) -> Option<i128> {
 /// correct, which is the same reason folding and the peephole rewrite in place. What is left
 /// behind is the wide subtree, now read by nothing, which is what dead code elimination is for.
 fn apply(func: &mut Func, inst: Inst, redo: &Redo, uses: &mut Vec<u32>) {
-    let lhs = build(func, inst, redo.ty, &redo.lhs, uses);
-    let rhs = build(func, inst, redo.ty, &redo.rhs, uses);
+    let operands = operands(func, inst, redo, uses);
     for value in func[func[inst].args].iter().copied() {
         uses[value.index()] -= 1;
     }
-    let args = func.push_values(&[lhs, rhs]);
-    uses[lhs.index()] += 1;
-    uses[rhs.index()] += 1;
+    let args = listed(func, operands, uses);
     let data = &mut func[inst];
     data.opcode = redo.opcode;
     // No flags. An operation that could not overflow at the wide width can overflow at the narrow
@@ -370,15 +530,32 @@ fn build(func: &mut Func, before: Inst, ty: Type, plan: &Plan, uses: &mut Vec<u3
             written(func, before, data, ty, uses)
         }
         Plan::Nested(redo) => {
-            let lhs = build(func, before, redo.ty, &redo.lhs, uses);
-            let rhs = build(func, before, redo.ty, &redo.rhs, uses);
-            let args = func.push_values(&[lhs, rhs]);
-            uses[lhs.index()] += 1;
-            uses[rhs.index()] += 1;
+            let operands = operands(func, before, redo, uses);
+            let args = listed(func, operands, uses);
             let data = InstData { args, extra: redo.extra, ..InstData::new(redo.opcode) };
             written(func, before, data, redo.ty, uses)
         }
     }
+}
+
+/// The values the plan's operands come to, written in front of the instruction if they are new.
+fn operands(
+    func: &mut Func,
+    before: Inst,
+    redo: &Redo,
+    uses: &mut Vec<u32>,
+) -> (Value, Option<Value>) {
+    let lhs = build(func, before, redo.ty, &redo.lhs, uses);
+    let rhs = redo.rhs.as_ref().map(|plan| build(func, before, redo.ty, plan, uses));
+    (lhs, rhs)
+}
+
+/// Hands back the operand list to put on an instruction, counting each one as read.
+fn listed(func: &mut Func, (lhs, rhs): (Value, Option<Value>), uses: &mut [u32]) -> ValueList {
+    uses[lhs.index()] += 1;
+    let Some(rhs) = rhs else { return func.push_values(&[lhs]) };
+    uses[rhs.index()] += 1;
+    func.push_values(&[lhs, rhs])
 }
 
 /// Puts an instruction in front of another one and gives back the value it produces.
@@ -412,6 +589,12 @@ mod tests {
         let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("a result") };
         let data = &func[inst];
         (data.opcode, func[data.args].iter().map(|&arg| func[arg].ty).collect())
+    }
+
+    /// The first operand of the instruction that produced a value.
+    fn under(func: &Func, value: Value) -> Value {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { panic!("a result") };
+        *func[func[inst].args].first().expect("an operand")
     }
 
     /// The predicate of the comparison this value is the answer to.
@@ -834,6 +1017,345 @@ mod tests {
         // about the wide operation is not a promise about the narrow one.
         let rucc_ir::Def::Result { inst, .. } = func[narrow].def else { panic!("a result") };
         assert_eq!(func[inst].flags, Flags::NONE);
+    }
+
+    /// `_Bool p, q; _Bool r = p & q;` and the same at the other two operators.
+    ///
+    /// The promotions widen both bits to an `int`, the operator runs there, and the conversion of
+    /// the answer back to `_Bool` is the comparison against zero. All of that is the operator on
+    /// the two bits.
+    #[test]
+    fn a_bitwise_operation_on_two_widened_bits_is_done_at_one_bit() {
+        for opcode in [Opcode::And, Opcode::Or, Opcode::Xor] {
+            let (mut func, block) = blank();
+            let p = func.append_param(block, Type::int(1));
+            let q = func.append_param(block, Type::int(1));
+            let mut build = Builder::new(&mut func, block);
+            let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+            let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+            let both = build.binary(opcode, wide_p, wide_q, Flags::NONE);
+            let zero = build.iconst(Type::int(32), 0);
+            let answer = build.icmp(IntPred::Ne, both, zero);
+            build.ret(&[answer]);
+            assert!(
+                Narrow
+                    .run(
+                        &mut func,
+                        &mut crate::machine::fixtures::analyses(),
+                        &mut Fuel::unlimited()
+                    )
+                    .changed(),
+                "{opcode:?}"
+            );
+            assert_eq!(shape(&func, answer), (opcode, vec![Type::int(1), Type::int(1)]));
+        }
+    }
+
+    /// Asking whether it came out zero is the negation of asking whether it came out nonzero, and
+    /// a negation is an instruction this pass has nowhere to put.
+    #[test]
+    fn asking_whether_a_bitwise_operation_on_widened_bits_is_zero_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::And, wide_p, wide_q, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Eq, both, zero);
+        build.ret(&[answer]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, answer).1, vec![Type::int(32), Type::int(32)]);
+    }
+
+    /// A sum of two widened bits is nonzero exactly when their `or` is, and that is a different
+    /// claim from the one this makes, so it is not made here.
+    #[test]
+    fn a_sum_of_two_widened_bits_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::Add, wide_p, wide_q, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Ne, both, zero);
+        build.ret(&[answer]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// Two widened bytes, which are not zero or one, so the bottom bit of the `and` is not the
+    /// answer to whether the whole of it is nonzero.
+    #[test]
+    fn a_bitwise_operation_on_something_wider_than_a_bit_is_not_this_shape() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+        let both = build.binary(Opcode::And, wide_a, wide_b, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Ne, both, zero);
+        build.ret(&[answer]);
+        Narrow.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+        // The truncated arithmetic shape does narrow the `and` to a byte, which is a different
+        // rewrite and is why this asserts on the comparison rather than on nothing having moved.
+        assert_eq!(shape(&func, answer).0, Opcode::ICmp);
+    }
+
+    /// `_Bool r = p & 1;` and the rest of the one bit table, which is the point of the shape.
+    ///
+    /// The constant comes over as the same constant at one bit, and then tier one has the rule
+    /// that finishes it. Four of the thirteen are here, one per answer the table gives.
+    #[test]
+    fn a_bitwise_operation_on_a_widened_bit_and_a_bit_constant_is_done_at_one_bit() {
+        for (opcode, k) in
+            [(Opcode::And, 0), (Opcode::And, 1), (Opcode::Or, 0), (Opcode::Or, 1), (Opcode::Xor, 0)]
+        {
+            let (mut func, block) = blank();
+            let p = func.append_param(block, Type::int(1));
+            let mut build = Builder::new(&mut func, block);
+            let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+            let bit = build.iconst(Type::int(32), k);
+            let both = build.binary(opcode, wide_p, bit, Flags::NONE);
+            let zero = build.iconst(Type::int(32), 0);
+            let answer = build.icmp(IntPred::Ne, both, zero);
+            build.ret(&[answer]);
+            assert!(
+                Narrow
+                    .run(
+                        &mut func,
+                        &mut crate::machine::fixtures::analyses(),
+                        &mut Fuel::unlimited()
+                    )
+                    .changed(),
+                "{opcode:?} {k}"
+            );
+            assert_eq!(shape(&func, answer), (opcode, vec![Type::int(1), Type::int(1)]));
+        }
+    }
+
+    /// A constant with a bit set above the bottom one, which is where the argument stops holding:
+    /// the wide result can be nonzero with its bottom bit clear.
+    #[test]
+    fn a_bitwise_operation_against_a_constant_wider_than_a_bit_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let two = build.iconst(Type::int(32), 2);
+        let both = build.binary(Opcode::Or, wide_p, two, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Ne, both, zero);
+        build.ret(&[answer]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// `_Bool r = p & p;`, where one widening is read twice by the operation above it and by
+    /// nothing else, which is the same fact about the subtree as one reader is.
+    #[test]
+    fn a_widened_bit_the_operation_reads_twice_is_still_only_read_by_it() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let both = build.binary(Opcode::And, wide_p, wide_p, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Ne, both, zero);
+        build.ret(&[answer]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, answer), (Opcode::And, vec![Type::int(1), Type::int(1)]));
+    }
+
+    /// A widened bit something else reads as well, which keeps the widening alive, so the
+    /// rewrite would be an instruction added rather than a subtree replaced.
+    #[test]
+    fn a_widened_bit_that_something_else_reads_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::And, wide_p, wide_q, Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let answer = build.icmp(IntPred::Ne, both, zero);
+        build.ret(&[answer, wide_p]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// Against something other than zero, which asks a question the bottom bit does not answer.
+    #[test]
+    fn a_bitwise_operation_on_widened_bits_compared_against_one_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::Or, wide_p, wide_q, Flags::NONE);
+        let one = build.iconst(Type::int(32), 1);
+        let answer = build.icmp(IntPred::Ne, both, one);
+        build.ret(&[answer]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// `(long long)(p & q)`, which asks for the result as a wider number rather than as a truth.
+    ///
+    /// The bits are zero or one, so the extension of what the operation came to is the extension
+    /// of the one bit it came to, and a sign extension there is the same value as a zero one.
+    #[test]
+    fn a_bitwise_operation_on_widened_bits_taken_wider_is_done_at_one_bit() {
+        for kind in [Opcode::ZExt, Opcode::SExt] {
+            let (mut func, block) = blank();
+            let p = func.append_param(block, Type::int(1));
+            let q = func.append_param(block, Type::int(1));
+            let mut build = Builder::new(&mut func, block);
+            let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+            let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+            let both = build.binary(Opcode::And, wide_p, wide_q, Flags::NONE);
+            let wider = build.unary(kind, both, Type::int(64));
+            build.ret(&[wider]);
+            assert!(
+                Narrow
+                    .run(
+                        &mut func,
+                        &mut crate::machine::fixtures::analyses(),
+                        &mut Fuel::unlimited()
+                    )
+                    .changed(),
+                "{kind:?}"
+            );
+            assert_eq!(shape(&func, wider), (Opcode::ZExt, vec![Type::int(1)]), "{kind:?}");
+            let bit = under(&func, wider);
+            let want = (Opcode::And, vec![Type::int(1), Type::int(1)]);
+            assert_eq!(shape(&func, bit), want, "{kind:?}");
+        }
+    }
+
+    /// A bitwise operation on two bit constants, which is a number the folder knows and not a
+    /// widening this has any way of reaching past.
+    #[test]
+    fn a_bitwise_operation_on_two_bit_constants_is_left_to_the_folder() {
+        let (mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let zero = build.iconst(Type::int(32), 0);
+        let one = build.iconst(Type::int(32), 1);
+        let both = build.binary(Opcode::And, zero, one, Flags::NONE);
+        let wider = build.unary(Opcode::ZExt, both, Type::int(64));
+        build.ret(&[wider]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// The second question rewrites an extension into an extension, so the pass has to be asked
+    /// twice before it has said it stops. What it is handed the second time is an operation
+    /// already at one bit, which is not a narrowing and is left where it is.
+    #[test]
+    fn a_bitwise_operation_already_at_one_bit_is_not_done_again() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::Xor, wide_p, wide_q, Flags::NONE);
+        let wider = build.unary(Opcode::SExt, both, Type::int(64));
+        build.ret(&[wider]);
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(Narrow.run(&mut func, &mut an, &mut Fuel::unlimited()).changed());
+        assert!(!Narrow.run(&mut func, &mut an, &mut Fuel::unlimited()).changed());
+    }
+
+    /// `(long long)(p & 1)`, where the constant comes over at one bit the same as it does under a
+    /// comparison, and then tier one has the rule that finishes it.
+    #[test]
+    fn a_bit_constant_comes_over_under_an_extension_too() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let one = build.iconst(Type::int(32), 1);
+        let both = build.binary(Opcode::And, wide_p, one, Flags::NONE);
+        let wider = build.unary(Opcode::SExt, both, Type::int(64));
+        build.ret(&[wider]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, wider), (Opcode::ZExt, vec![Type::int(1)]));
+        assert_eq!(shape(&func, under(&func, wider)), (Opcode::And, vec![Type::int(1); 2]));
+    }
+
+    /// An extension of a bitwise operation on things wider than a bit, which is the ordinary
+    /// promoted shape and has nothing to do with this.
+    #[test]
+    fn an_extension_of_a_bitwise_operation_on_bytes_is_left_alone() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+        let both = build.binary(Opcode::And, wide_a, wide_b, Flags::NONE);
+        let wider = build.unary(Opcode::SExt, both, Type::int(64));
+        build.ret(&[wider]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+    }
+
+    /// An extension of a sum of two widened bits, which is zero, one or two, so the whole of it is
+    /// not its own bottom bit and the operation the pass would write is not the one it read.
+    #[test]
+    fn an_extension_of_a_sum_of_two_widened_bits_is_left_alone() {
+        let (mut func, block) = blank();
+        let p = func.append_param(block, Type::int(1));
+        let q = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_p = build.unary(Opcode::ZExt, p, Type::int(32));
+        let wide_q = build.unary(Opcode::ZExt, q, Type::int(32));
+        let both = build.binary(Opcode::Add, wide_p, wide_q, Flags::NONE);
+        let wider = build.unary(Opcode::SExt, both, Type::int(64));
+        build.ret(&[wider]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
     }
 
     #[test]

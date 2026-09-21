@@ -161,7 +161,9 @@ impl Checker<'_> {
                 let ty = self.tast[decl].ty;
                 let category = match self.tast[decl].kind {
                     DeclKind::Function => Category::Function,
-                    DeclKind::Object => Category::Lvalue,
+                    // A name for a type is bound as a typedef and is turned down above, so the
+                    // only declaration a name resolves to here is an object.
+                    DeclKind::Object | DeclKind::Type => Category::Lvalue,
                 };
                 self.tast.expr(Expr::new(ExprKind::Decl(decl), ty, category), span)
             }

@@ -33,7 +33,7 @@ sysroot   <cache>/sysroots/x86_64-linux-android
   -L<cache>/sysroots/x86_64-linux-android/lib
   main.o
   <cache>/sysroots/x86_64-linux-android/lib/libc.so
-  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-android/lib/crtn.o
 
 [dynamic-no-pie]
@@ -59,7 +59,7 @@ sysroot   <cache>/sysroots/x86_64-linux-android
   -L<cache>/sysroots/x86_64-linux-android/lib
   main.o
   <cache>/sysroots/x86_64-linux-android/lib/libc.so
-  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-android/lib/crtn.o
 
 [shared]
@@ -82,5 +82,5 @@ sysroot   <cache>/sysroots/x86_64-linux-android
   -L<cache>/sysroots/x86_64-linux-android/lib
   main.o
   <cache>/sysroots/x86_64-linux-android/lib/libc.so
-  <cache>/sysroots/x86_64-linux-android/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-android/lib/crtn.o

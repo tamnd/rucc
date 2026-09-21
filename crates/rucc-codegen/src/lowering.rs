@@ -258,7 +258,7 @@ impl Step {
             Self::Widths => return widths::integers(func),
             Self::Bytes => expand::bytes(func),
             Self::Counts => expand::counts(func),
-            Self::Quads => quad::calls(func, names),
+            Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func),
             Self::Bulk => expand::bulk(func, names, conv.word),
             Self::Rounds => expand::rounds(func, conv.stack_align),

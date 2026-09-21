@@ -25,7 +25,7 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/libc.a
-  <cache>/sysroots/armv7-linux-musleabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-musleabihf/lib/crtn.o
 
 [static-pie]
@@ -51,7 +51,7 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/libc.a
-  <cache>/sysroots/armv7-linux-musleabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-musleabihf/lib/crtn.o
 
 [dynamic]
@@ -77,7 +77,7 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/libc.a
-  <cache>/sysroots/armv7-linux-musleabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-musleabihf/lib/crtn.o
 
 [dynamic-no-pie]
@@ -103,7 +103,7 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/libc.a
-  <cache>/sysroots/armv7-linux-musleabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-musleabihf/lib/crtn.o
 
 [shared]
@@ -126,5 +126,5 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/libc.a
-  <cache>/sysroots/armv7-linux-musleabihf/lib/librucc_builtins.a
+  <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-musleabihf/lib/crtn.o

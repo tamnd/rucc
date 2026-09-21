@@ -36,14 +36,14 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, Eval, ExprId, ExprKind, ExprList,
-    FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration,
-    Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, DeclKind, Eval, ExprId, ExprKind,
+    ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId,
+    StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
-    ArrayLen, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId, integer_info,
-    pointee,
+    ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
+    integer_info, pointee,
 };
 
 use crate::abi::{self, Plan, Travel};
@@ -1153,6 +1153,11 @@ impl<'u> Body<'_, 'u> {
         // The sizes first, and once: they are what the object is as long as, and what every
         // `sizeof` of it and every step over its rows answers with afterwards.
         self.measure(ty);
+        if tast[decl].kind == DeclKind::Type {
+            // A name for a type, `typedef char T[n]`, which is in the tree for the measuring
+            // above and declares no object to make a slot for.
+            return;
+        }
         if !repr::is_variable_length(self.types(), ty) {
             // A declaration of a variably modified type that is not an array itself, `int
             // (*p)[n]`, whose object is an ordinary pointer with its slot already made. The
@@ -1188,6 +1193,20 @@ impl<'u> Body<'_, 'u> {
                 }
                 self.measure(elem);
             }
+            // A record is as long as its members, so the sizes to evaluate are the ones in them.
+            // Only a record that has such a size is walked: an ordinary one is a tree of members
+            // with nothing in it to evaluate, and walking every one of those would be walking
+            // every structure the program declares at every declaration of one.
+            TypeKind::Record(record) => {
+                if self.types().record_info(record).variable.is_none() {
+                    return;
+                }
+                let members: Vec<TypeId> =
+                    self.types().record_info(record).fields.iter().map(|field| field.ty).collect();
+                for member in members {
+                    self.measure(member);
+                }
+            }
             _ => {}
         }
     }
@@ -1210,6 +1229,13 @@ impl<'u> Body<'_, 'u> {
     fn size_value(&mut self, ty: TypeId, span: Span) -> Value {
         let address = self.address;
         let canonical = self.types().canonical(ty);
+        if let TypeKind::Record(record) = self.types().kind(canonical) {
+            let recipe =
+                self.types().record_info(record).variable.as_ref().map(|found| found.size.clone());
+            if let Some(recipe) = recipe {
+                return self.extent_value(record, &recipe, span);
+            }
+        }
         let TypeKind::Array { elem, len } = self.types().kind(canonical) else {
             let size = repr::size_of(self.types(), self.target(), ty);
             return self.build(span).iconst(address, i128::from(size));
@@ -1228,6 +1254,62 @@ impl<'u> Body<'_, 'u> {
         };
         let elem = self.size_value(elem, span);
         self.build(span).binary(Opcode::Mul, count, elem, Flags::NSW)
+    }
+
+    /// One recipe the layout left behind, as the value it works out to.
+    ///
+    /// The recipe is what was written down where the record was laid out and the numbers ran out,
+    /// and every one of its leaves is either a number or a member whose size this asks for the
+    /// same way it asks for any other. The sizes it reaches are the ones evaluated where the
+    /// declaration was, since [`Self::count`] hands back what it kept rather than reading `n`
+    /// again, so a record measured twice measures the same both times however `n` has moved on.
+    fn extent_value(&mut self, record: RecordId, extent: &Extent, span: Span) -> Value {
+        let address = self.address;
+        match extent {
+            Extent::Bytes(count) => self.build(span).iconst(address, i128::from(*count)),
+            Extent::Member(index) => {
+                let member = self.types().record_info(record).fields[*index as usize].ty;
+                self.size_value(member, span)
+            }
+            Extent::Sum(parts) => {
+                let mut answer: Option<Value> = None;
+                for part in parts {
+                    let part = self.extent_value(record, part, span);
+                    answer = Some(match answer {
+                        Some(sum) => self.build(span).binary(Opcode::Add, sum, part, Flags::NUW),
+                        None => part,
+                    });
+                }
+                answer.unwrap_or_else(|| self.build(span).iconst(address, 0))
+            }
+            // The mask rather than a division, because an alignment is a power of two and a size
+            // is unsigned, so the two say the same thing and this one is what either compiles to.
+            Extent::RoundUp(inner, to) => {
+                let inner = self.extent_value(record, inner, span);
+                let ahead = self.build(span).iconst(address, i128::from(*to - 1));
+                let raised = self.build(span).binary(Opcode::Add, inner, ahead, Flags::NUW);
+                let mask = self.build(span).iconst(address, !i128::from(*to - 1));
+                self.build(span).binary(Opcode::And, raised, mask, Flags::NONE)
+            }
+            // How long a `union` is, which is a question about the longest of its members rather
+            // than about where anything ended. Both arms are worked out and one is thrown away,
+            // which costs an arithmetic instruction and reads nothing the program has not already
+            // read: what a size reaches is a length that was evaluated at the declaration.
+            Extent::Max(parts) => {
+                let mut answer: Option<Value> = None;
+                for part in parts {
+                    let part = self.extent_value(record, part, span);
+                    answer = Some(match answer {
+                        Some(most) => {
+                            let wider = self.build(span).icmp(IntPred::Ugt, most, part);
+                            self.build(span).select(wider, most, part)
+                        }
+                        None => part,
+                    });
+                }
+                answer.unwrap_or_else(|| self.build(span).iconst(address, 0))
+            }
+        }
     }
 
     /// How far one step over a type moves.
@@ -2747,6 +2829,9 @@ impl<'u> Body<'_, 'u> {
             // An aggregate initializing part of an aggregate, which is `struct p = q;` and
             // `struct p = (struct point){ 1, 2 };`. It is a copy rather than a store, because
             // an aggregate is not a value the IR can hold.
+            if self.unmovable(ty, span) {
+                return;
+            }
             let source = self.place(value);
             let source = self.address_of(source, span);
             let size = repr::size_of(self.types(), self.target(), ty);
@@ -3701,9 +3786,26 @@ impl<'u> Body<'_, 'u> {
 
     /// One whole object of a type copied from one address to another.
     fn copy_bytes(&mut self, to: Value, from: Value, ty: TypeId, span: Span) {
+        if self.unmovable(ty, span) {
+            return;
+        }
         let size = repr::size_of(self.types(), self.target(), ty);
         let align = repr::align_of(self.types(), self.target(), ty);
         self.memcpy(to, from, size, align, span);
+    }
+
+    /// Whether a whole object of this type is one the walk cannot move yet, reported if so.
+    ///
+    /// Moving one needs a `memcpy` whose length is a value rather than a number, which nothing
+    /// here builds. Declaring such an object works and so does reaching a member of it, so what
+    /// this turns down is only the shapes that move the whole thing at once, which after the
+    /// checking has had its say is an assignment of one record to another.
+    fn unmovable(&mut self, ty: TypeId, span: Span) -> bool {
+        if !repr::is_variable_length(self.types(), ty) {
+            return false;
+        }
+        self.unsupported("a copy of a whole object whose length the program computes", span);
+        true
     }
 
     /// The type both halves of a complex type have.
@@ -3806,6 +3908,28 @@ impl<'u> Body<'_, 'u> {
                 ..Place::new(Where::Bits(addr, run), ty)
             };
         }
+        // A member that comes after one whose length the program computes does not sit where the
+        // number in the layout says, and where it does sit is worked out here from the sizes the
+        // program has by now. Its offset is a multiple of the alignment it was placed at, so the
+        // address is as aligned as the lesser of that and what the record's own address is.
+        let recipe = self
+            .types()
+            .record_info(id)
+            .variable
+            .as_ref()
+            .and_then(|found| found.offsets.get(field as usize).cloned().flatten());
+        if let Some(recipe) = recipe {
+            let amount = self.extent_value(id, &recipe, span);
+            let moved = {
+                let mut build = self.build(span);
+                let args = build.func().push_values(&[addr, amount]);
+                build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+            };
+            let placed = u32::try_from(member.align).unwrap_or(u32::MAX);
+            self.aligns(moved, base.min(placed));
+            let where_ = Where::Addr(moved);
+            return Place { punned, owns, restrict: place.restrict, ..Place::new(where_, ty) };
+        }
         let addr = self.offset(addr, byte, span);
         Place { punned, owns, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) }
     }
@@ -3830,6 +3954,12 @@ impl<'u> Body<'_, 'u> {
     /// saying the longer one holds something nobody put there.
     fn owned(&self, id: RecordId, record: TypeId, kind: RecordKind, byte: u64, outer: u32) -> u32 {
         if !self.unit.padding || kind == RecordKind::Union {
+            return 0;
+        }
+        // Nothing for a record whose members do not all sit at a fixed offset either. What
+        // follows a member there is not known here, and claiming bytes that may turn out not to
+        // be padding would say that something nobody wrote is written.
+        if self.types().record_info(id).variable.is_some() {
             return 0;
         }
         let next = self
@@ -6866,6 +6996,9 @@ impl<'u> Body<'_, 'u> {
     /// through a temporary and never one lock held across the other, which is what would deadlock
     /// a table that hashes two objects onto one entry.
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+        if self.unmovable(ty, span) {
+            return None;
+        }
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let destination = self.address_of(place, span);
@@ -7344,6 +7477,11 @@ impl Scan<'_> {
 
     /// One declaration, and the initializer it has.
     fn decl(&mut self, id: DeclId) {
+        if self.tast[id].kind == DeclKind::Type {
+            // A name for a type is neither a local nor a global. It has no slot, no image and
+            // no initializer, and the sizes in it are evaluated where the walk meets it.
+            return;
+        }
         if self.tast[id].duration == StorageDuration::Automatic {
             self.locals.push(id);
         } else {

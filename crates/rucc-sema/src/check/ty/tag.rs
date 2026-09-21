@@ -199,8 +199,11 @@ impl Checker<'_> {
         // A record whose members did not lay out is completed all the same, with nothing in it.
         // What is wrong with it has been reported once, and leaving it incomplete would report
         // it again at every use.
-        let laid_out =
-            laid_out.unwrap_or(RecordLayout { layout: Layout::new(0, 1), fields: Vec::new() });
+        let laid_out = laid_out.unwrap_or(RecordLayout {
+            layout: Layout::new(0, 1),
+            fields: Vec::new(),
+            variable: None,
+        });
         self.types.complete_record(id, laid_out);
         if let Some(at) = self.transparent_union(attrs) {
             self.make_transparent(id, at);
@@ -495,6 +498,15 @@ impl Checker<'_> {
             }
             RecordError::Member { index, .. } => (index, "has incomplete type", "E0549"),
             RecordError::BitFieldTooWide { index, .. } => (index, "exceeds its type", "E0559"),
+            // Not a thing the program did wrong. Where a bit-field goes depends on the bit the
+            // record has got to, and after a member whose length the program computes that is a
+            // question this compiler does not answer yet.
+            RecordError::VariableBitField { index } => {
+                if let Some(&(_, at)) = fields.get(index) {
+                    self.unsupported_type("a bit-field after a member of no fixed size", at);
+                }
+                return;
+            }
         };
         let Some(&(decl, at)) = fields.get(index) else { return };
         let who = self.member_named(decl.name);

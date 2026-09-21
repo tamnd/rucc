@@ -936,8 +936,19 @@ mod tests {
     ///
     /// The name is the test's own, because these run at the same time and a shared file is two
     /// tests reading each other's directives.
+    /// Where the cases these tests read are written, which is per process and not per machine.
+    ///
+    /// A fixed name here was a file two processes wrote and read at the same time. Two checkouts,
+    /// or a gate and somebody's own `cargo test`, and one of them truncates `a-gap.c` while the
+    /// other is reading it, so a case comes back with no `row:` in it and a test that has nothing
+    /// to do with any of this fails. The suite's own directory is named after the run for exactly
+    /// this reason, and the test helper was the one place still naming a fixed one.
+    fn judging() -> PathBuf {
+        std::env::temp_dir().join(format!("rucc-safety-judging-{}", std::process::id()))
+    }
+
     fn case(name: &str, directives: &str) -> Case {
-        let dir = std::env::temp_dir().join("rucc-safety-judging");
+        let dir = judging();
         std::fs::create_dir_all(&dir).expect("a temporary directory");
         let path = dir.join(format!("{name}.c"));
         std::fs::write(&path, format!("{directives}int main(void) {{ return 0; }}\n"))
@@ -1063,7 +1074,7 @@ mod tests {
     fn a_blocked_case_may_not_also_be_a_gap() {
         // Both say the same thing, which is that nothing is expected to happen, and a case with
         // two issue numbers on it leaves nobody sure which one closing it should make it run.
-        let dir = std::env::temp_dir().join("rucc-safety-judging");
+        let dir = judging();
         std::fs::create_dir_all(&dir).expect("a temporary directory");
         let path = dir.join("a-blocked-gap.c");
         std::fs::write(

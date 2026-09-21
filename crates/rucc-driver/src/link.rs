@@ -227,6 +227,19 @@ pub enum Error {
         /// can name a command that would fix it.
         pinned: bool,
     },
+    /// The linker was found and cannot do this target's link.
+    ///
+    /// Separate from [`Error::NoLinker`] because the linker is there and runs, and separate from
+    /// [`Error::Refused`] because the refusal is ours rather than its own: this is the case the
+    /// linker would not complain about at all.
+    TooOld {
+        /// What it was found as, which is what to look for when replacing it.
+        name: String,
+        /// The major version it reported.
+        found: u32,
+        /// The target whose link it cannot do.
+        target: String,
+    },
     /// The linker was found and could not be started.
     Spawn {
         /// Where it was.
@@ -271,6 +284,17 @@ impl std::fmt::Display for Error {
                  against, and this release pins none for it to fetch. Pass --sysroot=<dir> to name \
                  a tree you have already, or see spec/cross-compile/13-distribution.md section \
                  13.2 for the cache that will hold one"
+            ),
+            // The whole message, because the person reading it has a linker that works, a link that
+            // succeeded on their last try, and no reason to suspect the thing that is wrong.
+            Error::TooOld { name, found, target } => write!(
+                f,
+                "{name} is lld {found} and cannot link for {target}. mingw-w64 writes a few hundred \
+                 of its aliases, `_crt_atexit == atexit` among them, as IMPORT_NAME_EXPORTAS \
+                 records in its import libraries, which lld learned to read in {LLD_EXPORTAS}. An \
+                 older one neither reads them nor says so: it writes an import by ordinal zero, the \
+                 link succeeds, and the program dies at startup. Install lld {LLD_EXPORTAS} or \
+                 newer, or name one with -fuse-ld="
             ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
             Error::Refused { status } => write!(f, "the linker {status}"),
@@ -470,6 +494,26 @@ fn cross_line(
         })
         .collect();
     let output = PathBuf::from(output);
+    // Ours, from beside the compiler, because that is where `cargo xtask builtins` writes it and a
+    // fetched sysroot will never hold it. The cross line used to name it inside the sysroot, which
+    // is a file nothing puts there, so every cross link either failed at the linker or quietly ran
+    // against somebody else's `libgcc` copied in under the name. tamnd/rucc#1514.
+    let ours = builtins_archive(target, &opts.prefixes);
+    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib {
+        // Said here rather than left to the linker, which on a Windows target says `___chkstk_ms`
+        // is undefined and names mingw-w64's objects as the callers, and on a musl one says
+        // `__udivti3` is. Neither of those is a person's first guess at a missing archive.
+        let tuple = target.tuple().to_canonical_string();
+        return Err(Error::Cross {
+            why: format!(
+                "a cross link ends with librucc_builtins.a, this compiler's own runtime for \
+                 {tuple}, and there is none beside the compiler or under a -B prefix. A sysroot \
+                 does not carry it, because it is our output rather than the platform's. Build it \
+                 with `cargo xtask builtins --target={tuple}`, or pass -fno-builtins-lib to link \
+                 without it"
+            ),
+        });
+    }
     let invocation = argv::Invocation {
         inputs: &inputs,
         output: Some(&output),
@@ -478,6 +522,7 @@ fn cross_line(
         no_startfiles: !opts.wants_startfiles(),
         no_defaultlibs: !opts.wants_defaultlibs(),
         no_builtins_lib: opts.no_builtins_lib,
+        builtins: ours.as_deref(),
         export_dynamic: opts.export_dynamic,
         strip: opts.strip,
     };
@@ -503,7 +548,11 @@ fn cross_line(
 /// it would be linked against is not there.
 pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
-    cross_line(target, opts, &[], "a.out", &sysroot)?;
+    // Whether there is a line for this target and mode at all, asked with our own runtime left off
+    // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
+    // report the same thing, and the archive is the smaller of the two problems by a long way.
+    let shape = LinkOptions { no_builtins_lib: true, ..opts.clone() };
+    cross_line(target, &shape, &[], "a.out", &sysroot)?;
     // The library directory rather than the root, because the root of a cache directory that has
     // been created and never populated is there and holds nothing. Section 11.6's rule is that
     // suitable is checked and not assumed, and this is the cheapest form of that.
@@ -515,6 +564,9 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
             target: tuple,
         });
     }
+    // And now the whole line, which is the sysroot's files plus ours, so that a missing runtime is
+    // said here rather than by the linker after everything has been compiled.
+    cross_line(target, opts, &[], "a.out", &sysroot)?;
     Ok(())
 }
 
@@ -552,6 +604,71 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
         Some(name) => Err(Error::Named { name: name.clone() }),
         None => Err(Error::NoLinker { tried }),
     }
+}
+
+/// The first lld that reads `IMPORT_NAME_EXPORTAS`, which is what a windows-gnu link needs.
+///
+/// 18 does not read it and does not say so, so the number is not a convenience: below it the
+/// answer is wrong rather than absent. tamnd/rucc#1515.
+pub const LLD_EXPORTAS: u32 = 19;
+
+/// Whether a found linker can do this target's link, asked before it is handed anything.
+///
+/// Section 11.6's rule is that suitable is checked and not assumed, and this is the one check that
+/// cannot be made by looking at a file. A windows-gnu link reads import libraries that mingw-w64's
+/// `==` aliases compiled into `IMPORT_NAME_EXPORTAS` records, which lld reads from
+/// [`LLD_EXPORTAS`] on. An older lld writes an import by ordinal zero instead, without a warning
+/// and with a successful exit, so nothing later in the toolchain has anything to notice: the
+/// program is wrong at startup and the link that made it said nothing. Ubuntu 24.04 is the current
+/// LTS and ships 18, so the machine this happens on is an ordinary one.
+///
+/// Every other target is left alone, and so is anything that is not an lld, because this is the one
+/// version of the one linker that is known to answer wrongly rather than not at all.
+///
+/// A linker that will not run or whose version cannot be read is allowed through. What the check
+/// can establish is that a specific old lld is here, and it should not turn every unusual linker
+/// into a refusal on the strength of failing to recognise it.
+///
+/// # Errors
+///
+/// [`Error::TooOld`] when the linker is an lld older than [`LLD_EXPORTAS`] and the target is
+/// windows-gnu.
+pub fn suitable(target: Triple, linker: &Linker) -> Result<(), Error> {
+    if (target.os, target.env) != (Os::Windows, Env::Gnu) {
+        return Ok(());
+    }
+    let Some(found) = lld_major(&reported_version(&linker.path)) else { return Ok(()) };
+    if found >= LLD_EXPORTAS {
+        return Ok(());
+    }
+    Err(Error::TooOld {
+        name: linker.name.clone(),
+        found,
+        target: target.tuple().to_canonical_string(),
+    })
+}
+
+/// What `<linker> --version` prints, or an empty string when it will not say.
+///
+/// A linker that cannot be started is not this function's problem to report, because the link is
+/// about to start it again and say so properly. What this returns for such a one is nothing to
+/// read, which is the same as a linker that ran and said something unrecognisable.
+fn reported_version(path: &Path) -> String {
+    let Ok(out) = Command::new(path).arg("--version").output() else { return String::new() };
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The major version in an lld's `--version`, when the program that printed it was an lld.
+///
+/// What lld prints is `LLD 18.1.8 (compatible with GNU linkers)`, with a distribution's own prefix
+/// in front of it often enough that the word is looked for rather than the line starting with it:
+/// Ubuntu's says `Ubuntu LLD 18.1.3`. Binutils prints `GNU ld (GNU Binutils for Ubuntu) 2.42` and
+/// mold prints its own name, and neither has the word, so both come back as [`None`] and are left
+/// alone.
+fn lld_major(text: &str) -> Option<u32> {
+    let mut words = text.split_whitespace();
+    words.find(|word| *word == "LLD")?;
+    words.next()?.split('.').next()?.parse().ok()
 }
 
 /// The first executable of that name on `PATH`.
@@ -853,7 +970,9 @@ fn version_key(dir: &Path) -> Vec<u64> {
 /// `-B` prefix is asked first, because that is what a `-B` prefix is for.
 #[must_use]
 pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf> {
-    const NAME: &str = "librucc_builtins.a";
+    // The name from the crate that puts it on a line, rather than a second spelling of it here,
+    // which is what that constant asks of anybody who needs the name.
+    const NAME: &str = rucc_sysroot::link::BUILTINS;
     let triple = target.to_string();
     let mut places: Vec<PathBuf> = Vec::new();
     for prefix in prefixes {
@@ -1309,8 +1428,28 @@ mod tests {
     }
 
     /// A command line that has a cache to find generated sysroots in, which a real one always has.
+    ///
+    /// And a `-B` prefix with our runtime in it, because a cross link refuses without one and
+    /// every machine that does this for real has the archive `cargo xtask builtins` wrote. What
+    /// happens when it is missing is its own test below.
     fn cached() -> LinkOptions {
-        LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() }
+        LinkOptions {
+            cache: Some(PathBuf::from("/cache")),
+            prefixes: vec![a_builtins_dir()],
+            ..LinkOptions::default()
+        }
+    }
+
+    /// A directory with our runtime archive in it, so that a test can say what a machine where the
+    /// runtime was built looks like without building one.
+    ///
+    /// One directory for every test rather than one each, since none of them writes to it and the
+    /// name of the file is the whole of what they read.
+    fn a_builtins_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rucc-link-ours-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
+        dir
     }
 
     /// Where that cache would keep this target's sysroot.
@@ -1407,6 +1546,110 @@ mod tests {
         let names = cross_order(target);
         assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
         assert!(names.contains(&"x86_64-w64-mingw32-ld".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    fn our_runtime_comes_from_beside_the_compiler_rather_than_from_inside_the_sysroot() {
+        // The two halves of tamnd/rucc#1514. The line used to name it under the sysroot's `lib`,
+        // where nothing ever put it: it is this compiler's output for the target and a sysroot
+        // fetched from a release holds the platform's files and not ours. So the path on the line
+        // is the one the driver found, and the only `librucc_builtins.a` on the line is that one.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let sysroot = a_sysroot(target);
+        let opts = cached();
+        let args = cross_line(target, &opts, &one("a.o"), "a.exe", &sysroot).expect("a line");
+        let ours: Vec<&String> =
+            args.iter().filter(|arg| arg.ends_with("librucc_builtins.a")).collect();
+        assert_eq!(ours.len(), 1, "{args:?}");
+        assert_eq!(ours[0], &opts.prefixes[0].join("librucc_builtins.a").display().to_string());
+        assert!(!ours[0].starts_with(&sysroot.lib().display().to_string()), "{args:?}");
+        // And it is still last, after everything that calls into it.
+        assert_eq!(args.last(), Some(ours[0]), "{args:?}");
+    }
+
+    #[test]
+    fn a_cross_link_with_no_runtime_to_find_says_which_command_writes_one() {
+        // What the linker would say instead is that `___chkstk_ms` is undefined, referenced from
+        // mingw-w64's own objects, which is tamnd/rucc#1513 and is nobody's first guess at a
+        // missing archive.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { prefixes: Vec::new(), ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect_err("there is no runtime for it to find");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("cargo xtask builtins"), "{why}");
+        assert!(why.contains("-fno-builtins-lib"), "{why}");
+
+        // And that flag is the way through it, for somebody who meant to link without ours.
+        let without = LinkOptions { no_builtins_lib: true, ..opts };
+        let args = cross_line(target, &without, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line without ours on it");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+    }
+
+    #[test]
+    fn the_version_an_lld_prints_is_read_and_nothing_elses_is() {
+        // What each of these programs actually prints, because the word being in the line is the
+        // whole of how one is told from another.
+        assert_eq!(lld_major("LLD 18.1.8 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("Ubuntu LLD 18.1.3 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("LLD 20.1.2 (compatible with GNU linkers)\n"), Some(20));
+
+        // Binutils and mold do not have it, and neither of them has this problem, so the answer
+        // for both is that this check has nothing to say about them.
+        assert_eq!(lld_major("GNU ld (GNU Binutils for Ubuntu) 2.42\n"), None);
+        assert_eq!(lld_major("mold 2.4.1 (compatible with GNU ld)\n"), None);
+        assert_eq!(lld_major(""), None);
+    }
+
+    /// A program that prints `text` and exits, which is as much of a linker as this check reads.
+    ///
+    /// Named after what it says, so that two of them in one test are two files.
+    #[cfg(unix)]
+    fn a_linker_that_says(tag: &str, text: &str) -> Linker {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("rucc-link-ld-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join(format!("ld.lld-{tag}"));
+        fs::write(&path, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("an executable one");
+        Linker { name: "ld.lld".to_owned(), path }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_too_old_to_read_exportas_is_refused_for_windows_gnu_and_nowhere_else() {
+        // The failure this replaces has no diagnostic at all: 18 writes an import by ordinal zero,
+        // exits successfully, and the program dies at startup under wine. tamnd/rucc#1515.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let old = a_linker_that_says("18", "LLD 18.1.8 (compatible with GNU linkers)");
+        let error = suitable(windows, &old).expect_err("18 cannot link this");
+        let Error::TooOld { name, found, target } = &error else { panic!("{error:?}") };
+        assert_eq!((name.as_str(), *found, target.as_str()), ("ld.lld", 18, "x86_64-windows-gnu"));
+        assert!(error.to_string().contains("IMPORT_NAME_EXPORTAS"), "{error}");
+
+        // The same linker for a target whose import libraries have no such records in them, which
+        // is every other target, since this is one encoding in one format.
+        let linux = Triple::new(Arch::X86_64, Os::Linux, Env::Musl);
+        assert_eq!(suitable(linux, &old), Ok(()));
+
+        // And the first one that reads them.
+        let new = a_linker_that_says("19", "LLD 19.1.0 (compatible with GNU linkers)");
+        assert_eq!(suitable(windows, &new), Ok(()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_linker_that_will_not_say_what_it_is_is_left_alone() {
+        // Every linker that is not an lld reaches this check too, and what it can establish is
+        // that a specific old lld is here rather than that anything else is fit. Turning "I did
+        // not recognise this" into a refusal would break machines this problem never touched.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let quiet = a_linker_that_says("gnu", "GNU ld (GNU Binutils for Ubuntu) 2.42");
+        assert_eq!(suitable(windows, &quiet), Ok(()));
+
+        let missing = Linker { name: "ld.lld".to_owned(), path: PathBuf::from("/no/such/linker") };
+        assert_eq!(suitable(windows, &missing), Ok(()));
     }
 
     #[test]

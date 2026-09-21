@@ -30,6 +30,7 @@ mod pressure;
 mod quad;
 mod real_libc;
 mod repeatable;
+mod replay;
 mod runner;
 mod safety;
 mod sides;
@@ -77,6 +78,8 @@ tasks:
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   libraries         build real libraries instrumented at -O0 and -O2, run a real workload
                     against each, and hold it to its own answers and to what was reported
+  replay            build a real library instrumented at -O0 and hand it every input of the
+                    corpus its OSS-Fuzz target accumulated, one process per input
   fuzz              generate C programs with one memory error each and hold both builds to it
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
@@ -126,6 +129,7 @@ fn main() -> ExitCode {
         Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
+        Some("replay") => replay::replay(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
         Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -985,9 +989,17 @@ fn version() -> Result<()> {
                 ));
             }
         }
-        // Only the published compiler crates. `xtask` and the build tools have no docs.rs page
-        // to send anyone to.
-        if !dir.starts_with(root.join("crates")) {
+        // Every crate the release publishes, which is every member that does not say it is not
+        // for the registry. This used to be the members under `crates` and nothing else, on the
+        // reasoning that the build tools and the runtime have no docs.rs page to send anyone
+        // to. They do: `.github/publish-crates.sh` publishes every member whose manifest does
+        // not say `publish = false`, and that is all of them but `xtask`. The four it was not
+        // looking at drifted exactly the way the two it was looking at drifted before this task
+        // existed, `rucc-rules` as far back as 0.3.3, so the rule is the publish script's rule
+        // now and the two are read off the same fact.
+        let published =
+            !member.lines().any(|l| l.trim_start().starts_with("publish") && l.contains("false"));
+        if !published {
             continue;
         }
         let lib = dir.join("src/lib.rs");
@@ -1361,22 +1373,28 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
     Ok(archive)
 }
 
-/// Every `.c` under `runtime/builtins`, in the order their names sort in.
+/// Every `.c` and `.S` under `runtime/builtins`, in the order their names sort in.
 ///
 /// Sorted rather than in whatever order the file system hands them back, because the members of an
 /// archive come out in the order they went in and `spec/cross-compile/13-distribution.md` section
 /// 13.6 asks for the same bytes from the same tree on any machine.
 ///
+/// The assembly is here rather than under a build rule of its own because the compiler reads a `.S`
+/// the way it reads a `.c`, through the preprocessor and then through its own assembler, so one
+/// command line still compiles the whole directory. A capital `S` and not a small one: every file
+/// here is guarded by what the target is, and a small `s` is the extension that says the
+/// preprocessor does not run. See `runtime/builtins/chkstk.S`.
+///
 /// # Errors
 ///
-/// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is no C in it
-/// at all, which would otherwise write an empty archive and call it a success.
+/// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is nothing to
+/// compile in it at all, which would otherwise write an empty archive and call it a success.
 fn builtin_sources() -> Result<Vec<PathBuf>> {
     let dir = root().join("runtime").join("builtins");
     let mut sources = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))? {
         let path = entry.map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?.path();
-        if path.extension().is_some_and(|e| e == "c") {
+        if path.extension().is_some_and(|e| e == "c" || e == "S") {
             sources.push(path);
         }
     }
@@ -1384,7 +1402,7 @@ fn builtin_sources() -> Result<Vec<PathBuf>> {
     if sources.is_empty() {
         return Err(Error::Failed {
             task: "builtins",
-            problems: vec![format!("there is no C to compile in {}", dir.display())],
+            problems: vec![format!("there is nothing to compile in {}", dir.display())],
         });
     }
     Ok(sources)
