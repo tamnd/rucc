@@ -262,6 +262,15 @@ pub struct Checker<'a> {
     /// and `__builtin_nan(p)` is a call, so a file with both leaves a declaration behind, and
     /// without this the answer to the second one written would depend on the first.
     pub(in crate::check) declared_builtins: Vec<Symbol>,
+    /// How many array sizes have been refused, which is what tells `int a[]` from an array
+    /// whose size did not check.
+    ///
+    /// Both are an array with no size, because no size is the nearest type a refused size can be
+    /// answered with, so the type alone cannot say which of the two a member is. A member that
+    /// only looks like a flexible array member because its size was refused is not one, and
+    /// saying so a second time in the words of a rule it never broke sends whoever is reading
+    /// after a fix that makes the first message no clearer.
+    pub(in crate::check) refused_sizes: usize,
     /// The name being checked as the callee of a call, and nothing anywhere else.
     ///
     /// C89 said a call to a name nothing declared declares that name, and only a call does: the
@@ -286,6 +295,7 @@ impl<'a> Checker<'a> {
             body: None,
             underspecified: Vec::new(),
             declared_builtins: Vec::new(),
+            refused_sizes: 0,
             calling: None,
         }
     }

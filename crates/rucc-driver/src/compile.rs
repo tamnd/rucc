@@ -6247,6 +6247,41 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(run(&opts, address).messages, [warning]);
     }
 
+    /// A member whose size was refused is not a flexible array member, whatever it looks like.
+    ///
+    /// The refusal leaves the member with no size, which is also how `int a[]` is written, so
+    /// without the count that tells the two apart the rules about where a flexible array member
+    /// may sit read the wreckage of the first error as a second mistake. gcc 16.2.0 says one
+    /// thing about each of these and so does this, which is what the program can act on: adding
+    /// a named member to `struct D` makes the message about `k` no clearer, and moving `a` to
+    /// the end of `struct E` does not either.
+    #[test]
+    fn a_member_whose_size_was_refused_is_not_a_flexible_array_member() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+
+        let alone = "int k;\nextern struct D { int a[k]; } ed;\n";
+        let message = "/main.c:2:23: error: variably modified 'a' at file scope [E0538]";
+        assert_eq!(run(&opts, alone).messages, [message]);
+
+        // And not one in the wrong place either, which is the other half of the same rule.
+        let first = "int k;\nextern struct E { int a[k]; int b; } ee;\n";
+        assert_eq!(run(&opts, first).messages, [message]);
+
+        // A size that is refused for a reason of its own, to show the count is about the
+        // refusal rather than about the one message that happens to have been found first.
+        let negative = "struct F { int a[-1]; };\n";
+        let refused = "/main.c:1:18: error: size of array 'a' is negative [E0536]";
+        assert_eq!(run(&opts, negative).messages, [refused]);
+
+        // The member that was written with no size at all is still a flexible array member, and
+        // a structure with nothing else in it still has no named member to hang one off.
+        let flexible = "struct G { int a[]; };\n";
+        let named = "/main.c:1:16: error: flexible array member in a struct with no named \
+             members [E0554]";
+        assert_eq!(run(&opts, flexible).messages, [named]);
+    }
+
     /// A pointer to an array, where the qualifiers are on the element and the comparison is not.
     ///
     /// 6.7.3p10 says the qualifiers in an array declaration belong to the element, so `const int
