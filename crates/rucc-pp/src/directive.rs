@@ -782,6 +782,16 @@ impl Preprocessor {
                 return;
             }
         };
+        // A header found in a system directory came with the machine, and so did everything it
+        // includes, however that one was found: glibc's `stdio.h` includes `bits/types.h` through
+        // a quoted include that the search answers out of the same directory it was itself found
+        // in, and a warning about the inner one is no more the project's business than one about
+        // the outer. The includer is asked about through the span of the directive rather than
+        // through a flag carried down the stack, because the map already knows which file that
+        // span is in and two answers to one question is one too many.
+        if found.is_system || cx.sources.is_system(at.lo) {
+            cx.sources.mark_system(file);
+        }
         self.stack.push(Frame {
             at,
             dir: found.path.parent().map(Path::to_path_buf),

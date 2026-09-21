@@ -245,6 +245,7 @@ options:
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
+  -W[no-]system-headers  warn about a header that came with the machine, off by default
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
@@ -521,6 +522,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
             // through rather than here, so that a warning `-w` dropped is not counted either.
             "-w" => opts.warnings = false,
+            // Off by default, the way gcc has it off. A header that came with the machine is not
+            // one the person compiling can change, so a warning about it is noise, and under
+            // `-Werror` it is a build that stops on a line nobody in the project wrote. Somebody
+            // porting a header does want to hear all of it, which is what the flag is for.
+            "-Wsystem-headers" => opts.system_header_warnings = true,
+            "-Wno-system-headers" => opts.system_header_warnings = false,
             "-pedantic-errors" => {
                 opts.pedantic = true;
                 opts.warnings_are_errors = true;
@@ -5033,6 +5040,13 @@ mod tests {
         assert!(opts.warnings_are_errors);
         let (opts, _) = compile(&["-w", "-c", "a.c"]);
         assert!(!opts.warnings);
+        // Off without being asked, the way gcc has it off, and both spellings are read.
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.system_header_warnings);
+        let (opts, _) = compile(&["-Wsystem-headers", "-c", "a.c"]);
+        assert!(opts.system_header_warnings);
+        let (opts, _) = compile(&["-Wsystem-headers", "-Wno-system-headers", "-c", "a.c"]);
+        assert!(!opts.system_header_warnings);
         let (opts, _) = compile(&["-pedantic-errors", "-c", "a.c"]);
         assert!(opts.pedantic && opts.warnings_are_errors);
     }

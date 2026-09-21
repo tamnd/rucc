@@ -30,7 +30,7 @@
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use crate::{BytePos, Span};
+use crate::{BytePos, Diagnostic, Severity, Span};
 
 /// The contents of a file, shared rather than copied.
 ///
@@ -135,6 +135,13 @@ pub struct SourceFile {
     /// The `#include` that pulled this file in, or `None` for a file named on the command
     /// line. This is what "in file included from" is printed from.
     pub included_from: Option<Span>,
+    /// Whether this file came with the machine rather than with the project.
+    ///
+    /// A file found in a system include directory, and anything it includes. What it decides is
+    /// whether a warning about something in it is worth printing: the person compiling cannot fix
+    /// a header they did not write, so gcc says nothing about one unless `-Wsystem-headers` asks,
+    /// and a project built with warnings as errors stops dead without that rule.
+    pub is_system: bool,
     bytes: SourceBytes,
     /// Absolute offset of the first byte of each line. Built on first use, because most files
     /// in a build are never the subject of a diagnostic.
@@ -403,11 +410,29 @@ impl SourceMap {
             start,
             end,
             included_from,
+            is_system: false,
             bytes,
             lines: OnceLock::new(),
             presumed: Vec::new(),
         });
         Ok(id)
+    }
+
+    /// Records that `id` came with the machine rather than with the project.
+    ///
+    /// Said after the file is added rather than while it is being added, because the four ways in
+    /// are about where the bytes came from and only one caller out of all of them knows the
+    /// answer to this: the preprocessor, which did the search that found the file.
+    pub fn mark_system(&mut self, id: FileId) {
+        self.files[id.index()].is_system = true;
+    }
+
+    /// Whether `pos` is in a file that came with the machine.
+    ///
+    /// False for a position in no file, because a diagnostic nobody can point at is one nothing
+    /// should be suppressing.
+    pub fn is_system(&self, pos: BytePos) -> bool {
+        self.lookup_file(pos).is_some_and(|id| self.file(id).is_system)
     }
 
     /// Every file, in the order they were added.
@@ -529,6 +554,32 @@ impl SourceMap {
     }
 }
 
+/// Whether `diag` is a warning nobody asked to see.
+///
+/// Two reasons, and both are about warnings only. `-w` turns `warnings` off and means a build has
+/// decided it does not want to hear about anything that is not fatal. `-Wsystem-headers` turns
+/// `system_headers` on and is off by default, so a warning about something inside a header that
+/// came with the machine is dropped: the person compiling did not write that file, and under
+/// `-Werror` the alternative is a build that stops on a line nobody in the project typed.
+///
+/// An error is never dropped by either, whatever file it is in. A header that does not compile is
+/// still a translation unit that does not compile.
+///
+/// This is asked in three places, which are the compiler, the preprocessor and the session, and it
+/// is one function rather than three copies because the two rules have to agree about which one
+/// wins. `-w` does, and it wins by being asked first, so `-w -Wsystem-headers` is quiet.
+pub fn dropped(
+    diag: &Diagnostic,
+    sources: &SourceMap,
+    warnings: bool,
+    system_headers: bool,
+) -> bool {
+    if diag.severity != Severity::Warning {
+        return false;
+    }
+    !warnings || (!system_headers && sources.is_system(diag.span.lo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +591,31 @@ mod tests {
             .map(|(name, text)| map.add(*name, text.as_bytes().to_vec()).unwrap())
             .collect();
         (map, ids)
+    }
+
+    #[test]
+    fn a_warning_about_a_file_that_came_with_the_machine_is_dropped_and_an_error_is_not() {
+        let (mut map, ids) = map_with(&[("a.c", "ab"), ("stdio.h", "cd")]);
+        map.mark_system(ids[1]);
+        assert!(!map.is_system(map.file(ids[0]).start));
+        assert!(map.is_system(map.file(ids[1]).start));
+
+        let here = |id: FileId| Span::empty_at(map.file(id).start);
+        let mine = Diagnostic::warning("said twice", here(ids[0]));
+        let theirs = Diagnostic::warning("said twice", here(ids[1]));
+        let broken = Diagnostic::error("does not compile", here(ids[1]));
+
+        assert!(!dropped(&mine, &map, true, false));
+        assert!(dropped(&theirs, &map, true, false));
+        // `-Wsystem-headers` asks for it, `-w` says nothing at all whatever the file is, and an
+        // error is never dropped by either, because a header that does not compile is still a
+        // translation unit that does not compile.
+        assert!(!dropped(&theirs, &map, true, true));
+        assert!(dropped(&mine, &map, false, true));
+        assert!(!dropped(&broken, &map, false, false));
+
+        // A position in no file is nobody's header, so nothing about it is suppressed.
+        assert!(!map.is_system(Span::DUMMY.lo));
     }
 
     #[test]
