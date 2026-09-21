@@ -1096,12 +1096,7 @@ mod tests {
 
     /// A spill slot wanting bytes over one stretch of the line.
     fn slot(number: usize, start: Point, end: Point) -> Want {
-        Want {
-            what: What::Slot(number),
-            size: 8,
-            align: 8,
-            area: Some(vec![Range { start, end }]),
-        }
+        Want { what: What::Slot(number), size: 8, align: 8, area: Some(vec![Range { start, end }]) }
     }
 
     #[test]

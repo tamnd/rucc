@@ -7623,6 +7623,31 @@ block5:
         assert!(large <= 8, "the values the loop keeps, and not a set of them per label: {large}");
     }
 
+    /// The same interpreter with more values in hand than there are registers, which is what makes
+    /// the allocator send some of them to the stack at every label.
+    fn crowded(labels: usize) -> String {
+        const VALUES: usize = 24;
+        let mask = labels - 1;
+        let mut source = String::from("int spin(int n)\n{\n\tstatic void *table[] = {");
+        for index in 0..labels {
+            source.push_str(&format!(" &&a{index},"));
+        }
+        source.push_str(" };\n\t");
+        for value in 0..VALUES {
+            source.push_str(&format!("int v{value} = n + {value}; "));
+        }
+        let sum: Vec<String> = (0..VALUES).map(|value| format!("v{value}")).collect();
+        source.push_str(&format!("\n\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"));
+        for index in 0..labels {
+            let (to, from) = (index % VALUES, (index + 1) % VALUES);
+            source.push_str(&format!("a{index}:\n\tv{to} += v{from};\n"));
+            source.push_str(&format!("\tif (--n <= 0) return {};\n", sum.join(" + ")));
+            source.push_str(&format!("\tgoto *table[n & {mask}];\n"));
+        }
+        source.push_str("}\n");
+        source
+    }
+
     /// How many bytes of frame the first function in a listing opens.
     fn the_frame(text: &str) -> u64 {
         text.lines()
@@ -7643,9 +7668,9 @@ block5:
     /// which is tamnd/rucc#1630.
     #[test]
     fn a_frame_holds_what_is_wanted_at_once_and_not_a_slot_for_every_label() {
-        let small = the_frame(&asm(&dispatch(16)));
-        let large = the_frame(&asm(&dispatch(64)));
-        assert!(large <= small * 2, "four times the labels and the same values: {small}, {large}");
+        let small = the_frame(&asm(&crowded(16)));
+        let large = the_frame(&asm(&crowded(64)));
+        assert_eq!(small, large, "four times the labels and the same values: {small}, {large}");
     }
 
     #[test]
