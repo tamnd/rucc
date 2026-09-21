@@ -719,6 +719,23 @@ impl Module {
         Idx::from_usize(self.relocs.len() - 1)
     }
 
+    /// Every relocation in the module, to be read or edited in place.
+    ///
+    /// A pool rather than a tree, so a pass that wants to rename what an initializer points at has
+    /// nothing to walk: the data lists hold indices into this and the symbol lives here. The one
+    /// pass that wants that is `rucc_safety::wrap`, which turns `&read` in a static initializer
+    /// into `&__rucc_wrap_read` so that a call through the pointer is a call the monitor modelled.
+    pub fn relocs_mut(&mut self) -> &mut [Reloc] {
+        &mut self.relocs
+    }
+
+    /// The same pool, to read. `rucc_safety::summary` walks it to find the names an initializer
+    /// mentions that the build has no wrapper for, which is a boundary it did not model.
+    #[must_use]
+    pub fn relocs(&self) -> &[Reloc] {
+        &self.relocs
+    }
+
     /// How much is in it, for the `-fstats` output and for a test that wants to say a pass
     /// deleted something without saying which.
     #[must_use]

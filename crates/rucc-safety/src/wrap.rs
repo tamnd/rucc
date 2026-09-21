@@ -83,7 +83,9 @@ pub const INTERPOSED: &[&str] = &[
     "read",
     "write",
     "pread",
+    "pread64",
     "pwrite",
+    "pwrite64",
     "recv",
     "send",
     "readv",
@@ -105,17 +107,40 @@ pub const INTERPOSED: &[&str] = &[
     "sem_post",
 ];
 
-/// Points every direct call to an interposed function at its wrapper, and says how many it moved.
+/// Points every mention of an interposed function at its wrapper, and says how many it moved.
 ///
 /// The count is reported for the reason [`crate::Counts`] is: it is the number of boundary
 /// crossings this file has that the monitor now models, and `--emit=safety-summary` is going to
 /// want it. It is also the number that says whether redirection is working at all, which a suite
 /// can assert on and a person cannot read off the assembly without looking for it.
 ///
-/// A call through a pointer is not redirected and cannot be. The address in hand is the C library's
-/// own and there is nothing at the call site that says which function it names. Section 10.2 counts
-/// those against the trust set instead, which is the honest answer: they are a thing the build did
-/// not model rather than a thing it modelled badly.
+/// # Both the call and the address
+///
+/// A call whose callee is a name is the easy half. The other half is a program that writes the name
+/// where a pointer is wanted, and that half is not a lost cause the way a call through a pointer is:
+/// an indirect call says nothing about what it is calling, but `read` written as an address names
+/// the function as plainly as a call does. So a `global_addr` of an interposed name and a
+/// relocation in a static initializer both become the wrapper, and the pointer the program ends up
+/// holding is one that judges before it works.
+///
+/// SQLite is why this is here. Its Unix layer keeps a table of every system call it uses and goes
+/// through the table for all of them, so the assembly held `.quad read` and `.quad pread64` and not
+/// one call to any of them was modelled, which showed up in the replay as a page full of bytes the
+/// kernel had written that the init plane had never heard of. A pluggable layer like that is
+/// ordinary in a library that wants a test seam, so this was never about one project.
+///
+/// The wrapper takes the same arguments and returns the same thing, which is what makes the
+/// substitution safe to make sight unseen. What it is not is address preserving: a program that
+/// compares the pointer it stored against `read` is comparing the wrapper against the C library's
+/// own and will find them different. Nothing sensible does that, and a program that does is one
+/// this build changes the behaviour of, which is the honest thing to write down rather than to
+/// discover later.
+///
+/// A call through a pointer is still not redirected, because there is nothing at that call site to
+/// redirect. What changes is that the pointer being called has usually already been redirected
+/// where it was taken. What is left over, a pointer that arrived from uninstrumented code, is
+/// section 10.2's trust set and is a thing the build did not model rather than a thing it modelled
+/// badly.
 pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
     // Interned up front, so the walk is a comparison of symbols rather than of strings. Interning a
     // name the file never mentions costs one entry in a table that already holds every identifier
@@ -126,8 +151,14 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
         .collect();
 
     let ids: Vec<_> = module.funcs().collect();
-    let defined: Vec<Symbol> =
+    let mut defined: Vec<Symbol> =
         ids.iter().filter(|&&id| !module[id].is_declaration()).map(|&id| module[id].name).collect();
+    // A global of the name counts as the module's own too. A file that defines a variable called
+    // `read` and then takes its address has not named the C library's function, and turning that
+    // into the address of a wrapper around one would be a miscompilation rather than a monitor.
+    defined.extend(
+        module.globals().filter(|&id| !module[id].is_declaration()).map(|id| module[id].name),
+    );
 
     let mut moved = 0;
     for id in ids {
@@ -138,6 +169,20 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
         let insts: Vec<Inst> =
             func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
         for inst in insts {
+            // The address of one of these, written where a pointer was wanted. The name is right
+            // there, so this is the same redirection the call gets and it is the one that reaches a
+            // program that goes through a table.
+            if func[inst].opcode == Opcode::GlobalAddr {
+                let Extra::Symbol(named) = func[inst].extra else { continue };
+                if defined.contains(&named) {
+                    continue;
+                }
+                if let Some(&(_, wrapper)) = table.iter().find(|&&(name, _)| name == named) {
+                    func[inst].extra = Extra::Symbol(wrapper);
+                    moved += 1;
+                }
+                continue;
+            }
             // A tail call as well as a call. `return memcpy(a, b, n)` is a very ordinary thing to
             // write and it is the same boundary crossing.
             if !matches!(func[inst].opcode, Opcode::Call | Opcode::TailCall) {
@@ -158,6 +203,19 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
             // name.
             let redirected = func.add_call(CallInfo { callee: Some(wrapper), ..info });
             func[inst].extra = Extra::Call(redirected);
+            moved += 1;
+        }
+    }
+    // And the same name written into a static initializer, which is the pool rather than any one
+    // function. `static struct { const char *name; void *fn; } table[] = { { "read", read } }` is
+    // the shape SQLite's Unix layer is and the shape any pluggable layer is, and the relocation is
+    // where the name survives into the object.
+    for reloc in module.relocs_mut() {
+        if defined.contains(&reloc.symbol) {
+            continue;
+        }
+        if let Some(&(_, wrapper)) = table.iter().find(|&&(name, _)| name == reloc.symbol) {
+            reloc.symbol = wrapper;
             moved += 1;
         }
     }
@@ -273,6 +331,90 @@ mod tests {
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
+    }
+
+    /// Every name a `global_addr` in the module's definitions asks for.
+    fn addressed(module: &Module, names: &Interner) -> Vec<String> {
+        let mut out = Vec::new();
+        for id in module.funcs() {
+            let func = &module[id];
+            for block in func.blocks() {
+                for inst in func.insts(block) {
+                    if func[inst].opcode == Opcode::GlobalAddr {
+                        if let Extra::Symbol(named) = func[inst].extra {
+                            out.push(names.resolve(named).to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A module whose one function takes the address of `named` and of `puts`.
+    fn addressing(names: &mut Interner, named: &str) -> Module {
+        let mut func = Func::new(names.intern("run"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        for each in [named, "puts"] {
+            let symbol = names.intern(each);
+            b.value(
+                rucc_ir::InstData {
+                    extra: Extra::Symbol(symbol),
+                    ..rucc_ir::InstData::new(Opcode::GlobalAddr)
+                },
+                Type::PTR,
+            );
+        }
+        b.ret(&[]);
+
+        let mut module = Module::new(names.intern("run.c"), &target());
+        module.add_func(func);
+        module
+    }
+
+    #[test]
+    fn the_address_of_an_interposed_function_is_the_address_of_its_wrapper() {
+        // The half a table driven program goes through. Nothing at an indirect call says what it
+        // is calling, but the name written where the pointer was taken says it plainly.
+        let mut names = Interner::new();
+        let mut module = addressing(&mut names, "read");
+        assert_eq!(redirect(&mut module, &mut names), 1);
+        assert_eq!(addressed(&module, &names), ["__rucc_wrap_read", "puts"]);
+    }
+
+    #[test]
+    fn the_address_of_a_name_the_module_defines_itself_is_left_alone() {
+        // Same rule the call gets, and it has to hold for a global as well as for a function: a
+        // file with its own variable called `read` has not named the C library's function.
+        let mut names = Interner::new();
+        let mut module = addressing(&mut names, "read");
+        let own = names.intern("read");
+        let mut global = rucc_ir::Global::new(own, 8, 8);
+        let ty = Type::int(64);
+        let value = module.add_imm(rucc_ir::Imm::int(0, ty));
+        global.init = Some(module.push_data(&[rucc_ir::Datum::Scalar { ty, value }]));
+        module.add_global(global);
+
+        assert_eq!(redirect(&mut module, &mut names), 0);
+        assert_eq!(addressed(&module, &names), ["read", "puts"]);
+    }
+
+    #[test]
+    fn a_name_in_a_static_initializer_becomes_the_wrapper_too() {
+        // `static void *table[] = { read }`, which is the shape SQLite's Unix layer is and the one
+        // that made this worth doing. The name survives into a relocation rather than into any
+        // instruction, so it is the pool that has to be walked.
+        let mut names = Interner::new();
+        let mut module = addressing(&mut names, "getenv");
+        let read = names.intern("read");
+        let at = module.add_reloc(rucc_ir::Reloc { symbol: read, addend: 0, size: 8 });
+        let mut table = rucc_ir::Global::new(names.intern("table"), 8, 8);
+        table.init = Some(module.push_data(&[rucc_ir::Datum::Addr(at)]));
+        module.add_global(table);
+
+        assert_eq!(redirect(&mut module, &mut names), 1);
+        assert_eq!(names.resolve(module[at].symbol), "__rucc_wrap_read");
     }
 
     #[test]

@@ -68,7 +68,9 @@ mod real {
         pub(super) fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
         pub(super) fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
         pub(super) fn pread(fd: c_int, buf: *mut c_void, count: usize, at: i64) -> isize;
+        pub(super) fn pread64(fd: c_int, buf: *mut c_void, count: usize, at: i64) -> isize;
         pub(super) fn pwrite(fd: c_int, buf: *const c_void, count: usize, at: i64) -> isize;
+        pub(super) fn pwrite64(fd: c_int, buf: *const c_void, count: usize, at: i64) -> isize;
         pub(super) fn recv(fd: c_int, buf: *mut c_void, count: usize, flags: c_int) -> isize;
         pub(super) fn send(fd: c_int, buf: *const c_void, count: usize, flags: c_int) -> isize;
         pub(super) fn readv(fd: c_int, iov: *const Iovec, count: c_int) -> isize;
@@ -116,12 +118,34 @@ interpose! {
         unsafe { real::pread(fd, buf, count, at) }
     }
 
+    /// `pread64`, which is the name the same function is exported under for large offsets.
+    ///
+    /// Two symbols and one function. glibc exports both, and which one a program calls is decided
+    /// by whether its headers were asked for the large file interface, so on Linux the answer is
+    /// usually this one. SQLite's `os_unix.c` is the case that found it: the row for `pread` was
+    /// here and the call went past it, and a page read off a temp file came back with the monitor
+    /// none the wiser about the four thousand bytes the kernel had just written.
+    fn pread64(fd: c_int, buf: *mut c_void, count: usize, at: i64) -> isize
+        where writes(buf, count)
+    {
+        // SAFETY: the buffer has been judged, as in `read`.
+        unsafe { real::pread64(fd, buf, count, at) }
+    }
+
     /// `pwrite`, which is `write` with the offset given rather than remembered.
     fn pwrite(fd: c_int, buf: *const c_void, count: usize, at: i64) -> isize
         where reads(buf, count)
     {
         // SAFETY: the buffer has been judged, as in `read`.
         unsafe { real::pwrite(fd, buf, count, at) }
+    }
+
+    /// `pwrite64`, which is to `pwrite` what `pread64` is to `pread`.
+    fn pwrite64(fd: c_int, buf: *const c_void, count: usize, at: i64) -> isize
+        where reads(buf, count)
+    {
+        // SAFETY: the buffer has been judged, as in `read`.
+        unsafe { real::pwrite64(fd, buf, count, at) }
     }
 
     /// `recv`, which is `read` off a socket.

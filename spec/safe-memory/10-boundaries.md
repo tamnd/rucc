@@ -25,6 +25,7 @@ The categories:
 | The monitor itself | `rucc-safety`, `rucc-safe-rt`, the shadow mapping | not per-build; audited once |
 | The verified rules | the SMT encoding is faithful to the IR semantics | not per-build; document 14 |
 | Interposed libc | each wrapper implements the same effects as the real function | wrapper count, and the unwrapped-symbol list |
+| Addressed libc | a name written where a pointer is wanted is the wrapper's address | counted with the wrappers, and the unwrapped ones listed |
 | Declared regions | the reason given is true | region count, by reason |
 | Inline assembly | the asm does what its constraints say | asm site count |
 | Recovered capabilities | the recovered bounds are not wider than the real ones | recovery count |
@@ -33,6 +34,8 @@ The categories:
 | Uninstrumented objects | linked code respects the extents it is passed | object list |
 
 `--emit=safety-summary` (document 07 section 7.8) reports every row. A build whose counts are all zero except the first two has the strongest guarantee this design can produce; a build with ten thousand recoveries has a guarantee that is mostly aspiration, and the point is that the difference is visible without reading code.
+
+The addressed row is separate from the interposed one above it even though the same wrappers serve both, because what a reader wants to know is different. A call to a name is a boundary this build saw and modelled where it stood. An address taken of a name is a boundary that will be crossed somewhere else entirely, through a call site that says nothing about where it goes, and the only reason the build could do anything about it is that the name was still legible at the moment the address was taken. When it was not legible, because the pointer arrived from uninstrumented code, nothing here could have helped and the entry belongs to the last row instead. The unwrapped half of this row is the same list the row above uses, so a function whose address is taken and which has no wrapper appears by name once, however many times the unit mentions it.
 
 The declared region row is the one where the count on its own says the least, which is why it is reported by reason rather than as a total. Three regions all declared for the same reason are one thing to argue about and three regions with three different reasons are three, so the reasons are what the summary counts and the total falls out of them. Zero is written out rather than left off, because a build that declared no regions at all is making a claim and the reader should be able to see it made.
 
@@ -65,6 +68,8 @@ The two ends are where the rule has to say something. A destination word the cop
 **I/O and the syscall surface.** Section 10.5.
 
 **Everything else in libc.** Not interposed, listed. `qsort`, `bsearch`, `strtol`, the math functions, the locale functions: they receive pointers, so they receive J7 transfers or, where the effect is known and narrow, a declared effect annotation. The unwrapped-symbol list is in the summary, so the gap is visible.
+
+**The address counts as a mention, not only the call.** A call whose callee is a name is redirected to the wrapper, and that is the easy half. The other half is a program that writes the name where a pointer is wanted and calls through the pointer later, which is what a library with a pluggable platform layer does: SQLite keeps a table of every system call it uses and goes through the table for all of them, so an instrumented build of it held the C library's own `read` and `pread64` in that table and not one call through it was modelled. An indirect call site says nothing about what it is calling and never will, but the name written where the address was taken says it as plainly as a call does, so that is where the substitution happens: a `global_addr` of an interposed name and a relocation in a static initializer both become the wrapper, and the pointer the program ends up holding is one that judges before it works. This is not address preserving, and a program that compares such a pointer against the library's own symbol will find them different. Nothing sensible does that, and it is written down here rather than discovered later. What is left over is a pointer that arrived from uninstrumented code, which has no name to rewrite and stays in the trust set where section 10.2 puts it.
 
 **The pragmatic route to a large wrapper set.** Writing several hundred wrappers by hand is a large and boring job with a high error rate. `rucc-safety` generates them from a declarative table, for each function, the C signature plus an effects clause naming which arguments are read, written, and over what extent, in the vocabulary of the `__counted_by` family:
 
