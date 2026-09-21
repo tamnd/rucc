@@ -70,8 +70,8 @@ use rucc_types::{
 use crate::check::Checker;
 use crate::check::expr::Target;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitEntry, InitList, Linkage, Startup,
-    StorageDuration,
+    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitEntry, InitList, Linkage,
+    Startup, StorageDuration,
 };
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::{Address, Base, Const};
@@ -375,6 +375,7 @@ impl<'a> Checker<'a> {
                 inline: Emission::Silent,
                 gnu_inline: false,
                 noreturn: false,
+                effects: Effects::Any,
                 visibility: None,
                 weak: false,
                 startup: Startup::default(),
