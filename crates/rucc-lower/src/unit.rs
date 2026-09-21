@@ -36,8 +36,9 @@ use rucc_ir::{
     Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
-    Address, Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind,
-    InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
+    Address, Base, Const, Conversion, DeclId, DeclKind, Definition, Effects, Eval, ExprId,
+    ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast,
+    Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible};
@@ -617,6 +618,7 @@ impl Unit<'_> {
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let noreturn = node.noreturn;
+        let effects = node.effects;
         let startup = node.startup;
         let span = tast.decl_span(decl);
         if node.name.is_none() {
@@ -656,6 +658,17 @@ impl Unit<'_> {
         if noreturn {
             func.attrs.set |= AttrSet::NORETURN;
         }
+        // And the other one, for the same reason. What a call to `strtol` reads belongs to
+        // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
+        // for, so a unit that only declares the function gets nothing out of it unless the
+        // promise arrives here. `const` says the result comes from the arguments alone, which
+        // is `readnone`, and `pure` says it may read memory, which is `readonly`. The two are
+        // an incompatible pair in the IR and only one of them is ever set.
+        func.attrs.set |= match effects {
+            Effects::Any => AttrSet::NONE,
+            Effects::Pure => AttrSet::READONLY,
+            Effects::Const => AttrSet::READNONE,
+        };
         func.linkage = self.told(decl, linkage);
         // The same question as for an object, and the same answer, with one wrinkle: an inline
         // definition this unit does not emit is a declaration here, since C 6.7.4p7 sends the

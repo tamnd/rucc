@@ -406,6 +406,18 @@ block0(%0: i32):
     return
 }
 
+func @weigh(i32) -> i32, linkage(external), attrs(readnone);
+
+func @look(ptr) -> i32, linkage(external), attrs(readonly);
+
+func @asks_both(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = call @weigh(%0) : (i32) -> i32
+    %3 = call @look(%1) : (ptr) -> i32
+    %4 = add.nsw %2, %3
+    return %4
+}
+
 func @reads_the_table(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = global_addr @table

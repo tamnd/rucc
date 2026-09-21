@@ -126,6 +126,14 @@ pub struct Decl {
     /// is there for the same reason: the usual place to write it is a header, and the definition in
     /// the file below writes nothing.
     pub noreturn: bool,
+    /// What a declaration of this name promised a call to it does, and [`Effects::Any`] where
+    /// none of them said.
+    ///
+    /// `__attribute__((const))` and `__attribute__((pure))`. A fact about the name rather than
+    /// about one declaration of it, merged the way [`Self::noreturn`] is and for the same
+    /// reason: the place either attribute is written is a header, and the file that defines the
+    /// function writes an ordinary definition.
+    pub effects: Effects,
     /// Whether the function runs without anything calling it, which `constructor` and `destructor`
     /// ask for.
     ///
@@ -213,6 +221,52 @@ pub enum DeclKind {
     /// Nothing is emitted for one and nothing can name it as an expression, since the name is
     /// bound as a typedef rather than as a declaration.
     Type,
+}
+
+/// What a declaration promised a call to a function does, where nothing said is the default.
+///
+/// `__attribute__((const))` and `__attribute__((pure))` are the two claims. They are kept here
+/// rather than worked out from a body because the body is usually in some other file: a unit that
+/// only declares `strtol` has nothing to look at, so the promise travels on the declaration or it
+/// does not travel at all. That is the rule [`Decl::noreturn`] is under and it is there for the
+/// same reason.
+///
+/// The optimizer works out its own answer for the functions it can see, and this is not that
+/// answer. What a person wrote is a promise the program made, and gcc believes the promise, so the
+/// two are kept apart and met at the point they are read.
+///
+/// The order the variants are in is the order of strength, which is what the derived [`Ord`] is
+/// for: merging two declarations of one name is taking the stronger promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Effects {
+    /// No declaration of the name said anything, so a call may do anything a call may do.
+    #[default]
+    Any,
+    /// `pure`. The result depends on the arguments and on memory, and the call writes nothing the
+    /// caller can see, so two calls with the same arguments and no write between them are one
+    /// call.
+    Pure,
+    /// `const`. The result depends on the arguments alone, so the call does not even read memory.
+    /// Stronger than [`Self::Pure`], and a call to one is deletable when nothing reads it.
+    Const,
+}
+
+impl Effects {
+    /// What two declarations of one name promised between them, which is the stronger promise.
+    ///
+    /// A later declaration that says nothing does not take an earlier promise back, for the reason
+    /// one declaration writing `noreturn` is enough: the place people write these is a header and
+    /// the definition in the file underneath writes an ordinary definition.
+    #[must_use]
+    pub fn and(self, other: Effects) -> Effects {
+        self.max(other)
+    }
+
+    /// Whether anything was promised at all.
+    #[must_use]
+    pub const fn promised(self) -> bool {
+        !matches!(self, Effects::Any)
+    }
 }
 
 /// Whether the definition of a name is emitted, which is what `inline` decides.

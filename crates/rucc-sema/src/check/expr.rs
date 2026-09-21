@@ -42,7 +42,7 @@ use rucc_types::{
 use crate::check::expr::typeop::Measure;
 use crate::check::{Checker, Promoted};
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitEntry, Linkage, Startup,
+    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitEntry, Linkage, Startup,
     StorageDuration,
 };
 use crate::eval;
@@ -312,6 +312,7 @@ impl Checker<'_> {
                 inline: Emission::Silent,
                 gnu_inline: false,
                 noreturn: false,
+                effects: Effects::Any,
                 visibility: None,
                 weak: false,
                 startup: Startup::default(),

@@ -50,7 +50,9 @@ use rucc_base::Interner;
 use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
-use crate::decl::{DeclId, DeclKind, Definition, Linkage, Priority, StorageDuration, Visibility};
+use crate::decl::{
+    DeclId, DeclKind, Definition, Effects, Linkage, Priority, StorageDuration, Visibility,
+};
 use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk, JumpAsk};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
@@ -147,6 +149,13 @@ impl<'a> Printer<'a> {
         }
         if node.noreturn {
             head.push_str(" noreturn");
+        }
+        // Written under the name the attribute was written under rather than the name of the
+        // bit it becomes, because what a dump of the tree shows is what the source said.
+        match node.effects {
+            Effects::Any => {}
+            Effects::Pure => head.push_str(" pure"),
+            Effects::Const => head.push_str(" const"),
         }
         // The handler is a declaration rather than a name, so what is written is the name it was
         // resolved to, which is what makes a dump show which function the call will go to.
@@ -899,6 +908,7 @@ decl #0 : int[2] object automatic defined
             inline: Emission::Silent,
             gnu_inline: false,
             noreturn: false,
+            effects: Effects::Any,
             visibility: None,
             weak: false,
             startup: Startup::default(),

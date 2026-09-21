@@ -48,7 +48,7 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
-use crate::decl::{DeclId, DeclKind, Priority, Startup, StorageDuration, Visibility};
+use crate::decl::{DeclId, DeclKind, Effects, Priority, Startup, StorageDuration, Visibility};
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::scope::Binding;
@@ -589,6 +589,30 @@ impl Checker<'_> {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
                 && rucc_gnu::unarmour(self.text(attr.name)) == "noreturn"
         })
+    }
+
+    /// What an attribute list promises a call to this function does.
+    ///
+    /// `__attribute__((const))` and `__attribute__((pure))`, under the namespace test
+    /// [`Self::never_returns`] is under and through the same unarmouring, so `__const__` in a
+    /// header and `[[gnu::pure]]` are both read. `const` is the stronger of the two and wins if a
+    /// list somehow carries both, which is what taking the maximum does.
+    ///
+    /// The `const` here is the attribute and not the type qualifier, and the parser is what makes
+    /// that work: an attribute name is a token rather than an identifier, so the keyword arrives
+    /// as the name. There is nowhere in an attribute list a qualifier could have meant anything
+    /// else.
+    pub(in crate::check) fn promised_effects(&self, attrs: AttrList) -> Effects {
+        self.ast[attrs]
+            .iter()
+            .filter(|attr| !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu"))
+            .map(|attr| match rucc_gnu::unarmour(self.text(attr.name)) {
+                "const" => Effects::Const,
+                "pure" => Effects::Pure,
+                _ => Effects::Any,
+            })
+            .max()
+            .unwrap_or_default()
     }
 
     /// What an `alignas` on a member asked for, which is the same number `aligned` gives.

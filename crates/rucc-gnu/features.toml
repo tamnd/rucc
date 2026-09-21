@@ -433,17 +433,19 @@ tests = []
 name = "pure"
 kind = "attribute"
 gcc_version = "2.96"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "curl"]
-tests = []
+tests = ["rucc-sema::pure_written_as_the_attribute_is_kept", "tests/golden/gnu.c"]
+notes = "The promise reaches the IR as `attrs(readonly)` on the function, from either place an attribute can go on a declaration, and the purity analysis reads it there. Two calls to one with the same arguments and no write in between are one call, and a call to one nothing reads is deleted when it also terminates."
 
 [[feature]]
 name = "const"
 kind = "attribute"
 gcc_version = "2.5"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc-sema::const_written_as_the_attribute_is_kept", "tests/golden/gnu.c"]
+notes = "The stronger of the pair, reaching the IR as `attrs(readnone)`. A declaration is where it has to be read, because the function it is written about is usually defined in another file and the analysis that works purity out from a body has nothing to look at."
 
 [[feature]]
 name = "malloc"

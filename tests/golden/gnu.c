@@ -291,6 +291,18 @@ void stops_here(int a) {
   bail(a);
 }
 
+// `__attribute__((const))` and `__attribute__((pure))`, which are the other two claims about a
+// callee that nothing on this side of the call can work out. The body is in another file, so the
+// promise travels on the declaration or it does not travel. `const` says the result comes from the
+// arguments alone and becomes `readnone`, and `pure` says it may read memory and becomes
+// `readonly`. The armoured spelling and the place after the declarator are both what a real header
+// writes.
+__attribute__((__const__)) int weigh(int of);
+
+extern int look(const int *at) __attribute__((pure));
+
+int asks_both(int a, const int *at) { return weigh(a) + look(at); }
+
 // An `asm` written at file scope, whose template is directives and therefore says what the
 // object file itself holds rather than what any function does. A section, a label, the bytes
 // under it, and a second label whose distance from the first is the size: that is the whole of

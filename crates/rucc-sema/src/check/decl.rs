@@ -43,7 +43,7 @@ use crate::asm::FileAsm;
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Emission, InitList, Linkage, Startup,
+    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitList, Linkage, Startup,
     StorageDuration, Visibility,
 };
 use crate::scope::Binding;
@@ -84,6 +84,8 @@ struct Declared {
     gnu_inline: bool,
     /// Whether this declaration said control does not come back from a call to it.
     noreturn: bool,
+    /// What this declaration promised a call to it does, from `const` and `pure`.
+    effects: Effects,
     /// Where this declaration asked for the function to go in the run-up to `main` and the
     /// run-down after it.
     startup: Startup,
@@ -301,6 +303,12 @@ impl Checker<'_> {
             // definition goes on the specifiers as well since there is no declarator to hang it
             // off, so between them the two places cover everything a definition can say.
             noreturn: specs.func.has(FuncSpecs::NORETURN) || self.never_returns(specs.attrs),
+            // The specifiers only, for the reason `noreturn` above reads them only, and read
+            // on a definition at all because a promise made over a body is still a promise.
+            // The analysis that reads the body keeps its own answer somewhere else, so the two
+            // cannot quietly overwrite each other, and where they disagree the written one
+            // stands, which is what gcc does.
+            effects: self.promised_effects(specs.attrs),
             // The specifiers only, for the reason the two above read them only: a definition has
             // no declarator to write an attribute after, so a definition that says anything says
             // it there.
@@ -628,6 +636,11 @@ impl Checker<'_> {
             noreturn: specs.func.has(FuncSpecs::NORETURN)
                 || self.never_returns(specs.attrs)
                 || self.never_returns(item.attrs),
+            // Both places, for the reason `noreturn` above reads both. A header writing
+            // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
+            // one writing `int look(const int *) __attribute__((pure));` puts it after the
+            // declarator, and both spellings are common in the same header.
+            effects: self.promised_effects(specs.attrs).and(self.promised_effects(item.attrs)),
             // Both places, for the reason `retained` above reads both.
             visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
             // Both places, for the reason `retained` above reads both. The usual place a library
@@ -802,6 +815,7 @@ impl Checker<'_> {
                 inline: Emission::Silent,
                 gnu_inline: false,
                 noreturn: false,
+                effects: Effects::Any,
                 visibility: None,
                 weak: false,
                 startup: Startup::default(),
@@ -1213,6 +1227,10 @@ impl Checker<'_> {
             // again. gcc goes further and warns when the definition comes first, on the grounds
             // that the calls above it were already compiled, and that warning is not here yet.
             noreturn: node.noreturn || declared.noreturn,
+            // The stronger promise stands, which is the same rule `noreturn` above is under
+            // written for something that is not a flag. A header that says `const` and a
+            // definition underneath that says nothing leave the name `const`.
+            effects: node.effects.and(declared.effects),
             // The first one written stands, which is the rule the assembler name and the alias
             // above are under. gcc keeps the first one too and warns about the second, on the
             // same grounds it warns about a late `noreturn`: the references above it were
@@ -1438,6 +1456,7 @@ impl Checker<'_> {
             inline: self.emission(declared.written, declared.gnu_inline),
             gnu_inline: declared.gnu_inline,
             noreturn: declared.noreturn,
+            effects: declared.effects,
             visibility: declared.visibility,
             weak: declared.weak.is_some(),
             startup: declared.startup,
@@ -2476,6 +2495,116 @@ mod tests {
         let id = only(&c, list);
 
         assert_eq!(dump(&c, id), "decl #0 die : int(void) function external declared noreturn\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn const_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        // The attribute is spelled with a keyword, which the parser allows because an attribute
+        // name is a token and not an identifier. There is nowhere in a list a qualifier could go.
+        specs.attrs = f.attribute("const");
+        let decl = f.var(specs, "weigh", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 weigh : int(void) function external declared const\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn pure_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.attrs = f.attribute("pure");
+        let decl = f.var(specs, "look", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 look : int(void) function external declared pure\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_armoured_spellings_are_the_same_two_attributes() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        // What a header writes, for the reason every armoured spelling in one is written that way.
+        specs.attrs = f.attribute("__const__");
+        let decl = f.var(specs, "weigh", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 weigh : int(void) function external declared const\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_definition_keeps_what_the_declaration_above_it_promised_about_memory() {
+        let mut f = Fixture::new();
+        let mut declaring = f.int_specs();
+        declaring.attrs = f.attribute("pure");
+        let first = f.var(declaring, "look", &[function()], None);
+        let body = f.block(&[]);
+        let second = f.define(f.int_specs(), "look", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // The shape every program that uses either attribute has. The header promises and the
+        // file underneath writes an ordinary definition, so a promise that did not survive the
+        // definition would be a promise about almost nothing.
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 look : int(void) function external defined pure\n  body\n    block\n"
+        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn the_stronger_of_two_promises_about_one_name_is_the_one_kept() {
+        let mut f = Fixture::new();
+        let mut weaker = f.int_specs();
+        weaker.attrs = f.attribute("pure");
+        let first = f.var(weaker, "weigh", &[function()], None);
+        let mut stronger = f.int_specs();
+        stronger.attrs = f.attribute("const");
+        let second = f.var(stronger, "weigh", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // Neither declaration can take the other's promise back, so the answer is the stronger
+        // one whichever order they were written in.
+        assert_eq!(dump(&c, id), "decl #0 weigh : int(void) function external declared const\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_declaration_that_promises_nothing_does_not_take_an_earlier_promise_back() {
+        let mut f = Fixture::new();
+        let mut promising = f.int_specs();
+        promising.attrs = f.attribute("const");
+        let first = f.var(promising, "weigh", &[function()], None);
+        let second = f.var(f.int_specs(), "weigh", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        assert_eq!(dump(&c, id), "decl #0 weigh : int(void) function external declared const\n");
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 

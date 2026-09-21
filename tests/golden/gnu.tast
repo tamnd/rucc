@@ -616,11 +616,31 @@ decl #90 stops_here : void(int) function external defined
             decl #86 bail : void(int) function
           convert lvalue : int
             decl #91 a : int lvalue
-decl #92 table : const int[] object external static declared
-decl #93 table_count : const int object external static declared
-decl #95 reads_the_table : int(int) function external defined
+decl #93 weigh : int(int) function external declared const
+decl #95 look : int(const int *) function external declared pure
+decl #98 asks_both : int(int, const int *) function external defined
   params
-    decl #94 i : int object automatic defined
+    decl #96 a : int object automatic defined
+    decl #97 at : const int * object automatic defined
+  body
+    block
+      return
+        binary + : int
+          call : int
+            convert function-decay : int (*)(int)
+              decl #93 weigh : int(int) function
+            convert lvalue : int
+              decl #96 a : int lvalue
+          call : int
+            convert function-decay : int (*)(const int *)
+              decl #95 look : int(const int *) function
+            convert lvalue : const int *
+              decl #97 at : const int * lvalue
+decl #99 table : const int[] object external static declared
+decl #100 table_count : const int object external static declared
+decl #102 reads_the_table : int(int) function external defined
+  params
+    decl #101 i : int object automatic defined
   body
     block
       return
@@ -628,12 +648,12 @@ decl #95 reads_the_table : int(int) function external defined
           convert lvalue : int
             subscript : const int lvalue
               convert array-decay : const int *
-                decl #92 table : const int[] lvalue
+                decl #99 table : const int[] lvalue
               convert lvalue : int
-                decl #94 i : int lvalue
+                decl #101 i : int lvalue
           convert lvalue : int
-            decl #93 table_count : const int lvalue
-decl #96 the_default : void(void) function internal defined
+            decl #100 table_count : const int lvalue
+decl #103 the_default : void(void) function internal defined
   body
     block
       expr
@@ -641,10 +661,10 @@ decl #96 the_default : void(void) function internal defined
           convert function-decay : int (*)(int)
             decl #1 use : int(int) function
           const 0 : int
-decl #97 stuff : unsigned char[] object external static declared
-decl #99 reads_the_stuff : int(int) function external defined
+decl #104 stuff : unsigned char[] object external static declared
+decl #106 reads_the_stuff : int(int) function external defined
   params
-    decl #98 i : int object automatic defined
+    decl #105 i : int object automatic defined
   body
     block
       return
@@ -652,11 +672,11 @@ decl #99 reads_the_stuff : int(int) function external defined
           convert lvalue : unsigned char
             subscript : unsigned char lvalue
               convert array-decay : unsigned char *
-                decl #97 stuff : unsigned char[] lvalue
+                decl #104 stuff : unsigned char[] lvalue
               convert lvalue : int
-                decl #98 i : int lvalue
-decl #100 how_far : const int object external static declared
-decl #101 reads_the_distance : unsigned char(void) function external defined
+                decl #105 i : int lvalue
+decl #107 how_far : const int object external static declared
+decl #108 reads_the_distance : unsigned char(void) function external defined
   body
     block
       return
@@ -665,31 +685,31 @@ decl #101 reads_the_distance : unsigned char(void) function external defined
             binary + : const unsigned char *
               cast : const unsigned char *
                 unary & : const int *
-                  decl #100 how_far : const int lvalue
+                  decl #107 how_far : const int lvalue
               convert lvalue : int
-                decl #100 how_far : const int lvalue
-decl #102 ran : int object internal static tentative
-decl #103 opens : void(void) function internal defined constructor
+                decl #107 how_far : const int lvalue
+decl #109 ran : int object internal static tentative
+decl #110 opens : void(void) function internal defined constructor
   body
     block
       expr
         assign = : int
-          decl #102 ran : int lvalue
+          decl #109 ran : int lvalue
           const 1 : int
-decl #104 closes : void(void) function internal defined destructor(101)
+decl #111 closes : void(void) function internal defined destructor(101)
   body
     block
       expr
         assign = : int
-          decl #102 ran : int lvalue
+          decl #109 ran : int lvalue
           const 0 : int
-decl #105 both_ways : void(void) function internal defined constructor(101) destructor
+decl #112 both_ways : void(void) function internal defined constructor(101) destructor
   body
     block
       expr
         assign = : int
-          decl #102 ran : int lvalue
+          decl #109 ran : int lvalue
           binary + : int
             convert lvalue : int
-              decl #102 ran : int lvalue
+              decl #109 ran : int lvalue
             const 1 : int
