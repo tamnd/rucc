@@ -7754,6 +7754,24 @@ block2:
         assert!(named < after, "{text}");
     }
 
+    /// How far a place is from the bytes holding the answer, which is what tcc's test file writes
+    /// last and what the alternative instruction tables in a kernel header are made of. It is the
+    /// linker's answer rather than the compiler's, because the two sections are placed by the
+    /// linker, so the image holds a hole and a name for it.
+    #[test]
+    fn a_distance_from_here_at_file_scope_is_a_hole_naming_the_global_it_measures_to() {
+        let text = ir(concat!(
+            "__asm__(\".data\\n.byte 41\\nstuff:\\n661:\\n.byte 42\\n",
+            ".pushsection .data.ignore\\n.long 661b - .\\n.popsection\\n\");\n",
+            "extern unsigned char stuff[];\n",
+            "int read(void) { return stuff[0]; }\n",
+        ));
+        // The label the template measured to is a local one and no symbol, so what the hole names
+        // is the global it stands inside, which is the byte under `stuff`, and nothing further on
+        // since it is the first byte of it.
+        assert!(text.contains("global @.Lasm.1 : bytes 4 = { away.4 @stuff }"), "{text}");
+    }
+
     /// A `.set` says one name stands for another, which is a second symbol at the first one's
     /// address and is an alias and nothing else. What the directives around it said about the
     /// name is what the name gets, and a name the file defines itself keeps its own definition,

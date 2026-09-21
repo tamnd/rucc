@@ -176,7 +176,7 @@ impl<'a> Verifier<'a> {
                     );
                 }
             }
-            if let Datum::Addr(reloc) = datum {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) = datum {
                 let bytes = self.module[reloc].size;
                 if !matches!(bytes, 1 | 2 | 4 | 8) {
                     self.at(

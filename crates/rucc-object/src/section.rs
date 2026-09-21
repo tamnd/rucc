@@ -600,6 +600,19 @@ pub enum Reference {
         /// a narrower relocation for it. `R_X86_64_64` and `R_X86_64_32` on ELF.
         bytes: u8,
     },
+    /// How far the thing is from where the four bytes holding the answer are, written into an
+    /// image rather than reached by an instruction. `.long target - .` in an `asm` at file scope,
+    /// which is how a table of places in a program says where each of them is in four bytes rather
+    /// than eight and says it without anything having to be written into the table at startup.
+    ///
+    /// The same relocation a load makes, with nothing after the hole, because what a load asks is
+    /// the same question about the same four bytes. It is a kind of its own here all the same, and
+    /// not [`Reference::Data`] with `after` left at zero, because the two formats count the answer
+    /// from different ends: ELF counts from the front of the hole, which is what this wants, and
+    /// COFF counts from the byte after it, which is what an instruction wants. Saying which is
+    /// meant is what lets each writer answer for itself rather than one of them be quietly four
+    /// out.
+    Away,
     /// How far the thing is from the front of the loaded image, written into four bytes.
     ///
     /// What every field of a Windows unwind table is. The table is read at run time by code that

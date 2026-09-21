@@ -457,8 +457,23 @@ impl Unit<'_> {
                     continue;
                 }
             };
-            for piece in read.pieces {
-                self.piece(piece);
+            // The name of every global of the block first, because a distance one of them writes
+            // is measured to a place in another of them and a relocation names a symbol, so the
+            // name has to be to hand before the bytes that refer to it are built.
+            let symbols: Vec<Symbol> = read
+                .pieces
+                .iter()
+                .map(|piece| match &piece.name {
+                    Some(name) => self.names.intern(name),
+                    None => {
+                        let name = format!(".Lasm.{}", self.anonymous);
+                        self.anonymous += 1;
+                        self.names.intern(&name)
+                    }
+                })
+                .collect();
+            for (index, piece) in read.pieces.into_iter().enumerate() {
+                self.piece(piece, symbols[index], &symbols);
             }
             // Held back until the file has been walked, because a name a block equates may be
             // defined below the block, and remembered as a name something points at, because a
@@ -471,21 +486,14 @@ impl Unit<'_> {
         }
     }
 
-    /// One global an `asm` at file scope defined.
+    /// One global an `asm` at file scope defined, under the name minted for it and with the names
+    /// of the whole block to hand.
     ///
     /// The bytes a template writes before it writes any label are a global like the rest and a
-    /// global has to have a name, so one is minted here. Nothing refers to it, so the only thing
-    /// the name has to be is one nothing else takes, and the leading dot keeps it out of the
-    /// symbol table the way the name of a string literal does.
-    fn piece(&mut self, piece: directives::Piece) {
-        let symbol = match &piece.name {
-            Some(name) => self.names.intern(name),
-            None => {
-                let name = format!(".Lasm.{}", self.anonymous);
-                self.anonymous += 1;
-                self.names.intern(&name)
-            }
-        };
+    /// global has to have a name, so one is minted for them. Nothing refers to it by that name, so
+    /// the only thing it has to be is one nothing else takes, and the leading dot keeps it out of
+    /// the symbol table the way the name of a string literal does.
+    fn piece(&mut self, piece: directives::Piece, symbol: Symbol, symbols: &[Symbol]) {
         let mut global = Global::new(symbol, piece.size, piece.align.max(1));
         global.linkage = piece.linkage;
         global.visibility = piece.visibility;
@@ -520,6 +528,13 @@ impl Unit<'_> {
                     }
                 }
                 directives::Item::Zero(bytes) => Datum::Zero(bytes),
+                // Four bytes holding how far that global is from these bytes, which the reader
+                // said in globals of this block rather than in names because the place it
+                // measures to is usually a label the object file holds no name for.
+                directives::Item::Away { piece, addend } => {
+                    let reloc = Reloc { symbol: symbols[piece], addend, size: 4 };
+                    Datum::Away(self.module.add_reloc(reloc))
+                }
             });
         }
         global.init = Some(self.module.push_data(&data));

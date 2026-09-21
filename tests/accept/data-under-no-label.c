@@ -8,6 +8,13 @@
    gets the byte above it, and the local labels have to leave the bytes either side of them in one
    piece, because the distance between them is what the last line writes. */
 
+/* The block ends by going back to the text section, because what a template at file scope leaves
+   the assembler standing in is where whatever follows it lands. gcc copies these directives into
+   the stream it hands the assembler, so without the last line the code of `main` is assembled into
+   a section that is not executable and the program built by gcc dies on its first instruction.
+   rucc reads the template into globals instead and puts its own code where it always does, so it
+   is right either way, and the line is here so that the file means the same thing under both. */
+
 extern unsigned char alld_stuff[];
 
 __asm__(".data\n"
@@ -19,7 +26,8 @@ __asm__(".data\n"
 	".pushsection .data.ignore\n"
 	".byte 7\n"
 	".popsection\n"
-	".byte 662b - 661b\n");
+	".byte 662b - 661b\n"
+	".text\n");
 
 int main(void)
 {

@@ -280,6 +280,20 @@ impl Writer<'_> {
             },
             // Four and eight are the only widths that reach here, because the walk that built
             // this refused every other one rather than leave the two halves to disagree.
+            // Written the way the template that asked for it wrote it, which is the one spelling
+            // an assembler reading this back would give the same relocation to.
+            Piece::Away { symbol, addend } => {
+                let name = format!("{}{symbol}", self.directives.symbol());
+                match addend {
+                    0 => {
+                        let _ = writeln!(self.out, "\t.long\t{name} - .");
+                    }
+                    _ => {
+                        let sign = if *addend < 0 { '-' } else { '+' };
+                        let _ = writeln!(self.out, "\t.long\t{name}{sign}{} - .", addend.abs());
+                    }
+                }
+            }
             Piece::Addr { symbol, addend, bytes } => {
                 let directive = if *bytes == 8 { ".quad" } else { ".long" };
                 let name = format!("{}{symbol}", self.directives.symbol());
@@ -1164,6 +1178,17 @@ mod tests {
         let addr = Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 };
         let text = data(vec![var("p", Place::Written, vec![addr])], Os::Linux);
         assert!(text.contains("\np:\n\t.quad\ty+16\n"), "{text}");
+    }
+
+    #[test]
+    fn a_distance_in_an_image_is_written_as_the_name_less_where_it_is() {
+        let away = Piece::Away { symbol: "y".to_owned(), addend: 0 };
+        let text = data(vec![var("d", Place::ReadOnly, vec![away])], Os::Linux);
+        assert!(text.contains("\nd:\n\t.long\ty - .\n"), "{text}");
+
+        let away = Piece::Away { symbol: "y".to_owned(), addend: -3 };
+        let text = data(vec![var("d", Place::ReadOnly, vec![away])], Os::Linux);
+        assert!(text.contains("\nd:\n\t.long\ty-3 - .\n"), "{text}");
     }
 
     #[test]

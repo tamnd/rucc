@@ -437,7 +437,7 @@ impl Assembler<'_> {
                     // how far something is from the front of one, which is what a table of data
                     // holds. Nothing above produces either, because every reference an instruction
                     // makes is a distance from where the instruction ends.
-                    Reference::Address { .. } | Reference::Image => {
+                    Reference::Address { .. } | Reference::Image | Reference::Away => {
                         unreachable!("an instruction wanting an address")
                     }
                 };

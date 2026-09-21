@@ -341,8 +341,9 @@ impl<'a, 'n> Parser<'a, 'n> {
                 let bytes = self.string()?;
                 Ok(Datum::Bytes(module.push_bytes(&bytes)))
             }
-            "addr" => {
-                self.expect("addr")?;
+            word @ ("addr" | "away") => {
+                let away = word == "away";
+                self.expect(word)?;
                 self.expect(".")?;
                 let size = self.u32()?;
                 let symbol = self.symbol()?;
@@ -357,7 +358,8 @@ impl<'a, 'n> Parser<'a, 'n> {
                 } else {
                     0
                 };
-                Ok(Datum::Addr(module.add_reloc(Reloc { symbol, addend, size })))
+                let reloc = module.add_reloc(Reloc { symbol, addend, size });
+                Ok(if away { Datum::Away(reloc) } else { Datum::Addr(reloc) })
             }
             _ => {
                 let ty = self.ty()?;

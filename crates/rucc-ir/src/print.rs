@@ -238,9 +238,12 @@ impl<'a> Printer<'a> {
                 let _ = write!(self.out, "{ty} ");
                 self.imm(self.module[value], ty);
             }
-            Datum::Addr(reloc) => {
+            Datum::Addr(reloc) | Datum::Away(reloc) => {
+                // The one word says which of the two it is, since the rest of the line is the
+                // same: a symbol, how many bytes it is written in, and what to add to it.
+                let what = if matches!(datum, Datum::Away(_)) { "away" } else { "addr" };
                 let Reloc { symbol, addend, size } = self.module[reloc];
-                let _ = write!(self.out, "addr.{size} @{}", self.names.resolve(symbol));
+                let _ = write!(self.out, "{what}.{size} @{}", self.names.resolve(symbol));
                 match addend.signum() {
                     1 => {
                         let _ = write!(self.out, " + {addend}");
@@ -1324,6 +1327,7 @@ mod tests {
         let entry_name = names.intern("hi.str");
         let forward = module.add_reloc(Reloc { symbol: entry_name, addend: 8, size: 8 });
         let backward = module.add_reloc(Reloc { symbol: entry_name, addend: -8, size: 8 });
+        let far = module.add_reloc(Reloc { symbol: entry_name, addend: 1, size: 4 });
         let seven = module.add_imm(Imm::int(7, i32_));
         let image = module.push_data(&[
             Datum::Bytes(text),
@@ -1331,8 +1335,9 @@ mod tests {
             Datum::Scalar { ty: i32_, value: seven },
             Datum::Addr(forward),
             Datum::Addr(backward),
+            Datum::Away(far),
         ]);
-        let mut table = Global::new(names.intern("table"), 28, 8);
+        let mut table = Global::new(names.intern("table"), 32, 8);
         table.init = Some(image);
         table.constant = true;
         table.section = Some(names.intern(".rodata.rel"));

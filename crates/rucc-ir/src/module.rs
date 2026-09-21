@@ -280,12 +280,18 @@ pub enum Datum {
     /// The address of another symbol, from the module's relocation pool. `&x` in an
     /// initializer, which the linker fills in.
     Addr(Idx<Reloc>),
+    /// How far another symbol is from where this is written, from the same pool. `.long
+    /// target - .` in an `asm` at file scope, which is what a table of places in a program
+    /// holds when the table and the places are both in it: the distance fits in four bytes
+    /// where an address takes eight, and it is the same number wherever the image is loaded,
+    /// so nothing has to be written into it at startup.
+    Away(Idx<Reloc>),
 }
 
 impl Datum {
     /// How many bytes it contributes to the image.
     ///
-    /// The module is an argument because three of the four kinds keep what they are made of in
+    /// The module is an argument because four of the five kinds keep what they are made of in
     /// one of its pools, and a datum on its own is four words that mean nothing without it.
     #[must_use]
     pub fn size(self, module: &Module) -> u64 {
@@ -294,7 +300,7 @@ impl Datum {
             Self::Bytes(range) => range.len() as u64,
             // Rounded up, so that an `i1` in an image is a byte and a `_BitInt(24)` is three.
             Self::Scalar { ty, .. } => u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes()),
-            Self::Addr(reloc) => u64::from(module[reloc].size),
+            Self::Addr(reloc) | Self::Away(reloc) => u64::from(module[reloc].size),
         }
     }
 }
