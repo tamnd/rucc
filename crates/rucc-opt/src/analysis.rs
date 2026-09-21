@@ -39,6 +39,7 @@ use rucc_ir::Func;
 
 use crate::image::Images;
 use crate::machine::Machine;
+use crate::modref::Summaries;
 use crate::outside::Outside;
 use crate::predict::Callees;
 use crate::purity::Facts;
@@ -184,6 +185,7 @@ pub struct Analyses {
     images: Arc<Images>,
     outside: Arc<Outside>,
     purity: Arc<Facts>,
+    modref: Arc<Summaries>,
     cfg: OnceCell<Cfg>,
     doms: OnceCell<Dominators>,
     post: OnceCell<PostDominators>,
@@ -209,6 +211,7 @@ impl Analyses {
             images: Arc::default(),
             outside: Arc::default(),
             purity: Arc::default(),
+            modref: Arc::default(),
             cfg: OnceCell::new(),
             doms: OnceCell::new(),
             post: OnceCell::new(),
@@ -265,6 +268,20 @@ impl Analyses {
         self
     }
 
+    /// The same cache, knowing what each of those functions does to memory it was handed.
+    ///
+    /// The per parameter half of the answer above, which is the half a loop wants: purity says
+    /// whether a call wrote memory and this says whether it wrote *this*. Separate for the same
+    /// reason again, since [`Summaries::nothing`] knows nothing about anything and a pass that is
+    /// correct against that one is correct against every one.
+    ///
+    /// Counted rather than copied, and there is one of these per module.
+    #[must_use]
+    pub fn touching(mut self, modref: Arc<Summaries>) -> Self {
+        self.modref = modref;
+        self
+    }
+
     /// The machine this function is being compiled for.
     ///
     /// Not an analysis, and here because this is the one thing a pass is handed besides the
@@ -301,6 +318,15 @@ impl Analyses {
     #[must_use]
     pub fn purity(&self) -> &Facts {
         &self.purity
+    }
+
+    /// What each of those functions does to the memory behind each of its pointer parameters.
+    ///
+    /// Here for the reason the one above is. See [`crate::modref`] for what is in one and for
+    /// what an alias oracle does with it.
+    #[must_use]
+    pub fn modref(&self) -> &Summaries {
+        &self.modref
     }
 
     /// The control flow graph, computed if it is not already here.
@@ -457,12 +483,14 @@ impl Analyses {
     /// facts, since a function pass cannot add a symbol or a type node. Neither is what the
     /// functions are allowed to do, which was worked out for the whole module before the run: a
     /// pass that makes one function do less can only leave that answer stale in the safe
-    /// direction, and a pass cannot make one do more.
+    /// direction, and a pass cannot make one do more. Neither is what they do to the memory they
+    /// are handed, which is the same argument once more.
     pub fn clear(&mut self) {
         *self = Self::new(self.machine)
             .reading(Arc::clone(&self.images))
             .about(Arc::clone(&self.outside))
-            .calling(Arc::clone(&self.purity));
+            .calling(Arc::clone(&self.purity))
+            .touching(Arc::clone(&self.modref));
     }
 
     /// Forgets one analysis and nothing else.
@@ -562,6 +590,7 @@ mod tests {
     use rucc_ir::{Block, Func, Signature};
 
     use super::{Analysis, Preserved};
+    use crate::modref::{Summaries, Summary};
     use crate::purity::{Facts, Purity};
     use crate::testing::graph;
 
@@ -850,9 +879,14 @@ mod tests {
         let name = names.intern("f");
         let mut facts = Facts::default();
         facts.record_inferred(name, Purity::Const);
-        let mut an = crate::machine::fixtures::analyses().calling(Arc::new(facts));
+        let mut modref = Summaries::nothing();
+        modref.record(name, Summary::nothing(1));
+        let mut an = crate::machine::fixtures::analyses()
+            .calling(Arc::new(facts))
+            .touching(Arc::new(modref));
         an.clear();
         assert_eq!(an.purity().inferred(name), Purity::Const);
+        assert!(an.modref().of(name).is_some_and(Summary::touches_nothing));
     }
 
     #[test]

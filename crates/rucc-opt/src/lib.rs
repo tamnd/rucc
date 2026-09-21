@@ -129,6 +129,7 @@ pub mod load;
 pub mod loops;
 pub mod machine;
 pub mod memssa;
+pub mod modref;
 pub mod narrow;
 pub mod nests;
 pub mod nofree;

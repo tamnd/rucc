@@ -151,7 +151,7 @@ impl Pass for LoadForward {
         // every edit happens after it. Built once, because the escape analysis inside it is one
         // walk over the function and every query may ask it.
         {
-            let mut alias = Alias::new(func, an.outside());
+            let mut alias = Alias::new(func, an.outside()).knowing(an.modref());
             for block in func.blocks().collect::<Vec<Block>>() {
                 let mut known: HashMap<Value, Held> = HashMap::new();
                 for inst in func.insts(block).collect::<Vec<Inst>>() {

@@ -166,7 +166,7 @@ impl Pass for RedundantLoad {
         // walk over the function and every step of every walk may ask it.
         {
             let dom = an.dominators(func);
-            let mut walk = Walk::new(func, an.outside());
+            let mut walk = Walk::new(func, an.outside()).knowing(an.modref());
             // One entry per address read at a version of memory, holding the block the first load
             // of it was in and the value that load is known to be equal to.
             let mut seen: HashMap<(Value, Value, Type), (Block, Value)> = HashMap::new();
