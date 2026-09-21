@@ -106,11 +106,13 @@ pub use crate::kind::{
     RecordKind, Type, TypeKind, VlaId,
 };
 pub use crate::layout::{
-    IntegerInfo, Layout, LayoutError, float_format, float_width, int_width, integer_info, layout,
+    IntegerInfo, Layout, LayoutError, align, float_format, float_width, int_width, integer_info,
+    layout,
 };
 pub use crate::print::{declare, spell};
 pub use crate::record::{
-    Field, FieldDecl, RecordError, RecordLayout, RecordOptions, layout_record,
+    Extent, Field, FieldDecl, RecordError, RecordLayout, RecordOptions, VariableLayout,
+    layout_record,
 };
 pub use crate::types::{EnumInfo, RecordInfo, TypeId, Types};
 
@@ -686,10 +688,17 @@ mod tests {
         let mut types = Types::new();
         let linux = linux();
         let int = types.int(IntKind::Int);
-        for len in [ArrayLen::Unknown, ArrayLen::Star, ArrayLen::Variable(VlaId(0))] {
+        for len in [ArrayLen::Unknown, ArrayLen::Star] {
             let ty = types.array(int, len);
             assert_eq!(layout(&types, ty, &linux), Err(LayoutError::Incomplete));
         }
+        // An array whose length the program computes is a different answer from an incomplete
+        // one, because it is not a mistake: there is a size and this is not the place that
+        // knows it. A caller that only wants a number treats the two the same and a caller
+        // building the arithmetic asks for the members instead.
+        let measured = types.array(int, ArrayLen::Variable(VlaId(0)));
+        assert_eq!(layout(&types, measured, &linux), Err(LayoutError::Variable));
+        assert_eq!(align(&types, measured, &linux), Ok(4));
         let huge = types.array(int, ArrayLen::Fixed(u64::MAX));
         assert_eq!(layout(&types, huge, &linux), Err(LayoutError::TooLarge));
     }
@@ -1945,5 +1954,129 @@ mod tests {
         let name = types.typedef(interner.intern("word"), long);
         let array = types.array(name, ArrayLen::Fixed(4));
         assert_eq!(layout(&types, array, &linux()).unwrap(), Layout::new(32, 8));
+    }
+
+    /// A recipe worked out, with `sizes` standing for how large each member turned out to be.
+    ///
+    /// The lowering does this with instructions and this does it with numbers, which is what
+    /// makes a recipe testable here: the tree is the whole answer, and what a member is as long
+    /// as is the only thing either side has to be told.
+    fn work_out(recipe: &Extent, sizes: &[u64]) -> u64 {
+        match recipe {
+            Extent::Bytes(count) => *count,
+            Extent::Member(index) => sizes[*index as usize],
+            Extent::Sum(parts) => parts.iter().map(|part| work_out(part, sizes)).sum(),
+            Extent::RoundUp(inner, to) => work_out(inner, sizes).next_multiple_of(*to),
+            Extent::Max(parts) => parts.iter().map(|part| work_out(part, sizes)).max().unwrap_or(0),
+        }
+    }
+
+    /// An array of `int` whose length the program computes.
+    fn measured(types: &mut Types, which: u32) -> TypeId {
+        let int = types.int(IntKind::Int);
+        types.array(int, ArrayLen::Variable(VlaId(which)))
+    }
+
+    #[test]
+    fn a_member_of_no_fixed_size_leaves_the_size_and_what_follows_it_to_the_program() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let rows = measured(&mut types, 0);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(rows), member(int)]);
+
+        // Nothing is known here but the alignment, which never varies: it is decided by the
+        // members rather than by where they land.
+        assert_eq!(laid_out.layout, Layout::new(0, 4));
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        // The member in front of the variable one sits where its number says, and the one after
+        // it does not. There is no rounding in between, because an array of `int` ends on a four
+        // byte boundary however long it is.
+        assert_eq!(variable.offsets[0], None);
+        let after = variable.offsets[1].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [4 * count, 4];
+            assert_eq!(work_out(after, &sizes), 4 * count);
+            assert_eq!(work_out(&variable.size, &sizes), 4 * count + 4);
+        }
+        assert_eq!(laid_out.fields[1].align, 4);
+    }
+
+    #[test]
+    fn a_member_after_one_of_no_fixed_size_is_rounded_up_where_its_alignment_asks_for_it() {
+        let mut types = Types::new();
+        let char_ty = types.int(IntKind::Char);
+        let rows = measured(&mut types, 0);
+        let double = types.float(FloatKind::Double);
+        let fields = [member(char_ty), member(rows), member(double)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+
+        assert_eq!(laid_out.layout, Layout::new(0, 8));
+        assert_eq!(offsets(&laid_out)[..2], [0, 32]);
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        assert_eq!(variable.offsets[..2], [None, None]);
+        let after = variable.offsets[2].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [1, 4 * count, 8];
+            let at = (4 + 4 * count).next_multiple_of(8);
+            assert_eq!(work_out(after, &sizes), at);
+            assert_eq!(work_out(&variable.size, &sizes), at + 8);
+        }
+    }
+
+    #[test]
+    fn a_union_with_a_member_of_no_fixed_size_is_as_long_as_the_longest_of_them() {
+        let mut types = Types::new();
+        let rows = measured(&mut types, 0);
+        let double = types.float(FloatKind::Double);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(rows), member(double)]);
+
+        assert_eq!(laid_out.layout, Layout::new(0, 8));
+        let variable = laid_out.variable.expect("a union with a member of no fixed size");
+        // Every member of a union starts where the union does, so none of them has an offset the
+        // program has to work out.
+        assert!(variable.offsets.iter().all(Option::is_none));
+        for count in 0..6u64 {
+            let sizes = [4 * count, 8];
+            let want = (4 * count).max(8).next_multiple_of(8);
+            assert_eq!(work_out(&variable.size, &sizes), want);
+        }
+    }
+
+    #[test]
+    fn packed_takes_the_rounding_out_of_a_record_the_program_measures() {
+        let mut types = Types::new();
+        let char_ty = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let rows = measured(&mut types, 0);
+        let fields = [member(char_ty), member(rows), member(int)];
+        let options = RecordOptions { packed: true, ..RecordOptions::default() };
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &options, &linux())
+            .expect("a packed record with a member of no fixed size");
+
+        assert_eq!(laid_out.layout, Layout::new(0, 1));
+        assert_eq!(laid_out.fields[2].align, 1);
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        let after = variable.offsets[2].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [1, 4 * count, 4];
+            assert_eq!(work_out(after, &sizes), 1 + 4 * count);
+            assert_eq!(work_out(&variable.size, &sizes), 1 + 4 * count + 4);
+        }
+    }
+
+    #[test]
+    fn a_bit_field_after_a_member_of_no_fixed_size_is_turned_down() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let rows = measured(&mut types, 0);
+        let fields = [member(rows), bits(&mut interner, "b", int, 3)];
+        let options = RecordOptions::default();
+        let failed = layout_record(&types, RecordKind::Struct, &fields, &options, &linux());
+
+        // Which unit such a bit-field lands in is a question about an address the program has
+        // not worked out yet, and gcc answers it while the program runs. Nothing here does, so
+        // the layout says so rather than putting the member somewhere plausible.
+        assert_eq!(failed, Err(RecordError::VariableBitField { index: 1 }));
     }
 }

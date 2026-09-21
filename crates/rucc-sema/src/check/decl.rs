@@ -164,8 +164,8 @@ impl Checker<'_> {
     fn var(&mut self, specs: ast::DeclSpecsId, declarators: ast::InitDeclaratorList) -> DeclList {
         let mut items = self.ast[declarators].to_vec();
         if items.is_empty() {
-            self.empty_declaration(specs);
-            return self.tast.add_decl_refs(&[]);
+            let declared = self.empty_declaration(specs);
+            return self.tast.add_decl_refs(declared.as_slice());
         }
         let node = self.ast[specs];
         if let Some(which) = node.deduces() {
@@ -433,7 +433,12 @@ impl Checker<'_> {
     /// The type is built either way, because `struct S { int x; };` is how every structure in
     /// every header is declared and the body is where the members are checked. What is diagnosed
     /// is the case where a type was named and there was nothing for it to be the type of.
-    fn empty_declaration(&mut self, specs: ast::DeclSpecsId) {
+    ///
+    /// The declaration it hands back is the one a record whose members the program measures
+    /// leaves behind, `struct S { char b[n]; };`, which declares no object and is there so that
+    /// the lowering has somewhere to evaluate `n`. 6.7.7.3p12 wants that done where this stands,
+    /// so that a later `n++` does not change what `sizeof(struct S)` answers.
+    fn empty_declaration(&mut self, specs: ast::DeclSpecsId) -> Option<DeclId> {
         let node = self.ast[specs];
         if matches!(node.ty, ast::TypeSpec::None) {
             // No type was named, so there is none to build and nothing to say about what it
@@ -441,7 +446,7 @@ impl Checker<'_> {
             // and the type builder would otherwise report the missing type as if the
             // declaration had a declarator that needed one.
             self.specifiers_alone(node);
-            return;
+            return None;
         }
         if let ast::TypeSpec::Auto(which) = node.ty {
             // A deduced type with nothing to deduce from. Not a useless type name, because
@@ -452,9 +457,9 @@ impl Checker<'_> {
                 Diagnostic::error(format!("`{word}` in empty declaration"), node.span)
                     .with_code("E0669"),
             );
-            return;
+            return None;
         }
-        self.declared_specs(specs);
+        let ty = self.declared_specs(specs);
         match node.ty {
             // A record with no tag and no declarator names a type nothing can ever refer to,
             // which is a different mistake from naming a type and forgetting the variable.
@@ -485,6 +490,7 @@ impl Checker<'_> {
                 );
             }
         }
+        self.type_decl(None, ty, node.span)
     }
 
     /// A declaration that named no type, no declarator and no tag, which is a `;` and whatever
@@ -747,7 +753,7 @@ impl Checker<'_> {
             None => {}
         }
         self.declare_typedef(name, ty);
-        self.type_decl(name, ty, span)
+        self.type_decl(Some(name), ty, span)
     }
 
     /// The declaration a typedef of a variably modified type leaves behind.
@@ -761,13 +767,13 @@ impl Checker<'_> {
     ///
     /// A file-scope typedef needs none of it, since a variably modified type is refused there and
     /// there is no run time to evaluate a size in.
-    fn type_decl(&mut self, name: Symbol, ty: TypeId, span: Span) -> Option<DeclId> {
+    fn type_decl(&mut self, name: Option<Symbol>, ty: TypeId, span: Span) -> Option<DeclId> {
         if self.scopes.at_file_scope() || !self.is_variably_modified(ty) {
             return None;
         }
         Some(self.tast.decl(
             Decl {
-                name: Some(name),
+                name,
                 ty,
                 kind: DeclKind::Type,
                 linkage: Linkage::None,

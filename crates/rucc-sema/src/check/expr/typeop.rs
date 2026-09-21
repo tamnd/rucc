@@ -36,9 +36,9 @@ use rucc_ast::{self as ast, Designator};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
-    ArrayLen, FloatKind, Layout, LayoutError, RecordId, TypeId, TypeKind, compatible,
-    is_arithmetic, is_complete, is_floating, is_function, is_integer, is_pointer, is_record,
-    is_void, layout,
+    ArrayLen, Extent, FloatKind, Layout, LayoutError, RecordId, TypeId, TypeKind, align,
+    compatible, is_arithmetic, is_complete, is_floating, is_function, is_integer, is_pointer,
+    is_record, is_void, layout,
 };
 
 use crate::check::Checker;
@@ -46,6 +46,20 @@ use crate::check::expr::{Callee, Target};
 use crate::decl::InitEntry;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
+
+/// One step of an `offsetof` path, and what walking it added to the offset.
+///
+/// The offset is split in two because almost every path is a number and a few are not: a record
+/// the program measures, or an array of one, puts a term in here that has to be worked out where
+/// the `offsetof` is written, and the number beside it is everything the layout already knew.
+struct Step {
+    /// The type the step reached, which is what the next step walks through.
+    ty: TypeId,
+    /// How many bytes the step added, for the part of it the layout had a number for.
+    bytes: u64,
+    /// The rest of what it added, where the layout had no number.
+    term: Option<ExprId>,
+}
 
 /// `void_type_class`, and the eleven below it are the rest of gcc's `enum type_class`.
 ///
@@ -377,9 +391,11 @@ impl Checker<'_> {
             };
         }
         // An array's alignment is its element's, which is the answer for a variable length one
-        // as well even though it has no size to speak of.
+        // as well even though it has no size to speak of, and a record with one among its members
+        // is aligned by its members however long they turn out to be.
         let measured = match what {
-            Measure::Align => layout(&self.types, self.element_of(ty), self.cx.target),
+            Measure::Align => align(&self.types, self.element_of(ty), self.cx.target)
+                .map(|align| Layout::new(0, align)),
             Measure::Size => layout(&self.types, ty, self.cx.target),
         };
         let value = match measured {
@@ -417,6 +433,19 @@ impl Checker<'_> {
                 );
                 return self.poison(span);
             }
+            // A size worked out where the declaration was reached, which the test at the top of
+            // this took, so what is left here is an alignment and every one of those is a number.
+            Err(LayoutError::Variable) => {
+                let spelled = self.spell(ty);
+                self.report(
+                    Diagnostic::error(
+                        format!("invalid application of '{}' to type '{spelled}'", what.as_str()),
+                        span,
+                    )
+                    .with_code("E0571"),
+                );
+                return self.poison(span);
+            }
         };
         let size = self.size_type();
         self.constant(Const::Int(i128::from(value)), size, span)
@@ -448,9 +477,14 @@ impl Checker<'_> {
             let measured = layout(&self.types, ty, self.cx.target).ok()?;
             return Some(self.constant(Const::Int(i128::from(measured.size)), size, span));
         }
-        // Only an array answers the test above, so the pattern holds and the `else` is here
-        // because the compiler cannot know that.
-        let TypeKind::Array { elem, len } = self.types.kind(self.types.canonical(ty)) else {
+        let canonical = self.types.canonical(ty);
+        if let TypeKind::Record(record) = self.types.kind(canonical) {
+            let recipe = self.types.record_info(record).variable.as_ref()?.size.clone();
+            return self.extent_expr(record, &recipe, span);
+        }
+        // An array and a record are the only two that answer the test above, so the pattern
+        // holds and the `else` is here because the compiler cannot know that.
+        let TypeKind::Array { elem, len } = self.types.kind(canonical) else {
             return None;
         };
         let elem = self.size_expr(elem, span)?;
@@ -466,6 +500,97 @@ impl Checker<'_> {
         };
         let node = ExprKind::Binary { op: ast::BinaryOp::Mul, lhs: count, rhs: elem };
         Some(self.tast.expr(Expr::new(node, size, Category::Rvalue), span))
+    }
+
+    /// One recipe over the members of a record, as the expression that works it out.
+    ///
+    /// The recipe is what the layout left behind where it ran out of numbers, and this is the
+    /// one side of turning it back into something that has a value. The other side is in the
+    /// lowering, which wants an instruction rather than a node; they agree because both of them
+    /// ask the same question about a member, which is how large its type is.
+    ///
+    /// Every size in it reaches the same size expression the array itself was declared with, so a
+    /// `sizeof` reads what was worked out at the declaration rather than working it out again,
+    /// which is the rule for an array and is the rule for a record holding one.
+    fn extent_expr(&mut self, record: RecordId, extent: &Extent, span: Span) -> Option<ExprId> {
+        let size = self.size_type();
+        match extent {
+            Extent::Bytes(count) => Some(self.constant(Const::Int(i128::from(*count)), size, span)),
+            Extent::Member(index) => {
+                let field = self.types.record_info(record).fields.get(*index as usize)?;
+                self.size_expr(field.ty, span)
+            }
+            Extent::Sum(parts) => self.extent_fold(record, parts, ast::BinaryOp::Add, span),
+            Extent::RoundUp(inner, to) => {
+                let inner = self.extent_expr(record, inner, span)?;
+                Some(self.round_up_expr(inner, *to, span))
+            }
+            Extent::Max(parts) => self.extent_largest(record, parts, span),
+        }
+    }
+
+    /// The parts of a recipe joined left to right by one operator.
+    fn extent_fold(
+        &mut self,
+        record: RecordId,
+        parts: &[Extent],
+        op: ast::BinaryOp,
+        span: Span,
+    ) -> Option<ExprId> {
+        let size = self.size_type();
+        let mut answer: Option<ExprId> = None;
+        for part in parts {
+            let part = self.extent_expr(record, part, span)?;
+            answer = Some(match answer {
+                Some(lhs) => {
+                    let node = ExprKind::Binary { op, lhs, rhs: part };
+                    self.tast.expr(Expr::new(node, size, Category::Rvalue), span)
+                }
+                None => part,
+            });
+        }
+        answer
+    }
+
+    /// An expression rounding `value` up to a multiple of `to`, which is always a power of two.
+    ///
+    /// Written as the mask rather than as a division because that is what it compiles to either
+    /// way and because the mask is exact: a size and an alignment are both unsigned here, so
+    /// there is no rounding toward zero to think about and nothing to overflow that the size
+    /// itself would not have overflowed.
+    fn round_up_expr(&mut self, value: ExprId, to: u64, span: Span) -> ExprId {
+        let size = self.size_type();
+        let ahead = self.constant(Const::Int(i128::from(to - 1)), size, span);
+        let mask = self.constant(Const::Int(!i128::from(to - 1)), size, span);
+        let node = ExprKind::Binary { op: ast::BinaryOp::Add, lhs: value, rhs: ahead };
+        let raised = self.tast.expr(Expr::new(node, size, Category::Rvalue), span);
+        let node = ExprKind::Binary { op: ast::BinaryOp::BitAnd, lhs: raised, rhs: mask };
+        self.tast.expr(Expr::new(node, size, Category::Rvalue), span)
+    }
+
+    /// The largest of the parts of a recipe, which is how long a `union` of them is.
+    ///
+    /// A member of it is named twice, once in the comparison and once in the answer, and that is
+    /// not two evaluations of anything: what a size reaches is the expression the array was
+    /// declared with, which was evaluated where the declaration was and is read from where it was
+    /// kept.
+    fn extent_largest(&mut self, record: RecordId, parts: &[Extent], span: Span) -> Option<ExprId> {
+        let size = self.size_type();
+        let int = self.int();
+        let mut answer: Option<ExprId> = None;
+        for part in parts {
+            let part = self.extent_expr(record, part, span)?;
+            answer = Some(match answer {
+                Some(lhs) => {
+                    let node = ExprKind::Binary { op: ast::BinaryOp::Gt, lhs, rhs: part };
+                    let wider = self.tast.expr(Expr::new(node, int, Category::Rvalue), span);
+                    let node = ExprKind::Cond { cond: wider, then: lhs, otherwise: part };
+                    self.tast.expr(Expr::new(node, size, Category::Rvalue), span)
+                }
+                None => part,
+            });
+        }
+        answer
     }
 
     /// The type whose alignment an array's is, which is its element's however deep it goes.
@@ -569,7 +694,12 @@ impl Checker<'_> {
         true
     }
 
-    /// `__builtin_offsetof(ty, path)`, which is a constant and not an address.
+    /// `__builtin_offsetof(ty, path)`, which is a constant where every step of the path is one.
+    ///
+    /// A step is not one where the type it walks through is a record or an array the program
+    /// measures, `offsetof(struct S, b[i])` inside a function, and gcc answers those with the
+    /// arithmetic rather than turning them down. So the path adds up to a number and however
+    /// many terms were not numbers, and what comes back is the sum of the two.
     pub(super) fn offset_of(
         &mut self,
         ty: ast::TypeNameId,
@@ -578,20 +708,41 @@ impl Checker<'_> {
     ) -> ExprId {
         let mut ty = self.type_name(ty);
         let mut offset = 0u64;
+        let mut computed: Option<ExprId> = None;
         for index in 0..self.ast[path].len() {
             let step = self.ast[path][index];
-            let Some((next, bytes)) = self.offset_step(ty, step, span) else {
+            let Some(step) = self.offset_step(ty, step, span) else {
                 return self.poison(span);
             };
-            ty = next;
-            offset += bytes;
+            ty = step.ty;
+            offset += step.bytes;
+            if let Some(term) = step.term {
+                computed = Some(match computed {
+                    Some(sum) => self.sum_expr(sum, term, span),
+                    None => term,
+                });
+            }
         }
         let size = self.size_type();
-        self.constant(Const::Int(i128::from(offset)), size, span)
+        let Some(term) = computed else {
+            return self.constant(Const::Int(i128::from(offset)), size, span);
+        };
+        if offset == 0 {
+            return term;
+        }
+        let number = self.constant(Const::Int(i128::from(offset)), size, span);
+        self.sum_expr(number, term, span)
+    }
+
+    /// Two offsets added, which is how the terms of a path that is not a number are joined.
+    fn sum_expr(&mut self, lhs: ExprId, rhs: ExprId, span: Span) -> ExprId {
+        let size = self.size_type();
+        let node = ExprKind::Binary { op: ast::BinaryOp::Add, lhs, rhs };
+        self.tast.expr(Expr::new(node, size, Category::Rvalue), span)
     }
 
     /// One step of an offset path: the type it reaches and what it adds to the offset.
-    fn offset_step(&mut self, ty: TypeId, step: Designator, span: Span) -> Option<(TypeId, u64)> {
+    fn offset_step(&mut self, ty: TypeId, step: Designator, span: Span) -> Option<Step> {
         match step {
             Designator::Field(name) | Designator::ObsoleteField(name) => {
                 self.offset_field(ty, name, span)
@@ -611,9 +762,25 @@ impl Checker<'_> {
                     return None;
                 };
                 let expr = self.expr(expr);
-                let index = self.eval_integer(expr).ok()?;
-                let size = layout(&self.types, elem, self.cx.target).ok()?.size;
-                Some((elem, size * u64::try_from(index).unwrap_or(0)))
+                let index = self.eval_integer(expr).ok();
+                let stride = layout(&self.types, elem, self.cx.target).map(|laid| laid.size);
+                if let (Some(index), Ok(stride)) = (index, stride) {
+                    let bytes = stride * u64::try_from(index).unwrap_or(0);
+                    return Some(Step { ty: elem, bytes, term: None });
+                }
+                let size = self.size_type();
+                let stride = match stride {
+                    Ok(bytes) => self.constant(Const::Int(i128::from(bytes)), size, span),
+                    Err(LayoutError::Variable) => self.size_expr(elem, span)?,
+                    Err(_) => return None,
+                };
+                // The subscript in the type the arithmetic happens in, which is the one a size
+                // is in. A negative one is as meaningless here as it is in a subscript of an
+                // object, and gcc wraps it the same way this does.
+                let count = self.conv().to_type(expr, size);
+                let node = ExprKind::Binary { op: ast::BinaryOp::Mul, lhs: count, rhs: stride };
+                let term = self.tast.expr(Expr::new(node, size, Category::Rvalue), span);
+                Some(Step { ty: elem, bytes: 0, term: Some(term) })
             }
             // A range designates more than one element, so there is no one offset to answer
             // with. It is legal in an initializer and nowhere near an `offsetof`.
@@ -628,7 +795,7 @@ impl Checker<'_> {
     }
 
     /// The member step of an offset path, which is where the record rules are.
-    fn offset_field(&mut self, ty: TypeId, name: Symbol, span: Span) -> Option<(TypeId, u64)> {
+    fn offset_field(&mut self, ty: TypeId, name: Symbol, span: Span) -> Option<Step> {
         let TypeKind::Record(record) = self.types.kind(self.types.canonical(ty)) else {
             let name = self.text(name).to_owned();
             self.report(
@@ -660,14 +827,10 @@ impl Checker<'_> {
     }
 
     /// The offset of a member reached through however many anonymous members hold it.
-    fn offset_chain(
-        &mut self,
-        record: RecordId,
-        path: &[u32],
-        span: Span,
-    ) -> Option<(TypeId, u64)> {
+    fn offset_chain(&mut self, record: RecordId, path: &[u32], span: Span) -> Option<Step> {
         let mut record = record;
         let mut offset = 0;
+        let mut computed: Option<ExprId> = None;
         let mut ty = self.types.record(record);
         for (step, &index) in path.iter().enumerate() {
             let field = self.types.record_info(record).fields[index as usize];
@@ -685,7 +848,25 @@ impl Checker<'_> {
                 );
                 return None;
             }
-            offset += field.offset;
+            // Where a member of a record the program measures sits, for the members that come
+            // after the one of no fixed size. The rest of them sit where the number says, which
+            // is every member of every other record and the ones in front of that one here.
+            let recipe = self
+                .types
+                .record_info(record)
+                .variable
+                .as_ref()
+                .and_then(|found| found.offsets.get(index as usize).cloned().flatten());
+            match recipe {
+                Some(recipe) => {
+                    let term = self.extent_expr(record, &recipe, span)?;
+                    computed = Some(match computed {
+                        Some(sum) => self.sum_expr(sum, term, span),
+                        None => term,
+                    });
+                }
+                None => offset += field.offset,
+            }
             ty = field.ty;
             if step + 1 < path.len() {
                 let TypeKind::Record(inner) = self.types.kind(self.types.canonical(ty)) else {
@@ -694,7 +875,7 @@ impl Checker<'_> {
                 record = inner;
             }
         }
-        Some((ty, offset))
+        Some(Step { ty, bytes: offset, term: computed })
     }
 
     /// `__builtin_classify_type(expr)`, whose operand is there for its type alone.

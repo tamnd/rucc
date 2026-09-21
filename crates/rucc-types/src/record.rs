@@ -26,7 +26,7 @@
 use rucc_target::{BitFieldStyle, TargetInfo};
 
 use crate::kind::{ArrayLen, RecordKind, TypeKind};
-use crate::layout::{Layout, LayoutError, layout};
+use crate::layout::{Layout, LayoutError, align, layout};
 use crate::types::{TypeId, Types};
 
 /// One member of a record as the program wrote it.
@@ -85,6 +85,13 @@ pub struct Field {
     ///
     /// Always zero for an ordinary member, since every one of those starts on a byte boundary.
     pub bit: u32,
+    /// What the member's offset is a multiple of, which is the alignment it was placed at.
+    ///
+    /// The same as the alignment of its type for most members, one byte under `packed`, and more
+    /// than either where `aligned` asked for more. It is here because it is the only thing known
+    /// about where a member sits once the offset stops being a number: an address is as aligned
+    /// as the record is and as the offset into it is, and this is that second half.
+    pub align: u64,
     /// The bit-field width, absent when the member is an ordinary one.
     pub bits: Option<u32>,
 }
@@ -119,13 +126,136 @@ pub struct RecordOptions {
     pub pack: Option<u64>,
 }
 
+/// How many bytes something is, where the answer is not a number here.
+///
+/// A member of a structure declared inside a function may be a variable length array, and then
+/// the size of the structure and the offsets of the members after that one are worked out where
+/// the declaration is reached rather than where it is written. This is the recipe for working one
+/// out: a small tree over the sizes of the members, which whoever generates code walks once it
+/// has a value for each of those.
+///
+/// A recipe rather than an expression because this crate has no expressions in it. What it names
+/// is a member by index, and the one thing a reader has to be able to do with that is ask how
+/// large the member's type is, which is a question it already answers for every other type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Extent {
+    /// A number of bytes, known here.
+    Bytes(u64),
+    /// How large the type of the member at this index is.
+    Member(u32),
+    /// The sum of these, which is where a member sits once what is in front of it is counted.
+    Sum(Vec<Extent>),
+    /// The first rounded up to a multiple of the second, which is an alignment.
+    RoundUp(Box<Extent>, u64),
+    /// The largest of these, which is how long a `union` is.
+    Max(Vec<Extent>),
+}
+
+impl Extent {
+    /// The sum of the parts, folded where the parts are numbers.
+    ///
+    /// Folding here rather than in the reader because nearly every one of these has a constant in
+    /// it and most of them are nothing else: a member two members past the variable one is at the
+    /// same place as the member before it plus a number, and adding the two numbers here is what
+    /// keeps the recipe the size of the thing that varies rather than the size of the record.
+    #[must_use]
+    pub fn sum(parts: Vec<Extent>) -> Extent {
+        let mut bytes = 0u64;
+        let mut rest = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                Extent::Bytes(count) => bytes = bytes.saturating_add(count),
+                Extent::Sum(inner) => {
+                    for part in inner {
+                        match part {
+                            Extent::Bytes(count) => bytes = bytes.saturating_add(count),
+                            part => rest.push(part),
+                        }
+                    }
+                }
+                part => rest.push(part),
+            }
+        }
+        if rest.is_empty() {
+            return Extent::Bytes(bytes);
+        }
+        if bytes != 0 {
+            rest.push(Extent::Bytes(bytes));
+        }
+        if rest.len() > 1 {
+            return Extent::Sum(rest);
+        }
+        // The one part left, which is the whole answer: a list of one adds nothing to it.
+        rest.pop().unwrap_or(Extent::Bytes(bytes))
+    }
+
+    /// The extent rounded up to a multiple of `to`, folded where it is a number.
+    #[must_use]
+    pub fn round_up(self, to: u64) -> Extent {
+        if to <= 1 {
+            return self;
+        }
+        match self {
+            Extent::Bytes(count) => Extent::Bytes(count.next_multiple_of(to)),
+            extent => Extent::RoundUp(Box::new(extent), to),
+        }
+    }
+
+    /// The largest of the parts, folded where the parts are numbers.
+    #[must_use]
+    pub fn max(parts: Vec<Extent>) -> Extent {
+        let mut bytes = 0u64;
+        let mut rest = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                Extent::Bytes(count) => bytes = bytes.max(count),
+                part => rest.push(part),
+            }
+        }
+        if rest.is_empty() {
+            return Extent::Bytes(bytes);
+        }
+        if bytes != 0 {
+            rest.push(Extent::Bytes(bytes));
+        }
+        if rest.len() > 1 {
+            return Extent::Max(rest);
+        }
+        // The one part left, which is the whole answer: a list of one adds nothing to it.
+        rest.pop().unwrap_or(Extent::Bytes(bytes))
+    }
+}
+
+/// What is left of a record's layout when it depends on something the program computes.
+///
+/// Present on exactly the records that have a variable length array somewhere in their members,
+/// which C calls variably modified and which may only be declared inside a function. The
+/// alignment is not in here because an alignment never varies: it is decided by the members
+/// rather than by where they land, so it is in the [`Layout`] beside this with a size of zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableLayout {
+    /// How large the record is, padded to its alignment the way a fixed size one is.
+    pub size: Extent,
+    /// Where each member sits, in bytes, one entry per member and in the same order.
+    ///
+    /// Absent for a member that sits where the number in its [`Field`] says, which is every
+    /// member in front of the first one of no fixed size and is the common case even here.
+    pub offsets: Vec<Option<Extent>>,
+}
+
 /// A record, laid out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordLayout {
     /// The size and alignment of the record.
+    ///
+    /// For a record whose size is not known here the alignment is still the right one and the
+    /// size is zero, with [`RecordLayout::variable`] holding the recipe that says how long it
+    /// really is.
     pub layout: Layout,
     /// The members, one per declaration and in the same order, zero width bit-fields included.
     pub fields: Vec<Field>,
+    /// What the record's size and its members' offsets are, where they are not numbers.
+    pub variable: Option<VariableLayout>,
 }
 
 /// Why a record has no layout.
@@ -150,6 +280,12 @@ pub enum RecordError {
     /// The record is larger than an object may be, which enough members or one large enough
     /// array can arrange.
     TooLarge,
+    /// A bit-field sits after a member whose length the program computes, which this compiler
+    /// does not lay out yet. The index is into the declarations that were passed.
+    VariableBitField {
+        /// Which member.
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for RecordError {
@@ -163,6 +299,9 @@ impl std::fmt::Display for RecordError {
                 )
             }
             RecordError::TooLarge => f.write_str("the record is larger than an object may be"),
+            RecordError::VariableBitField { index } => {
+                write!(f, "member {index}: a bit-field after a member of no fixed size")
+            }
         }
     }
 }
@@ -180,6 +319,12 @@ impl std::error::Error for RecordError {}
 /// makes `malloc(sizeof(struct S) + n)` the idiom it is. An array with no size anywhere else is
 /// an incomplete member and reported as one; whether it was allowed to be there at all is a
 /// question for whoever holds the span.
+///
+/// A member whose length is a variable is not an error either. It is placed by the same rules as
+/// any other member, over a position that is a recipe rather than a number once the first of them
+/// has gone by, and the result carries a [`VariableLayout`] saying what that recipe is. Whether
+/// the program was allowed to write one there is again a question for whoever holds the span,
+/// since the answer depends on the scope the record was declared in.
 ///
 /// # Errors
 ///
@@ -225,6 +370,27 @@ struct Builder {
     /// against the running bit position and the storage it lands in is whatever it lands in.
     unit: Option<Unit>,
     fields: Vec<Field>,
+    /// Where the running position starts from, once a member of no fixed size has gone by.
+    ///
+    /// `None` until then, and from then on [`Builder::at`] and [`Builder::bits`] are counted from
+    /// here rather than from the start of the record. Every member is a whole number of bytes
+    /// long, so this is a byte position and the bits in `at` are bits within the byte it names.
+    base: Option<Extent>,
+    /// What the base is known to be a multiple of, which is what says whether a member after it
+    /// is already where its alignment wants it.
+    ///
+    /// The size of a type is always a multiple of its alignment, so the end of a member of no
+    /// fixed size is a multiple of the member's own alignment even though it is not a number.
+    /// That is what makes `struct { int i[n]; int j; }` cost no arithmetic at all: four times
+    /// however many is a multiple of four, so `j` is where the running position already is.
+    base_align: u64,
+    /// Where each member sits, where that is not the number in its [`Field`].
+    offsets: Vec<Option<Extent>>,
+    /// How long each member of no fixed size is, which is what makes a `union` as long as it is.
+    ///
+    /// Only a `union` fills this, because only there is the size of the whole a question about
+    /// every member at once rather than about where the last one ended.
+    widest: Vec<Extent>,
 }
 
 /// A run of Microsoft bit-fields sharing one piece of storage.
@@ -258,6 +424,10 @@ impl Builder {
             empty: target.empty_record_size,
             unit: None,
             fields: Vec::with_capacity(members),
+            base: None,
+            base_align: 1,
+            offsets: Vec::with_capacity(members),
+            widest: Vec::new(),
         }
     }
 
@@ -270,9 +440,23 @@ impl Builder {
         decl: &FieldDecl,
         last: bool,
     ) -> Result<(), RecordError> {
+        // Where a bit-field goes depends on the bit the record has got to, and once a member of
+        // no fixed size has gone by nothing here knows which bit that is. gcc works it out where
+        // the declaration is reached, in arithmetic that decides at run time whether the field
+        // straddles its storage; this compiler does not do that yet, and refusing is the answer
+        // until it does, because the alternative is a member at an offset that is right for some
+        // lengths and wrong for others.
+        if decl.bits.is_some() && self.base.is_some() {
+            return Err(RecordError::VariableBitField { index });
+        }
         let flexible = last && self.kind == RecordKind::Struct && flexible_array(types, decl.ty);
-        let member = member_layout(types, decl.ty, flexible, target)
-            .map_err(|error| RecordError::Member { index, error })?;
+        let member = match member_layout(types, decl.ty, flexible, target) {
+            Ok(member) => member,
+            // A member whose length nobody knows yet, which is laid out by a path of its own
+            // because the only thing it cannot do is contribute a number to the position.
+            Err(LayoutError::Variable) => return self.variable(types, target, index, decl),
+            Err(error) => return Err(RecordError::Member { index, error }),
+        };
         let align = self.member_align(decl, member.align);
         match decl.bits {
             Some(0) => self.zero_width(target, decl, member.align)?,
@@ -287,10 +471,73 @@ impl Builder {
     /// Splitting the bit offset into a byte and a bit is the only place a `u64` can be too
     /// narrow for it, and it can only happen for a record that [`Self::finish`] is going to
     /// refuse anyway, so saying so here is the same answer arriving earlier.
-    fn push(&mut self, decl: &FieldDecl, at: u128, bits: Option<u32>) -> Result<(), RecordError> {
+    fn push(
+        &mut self,
+        decl: &FieldDecl,
+        at: u128,
+        bits: Option<u32>,
+        align: u64,
+    ) -> Result<(), RecordError> {
         let offset = u64::try_from(at / 8).map_err(|_| RecordError::TooLarge)?;
         let bit = u32::try_from(at % 8).expect("a bit within a byte");
-        self.fields.push(Field { name: decl.name, ty: decl.ty, offset, bit, bits });
+        self.fields.push(Field { name: decl.name, ty: decl.ty, offset, bit, bits, align });
+        // Once a member of no fixed size has gone by, the number above is counted from the end of
+        // that member rather than from the start of the record, so what really says where this
+        // member sits is kept beside it.
+        let recipe = self.base.as_ref().map(|_| self.position(offset));
+        self.offsets.push(recipe);
+        Ok(())
+    }
+
+    /// The position `bytes` past where the running position is counted from.
+    fn position(&self, bytes: u64) -> Extent {
+        match &self.base {
+            Some(base) => Extent::sum(vec![base.clone(), Extent::Bytes(bytes)]),
+            None => Extent::Bytes(bytes),
+        }
+    }
+
+    /// Places a member whose length is not known until the program runs.
+    ///
+    /// The rules are the ones every other member is placed by. What is different is that the
+    /// position stops being a number here: the member starts at a byte the alignment decides and
+    /// ends somewhere only the program knows, so what comes after it is counted from that end.
+    /// The running bit position is reset rather than carried, and it can be, because a member is
+    /// a whole number of bytes long however long that is.
+    fn variable(
+        &mut self,
+        types: &Types,
+        target: &TargetInfo,
+        index: usize,
+        decl: &FieldDecl,
+    ) -> Result<(), RecordError> {
+        let natural =
+            align(types, decl.ty, target).map_err(|error| RecordError::Member { index, error })?;
+        let align = self.member_align(decl, natural);
+        let member = u32::try_from(index).map_err(|_| RecordError::TooLarge)?;
+        // A member of no fixed size is never a bit-field, so the run of them that Microsoft's
+        // rule allocates ends here, and after that the position is a whole byte.
+        self.close_unit();
+        match self.kind {
+            RecordKind::Struct => {
+                let at = self.step_to(align)?;
+                let bytes = u64::try_from(at / 8).map_err(|_| RecordError::TooLarge)?;
+                let start = self.position(bytes);
+                self.push(decl, at, None, align)?;
+                self.base = Some(Extent::sum(vec![start, Extent::Member(member)]));
+                // The member starts where its own alignment put it and is a whole number of its
+                // natural alignment long, so the end of it is a multiple of the smaller of the
+                // two. They differ when `packed` lowered where it starts or `aligned` raised it.
+                self.base_align = align.min(natural).max(1);
+                self.at = 0;
+                self.bits = 0;
+            }
+            RecordKind::Union => {
+                self.push(decl, 0, None, align)?;
+                self.widest.push(Extent::Member(member));
+            }
+        }
+        self.align = self.align.max(align);
         Ok(())
     }
 
@@ -330,13 +577,37 @@ impl Builder {
         // Itanium rule, where there is never a unit open.
         self.close_unit();
         let offset = match self.kind {
-            RecordKind::Struct => round_up(self.at, u128::from(align) * 8)?,
+            RecordKind::Struct => self.step_to(align)?,
             RecordKind::Union => 0,
         };
-        self.push(decl, offset, None)?;
+        self.push(decl, offset, None, align)?;
         self.advance(offset, u128::from(member.size) * 8);
         self.align = self.align.max(align);
         Ok(())
+    }
+
+    /// The bit a member of this alignment starts at, once the member before it is placed.
+    ///
+    /// The ordinary answer is the running position rounded up, and it stays the ordinary answer
+    /// for as long as the running position is a number. After that it is not enough: the position
+    /// is so many bytes past something only the program knows, and rounding that up leaves the
+    /// address a multiple of the alignment past a base that is not one. So where the base is not
+    /// already as aligned as the member wants, the rounding is written into the recipe instead and
+    /// what follows is counted from there.
+    fn step_to(&mut self, align: u64) -> Result<u128, RecordError> {
+        let boundary = u128::from(align) * 8;
+        let Some(base) = self.base.clone() else {
+            return round_up(self.at, boundary);
+        };
+        if align <= self.base_align && self.at % boundary == 0 {
+            return Ok(self.at);
+        }
+        let bytes = u64::try_from(self.at / 8).map_err(|_| RecordError::TooLarge)?;
+        self.base = Some(Extent::sum(vec![base, Extent::Bytes(bytes)]).round_up(align));
+        self.base_align = align;
+        self.at = 0;
+        self.bits = 0;
+        Ok(0)
     }
 
     /// Places a bit-field of non-zero width.
@@ -361,7 +632,7 @@ impl Builder {
             BitFieldStyle::Itanium => self.itanium(decl, align, capacity, width)?,
             BitFieldStyle::Microsoft => self.microsoft(member, align, width)?,
         };
-        self.push(decl, offset, Some(width))?;
+        self.push(decl, offset, Some(width), align)?;
         if self.contributes_alignment(target, decl.name.is_some()) {
             self.align = self.align.max(align);
         }
@@ -521,7 +792,7 @@ impl Builder {
             }
             BitFieldStyle::Microsoft => self.close_unit(),
         }
-        self.push(decl, self.at, Some(0))
+        self.push(decl, self.at, Some(0), natural.max(1))
     }
 
     /// Records that a member ending at `offset + size` has been placed.
@@ -544,6 +815,9 @@ impl Builder {
             Some(asked) => self.align.max(asked),
             None => self.align,
         };
+        if self.base.is_some() || !self.widest.is_empty() {
+            return self.finish_variable(align);
+        }
         let size = u64::try_from(self.bits.div_ceil(8)).map_err(|_| RecordError::TooLarge)?;
         // A record with no storage in it is the one shape C has nothing to say about, because C
         // does not have it: it is a GNU extension, and the number is whatever the target's other
@@ -555,7 +829,45 @@ impl Builder {
         if size > self.max {
             return Err(RecordError::TooLarge);
         }
-        Ok(RecordLayout { layout: Layout::new(size, align), fields: self.fields })
+        Ok(RecordLayout { layout: Layout::new(size, align), fields: self.fields, variable: None })
+    }
+
+    /// The finished record, where how long it is depends on something the program computes.
+    ///
+    /// The one rule the fixed size path has that this one cannot is the limit on how large an
+    /// object may be, since nothing here knows how large it turned out to be. It is not lost:
+    /// every object of this type has its size worked out where its declaration is reached, and
+    /// that is where a length nobody can have an object of is caught.
+    ///
+    /// The other one it does without is the size a target gives a record with nothing in it, which
+    /// cannot arise, because a record with a member of no fixed size has a member.
+    fn finish_variable(self, align: u64) -> Result<RecordLayout, RecordError> {
+        let bytes = u64::try_from(self.bits.div_ceil(8)).map_err(|_| RecordError::TooLarge)?;
+        let size = match self.kind {
+            // Counted from the end of the last member of no fixed size, which is what the base
+            // is, plus whatever the members after it came to.
+            RecordKind::Struct => self.position(bytes),
+            // Every member of a `union` starts at the same place, so how long it is is a question
+            // about the longest of them and not about where anything ended.
+            RecordKind::Union => {
+                let mut parts = self.widest;
+                parts.push(Extent::Bytes(bytes));
+                Extent::max(parts)
+            }
+        };
+        // Rounded up to the alignment, unless the members already left it there, which is the
+        // same question a member of that alignment asks about where it goes.
+        let rounded = if self.base_align >= align && bytes % align == 0 {
+            size
+        } else {
+            size.round_up(align)
+        };
+        let variable = VariableLayout { size: rounded, offsets: self.offsets };
+        Ok(RecordLayout {
+            layout: Layout::new(0, align),
+            fields: self.fields,
+            variable: Some(variable),
+        })
     }
 }
 

@@ -18,7 +18,7 @@ use crate::kind::{
     RecordKind, Type, TypeKind,
 };
 use crate::layout::Layout;
-use crate::record::{Field, RecordLayout};
+use crate::record::{Field, RecordLayout, VariableLayout};
 
 /// The identity of a type.
 ///
@@ -57,7 +57,16 @@ pub struct RecordInfo {
     /// This is also what says whether the type is complete. A record is incomplete from the
     /// point its tag is first mentioned until its closing brace, and code in between may
     /// declare pointers to it and nothing else.
+    ///
+    /// For a record with a member of no fixed size the alignment here is the right one and the
+    /// size is zero, since an alignment never depends on a length. [`RecordInfo::variable`] is
+    /// what holds the size in that case and what says the size here means nothing.
     pub layout: Option<Layout>,
+    /// How long the record is and where its members sit, where those are not numbers.
+    ///
+    /// Present on exactly the records C calls variably modified, meaning a variable length array
+    /// is somewhere among the members, which may only be written inside a function.
+    pub variable: Option<VariableLayout>,
     /// The members, placed, and empty until the record is complete.
     ///
     /// One entry per member the program wrote, in that order, so a caller that kept the
@@ -322,6 +331,7 @@ impl Types {
             kind,
             tag,
             layout: None,
+            variable: None,
             fields: Vec::new(),
             transparent: false,
         });
@@ -382,6 +392,7 @@ impl Types {
     pub fn complete_record(&mut self, id: RecordId, laid_out: RecordLayout) {
         let info = &mut self.records[id.0 as usize];
         info.layout = Some(laid_out.layout);
+        info.variable = laid_out.variable;
         info.fields = laid_out.fields;
     }
 

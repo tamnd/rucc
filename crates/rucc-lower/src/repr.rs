@@ -14,7 +14,7 @@
 use rucc_ir::{Float, Type};
 use rucc_target::TargetInfo;
 use rucc_types::{
-    ArrayLen, FloatKind, LayoutError, Qualifiers, TypeId, TypeKind, Types, float_format,
+    ArrayLen, FloatKind, LayoutError, Qualifiers, TypeId, TypeKind, Types, align, float_format,
     integer_info, layout,
 };
 
@@ -123,14 +123,17 @@ pub(crate) fn is_read_only(types: &Types, id: TypeId) -> bool {
 /// array or something built out of one.
 ///
 /// `int a[n]` is one and so is `int a[3][n]`, because the outer array's size is three times a
-/// number nobody has yet. What is not one is `int (*p)[n]`: a pointer to a variably modified
-/// type is an ordinary pointer, and only the thing it points at has a size that varies.
+/// number nobody has yet. So is a record with one of those among its members, which is a
+/// structure declared inside a function. What is not one is `int (*p)[n]`: a pointer to a
+/// variably modified type is an ordinary pointer, and only the thing it points at has a size
+/// that varies.
 #[must_use]
 pub(crate) fn is_variable_length(types: &Types, id: TypeId) -> bool {
     match types.kind(types.canonical(id)) {
         TypeKind::Array { elem, len } => {
             matches!(len, ArrayLen::Variable(_) | ArrayLen::Star) || is_variable_length(types, elem)
         }
+        TypeKind::Record(record) => types.record_info(record).variable.is_some(),
         _ => false,
     }
 }
@@ -168,16 +171,12 @@ pub(crate) fn size_of(types: &Types, target: &TargetInfo, id: TypeId) -> u64 {
 ///
 /// An array whose length is not a constant has no layout, and yet an object of one is a real
 /// object that has to be aligned: an array is as aligned as its element whatever it is as long
-/// as, so that is the answer for one of these.
+/// as, so that is the answer for one of these, and a record holding one is aligned by its members
+/// however long they turn out to be. Both of those are what [`align`] is for.
 #[must_use]
 pub(crate) fn align_of(types: &Types, target: &TargetInfo, id: TypeId) -> u32 {
-    if let TypeKind::Array { elem, .. } = types.kind(types.canonical(id)) {
-        if is_variable_length(types, id) {
-            return align_of(types, target, elem);
-        }
-    }
-    match layout(types, id, target) {
-        Ok(layout) => u32::try_from(layout.align).unwrap_or(1).max(1),
+    match align(types, id, target) {
+        Ok(align) => u32::try_from(align).unwrap_or(1).max(1),
         Err(_) => 1,
     }
 }

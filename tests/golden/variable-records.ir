@@ -1,0 +1,395 @@
+; ModuleID = 'tests/golden/variable-records.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @use(ptr) -> i32, linkage(external);
+
+func @a_member_and_one_after_it(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = stacksave.ptr
+    %7 = alloca %5, align 4
+    %8 = sext.i64 %0
+    %9 = iconst.i64 4
+    %10 = mul.nsw %8, %9
+    %11 = ptr_add %7, %10
+    %12 = iconst.i32 1
+    store %12 -> %11, align 4, tbaa !1
+    %13 = sext.i64 %0
+    %14 = iconst.i64 4
+    %15 = mul %13, %14
+    %16 = iconst.i64 4
+    %17 = add %15, %16
+    %18 = call @use(%7) : (ptr) -> i32
+    %19 = sext.i64 %18
+    %20 = add.nsw %17, %19
+    return %20
+}
+
+func @members_on_both_sides(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = iconst.i64 7
+    %7 = add.nuw %5, %6
+    %8 = iconst.i64 -8
+    %9 = and %7, %8
+    %10 = iconst.i64 8
+    %11 = add.nuw %9, %10
+    %12 = stacksave.ptr
+    %13 = alloca %11, align 8
+    %14 = iconst.i32 1
+    %15 = trunc.i8 %14
+    store %15 -> %13, align 1, tbaa !0
+    %16 = sext.i64 %0
+    %17 = iconst.i64 4
+    %18 = mul.nsw %16, %17
+    %19 = iconst.i64 4
+    %20 = add.nuw %18, %19
+    %21 = iconst.i64 7
+    %22 = add.nuw %20, %21
+    %23 = iconst.i64 -8
+    %24 = and %22, %23
+    %25 = ptr_add %13, %24
+    %26 = iconst.i32 2
+    %27 = sitofp.f64 %26
+    store %27 -> %25, align 8, tbaa !2
+    %28 = sext.i64 %0
+    %29 = iconst.i64 4
+    %30 = mul %28, %29
+    %31 = iconst.i64 4
+    %32 = add %30, %31
+    %33 = iconst.i64 7
+    %34 = add %32, %33
+    %35 = iconst.i64 -8
+    %36 = and %34, %35
+    %37 = iconst.i64 8
+    %38 = add %36, %37
+    %39 = call @use(%13) : (ptr) -> i32
+    %40 = sext.i64 %39
+    %41 = add.nsw %38, %40
+    return %41
+}
+
+func @two_variable_members(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 1
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 1
+    %5 = add.nuw %3, %4
+    %6 = iconst.i64 -2
+    %7 = and %5, %6
+    %8 = sext.i64 %0
+    %9 = iconst.i64 1
+    %10 = mul.nsw %8, %9
+    %11 = add.nuw %7, %10
+    %12 = iconst.i64 2
+    %13 = add.nuw %11, %12
+    %14 = iconst.i64 3
+    %15 = add.nuw %13, %14
+    %16 = iconst.i64 -4
+    %17 = and %15, %16
+    %18 = iconst.i64 4
+    %19 = add.nuw %17, %18
+    %20 = stacksave.ptr
+    %21 = alloca %19, align 4
+    %22 = sext.i64 %0
+    %23 = iconst.i64 1
+    %24 = mul.nsw %22, %23
+    %25 = iconst.i64 1
+    %26 = add.nuw %24, %25
+    %27 = iconst.i64 -2
+    %28 = and %26, %27
+    %29 = ptr_add %21, %28
+    %30 = iconst.i32 1
+    %31 = trunc.i16 %30
+    store %31 -> %29, align 2, tbaa !3
+    %32 = sext.i64 %0
+    %33 = iconst.i64 1
+    %34 = mul.nsw %32, %33
+    %35 = iconst.i64 1
+    %36 = add.nuw %34, %35
+    %37 = iconst.i64 -2
+    %38 = and %36, %37
+    %39 = sext.i64 %0
+    %40 = iconst.i64 1
+    %41 = mul.nsw %39, %40
+    %42 = add.nuw %38, %41
+    %43 = iconst.i64 2
+    %44 = add.nuw %42, %43
+    %45 = iconst.i64 3
+    %46 = add.nuw %44, %45
+    %47 = iconst.i64 -4
+    %48 = and %46, %47
+    %49 = ptr_add %21, %48
+    %50 = iconst.i32 2
+    store %50 -> %49, align 4, tbaa !1
+    %51 = sext.i64 %0
+    %52 = iconst.i64 1
+    %53 = mul %51, %52
+    %54 = iconst.i64 1
+    %55 = add %53, %54
+    %56 = iconst.i64 -2
+    %57 = and %55, %56
+    %58 = sext.i64 %0
+    %59 = iconst.i64 1
+    %60 = mul %58, %59
+    %61 = add %57, %60
+    %62 = iconst.i64 2
+    %63 = add %61, %62
+    %64 = iconst.i64 3
+    %65 = add %63, %64
+    %66 = iconst.i64 -4
+    %67 = and %65, %66
+    %68 = iconst.i64 4
+    %69 = add %67, %68
+    %70 = call @use(%21) : (ptr) -> i32
+    %71 = sext.i64 %70
+    %72 = add.nsw %69, %71
+    return %72
+}
+
+func @a_union(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 8
+    %5 = icmp ugt %3, %4
+    %6 = select.i64 %5, %3, %4
+    %7 = iconst.i64 7
+    %8 = add.nuw %6, %7
+    %9 = iconst.i64 -8
+    %10 = and %8, %9
+    %11 = stacksave.ptr
+    %12 = alloca %10, align 8
+    %13 = iconst.i32 1
+    %14 = sitofp.f64 %13
+    store %14 -> %12, align 8, tbaa !0
+    %15 = sext.i64 %0
+    %16 = iconst.i64 4
+    %17 = mul %15, %16
+    %18 = iconst.i64 8
+    %19 = icmp ugt %17, %18
+    br_if %19, block1, block2
+
+block1:
+    %20 = sext.i64 %0
+    %21 = iconst.i64 4
+    %22 = mul %20, %21
+    jump block3(%22)
+
+block2:
+    %23 = iconst.i64 8
+    jump block3(%23)
+
+block3(%24: i64):
+    %25 = iconst.i64 7
+    %26 = add %24, %25
+    %27 = iconst.i64 -8
+    %28 = and %26, %27
+    %29 = call @use(%12) : (ptr) -> i32
+    %30 = sext.i64 %29
+    %31 = add.nsw %28, %30
+    return %31
+}
+
+func @packed(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 5
+    %5 = add.nuw %3, %4
+    %6 = stacksave.ptr
+    %7 = alloca %5, align 1
+    %8 = sext.i64 %0
+    %9 = iconst.i64 4
+    %10 = mul.nsw %8, %9
+    %11 = iconst.i64 1
+    %12 = add.nuw %10, %11
+    %13 = ptr_add %7, %12
+    %14 = iconst.i32 1
+    store %14 -> %13, align 1, tbaa !1
+    %15 = sext.i64 %0
+    %16 = iconst.i64 4
+    %17 = mul %15, %16
+    %18 = iconst.i64 5
+    %19 = add %17, %18
+    %20 = call @use(%7) : (ptr) -> i32
+    %21 = sext.i64 %20
+    %22 = add.nsw %19, %21
+    return %22
+}
+
+func @an_aligned_member(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = iconst.i64 15
+    %7 = add.nuw %5, %6
+    %8 = iconst.i64 -16
+    %9 = and %7, %8
+    %10 = iconst.i64 4
+    %11 = add.nuw %9, %10
+    %12 = iconst.i64 15
+    %13 = add.nuw %11, %12
+    %14 = iconst.i64 -16
+    %15 = and %13, %14
+    %16 = stacksave.ptr
+    %17 = alloca %15, align 16
+    %18 = sext.i64 %0
+    %19 = iconst.i64 4
+    %20 = mul.nsw %18, %19
+    %21 = iconst.i64 4
+    %22 = add.nuw %20, %21
+    %23 = iconst.i64 15
+    %24 = add.nuw %22, %23
+    %25 = iconst.i64 -16
+    %26 = and %24, %25
+    %27 = ptr_add %17, %26
+    %28 = iconst.i32 1
+    store %28 -> %27, align 4, tbaa !1
+    %29 = sext.i64 %0
+    %30 = iconst.i64 4
+    %31 = mul %29, %30
+    %32 = iconst.i64 4
+    %33 = add %31, %32
+    %34 = iconst.i64 15
+    %35 = add %33, %34
+    %36 = iconst.i64 -16
+    %37 = and %35, %36
+    %38 = iconst.i64 4
+    %39 = add %37, %38
+    %40 = iconst.i64 15
+    %41 = add %39, %40
+    %42 = iconst.i64 -16
+    %43 = and %41, %42
+    %44 = call @use(%17) : (ptr) -> i32
+    %45 = sext.i64 %44
+    %46 = add.nsw %43, %45
+    return %46
+}
+
+func @nested(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = iconst.i64 8
+    %7 = add.nuw %5, %6
+    %8 = stacksave.ptr
+    %9 = alloca %7, align 4
+    %10 = iconst.i64 4
+    %11 = ptr_add %9, %10
+    %12 = sext.i64 %0
+    %13 = iconst.i64 4
+    %14 = mul.nsw %12, %13
+    %15 = ptr_add %11, %14
+    %16 = iconst.i32 1
+    store %16 -> %15, align 4, tbaa !1
+    %17 = sext.i64 %0
+    %18 = iconst.i64 4
+    %19 = mul.nsw %17, %18
+    %20 = iconst.i64 4
+    %21 = add.nuw %19, %20
+    %22 = iconst.i64 4
+    %23 = add.nuw %21, %22
+    %24 = ptr_add %9, %23
+    %25 = iconst.i32 2
+    store %25 -> %24, align 4, tbaa !1
+    %26 = sext.i64 %0
+    %27 = iconst.i64 4
+    %28 = mul %26, %27
+    %29 = iconst.i64 4
+    %30 = add %28, %29
+    %31 = iconst.i64 8
+    %32 = add %30, %31
+    %33 = call @use(%9) : (ptr) -> i32
+    %34 = sext.i64 %33
+    %35 = add.nsw %32, %34
+    return %35
+}
+
+func @an_array_of_them(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i64 2
+    %2 = sext.i64 %0
+    %3 = iconst.i64 4
+    %4 = mul.nsw %2, %3
+    %5 = iconst.i64 4
+    %6 = add.nuw %4, %5
+    %7 = mul.nsw %1, %6
+    %8 = stacksave.ptr
+    %9 = alloca %7, align 4
+    %10 = iconst.i32 1
+    %11 = sext.i64 %0
+    %12 = iconst.i64 4
+    %13 = mul.nsw %11, %12
+    %14 = iconst.i64 4
+    %15 = add.nuw %13, %14
+    %16 = sext.i64 %10
+    %17 = mul.nsw %16, %15
+    %18 = ptr_add %9, %17
+    %19 = sext.i64 %0
+    %20 = iconst.i64 4
+    %21 = mul.nsw %19, %20
+    %22 = ptr_add %18, %21
+    %23 = iconst.i32 1
+    store %23 -> %22, align 4, tbaa !1
+    %24 = iconst.i64 2
+    %25 = sext.i64 %0
+    %26 = iconst.i64 4
+    %27 = mul %25, %26
+    %28 = iconst.i64 4
+    %29 = add %27, %28
+    %30 = mul %24, %29
+    %31 = call @use(%9) : (ptr) -> i32
+    %32 = sext.i64 %31
+    %33 = add.nsw %30, %32
+    return %33
+}
+
+func @measured_at_the_definition(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = sext.i64 %0
+    %3 = iconst.i64 4
+    %4 = mul %2, %3
+    return %4
+}
+
+func @offsets(i32, i32) -> i64, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = sext.i64 %0
+    %3 = iconst.i64 4
+    %4 = mul %2, %3
+    %5 = iconst.i64 4
+    %6 = sext.i64 %1
+    %7 = sext.i64 %0
+    %8 = iconst.i64 4
+    %9 = mul %7, %8
+    %10 = mul %6, %9
+    %11 = add %5, %10
+    %12 = add.nsw %4, %11
+    return %12
+}
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+!2 = tbaa "double", parent !0, offset 0
+!3 = tbaa "short", parent !0, offset 0
