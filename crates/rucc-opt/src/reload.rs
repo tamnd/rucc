@@ -498,6 +498,50 @@ block2:
     }
 
     #[test]
+    fn a_swap_down_one_arm_is_not_an_answer_for_the_join_below_it() {
+        // Issue 1568, and the shape is the swap in `runtime/builtins/quad.c`: three copies down one
+        // arm that exchange two objects, and a read of one of them below the join. Down the arm
+        // that swapped, the first object holds what the second one held, and down the other arm it
+        // holds what it was given, so the two paths disagree and the load has to stay.
+        //
+        // What made it an answer was the visited set. The walk over the arm that swapped rewrites
+        // the question at each copy, and it used to carry the set across the rewrite, so it marked
+        // versions in the block above the branch as seen while asking about somewhere else. The
+        // walk over the other arm then reached those same versions, was told it had been there,
+        // and gave nothing back, and nothing on one path into a join is whatever the other path
+        // said. The join came back holding the swapped arm's answer alone.
+        let text = wrap(
+            "(i1) -> i64",
+            "block0(%0: i1):
+    %1 = alloca, size 16, align 8
+    %2 = alloca, size 16, align 8
+    %3 = alloca, size 16, align 8
+    %4 = iconst.i64 11
+    store %4 -> %1, align 8
+    %5 = iconst.i64 22
+    store %5 -> %2, align 8
+    br_if %0, block1, block2
+
+block1:
+    memcpy %3, %1, size 16, align 8
+    memcpy %1, %2, size 16, align 8
+    memcpy %2, %3, size 16, align 8
+    jump block3
+
+block2:
+    jump block3
+
+block3:
+    %6 = load.i64 %1, align 8
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
     fn a_store_down_only_one_arm_is_not_an_answer() {
         // One path into the join wrote it and the other did not, and a disagreement is `Unknown`
         // rather than the weaker of the two, because there is no order on these to act on.

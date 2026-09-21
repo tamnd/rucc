@@ -647,13 +647,20 @@ impl<'a> Walk<'a> {
                     None => reference,
                     Some(answer) => match translate(&reference, inst) {
                         Step::Stop => return Some(answer),
-                        // The reference has changed, so a version already visited is a version
-                        // worth visiting again. What stops this running away is the budget,
-                        // which every step through a def spends whether or not the caller
-                        // rewrote anything.
+                        // A rewritten question is a walk of its own and gets a visited set of its
+                        // own. The set is there to stop a cycle being walked twice, and what makes
+                        // the second time round pointless is that the answer at a version is an
+                        // answer about one reference: a version this walk has already been to was
+                        // visited asking something else, and what it said then says nothing about
+                        // what is being asked now. Carrying the set across the rewrite loses an
+                        // answer rather than repeating one, because a version declined as already
+                        // seen contributes nothing to the join above it, and a join whose two paths
+                        // disagree would come back holding whichever of them was walked first
+                        // rather than `Unknown`.
                         Step::Retry(next) => {
-                            seen.clear();
-                            next
+                            let before = self.func.mem_in(inst)?;
+                            let mut fresh = HashSet::new();
+                            return self.back(next, before, budget, &mut fresh, translate);
                         }
                     },
                 };
