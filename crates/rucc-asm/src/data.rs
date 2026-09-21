@@ -112,6 +112,15 @@ pub enum Piece {
         /// How many bytes it occupies.
         bytes: u8,
     },
+    /// How far a symbol is from these four bytes, which is the same hole with a different
+    /// question in it. `.long target - .` in an `asm` at file scope and nothing else.
+    Away {
+        /// Whose distance it is, as the template spelled it.
+        symbol: String,
+        /// What to add to that address before the distance is taken, which is how far into the
+        /// symbol the place being measured to sits.
+        addend: i64,
+    },
 }
 
 impl Piece {
@@ -122,6 +131,7 @@ impl Piece {
             Piece::Zero(bytes) => *bytes,
             Piece::Bytes(bytes) | Piece::Scalar(bytes) => bytes.len() as u64,
             Piece::Addr { bytes, .. } => u64::from(*bytes),
+            Piece::Away { .. } => 4,
         }
     }
 }
@@ -170,6 +180,16 @@ impl Globals {
                             after: 0,
                         });
                         object.bytes.resize(object.bytes.len() + usize::from(*bytes), 0);
+                    }
+                    Piece::Away { symbol, addend } => {
+                        object.relocs.push(Reloc {
+                            at: object.bytes.len(),
+                            symbol: symbol.clone(),
+                            kind: Reference::Away,
+                            addend: *addend,
+                            after: 0,
+                        });
+                        object.bytes.resize(object.bytes.len() + 4, 0);
                     }
                 }
             }
@@ -285,6 +305,19 @@ fn variable(
                     image.reverse();
                 }
                 Piece::Scalar(image)
+            }
+            // A distance rather than an address, which is the same symbol and addend read a
+            // different way. It is not in `addrs` below, because what that list is for is whether
+            // a read only image needs relocating when it is loaded, and a distance between two
+            // places in the same file is the same number wherever the file is loaded.
+            Datum::Away(idx) => {
+                let reloc = module[idx];
+                if reloc.size != 4 {
+                    let why = format!("a distance {} bytes wide", reloc.size);
+                    return Err(Error::Image { name, why });
+                }
+                let symbol = names.resolve(reloc.symbol).to_owned();
+                Piece::Away { symbol, addend: reloc.addend }
             }
             Datum::Addr(idx) => {
                 let reloc = module[idx];
@@ -612,6 +645,43 @@ mod tests {
                 addend: 16,
                 after: 0,
             }]
+        );
+    }
+
+    #[test]
+    fn a_variable_holding_a_distance_is_a_hole_the_linker_measures_from_where_it_is() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 1, size: 4 });
+        let id = defined(&mut module, &mut names, "d", &[Datum::Away(reloc)]);
+        module[id].size = 4;
+        // Read only rather than relocated at load time, which is the point of writing a table of
+        // distances: what is in the four bytes is the same number wherever the file is loaded.
+        module[id].constant = true;
+        let vars =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
+        assert_eq!(vars[0].pieces, [Piece::Away { symbol: "y".to_owned(), addend: 1 }]);
+        assert_eq!(vars[0].place, Place::ReadOnly);
+
+        let data = Globals { vars, weak: Vec::new() }.image();
+        assert_eq!(data.objects[0].bytes, vec![0; 4]);
+        assert_eq!(
+            data.objects[0].relocs,
+            [Reloc { at: 0, symbol: "y".to_owned(), kind: Reference::Away, addend: 1, after: 0 }]
+        );
+    }
+
+    #[test]
+    fn a_distance_of_a_width_no_relocation_writes_is_refused_by_the_width_it_asked_for() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 0, size: 8 });
+        let id = defined(&mut module, &mut names, "d", &[Datum::Away(reloc)]);
+        module[id].size = 8;
+        let failed = globals(&module, &names, ObjectFormat::Elf).expect_err("a distance that wide");
+        assert_eq!(
+            failed,
+            Error::Image { name: "d".to_owned(), why: "a distance 8 bytes wide".to_owned() }
         );
     }
 

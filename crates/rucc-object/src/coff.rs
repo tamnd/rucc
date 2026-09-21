@@ -52,7 +52,12 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         Reference::Address { bytes: 8 } => pe::IMAGE_REL_AMD64_ADDR64,
         Reference::Address { bytes: 4 } => pe::IMAGE_REL_AMD64_ADDR32,
         Reference::Image => pe::IMAGE_REL_AMD64_ADDR32NB,
+        // Nothing for a distance written into an image. The relocation this format has for four
+        // bytes of distance counts from the byte after them, which is the answer an instruction
+        // wants and is four more than the answer an image wants, and there is no addend field to
+        // put the difference in because this format keeps the addend in the bytes themselves.
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
+        Reference::Away => return None,
         Reference::Address { .. } => return None,
     })
 }

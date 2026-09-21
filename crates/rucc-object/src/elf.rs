@@ -37,7 +37,7 @@ use crate::section::{Array, Binding, Property, Reference, Visibility};
 pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_X86_64_PLT32,
-        Reference::Data => elf::R_X86_64_PC32,
+        Reference::Data | Reference::Away => elf::R_X86_64_PC32,
         Reference::Got => elf::R_X86_64_REX_GOTPCRELX,
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,

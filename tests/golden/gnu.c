@@ -342,6 +342,29 @@ extern unsigned char stuff[];
 
 int reads_the_stuff(int i) { return stuff[i]; }
 
+// How far one of the block's own places is from the bytes that say so, which is a distance the
+// linker works out because it is what placed the two sections the distance is measured between.
+// The place is written as a local label and the object file holds no name for one of those, so
+// what the relocation names is the global the label stands inside and how far into it the label
+// is, which names the same byte in the terms a symbol table has. A table of these in one section
+// pointing at code in another is what every alternative instruction table in a kernel header is.
+__asm__(".data\n"
+        "measured:\n"
+        ".byte 42\n"
+        "663:\n"
+        ".byte 43\n"
+        ".pushsection .data.away, \"aw\"\n"
+        ".globl how_far\n"
+        "how_far:\n"
+        ".long 663b - .\n"
+        ".popsection\n");
+
+extern const int how_far;
+
+unsigned char reads_the_distance(void) {
+  return *((const unsigned char *)&how_far + how_far);
+}
+
 // `__attribute__((constructor))` and `__attribute__((destructor))`, which ask for a function to
 // run without anything calling it. Each one becomes an object holding the function's address, in
 // the section the startup code of the target walks, and the priority is what orders them: a lower

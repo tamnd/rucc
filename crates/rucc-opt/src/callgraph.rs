@@ -197,7 +197,7 @@ impl CallGraph {
         for id in module.globals() {
             let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
             for datum in init {
-                if let Datum::Addr(reloc) = *datum {
+                if let Datum::Addr(reloc) | Datum::Away(reloc) = *datum {
                     graph.took_the_address_of(module[reloc].symbol);
                 }
             }

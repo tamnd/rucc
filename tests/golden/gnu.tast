@@ -655,28 +655,41 @@ decl #99 reads_the_stuff : int(int) function external defined
                 decl #97 stuff : unsigned char[] lvalue
               convert lvalue : int
                 decl #98 i : int lvalue
-decl #100 ran : int object internal static tentative
-decl #101 opens : void(void) function internal defined constructor
+decl #100 how_far : const int object external static declared
+decl #101 reads_the_distance : unsigned char(void) function external defined
+  body
+    block
+      return
+        convert lvalue : unsigned char
+          unary * : const unsigned char lvalue
+            binary + : const unsigned char *
+              cast : const unsigned char *
+                unary & : const int *
+                  decl #100 how_far : const int lvalue
+              convert lvalue : int
+                decl #100 how_far : const int lvalue
+decl #102 ran : int object internal static tentative
+decl #103 opens : void(void) function internal defined constructor
   body
     block
       expr
         assign = : int
-          decl #100 ran : int lvalue
+          decl #102 ran : int lvalue
           const 1 : int
-decl #102 closes : void(void) function internal defined destructor(101)
+decl #104 closes : void(void) function internal defined destructor(101)
   body
     block
       expr
         assign = : int
-          decl #100 ran : int lvalue
+          decl #102 ran : int lvalue
           const 0 : int
-decl #103 both_ways : void(void) function internal defined constructor(101) destructor
+decl #105 both_ways : void(void) function internal defined constructor(101) destructor
   body
     block
       expr
         assign = : int
-          decl #100 ran : int lvalue
+          decl #102 ran : int lvalue
           binary + : int
             convert lvalue : int
-              decl #100 ran : int lvalue
+              decl #102 ran : int lvalue
             const 1 : int

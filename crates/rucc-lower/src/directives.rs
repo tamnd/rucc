@@ -110,6 +110,17 @@ pub(crate) enum Item {
     },
     /// That many zero bytes, and no image for them.
     Zero(u64),
+    /// How far one of this template's own places is from these four bytes, which is what
+    /// `.long 661b - .` writes. The place is named as the global it is inside and how far into
+    /// that global it sits, because a relocation names a symbol and the label it was written as
+    /// may be a local one that never becomes a symbol at all.
+    Away {
+        /// Which of the template's globals holds the place, as an index into the list this
+        /// reader gives back, since the name of one written under no label is minted later.
+        piece: usize,
+        /// How far into that global the place is.
+        addend: i64,
+    },
 }
 
 impl Item {
@@ -119,6 +130,7 @@ impl Item {
             Item::Bytes(bytes) => bytes.len() as u64,
             Item::Int { width, .. } => u64::from(*width),
             Item::Zero(bytes) => *bytes,
+            Item::Away { .. } => 4,
         }
     }
 }
@@ -214,6 +226,8 @@ struct Open {
     name: Option<String>,
     /// Which of [`Assembler::sections`] it is in.
     section: usize,
+    /// How far into that section it starts, which is where the label stood.
+    start: u64,
     /// What the label was aligned to.
     align: u32,
     /// Its image so far.
@@ -246,12 +260,25 @@ struct Value {
     section: Option<usize>,
     /// The number itself.
     offset: i64,
+    /// Whether this is the position itself rather than a label standing at it, which is what `.`
+    /// reads as. It matters because a label minus the position is a distance the linker can work
+    /// out even across sections, and a label minus another label is not.
+    here: bool,
+    /// Whether this is how far something is from where it is being written rather than where the
+    /// something is. The section and the offset are then the target's, and the position this is
+    /// counted from is wherever the bytes holding it land.
+    away: bool,
 }
 
 impl Value {
     /// A plain number, which counts from nothing.
     const fn number(offset: i64) -> Value {
-        Value { section: None, offset }
+        Value { section: None, offset, here: false, away: false }
+    }
+
+    /// A place, which is an offset into one of the sections the template has named.
+    const fn place(section: usize, offset: i64) -> Value {
+        Value { section: Some(section), offset, here: false, away: false }
     }
 }
 
@@ -265,6 +292,10 @@ struct Assembler<'a> {
     stack: Vec<usize>,
     /// The globals finished so far.
     pieces: Vec<Piece>,
+    /// How far into its section each of them starts, which is what a distance to a place inside
+    /// one is worked out from. Beside the list rather than in a [`Piece`] because it is the
+    /// reader's own bookkeeping and says nothing about the global itself.
+    starts: Vec<u64>,
     /// The names a `.set` equated to another name, in the order they were written.
     sets: Vec<(String, String)>,
     /// The one being filled in.
@@ -294,6 +325,7 @@ impl<'a> Assembler<'a> {
             current: 0,
             stack: Vec::new(),
             pieces: Vec::new(),
+            starts: Vec::new(),
             sets: Vec::new(),
             open: None,
             labels: HashMap::new(),
@@ -353,13 +385,12 @@ impl<'a> Assembler<'a> {
         let align = std::mem::replace(&mut self.pending, 1);
         let at = round_up(self.sections[self.current].at, u64::from(align));
         self.sections[self.current].at = at;
-        self.labels.insert(
-            name.to_owned(),
-            Value { section: Some(self.current), offset: i64::try_from(at).unwrap_or(0) },
-        );
+        self.labels
+            .insert(name.to_owned(), Value::place(self.current, i64::try_from(at).unwrap_or(0)));
         self.open = Some(Open {
             name: Some(name.to_owned()),
             section: self.current,
+            start: at,
             align,
             items: Vec::new(),
             size: 0,
@@ -370,7 +401,7 @@ impl<'a> Assembler<'a> {
     /// Where the position is, which is an offset into the section being written to.
     fn here(&self) -> Value {
         let at = self.sections[self.current].at;
-        Value { section: Some(self.current), offset: i64::try_from(at).unwrap_or(0) }
+        Value { here: true, ..Value::place(self.current, i64::try_from(at).unwrap_or(0)) }
     }
 
     /// One directive and the text after its name.
@@ -529,6 +560,10 @@ impl<'a> Assembler<'a> {
     fn ints(&mut self, operands: &str, width: u8) -> Result<(), Failed> {
         for operand in split(operands) {
             let value = self.value(&operand)?;
+            if value.away {
+                self.distance(&operand, value, width)?;
+                continue;
+            }
             if value.section.is_some() {
                 return Err(unsupported(format!(
                     "the address of '{}' in an image",
@@ -538,6 +573,53 @@ impl<'a> Assembler<'a> {
             self.emit(Item::Int { width, value: value.offset })?;
         }
         Ok(())
+    }
+
+    /// How far one of the template's own places is from these bytes, which is written rather than
+    /// worked out because where the bytes land is the linker's answer and not this reader's.
+    ///
+    /// Four bytes wide only, which is the width the relocation for it has on this target and the
+    /// width every program that writes one of these uses. The offset of the position the
+    /// expression subtracted is not wanted and was dropped: what the relocation is resolved
+    /// against is where the four bytes themselves end up, which is the same place.
+    fn distance(&mut self, operand: &str, value: Value, width: u8) -> Result<(), Failed> {
+        let operand = operand.trim();
+        if width != 4 {
+            return Err(unsupported(format!("a distance from here {width} bytes wide")));
+        }
+        let Some(section) = value.section else {
+            return Err(unsupported(format!("the distance '{operand}'")));
+        };
+        let Some((piece, addend)) = self.spot(section, value.offset) else {
+            return Err(unsupported(format!(
+                "the distance '{operand}', which measures to nothing this block wrote"
+            )));
+        };
+        self.emit(Item::Away { piece, addend })
+    }
+
+    /// Which global of a section holds that offset into it, and how far into that global it is.
+    ///
+    /// A relocation names a symbol, and the place a distance is measured to is usually a local
+    /// label, which is no symbol at all. So the label is turned into the global it stands inside
+    /// and the distance from the front of that global, which names the same place in terms the
+    /// object file has a symbol for. Only the globals already finished are walked, because the one
+    /// still open is in the section being written to and a place in that section is a plain number
+    /// rather than a distance.
+    fn spot(&self, section: usize, offset: i64) -> Option<(usize, i64)> {
+        let wanted = &self.sections[section].section;
+        let mut found = None;
+        for (index, piece) in self.pieces.iter().enumerate() {
+            if piece.section != *wanted {
+                continue;
+            }
+            let start = i64::try_from(self.starts[index]).unwrap_or(i64::MAX);
+            if start > offset {
+                break;
+            }
+            found = Some((index, offset - start));
+        }
+        found
     }
 
     /// A run of strings, with a terminator after each one under `.asciz`.
@@ -624,6 +706,7 @@ impl<'a> Assembler<'a> {
             None => self.open.insert(Open {
                 name: None,
                 section: self.current,
+                start: self.sections[self.current].at,
                 align: 1,
                 items: Vec::new(),
                 size: 0,
@@ -639,6 +722,7 @@ impl<'a> Assembler<'a> {
     /// Finishes the global being written, if there is one.
     fn close(&mut self) {
         let Some(open) = self.open.take() else { return };
+        self.starts.push(open.start);
         self.pieces.push(Piece {
             name: open.name,
             section: self.sections[open.section].section.clone(),
@@ -943,14 +1027,25 @@ fn add(left: Value, right: Value, text: &[char]) -> Result<Value, Failed> {
             return Err(unsupported(format!("two addresses added in '{}'", written(text))));
         }
     };
-    Ok(Value { section, offset: left.offset.wrapping_add(right.offset) })
+    let offset = left.offset.wrapping_add(right.offset);
+    // A number added to a distance moves the place the distance is measured to, since that is
+    // what the offset of one holds, so the sum is a distance to the place that far further on.
+    Ok(Value { section, offset, here: false, away: left.away || right.away })
 }
 
 /// The difference of two values, which is a plain number when both count from one section.
+///
+/// One that counts from another section is refused, with the one exception that is the reason the
+/// subtraction is written at all: how far a place is from where the answer itself is written. That
+/// is a relocation rather than a number, so the target is carried and the position is dropped, and
+/// the linker works out the difference once it has put both sections somewhere.
 fn subtract(left: Value, right: Value, text: &[char]) -> Result<Value, Failed> {
     let section = match (left.section, right.section) {
         (held, None) => held,
         (Some(a), Some(b)) if a == b => None,
+        (Some(_), Some(_)) if right.here && !left.away => {
+            return Ok(Value { away: true, here: false, ..left });
+        }
         _ => {
             return Err(unsupported(format!(
                 "a difference of addresses in two sections in '{}'",
@@ -958,7 +1053,11 @@ fn subtract(left: Value, right: Value, text: &[char]) -> Result<Value, Failed> {
             )));
         }
     };
-    Ok(Value { section, offset: left.offset.wrapping_sub(right.offset) })
+    if section.is_none() && (left.away || right.away) {
+        return Err(unsupported(format!("a distance taken away from in '{}'", written(text))));
+    }
+    let offset = left.offset.wrapping_sub(right.offset);
+    Ok(Value { section, offset, here: false, away: left.away })
 }
 
 /// The characters of an expression, for a message about it.
@@ -1151,6 +1250,9 @@ mod tests {
                     let want = bytes.len() + usize::try_from(*count).expect("a run that fits");
                     bytes.resize(want, 0);
                 }
+                // A hole the linker fills in, which is zeros until it does. The tests about one
+                // read the item rather than these bytes, since what it says is the whole of it.
+                Item::Away { .. } => bytes.extend_from_slice(&[0; 4]),
             }
         }
         bytes
@@ -1260,6 +1362,55 @@ gSize:
         assert_eq!(pieces[1].section, Section::Named(".init_array".to_owned()));
         assert_eq!(pieces[2].section, Section::Data, "which is where the pop went back to");
         assert_eq!(image(&pieces[2]), [2]);
+    }
+
+    /// How far a place is from the bytes that say so, which is the line tcc's test file ends its
+    /// second block with and is the shape every alternative instruction table in a kernel header
+    /// writes: a record in one section holding the distance to the code in another.
+    #[test]
+    fn a_distance_from_here_is_a_relocation_to_the_global_the_place_is_inside() {
+        let template = ".data\n.byte 41\nstuff:\n661:\n.byte 42\n\
+                        .pushsection .data.ignore\n.long 661b - .\n.popsection\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(named(&pieces), ["", "stuff", ""]);
+        // The place is named as the global it stands inside and how far into it, because it was
+        // written as a local label and no symbol is held for one of those.
+        assert_eq!(pieces[2].items, [Item::Away { piece: 1, addend: 0 }]);
+        assert_eq!(pieces[2].size, 4, "which is four bytes of image like any other long");
+
+        // A place further into the global, which is the same global and a distance into it.
+        let template = ".data\nstuff:\n.byte 42\n661:\n.byte 43\n\
+                        .pushsection .data.ignore\n.long 661b - .\n.popsection\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(pieces[1].items, [Item::Away { piece: 0, addend: 1 }]);
+    }
+
+    /// The same subtraction inside one section, which is a number and stays one.
+    #[test]
+    fn a_distance_to_a_place_in_the_same_section_is_worked_out_here() {
+        let pieces = read(".data\nx:\n.byte 7\n.long x - .\n").expect("read");
+        assert_eq!(
+            pieces[0].items,
+            [Item::Int { width: 1, value: 7 }, Item::Int { width: 4, value: -1 }]
+        );
+    }
+
+    /// What a distance is measured from is where the bytes holding it land, which the linker
+    /// knows and this does not, so an alignment in front of them changes nothing here.
+    #[test]
+    fn an_alignment_in_front_of_a_distance_leaves_the_distance_alone() {
+        let template = ".data\nstuff:\n661:\n.byte 42\n\
+                        .pushsection .data.ignore\n.byte 1\n.balign 4\n.long 661b - .\n\
+                        .popsection\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(
+            pieces[1].items,
+            [
+                Item::Int { width: 1, value: 1 },
+                Item::Bytes(vec![0, 0, 0]),
+                Item::Away { piece: 0, addend: 0 },
+            ]
+        );
     }
 
     /// A name is internal unless something exported it, which is what an assembler does.
@@ -1409,6 +1560,18 @@ gSize:
             (".data\nx:\n.byte 661f\n", "the local label '661f', which is below it"),
             (".data\nx:\n.byte 661b\n", "the local label '661b', which has no label"),
             (".data\nx:\n.popsection\n", "a '.popsection' with nothing pushed"),
+            (
+                ".data\nx:\n.byte 1\n.pushsection s\n.quad x - .\n",
+                "a distance from here 8 bytes wide",
+            ),
+            (
+                ".data\nx:\n.byte 1\n.pushsection s\ny:\n.long x - y\n",
+                "a difference of addresses in two sections in 'x-y'",
+            ),
+            (
+                ".data\nx:\n.byte 1\n.pushsection s\n.long x - (x - .)\n",
+                "a distance taken away from in 'x-(x-.)'",
+            ),
         ];
         for (template, want) in cases {
             let failed = read(template).expect_err(template);

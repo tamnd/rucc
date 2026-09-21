@@ -446,7 +446,7 @@ fn reachable(module: &Module) -> HashSet<Symbol> {
     for id in module.globals() {
         let Some(init) = module[id].init else { continue };
         for &datum in &module[init] {
-            if let Datum::Addr(at) = datum {
+            if let Datum::Addr(at) | Datum::Away(at) = datum {
                 taken.insert(module[at].symbol);
             }
         }
