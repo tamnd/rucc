@@ -757,6 +757,14 @@ impl<'a> Alias<'a> {
             return Answer::No(Reason::Plane);
         }
 
+        // A `setjmp` marker is not a call and the escape argument under this one does not reach it,
+        // so it has to be turned away before that argument is made. See
+        // [`Opcode::is_jump_marker`] for why, and what it costs to get this wrong is a store
+        // forwarded over the marker to a load the jump was the whole reason for.
+        if self.func[call].opcode.is_jump_marker() {
+            return Answer::May;
+        }
+
         // Everything a call reaches, it reaches through an address, and an object whose address
         // never left this function is not one it has. Reaching here means the address was not
         // handed to this call either, because that would have been an escape.
@@ -1707,6 +1715,32 @@ mod tests {
         let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::May);
+    }
+
+    #[test]
+    fn a_setjmp_marker_can_touch_a_local_whose_address_stayed_here() {
+        // The marker is on the memory chain and it is not a call, so the argument the two tests
+        // above rest on says nothing about it. Control arrives at what follows it from wherever
+        // the matching `longjmp` sits, and the jump comes back into this frame, so a local this
+        // function never let out is exactly what the landing goes on to read.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let name = names.intern("jmp_buf");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        build.load(Type::int(32), object, plain(4), Flags::NONE);
+        let buffer = global(&mut build, &mut module, name);
+        let args = build.func().push_values(&[buffer]);
+        let marker =
+            build.inst(InstData { args, ..InstData::new(Opcode::SetjmpMarker) }, &[Type::int(32)]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
+        let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
+        assert_eq!(alias.clobbered_by(&reference, marker), Answer::May);
+        assert_eq!(alias.read_by(&reference, marker), Answer::May);
     }
 
     #[test]

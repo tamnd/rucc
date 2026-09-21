@@ -1024,6 +1024,23 @@ impl Opcode {
         )
     }
 
+    /// Whether this marks one end of a jump along an edge this function's control flow graph does
+    /// not have.
+    ///
+    /// The two `setjmp` markers and nothing else. It exists because an alias oracle that reasons
+    /// about a call reasons from what the call was handed, and neither of these was handed
+    /// anything. Control arrives at the instruction after a `setjmp_marker` from wherever the
+    /// matching `longjmp` sits, so the memory there is a join of the chain that flows into the
+    /// marker and the memory at every one of those points, and a `longjmp_marker` is the other end
+    /// of that join and so reads everything the landing will look at. An object whose address never
+    /// left this function is as exposed to both as anything else, because the jump comes back into
+    /// this frame and the program reads the frame's own slots afterwards. The only answer about a
+    /// reference across one of these that cannot be wrong is that it may be touched.
+    #[must_use]
+    pub const fn is_jump_marker(self) -> bool {
+        matches!(self, Self::SetjmpMarker | Self::LongjmpMarker)
+    }
+
     /// How many values this produces, for the opcodes where the count is fixed.
     ///
     /// `None` means the count comes from somewhere else: a call takes it from its signature,

@@ -611,6 +611,30 @@ block2:
     }
 
     #[test]
+    fn a_setjmp_between_them_ends_it_even_for_a_local_nobody_else_can_see() {
+        // Issue 1503. The alloca is private, so every argument about what a call can reach says
+        // this store reaches this load, and for a call every one of them would be right. The
+        // marker is not a call. Control reaches the load from wherever the matching `longjmp` was
+        // as well as from the store above it, and what the jump left in the slot is the whole
+        // point of the program, so forwarding the store here is the miscompilation where a
+        // function returns the value it started with instead of the one it was jumped back with.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 0
+    store %2 -> %1, align 4
+    %3 = setjmp_marker.i32 %0
+    %4 = load.i32 %1, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
     fn one_arm_reading_it_is_not_the_other_arm_having_read_it() {
         // Nothing here writes memory, so both loads carry the version the function started with and
         // the table matches. Neither block runs before the other, which is what the dominance is

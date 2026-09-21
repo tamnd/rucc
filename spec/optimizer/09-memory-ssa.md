@@ -134,10 +134,7 @@ fact and let the ordinary machinery handle it; the reason not to is that alias a
 nothing about *how many times* an access happens, and `volatile` constrains that too. A separate
 bit, checked before anything else.
 
-**`setjmp` and computed gotos.** A block that is a `setjmp` return point can be reached with
-memory in a state no dominator analysis predicts. GCC handles this with `ABNORMAL_DISPATCHER`
-edges. rucc needs the equivalent: the CFG must contain the edges, so memory SSA's phis land in the
-right places, and document 06 must build them.
+**`setjmp` and computed gotos.** A block that is a `setjmp` return point can be reached with memory in a state no dominator analysis predicts. GCC handles this with `ABNORMAL_DISPATCHER` edges. rucc does not put that edge in the graph, for the reason document 13 gives under `__builtin_setjmp`: the edge is written into the buffer and taken while the program runs, so a block standing where control comes back is a block nothing in the graph reaches and the first pass to walk the edges takes it away. What stands in its place is that `setjmp_marker` and `longjmp_marker` are on the memory chain and the alias oracle answers that they may touch anything at all, so the walk stops at the marker and no version above it is handed to a use below it. Document 08.4 owns that answer, and the failure mode when it is missing is not a phi in the wrong place but a store forwarded straight over the marker to the load the jump existed to change.
 
 **Partial overlap.** A four-byte store followed by a one-byte load at offset 1. The load sees the
 store, but not all of it, and it cannot be replaced by the stored value without extraction. The
