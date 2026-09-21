@@ -166,3 +166,24 @@ decl #39 how_long_my_name_is : unsigned long(void) function external defined
         binary + : unsigned long
           const 20 : unsigned long
           const 20 : unsigned long
+decl #41 watched_local : int(int) function external defined
+  params
+    decl #40 a : int object automatic defined
+  body
+    block
+      decls
+        decl #42 seen : volatile int object automatic defined
+          init
+            +0
+              convert lvalue : int
+                decl #40 a : int lvalue
+      expr
+        assign = : int
+          decl #42 seen : volatile int lvalue
+          binary + : int
+            convert lvalue : int
+              decl #42 seen : volatile int lvalue
+            const 1 : int
+      return
+        convert lvalue : int
+          decl #42 seen : volatile int lvalue

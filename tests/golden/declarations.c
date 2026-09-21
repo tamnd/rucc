@@ -90,3 +90,14 @@ const char *my_name(void) {
 unsigned long how_long_my_name_is(void) {
   return sizeof __func__ + sizeof __func__;
 }
+
+// A `volatile` object of automatic storage lives in memory even where nothing takes its address,
+// because what makes an access volatile is the instruction that reaches memory and a value held
+// in a register has nothing to carry the flag on. It is also what the object has to be for
+// 7.13.2.1p3 to hold, which says that a `longjmp` back into this frame leaves such an object
+// holding what was last written to it, where every other automatic object is indeterminate.
+int watched_local(int a) {
+  volatile int seen = a;
+  seen = seen + 1;
+  return seen;
+}
