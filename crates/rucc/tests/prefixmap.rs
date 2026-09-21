@@ -1,4 +1,4 @@
-//! What the prefix mapping flags rewrite, which is `__FILE__` and nothing else yet.
+//! What the prefix mapping flags rewrite, which is `__FILE__` and the debug information.
 //!
 //! Design: `spec/04-driver-and-cli.md` section 4.6.
 //!
@@ -6,8 +6,9 @@
 //! exist so that a package built in `/build/thing-1.2` and the same package built in
 //! `/home/someone/thing-1.2` produce the same bytes. There are three lists because there are three
 //! places a path can reach the output: a string literal the preprocessor made, the debug
-//! information, and the profile data. This compiler has only the first of those, so only the macro
-//! list acts and the other two are recorded for the work that will read them.
+//! information, and the profile data. Two of those exist here, so the macro list and the debug list
+//! both act and the profile list is recorded for the work that will read it. What the debug list
+//! does to an object is asserted in `debug_line.rs`, since the claim there is about sections.
 //!
 //! The line that matters is which paths are rewritten and which are left alone, because getting it
 //! wrong in either direction is bad in a different way. Rewriting too little ships the build
@@ -144,11 +145,10 @@ fn the_file_map_is_the_three_of_them_and_the_other_two_touch_no_macro() {
     // The one that names everything does what the one that names macros does.
     assert_eq!(literal(&ask("-ffile-prefix-map"), "file"), "SRC/under/one.c");
 
-    // And the two that name an output this compiler does not have yet leave the macro alone, which
-    // is what gcc does: `-fdebug-prefix-map=` has never touched `__FILE__`. They are taken rather
-    // than refused because there is no debug information and no profile data for them to rewrite,
-    // so taking them promises nothing that is not kept. The day either of those arrives, the list
-    // is already sitting in the options waiting to be read.
+    // And the two that name another output leave the macro alone, which is what gcc does:
+    // `-fdebug-prefix-map=` has never touched `__FILE__`. The debug one rewrites what goes in the
+    // line table and nothing else, and the profile one is taken rather than refused because there
+    // is no profile data for it to rewrite, so taking it promises nothing that is not kept.
     for flag in ["-fdebug-prefix-map", "-fprofile-prefix-map"] {
         let whole = format!("{}/under/one.c", slashes(&old));
         assert_eq!(literal(&ask(flag), "file"), whole, "{flag}");

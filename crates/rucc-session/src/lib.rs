@@ -496,11 +496,10 @@ impl FromStr for Visibility {
 /// that understands the flag unpacks it on the way in. A distribution that ships debug symbols for
 /// everything it builds saves more from this than from anything else it passes.
 ///
-/// This compiler writes no debug sections at all yet, so every answer here produces the same bytes,
-/// and an object built with `-gz=zstd` is identical to one built without the flag. It is recorded
-/// rather than dropped for the reason section 4.1 gives for the rest of the family: the answer has
-/// to be sitting in the options on the day `rucc-debug` has something to compress, and a build that
-/// asked for it and got silence would have no way of noticing the difference.
+/// Nothing here compresses one yet, so every answer produces the same bytes and an object built
+/// with `-gz=zstd` is identical to one built without the flag. There are sections to compress now,
+/// which makes this a flag waiting on a compressor rather than one waiting on a producer, and
+/// `crates/rucc-debug` is where that is written down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Compress {
     /// `-gz=none`, and what a command line that says nothing gets. gcc's default is the same.
@@ -904,9 +903,10 @@ pub struct PrefixMaps {
     pub macros: PrefixMap,
     /// What a path in the debug info is rewritten by, from `-fdebug-prefix-map=`.
     ///
-    /// Nothing reads this yet, because no debug info is generated yet. It is kept rather than
-    /// dropped so that the crate that generates it has the answer waiting rather than a flag to
-    /// go and add, and `crates/rucc-debug` says so where the work will start.
+    /// Read by the driver rather than by `rucc-debug`, because the driver is the layer where a path
+    /// is still a path and by the time one reaches the DWARF writer it is a string in a table that
+    /// nothing is allowed to reinterpret. Every path that reaches the line table goes through it,
+    /// the unit's own name and the directory it was compiled in among them.
     pub debug: PrefixMap,
     /// What a path in the profile data is rewritten by, from `-fprofile-prefix-map=`.
     ///
@@ -1713,10 +1713,19 @@ pub struct Options {
     pub emit: EmitKind,
     /// Whether to emit debug information.
     pub debug_info: bool,
+    /// The directory the compiler ran in, which is what `DW_AT_comp_dir` says.
+    ///
+    /// A debugger joins it onto every file name in the line table that is relative, and the names
+    /// in there are the ones the command line gave, so a build invoked as `rucc -g a/b.c` produces
+    /// nothing a debugger can open without it. It is asked of the process by the driver rather than
+    /// read here, so that a caller that is not a command line gets to say what it was and so that a
+    /// test does not depend on where it was run from. [`None`] when the process could not say, which
+    /// is written out as a single dot.
+    pub working_dir: Option<String>,
     /// How the debug sections are compressed, from `-gz`.
     ///
-    /// Nothing reads this yet because nothing writes a debug section yet. It is the same shape of
-    /// answer `prefix_map.debug` is, and it is waiting for the same crate.
+    /// Nothing reads this yet, because nothing compresses a debug section yet. There are sections
+    /// to compress now, so what this is waiting on is the compressor rather than the producer.
     pub compress: Compress,
     /// What the `-flto` family asked for, which nothing does yet.
     pub lto: Lto,
@@ -2155,6 +2164,7 @@ impl Options {
             races: Races::default(),
             emit: EmitKind::default(),
             debug_info: false,
+            working_dir: None,
             compress: Compress::None,
             lto: Lto::default(),
             profile_data: Profile::default(),

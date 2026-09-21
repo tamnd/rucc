@@ -26,6 +26,9 @@ rucc-codegen.workspace = true
 # What the level asked for, which the back end is handed on its flags. Named here because the
 # driver is what reads the level and works the answer out.
 rucc-cost.workspace = true
+# The debug sections. Here rather than under the assembler because turning a span into a file and a
+# line needs the source map, and the driver is the layer that has one.
+rucc-debug.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-lex.workspace = true

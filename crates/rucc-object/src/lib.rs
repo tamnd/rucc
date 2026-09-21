@@ -80,8 +80,8 @@ mod source;
 
 pub use crate::file::{Error, defines, write};
 pub use crate::section::{
-    Alias, Array, Binding, Data, Extent, FUNC_ALIGN, Marker, Object, Output, Patch, Place,
-    Property, Reference, Reloc, Sections, Text, Unwind, Visibility,
+    Alias, Array, Binding, Chunk, Data, Extent, FUNC_ALIGN, Info, Marker, Object, Output, Patch,
+    Place, Property, Reference, Reloc, Sections, Text, Unwind, Visibility,
 };
 pub use crate::source::{Assembled, Held, Name, Part, Shape, Sort, assembled, assembled_defines};
 

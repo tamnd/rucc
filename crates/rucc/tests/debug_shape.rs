@@ -4,14 +4,16 @@
 //! Design: `spec/04-driver-and-cli.md` section 4.8.
 //!
 //! `-gz` says how the debug sections are compressed and `-gsplit-dwarf` says they go in a file of
-//! their own. This compiler writes no debug sections at all, so the first of them has nothing to
-//! act on and the second has nothing to put in the file it would write. Those two facts lead to
-//! opposite answers, and the point of this file is that the difference is deliberate: a flag that
-//! changes nothing about what is produced is taken, and a flag whose whole observable effect is
-//! that a file appears is refused, because the file would not appear.
+//! their own. There are debug sections now, and `crates/rucc-debug` says what is in them, but
+//! nothing compresses one and nothing writes a second file. Those two facts lead to opposite
+//! answers, and the point of this file is that the difference is deliberate: a flag that leaves
+//! the output as it was is taken, and a flag whose whole observable effect is that a file appears
+//! is refused, because the file would not appear.
 //!
 //! The compression case is asserted on bytes rather than on options, because the claim being made
-//! to a build that passes the flag is about the object, not about a field somewhere.
+//! to a build that passes the flag is about the object, not about a field somewhere. It is asserted
+//! with `-g` on, so that what is being compared is two objects that have something to compress
+//! rather than two that have nothing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,18 +56,17 @@ fn run(dir: &Path, flags: &[&str], object: &str) -> (bool, String) {
 
 #[test]
 fn asking_for_compressed_debug_sections_produces_the_same_object_as_not_asking() {
-    // The honest reading of taking a flag that has nothing to act on. Every value produces the
-    // bytes no value produces, so a build that passes `-gz` gets what it would have got anyway
-    // rather than a quietly different file, and the flag is a description rather than a promise.
-    // The day there is a debug section to compress, this test is the one that has to change, and
-    // it is written so that it fails rather than passes on that day.
+    // The honest reading of taking a flag nothing acts on yet. Every value produces the bytes no
+    // value produces, so a build that passes `-gz` gets what it would have got anyway rather than
+    // a quietly different file. The day the sections are compressed, this test is the one that has
+    // to change, and it is written so that it fails rather than passes on that day.
     let dir = fixture("same");
-    let (ok, said) = run(&dir, &[], "plain.o");
+    let (ok, said) = run(&dir, &["-g"], "plain.o");
     assert!(ok, "{said}");
     let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
 
     for spelling in ["-gz", "-gz=none", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
-        let (ok, said) = run(&dir, &[spelling], "asked.o");
+        let (ok, said) = run(&dir, &["-g", spelling], "asked.o");
         assert!(ok, "{spelling}: {said}");
         assert!(said.is_empty(), "{spelling} was taken without comment: {said}");
         let asked = std::fs::read(dir.join("asked.o")).expect("the object was written");

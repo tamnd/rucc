@@ -24,10 +24,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "gimli"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
+dependencies = [
+ "fallible-iterator",
+ "indexmap",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "hashbrown"
@@ -105,6 +122,7 @@ name = "rucc-asm"
 version = "0.10.73"
 dependencies = [
  "rucc-base",
+ "rucc-diag",
  "rucc-ir",
  "rucc-mir",
  "rucc-object",
@@ -156,6 +174,10 @@ dependencies = [
 [[package]]
 name = "rucc-debug"
 version = "0.10.73"
+dependencies = [
+ "gimli",
+ "rucc-object",
+]
 
 [[package]]
 name = "rucc-diag"
@@ -171,6 +193,7 @@ dependencies = [
  "rucc-base",
  "rucc-codegen",
  "rucc-cost",
+ "rucc-debug",
  "rucc-diag",
  "rucc-ir",
  "rucc-lex",
@@ -396,6 +419,12 @@ version = "0.10.73"
 dependencies = [
  "rucc-rules",
 ]
+
+[[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "xtask"

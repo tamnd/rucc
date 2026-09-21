@@ -16,6 +16,11 @@
 //! file does not contain. The jumps inside a function are not among them, because by the end of a
 //! function every block has a place and they are filled in here.
 //!
+//! A build that asked for debug information gets one more thing: where each machine instruction
+//! began and which span of the source it came from. Spans rather than files and lines, because this
+//! layer has no source map and the thing that has one is the driver, which is also the only place a
+//! `-ffile-prefix-map` still has paths to rewrite.
+//!
 //! The variables a file defines are here for the same reason and in the same shape. [`globals`] is
 //! the one walk over a module's globals, and what it gives back is a list of pieces that
 //! [`print()`] writes down as directives and [`Globals::image`] writes down as bytes, so a `.long`
@@ -47,7 +52,7 @@ mod source;
 mod unwind;
 
 pub use crate::att::print;
-pub use crate::bytes::assemble;
+pub use crate::bytes::{Assembled, Row, assemble};
 pub use crate::data::{Globals, Piece, Variable, aliases, globals};
 pub use crate::format::Directives;
 pub use crate::source::{Trouble, read};

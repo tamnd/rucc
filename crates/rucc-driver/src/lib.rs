@@ -385,6 +385,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let host = Triple::host()
         .ok_or_else(|| err("this host is not a supported target and no --target was given"))?;
     let mut opts = Options::new(host);
+    // Where the compiler is running, which is what `DW_AT_comp_dir` is and what a debugger joins a
+    // relative file name onto. Asked here rather than where the debug sections are written, because
+    // this is the one layer that is allowed to look at the process it is in, and because a command
+    // line that compiles four files should give the same answer for all four.
+    opts.working_dir = std::env::current_dir().ok().map(|dir| dir.to_string_lossy().into_owned());
     let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
     let mut print_pipeline = false;
