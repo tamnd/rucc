@@ -119,8 +119,8 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
     let mut messages = Vec::new();
     let mut errors = 0;
     for diag in pp.take_diagnostics() {
-        // `-w`, for the reason it is read here in the compiler proper.
-        if !opts.warnings && diag.severity == Severity::Warning {
+        // `-w` and `-Wsystem-headers`, for the reason they are read here in the compiler proper.
+        if rucc_diag::dropped(&diag, &sess.sources, opts.warnings, opts.system_header_warnings) {
             continue;
         }
         let fatal = diag.severity.is_fatal()
@@ -221,6 +221,42 @@ mod tests {
         assert!(result.failed());
         assert!(result.messages[0].contains("/nope.c"), "{:?}", result.messages);
         assert!(result.text.is_empty());
+    }
+
+    #[test]
+    fn a_warning_about_a_header_that_came_with_the_machine_is_not_printed() {
+        // micropython is what found this. It defines `_DIRENT_HAVE_D_TYPE` in its own
+        // configuration header and glibc defines it again in `bits/dirent.h`, gcc says nothing
+        // because the second one is in a system header, and the build runs with warnings as
+        // errors, so without this rule it stops on a line nobody in the project wrote.
+        let mut opts = options();
+        opts.search.push_system("/usr/include");
+        opts.search.push_bracket("/project");
+        let files = [
+            ("/main.c", "#define N 1\n#include <sys.h>\n#include \"own.h\"\n"),
+            ("/usr/include/sys.h", "#define N 2\n#include <inner.h>\n"),
+            ("/usr/include/inner.h", "#define N 3\n"),
+            ("/project/own.h", "#define N 4\n"),
+        ];
+
+        // One message, about the project's own header. The system one and the header it pulled in
+        // are both quiet, and the second of those is the propagation: `inner.h` was found in the
+        // same directory, but a header a system header includes is a system header whichever
+        // directory answers for it.
+        let result = run(&opts, &files);
+        assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("own.h"), "{:?}", result.messages);
+        assert_eq!(result.errors, 0);
+
+        // `-Wsystem-headers` is how somebody porting a header hears all of it.
+        opts.system_header_warnings = true;
+        let result = run(&opts, &files);
+        assert_eq!(result.messages.len(), 3, "{:?}", result.messages);
+
+        // `-w` beats it, because a warning that was never raised cannot be asked for back.
+        opts.warnings = false;
+        let result = run(&opts, &files);
+        assert_eq!(result.messages, Vec::<String>::new());
     }
 
     #[test]

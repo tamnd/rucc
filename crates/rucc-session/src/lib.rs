@@ -1901,6 +1901,14 @@ pub struct Options {
     /// tested at each site that raises one. `-w` beats `-Werror` where both are given, because a
     /// warning that was never raised cannot be promoted.
     pub warnings: bool,
+    /// Whether a warning about something in a header that came with the machine is printed, which
+    /// is `-Wsystem-headers` and is off the way gcc has it off.
+    ///
+    /// The person compiling did not write the file and cannot change it, so a warning about it is
+    /// noise, and under `-Werror` it is a build that stops on a line nobody in the project typed.
+    /// It is worth having the flag rather than nothing at all, because somebody porting a header
+    /// or reading what a new compiler thinks of one does want to hear all of it.
+    pub system_header_warnings: bool,
     /// How many diagnostics to print before giving up. Past a certain point the output is
     /// noise from a single earlier mistake, and GCC's default of no limit is not a kindness.
     pub error_limit: u32,
@@ -2172,6 +2180,7 @@ impl Options {
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,
+            system_header_warnings: false,
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
@@ -2289,9 +2298,16 @@ impl Session {
     /// Under `-Werror` a warning is promoted here, once, rather than at every site that
     /// raises one, and under `-w` it is dropped here for the same reason. A warning that `-w`
     /// dropped is not counted, so `-w -Werror` compiles rather than failing on a warning
-    /// nobody was going to see.
+    /// nobody was going to see. A warning about a line in a header that came with the machine is
+    /// dropped here too, which is what `-Wsystem-headers` turns off, and dropping it before the
+    /// promotion is what keeps `-Werror` from stopping a build on somebody else's header.
     pub fn emit(&mut self, mut diag: Diagnostic) {
-        if !self.opts.warnings && diag.severity == Severity::Warning {
+        if rucc_diag::dropped(
+            &diag,
+            &self.sources,
+            self.opts.warnings,
+            self.opts.system_header_warnings,
+        ) {
             return;
         }
         if self.opts.warnings_are_errors && diag.severity == Severity::Warning {

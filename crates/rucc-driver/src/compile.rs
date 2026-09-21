@@ -448,8 +448,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     for diag in &diagnostics {
         // `-w` drops the warning here rather than at the several hundred places one is raised,
         // and it drops it before the count, so `-w -Werror` compiles. A warning that was never
-        // raised is not a warning there is anything to promote.
-        if !opts.warnings && diag.severity == Severity::Warning {
+        // raised is not a warning there is anything to promote. A warning about something in a
+        // header that came with the machine goes the same way for the same reason, unless
+        // `-Wsystem-headers` asked for it.
+        if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings) {
             continue;
         }
         if diag.severity.is_fatal()

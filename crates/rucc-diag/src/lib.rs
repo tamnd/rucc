@@ -23,7 +23,7 @@ mod source;
 
 pub use crate::errors::{DEFAULT_ERROR_LIMIT, Errors};
 pub use crate::source::{
-    FileId, Loc, PresumedLoc, SourceBytes, SourceFile, SourceMap, SourceMapFull,
+    FileId, Loc, PresumedLoc, SourceBytes, SourceFile, SourceMap, SourceMapFull, dropped,
 };
 
 use std::fmt;
