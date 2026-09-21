@@ -2743,6 +2743,20 @@ impl<'u> Body<'_, 'u> {
             return;
         }
 
+        // An object whose length the program computes, which the checking allows an initializer
+        // on only where the braces are empty, so what is asked for here is the whole of it zeroed.
+        // 6.7.11p11: an automatic object written with an empty initializer holds what a static one
+        // would, which is zero in every element and in the padding too. It is a fill whose length
+        // is a value because the length is, and it is the only way the language offers to ask for
+        // a zeroed one of these.
+        if repr::is_variable_length(self.types(), ty) {
+            let slot = self.address_of(place, span);
+            let length = self.size_value(ty, span);
+            let align = repr::align_of(self.types(), self.target(), ty);
+            self.memset_value(slot, 0, length, align, span);
+            return;
+        }
+
         let size = repr::size_of(self.types(), self.target(), ty);
         let mut covered = 0;
         for entry in &entries {
@@ -2753,23 +2767,8 @@ impl<'u> Body<'_, 'u> {
             // zero as well, which is what makes a partly initialized structure comparable byte
             // for byte with another one.
             let slot = self.address_of(place, span);
-            let zero = self.build(span).iconst(Type::int(8), 0);
             let align = repr::align_of(self.types(), self.target(), ty);
-            let info = MemInfo {
-                size,
-                align,
-                order: MemOrder::NotAtomic,
-                tbaa: None,
-                owns: 0,
-                restrict: Restrict::NONE,
-            };
-            let mut build = self.build(span);
-            let mem = build.func().add_mem(info);
-            let args = build.func().push_values(&[slot, zero]);
-            build.inst(
-                InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memset) },
-                &[],
-            );
+            self.memset(slot, 0, size, align, span);
         }
         for entry in entries {
             self.store_entry(place, entry, span);
@@ -2829,14 +2828,9 @@ impl<'u> Body<'_, 'u> {
             // An aggregate initializing part of an aggregate, which is `struct p = q;` and
             // `struct p = (struct point){ 1, 2 };`. It is a copy rather than a store, because
             // an aggregate is not a value the IR can hold.
-            if self.unmovable(ty, span) {
-                return;
-            }
             let source = self.place(value);
             let source = self.address_of(source, span);
-            let size = repr::size_of(self.types(), self.target(), ty);
-            let align = repr::align_of(self.types(), self.target(), ty);
-            self.memcpy(addr, source, size, align, span);
+            self.copy_bytes(addr, source, ty, span);
             return;
         }
         let Some(value) = self.eval(value) else { return };
@@ -2845,11 +2839,79 @@ impl<'u> Body<'_, 'u> {
         self.build(span).store(value, addr, info, flags);
     }
 
+    /// A fill of a fixed number of bytes with one byte.
+    fn memset(&mut self, to: Value, byte: i128, size: u64, align: u32, span: Span) {
+        if size == 0 {
+            return;
+        }
+        self.fill(to, byte, size, None, align, span);
+    }
+
+    /// A fill with one byte over a run of bytes whose length the program works out.
+    ///
+    /// Separate from [`Self::memset`] rather than the same function taking either, because which
+    /// of the two shapes is built is not a detail. The length goes in the payload where it is a
+    /// number and in an operand where it is not, and a caller that had a number and built a
+    /// constant operand out of it would send a fill of four bytes to the library call
+    /// `rucc_codegen::expand` keeps for the ones it cannot write out as stores.
+    fn memset_value(&mut self, to: Value, byte: i128, length: Value, align: u32, span: Span) {
+        self.fill(to, byte, 0, Some(length), align, span);
+    }
+
+    /// What both of the two build, which is where the payload and the operands are decided.
+    fn fill(
+        &mut self,
+        to: Value,
+        byte: i128,
+        size: u64,
+        length: Option<Value>,
+        align: u32,
+        span: Span,
+    ) {
+        let info = MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut build = self.build(span);
+        let value = build.iconst(Type::int(8), byte);
+        let mem = build.func().add_mem(info);
+        let mut operands = vec![to, value];
+        operands.extend(length);
+        let args = build.func().push_values(&operands);
+        build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memset) }, &[]);
+    }
+
     /// A copy of a fixed number of bytes from one address to another.
     fn memcpy(&mut self, to: Value, from: Value, size: u64, align: u32, span: Span) {
         if size == 0 {
             return;
         }
+        self.move_bytes(to, from, size, None, align, span);
+    }
+
+    /// A copy from one address to another of a length the program works out.
+    ///
+    /// Separate from [`Self::memcpy`] for the reason [`Self::memset_value`] is separate from
+    /// [`Self::memset`]: which of the two shapes is built decides whether the copy can be written
+    /// out as stores, so a caller that has a number says so by calling the other one.
+    fn memcpy_value(&mut self, to: Value, from: Value, length: Value, align: u32, span: Span) {
+        self.move_bytes(to, from, 0, Some(length), align, span);
+    }
+
+    /// What both of the two build, which is where the payload and the operands are decided.
+    fn move_bytes(
+        &mut self,
+        to: Value,
+        from: Value,
+        size: u64,
+        length: Option<Value>,
+        align: u32,
+        span: Span,
+    ) {
         let info = MemInfo {
             size,
             align,
@@ -2860,7 +2922,9 @@ impl<'u> Body<'_, 'u> {
         };
         let mut build = self.build(span);
         let mem = build.func().add_mem(info);
-        let args = build.func().push_values(&[to, from]);
+        let mut operands = vec![to, from];
+        operands.extend(length);
+        let args = build.func().push_values(&operands);
         build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
     }
 
@@ -3785,27 +3849,20 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// One whole object of a type copied from one address to another.
+    ///
+    /// The length is the type's where the type has one and a value the program works out where it
+    /// does not, which is a record with a member the program measures or an array of one. The two
+    /// are the same copy and the second is the one a call to the runtime's `memcpy` stands in for,
+    /// since there is nothing to write out as stores when nobody knows how many there are.
     fn copy_bytes(&mut self, to: Value, from: Value, ty: TypeId, span: Span) {
-        if self.unmovable(ty, span) {
+        let align = repr::align_of(self.types(), self.target(), ty);
+        if repr::is_variable_length(self.types(), ty) {
+            let length = self.size_value(ty, span);
+            self.memcpy_value(to, from, length, align, span);
             return;
         }
         let size = repr::size_of(self.types(), self.target(), ty);
-        let align = repr::align_of(self.types(), self.target(), ty);
         self.memcpy(to, from, size, align, span);
-    }
-
-    /// Whether a whole object of this type is one the walk cannot move yet, reported if so.
-    ///
-    /// Moving one needs a `memcpy` whose length is a value rather than a number, which nothing
-    /// here builds. Declaring such an object works and so does reaching a member of it, so what
-    /// this turns down is only the shapes that move the whole thing at once, which after the
-    /// checking has had its say is an assignment of one record to another.
-    fn unmovable(&mut self, ty: TypeId, span: Span) -> bool {
-        if !repr::is_variable_length(self.types(), ty) {
-            return false;
-        }
-        self.unsupported("a copy of a whole object whose length the program computes", span);
-        true
     }
 
     /// The type both halves of a complex type have.
@@ -6996,9 +7053,6 @@ impl<'u> Body<'_, 'u> {
     /// through a temporary and never one lock held across the other, which is what would deadlock
     /// a table that hashes two objects onto one entry.
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
-        if self.unmovable(ty, span) {
-            return None;
-        }
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let destination = self.address_of(place, span);
@@ -7006,9 +7060,7 @@ impl<'u> Body<'_, 'u> {
             self.ordered_write(destination, source, place.ty, MemOrder::SeqCst, span);
             return None;
         }
-        let size = repr::size_of(self.types(), self.target(), ty);
-        let align = repr::align_of(self.types(), self.target(), ty);
-        self.memcpy(destination, source, size, align, span);
+        self.copy_bytes(destination, source, ty, span);
         None
     }
 

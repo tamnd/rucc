@@ -637,17 +637,11 @@ fn ask(
 /// afterwards is the same answer as reading it before, overlap included, because a copy writes no
 /// plane entries of its own.
 fn carry(func: &mut Func, copy: Inst) -> bool {
-    let Extra::Mem(info) = func[copy].extra else { return false };
-    // A copy of a known size is what the opcode is, and the verifier refuses one whose payload says
-    // zero, so this is a shape that does not arise rather than a case being handled.
-    let size = func[info].size;
-    if size == 0 {
-        return false;
-    }
-    let [to, from] = func[func[copy].args] else { return false };
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
 
     let span = func.span(copy);
-    let (made, length) = extent(func, copy, size);
     let args = func.push_values(&[to, from, length]);
     let data = InstData { args, ..InstData::new(Opcode::MetaTypeCopy) };
     let carried = func.create_inst(data, &[], span);
@@ -789,16 +783,11 @@ fn filled(
 /// difference between a copy the program wrote by hand and one the compiler wrote for it, which is
 /// tamnd/rucc#1471.
 fn relocation(func: &mut Func, copy: Inst) -> bool {
-    let Extra::Mem(info) = func[copy].extra else { return false };
-    // As in `carry` and in `moved`, and for the same reason.
-    let size = func[info].size;
-    if size == 0 {
-        return false;
-    }
-    let [to, from] = func[func[copy].args] else { return false };
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
 
     let span = func.span(copy);
-    let (made, length) = extent(func, copy, size);
     let args = func.push_values(&[to, from, length]);
     let data = InstData { args, ..InstData::new(Opcode::CapCopy) };
     let carried = func.create_inst(data, &[], span);
@@ -821,17 +810,11 @@ fn relocation(func: &mut Func, copy: Inst) -> bool {
 /// of CWE-200. Carrying the source's answer keeps the padding unwritten all the way to the
 /// boundary, which is where the read that matters happens.
 fn moved(func: &mut Func, copy: Inst) -> bool {
-    let Extra::Mem(info) = func[copy].extra else { return false };
-    // As in `carry`: the verifier refuses a copy whose payload says zero, so this is a shape that
-    // does not arise rather than a case being handled.
-    let size = func[info].size;
-    if size == 0 {
-        return false;
-    }
-    let [to, from] = func[func[copy].args] else { return false };
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
 
     let span = func.span(copy);
-    let (made, length) = extent(func, copy, size);
     let args = func.push_values(&[to, from, length]);
     let data = InstData { args, ..InstData::new(Opcode::MetaInitCopy) };
     let carried = func.create_inst(data, &[], span);
@@ -855,6 +838,28 @@ fn extent(func: &mut Func, at: Inst, size: u64) -> (Inst, Value) {
     func.insert_after(made, at);
     let length = func[made].results().next().expect("a constant created with one result has one");
     (made, length)
+}
+
+/// How long the copy at `at` is, as a value, and what a plane write over it goes in after.
+///
+/// The same pair [`extent`] hands back and for the same reason, except that this one asks the copy
+/// rather than being told a number. A copy whose length the program works out hands its own operand
+/// over and there is no constant to make, so what the caller goes in after is the copy itself,
+/// which puts the write in the same place either way.
+///
+/// `None` for a copy that moves no bytes, which the verifier refuses, so it is a shape that does
+/// not arise rather than a case being handled.
+fn copied(func: &mut Func, at: Inst) -> Option<(Inst, Value)> {
+    let bulk = func.bulk(at)?;
+    if let Some(length) = bulk.length {
+        return Some((at, length));
+    }
+    let Extra::Mem(info) = func[at].extra else { return None };
+    let size = func[info].size;
+    if size == 0 {
+        return None;
+    }
+    Some(extent(func, at, size))
 }
 
 /// How many bytes an access covers.
@@ -2383,6 +2388,58 @@ mod tests {
         assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
         assert!(printed.contains("meta_init_copy %0, %1, %3\n"), "{printed}");
         assert!(printed.contains("cap_copy %0, %1, %4\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_copy_of_a_length_the_program_works_out_carries_it_with_the_length_it_was_given() {
+        // The three plane writes are the same three, and the count is the copy's own operand
+        // rather than a constant made beside it, because there is no constant to make. They go in
+        // after the copy, which is where the constant ones go in too.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("move"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR, Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+        let length = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, from, length]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memcpy) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "move.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @move(ptr, ptr, i64), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr, %2: i64):\n    \
+             memcpy %0, %1, %2, align 8\n    \
+             meta_type_copy %0, %1, %2\n    \
+             meta_init_copy %0, %1, %2\n    \
+             cap_copy %0, %1, %2\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     #[test]

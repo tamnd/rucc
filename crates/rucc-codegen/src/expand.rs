@@ -1054,10 +1054,12 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32) {
 /// is what was there when the first was, and reading a word at a time costs one register where
 /// reading all of them first would cost as many registers as the copy has words.
 fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
-    let [into, from] = func[func[inst].args] else { return };
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, from) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let Some(plan) = chunks(info, word) else {
+    // A plan is a list of offsets, so there is none for a copy whose length the program works out.
+    let Some(plan) = chunks(info, word).filter(|_| bulk.length.is_none()) else {
         return library(func, names, inst, Opcode::Memcpy, word);
     };
     for (at, width) in plan {
@@ -1078,13 +1080,15 @@ fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
 /// initialiser did not name, where the byte is always zero, and the general case is written anyway
 /// because the arithmetic is the same and being right about `0xff` costs nothing.
 fn fill(func: &mut Func, names: &mut Interner, inst: Inst, word: u32) {
-    let [into, byte] = func[func[inst].args] else { return };
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, byte) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
     let Some(spelled) = literal(func, byte) else {
         return library(func, names, inst, Opcode::Memset, word);
     };
-    let Some(plan) = chunks(info, word) else {
+    // As in [`copy`]: a fill whose length the program works out has no list of offsets to write.
+    let Some(plan) = chunks(info, word).filter(|_| bulk.length.is_none()) else {
         return library(func, names, inst, Opcode::Memset, word);
     };
     for (at, width) in plan {
@@ -1116,7 +1120,8 @@ fn library(func: &mut Func, names: &mut Interner, inst: Inst, opcode: Opcode, wo
     // the mode each is written down under there.
     let mode = if opcode == Opcode::Memmove { "any" } else { "big" };
     let Some(routine) = capability::libcall(opcode, mode) else { return };
-    let [into, second] = func[func[inst].args] else { return };
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, second) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
 
@@ -1124,7 +1129,13 @@ fn library(func: &mut Func, names: &mut Interner, inst: Inst, opcode: Opcode, wo
     // the machine rather than written as sixty four so that a thirty two bit target gets the
     // argument its own C library declares.
     let words = Type::int(word * 8);
-    let count = ahead_const(func, inst, Imm::int(i128::from(size), words), words);
+    // The operand where the program worked the length out, and the payload's number otherwise.
+    // The operand is fitted to `size_t` here rather than by the front end, because how wide that
+    // is is a fact about the machine and this is the first pass that has been told which one.
+    let count = match bulk.length {
+        Some(length) => fitted(func, inst, length, words),
+        None => ahead_const(func, inst, Imm::int(i128::from(size), words), words),
+    };
     // A fill passes an `int` where the IR passes the byte itself, and the widening is a zero
     // extension because the routine looks at the low eight bits and nothing else.
     let second = if opcode == Opcode::Memset { widened(func, inst, second) } else { second };
@@ -1143,6 +1154,22 @@ fn library(func: &mut Func, names: &mut Interner, inst: Inst, opcode: Opcode, wo
     data.args = args;
     data.extra = Extra::Call(info);
     data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
+}
+
+/// A count brought to the width the routine takes it in, whichever side of it the value started.
+///
+/// The front end builds a length in whatever `size_t` it decided on, so on every target here the
+/// two already agree and this does nothing. It is written anyway because narrowing and widening
+/// are different instructions and picking the wrong one is the kind of mistake that shows up as a
+/// copy of four gigabytes rather than as a build failure. The extension is unsigned, since a
+/// length is a count of bytes and there is no negative one.
+fn fitted(func: &mut Func, inst: Inst, value: Value, want: Type) -> Value {
+    let ty = func[value].ty;
+    if ty == want {
+        return value;
+    }
+    let opcode = if ty.bits() < want.bits() { Opcode::ZExt } else { Opcode::Trunc };
+    ahead(func, inst, opcode, &[value], want)
 }
 
 /// A value widened to an `int`, or the value itself when it is one already.
@@ -1877,6 +1904,50 @@ mod tests {
         assert!(text.contains("call @memset"), "a call and not a run of stores: {text}");
         // Widened, because C passes the byte as an `int` and the IR holds it as a byte.
         assert!(text.contains("zext.i32"), "the byte is widened to what C passes: {text}");
+    }
+
+    /// A copy or a fill whose length the program works out, which carries the count as a third
+    /// operand and nothing beside the instruction.
+    fn computing(opcode: Opcode, byte: Option<i128>) -> (Interner, Func) {
+        one(&[Type::PTR, Type::PTR, Type::int(64)], &[], |build, args| {
+            let second = match byte {
+                Some(value) => build.iconst(Type::int(8), value),
+                None => args[1],
+            };
+            let mem = build.func().add_mem(access(0, 4));
+            let operands = build.func().push_values(&[args[0], second, args[2]]);
+            let data = InstData { args: operands, extra: Extra::Mem(mem), ..InstData::new(opcode) };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        })
+    }
+
+    /// However few bytes it turns out to be, because how many there are is not known here and a
+    /// plan is a list of offsets somebody has to be able to write down.
+    #[test]
+    fn a_bulk_move_of_a_length_the_program_works_out_is_a_call_whatever_the_payload_says() {
+        for (opcode, name) in
+            [(Opcode::Memcpy, "memcpy"), (Opcode::Memmove, "memmove"), (Opcode::Memset, "memset")]
+        {
+            let byte = (opcode == Opcode::Memset).then_some(0);
+            let (mut names, mut func) = computing(opcode, byte);
+            bulk(&mut func, &mut names, 8);
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("call @{name}")), "a call and not a plan: {text}");
+            // The count is the operand it came in with rather than a constant made here, which is
+            // the whole difference between this and a copy whose size the payload holds.
+            assert!(!text.contains("iconst.i64"), "no size was invented: {text}");
+        }
+    }
+
+    #[test]
+    fn what_a_bulk_move_of_a_length_the_program_works_out_becomes_is_ir_that_verifies() {
+        for opcode in [Opcode::Memcpy, Opcode::Memmove, Opcode::Memset] {
+            let byte = (opcode == Opcode::Memset).then_some(0);
+            let (mut names, mut func) = computing(opcode, byte);
+            bulk(&mut func, &mut names, 8);
+            valid(&func, &mut names);
+        }
     }
 
     /// A machine whose widest move is four bytes gets four byte words out of an eight byte block,

@@ -33,9 +33,9 @@ use rucc_diag::Span;
 use rucc_target::Slot;
 
 use crate::inst::{
-    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, CallInfo, Def, Extra, Imm,
-    ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SlotList, SwitchInfo, VaInfo,
-    Value, ValueData, ValueList,
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Extra,
+    Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SlotList, SwitchInfo,
+    VaInfo, Value, ValueData, ValueList,
 };
 use crate::module::{Linkage, Visibility};
 use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
@@ -469,6 +469,26 @@ impl Func {
     #[must_use]
     pub fn mem_out(&self, inst: Inst) -> Option<Value> {
         self[inst].results().last().filter(|&result| self[result].ty.is_mem())
+    }
+
+    /// A bulk copy or fill taken apart, or nothing where the instruction is not one.
+    ///
+    /// The length is an operand on a bulk operation over an object whose length the program works
+    /// out and is [`MemInfo::size`] on every other one. Both shapes are here so that a pass which
+    /// asks this cannot read the payload's number on the one where it is not the count: what it
+    /// gets is the operand or nothing, and nothing is the only answer that means the payload.
+    ///
+    /// Memory is the last operand where the function carries it, which is why the length is found
+    /// by position from the front rather than from the back.
+    #[must_use]
+    pub fn bulk(&self, inst: Inst) -> Option<Bulk> {
+        if !matches!(self[inst].opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset) {
+            return None;
+        }
+        let all = &self[self[inst].args];
+        let args = &all[..all.len() - usize::from(self.mem_in(inst).is_some())];
+        let [to, with, rest @ ..] = args else { return None };
+        Some(Bulk { to: *to, with: *with, length: rest.first().copied() })
     }
 
     /// Whether an instruction has been threaded onto the memory chain.
@@ -1720,5 +1740,65 @@ mod tests {
         let (mut func, store, _) = threaded();
         let start = func.mem_in(store).expect("it was threaded");
         func.with_mem(store, start);
+    }
+
+    /// Two copies of the same pair of addresses, the first of a fixed length and the second of one
+    /// the caller passed in, both on the memory chain so that the length is not the last operand.
+    fn copies() -> (Func, Inst, Inst) {
+        let mut names = Interner::new();
+        let i64_ = Type::int(64);
+        let mut func = Func::new(
+            names.intern("copies"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR, i64_]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+        let length = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 16,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let start = b.mem_entry();
+        let mem = b.func().add_mem(info);
+        let args = b.func().push_values(&[to, from]);
+        let fixed =
+            b.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        let mem = b.func().add_mem(MemInfo { size: 0, ..info });
+        let args = b.func().push_values(&[to, from, length]);
+        let computed =
+            b.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        b.ret(&[]);
+
+        let fixed = func.with_mem(fixed, start);
+        let after = func.mem_out(fixed).expect("a copy makes a new version");
+        let computed = func.with_mem(computed, after);
+        (func, fixed, computed)
+    }
+
+    #[test]
+    fn a_bulk_copy_hands_back_its_length_where_it_has_one_and_nothing_where_the_payload_has_it() {
+        let (func, fixed, computed) = copies();
+        let params = &func[func.entry().expect("an entry")].params;
+        let [to, from, length] = params[..] else { panic!("three of them were appended") };
+
+        let bulk = func.bulk(fixed).expect("a memcpy is one");
+        assert_eq!((bulk.to, bulk.with, bulk.length), (to, from, None));
+
+        let bulk = func.bulk(computed).expect("a memcpy is one");
+        assert_eq!((bulk.to, bulk.with, bulk.length), (to, from, Some(length)));
+    }
+
+    #[test]
+    fn an_instruction_that_is_not_a_bulk_operation_is_not_taken_apart_as_one() {
+        let (func, store, load) = threaded();
+        assert_eq!(func.bulk(store), None);
+        assert_eq!(func.bulk(load), None);
     }
 }
