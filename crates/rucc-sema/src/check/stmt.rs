@@ -46,7 +46,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, Remarks, StringLiteral};
 use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
 
-use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList};
+use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList, in_a_register};
 use crate::check::expr::Target;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
@@ -1014,12 +1014,15 @@ impl Checker<'_> {
         let ty = self.tast[value].ty;
         let lvalue = matches!(self.tast[value].category, Category::Lvalue | Category::Bitfield);
 
-        // A structure has no register to sit in, so it travels the only way it can whatever the
-        // constraint says, and a constraint that does not allow memory is turned down rather
-        // than lowered to an address the backend has no reason to expect.
+        // A structure has no value of its own to put in a register, so one as wide as a register
+        // travels as the integer its bytes spell, which is what gcc does with it, and one that is
+        // any other size travels the only way it can whatever the constraint says. A constraint
+        // that does not allow memory is then turned down rather than lowered to an address the
+        // backend has no reason to expect.
         let record = is_record(&self.types, ty);
-        let memory = memory_only(&text) || record;
-        if record && !memory_only(&text) {
+        let register = record && in_a_register(&self.types, self.cx.target, ty);
+        let memory = memory_only(&text) || (record && !register);
+        if record && !register && !memory_only(&text) {
             self.statement_unsupported("a structure or a union in a register constraint", span);
         }
 
@@ -1061,9 +1064,10 @@ impl Checker<'_> {
         }
 
         // An output is written through, and an operand in memory is addressed, so both of those
-        // stay the object they name. Everything else is read, which is what turns an array into
-        // a pointer and a variable into its value.
-        let value = if output || memory { value } else { self.value(value) };
+        // stay the object they name. So does a structure in a register, whose bytes are read out
+        // of wherever it is. Everything else is read, which is what turns an array into a pointer
+        // and a variable into its value.
+        let value = if output || memory || record { value } else { self.value(value) };
         AsmOperand { name: operand.name, constraint, value, memory }
     }
 

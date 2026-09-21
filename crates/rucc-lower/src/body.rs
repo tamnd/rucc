@@ -2017,6 +2017,11 @@ impl<'u> Body<'_, 'u> {
     /// entry takes the next operand, which is a value for an input and an address for anything
     /// in memory. An output written `+` is read as well as written and so takes both.
     ///
+    /// A structure or a union as wide as a register is a value here as well, which is its bytes
+    /// read as an integer that wide, and one of those as an output is written back into the
+    /// object the same way. [`rucc_sema::in_a_register`] is the rule about which of them travel
+    /// that way and the checking is where a wider one was turned down.
+    ///
     /// An `asm goto` is a terminator, and its first target is where control arrives when the
     /// assembly does not jump. That is what makes the outputs work: they are written into their
     /// objects in that block, so a label the assembly jumps to is somewhere they never happened,
@@ -2069,11 +2074,18 @@ impl<'u> Body<'_, 'u> {
                 args.push(addr);
                 continue;
             }
-            let ty = self.value_type(place.ty, at);
+            let record = self.record_in_a_register(place.ty);
+            let ty = match record {
+                Some(ty) => ty,
+                None => self.value_type(place.ty, at),
+            };
             if written[index].starts_with('+') {
-                let value = match self.read(place, at) {
-                    Some(value) => value,
-                    None => self.poison(ty, at),
+                let value = match record {
+                    Some(ty) => self.load_record(place, ty, at),
+                    None => match self.read(place, at) {
+                        Some(value) => value,
+                        None => self.poison(ty, at),
+                    },
                 };
                 args.push(value);
             }
@@ -2083,10 +2095,15 @@ impl<'u> Body<'_, 'u> {
         for index in 0..tast[node.inputs].len() {
             let operand = tast[node.inputs][index];
             let at = tast.expr_span(operand.value);
+            let ty = tast[operand.value].ty;
             if operand.memory {
                 let place = self.place(operand.value);
                 let addr = self.address_of(place, at);
                 args.push(addr);
+            } else if let Some(ty) = self.record_in_a_register(ty) {
+                let place = self.place(operand.value);
+                let value = self.load_record(place, ty, at);
+                args.push(value);
             } else {
                 let value = self.value(operand.value);
                 args.push(value);
@@ -2120,8 +2137,46 @@ impl<'u> Body<'_, 'u> {
         }
         let produced: Vec<Value> = self.func[inst].results().collect();
         for (place, value) in writes.into_iter().zip(produced) {
-            self.write(place, value, span);
+            match self.record_in_a_register(place.ty) {
+                Some(_) => self.store_record(place, value, span),
+                None => {
+                    self.write(place, value, span);
+                }
+            }
         }
+    }
+
+    /// The integer one structure or union in a register constraint travels as.
+    ///
+    /// [`rucc_sema::in_a_register`] is the rule about which of them may, and this is the type
+    /// that goes with it: an integer as wide as the object, rather than anything to do with what
+    /// is inside it, because a register holds bits and what the assembly was handed is the bits.
+    fn record_in_a_register(&mut self, ty: TypeId) -> Option<Type> {
+        if !rucc_sema::in_a_register(self.types(), self.target(), ty) {
+            return None;
+        }
+        let size = repr::size_of(self.types(), self.target(), ty);
+        Some(Type::int(u32::try_from(size).ok()? * 8))
+    }
+
+    /// One of those read out of the object it is in.
+    ///
+    /// A load of its own rather than [`Self::read`], for the reason a copy is one: this access
+    /// has no C type to go through, since what it reads is the whole object as a number and not
+    /// any member the program declared, and giving it the record's own alias node would say a
+    /// read through a type nobody reads through. How aligned it may claim to be is how aligned
+    /// the object is, which is what [`Self::place_align`] answers.
+    fn load_record(&mut self, place: Place, ty: Type, span: Span) -> Value {
+        let addr = self.address_of(place, span);
+        let info = self.piece_info(self.place_align(place), 0);
+        self.build(span).load(ty, addr, info, Flags::NONE)
+    }
+
+    /// One of those written back into the object it came out of, which is what an output is.
+    fn store_record(&mut self, place: Place, value: Value, span: Span) {
+        let addr = self.address_of(place, span);
+        let info = self.piece_info(self.place_align(place), 0);
+        self.build(span).store(value, addr, info, Flags::NONE);
     }
 
     /// The text of one of the strings of an assembly statement.

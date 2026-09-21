@@ -18,6 +18,8 @@
 use rucc_ast::AsmQuals;
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
+use rucc_target::TargetInfo;
+use rucc_types::{TypeId, Types, is_record, layout};
 
 use crate::expr::ExprId;
 use crate::tast::StrId;
@@ -87,7 +89,28 @@ pub struct AsmOperand {
     pub value: ExprId,
     /// Whether the assembly is given the address of an object rather than a value.
     ///
-    /// True for a constraint that allows nothing but memory and for a structure or a union,
-    /// which is not something a register holds.
+    /// True for a constraint that allows nothing but memory and for a structure or a union that
+    /// does not fit in a register, which [`in_a_register`] is the rule for.
     pub memory: bool,
+}
+
+/// Whether a structure or a union travels in a register when a constraint asks for one.
+///
+/// A record has no value a register holds, and gcc takes one in a register constraint anyway
+/// when the whole of it fits in one: the bytes are read as an integer that wide, handed to the
+/// assembly, and written back the same way. That is what `asm("" : "=r" (r) : "0" (s))` over a
+/// one word structure means, which is a thing an allocator written in C does to get at the bits
+/// of a pointer it keeps in a structure of its own.
+///
+/// What fits is a size a register has, which is a power of two up to the width of an address.
+/// Three bytes is not one, since the load and the store either side would touch a fourth byte
+/// the object does not own, and sixteen is not one because it is two registers and the operand
+/// is one. gcc takes both of those and gives the second half of the second one away, which is a
+/// thing to do rather than a rule to copy, so those stay turned down here.
+pub fn in_a_register(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
+    if !is_record(types, ty) {
+        return false;
+    }
+    let Ok(shape) = layout(types, ty, target) else { return false };
+    shape.size.is_power_of_two() && shape.size * 8 <= u64::from(target.pointer_width)
 }

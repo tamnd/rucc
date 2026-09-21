@@ -102,6 +102,7 @@ mod tast;
 
 pub use crate::asm::{
     Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, LabelRef, StrList, StrRef,
+    in_a_register,
 };
 pub use crate::check::{
     Checked, Checker, Context, library_name, unchecked_name, unimplemented_builtin,
