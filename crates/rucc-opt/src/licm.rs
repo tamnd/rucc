@@ -108,11 +108,14 @@ use std::collections::HashSet;
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Flags, Func, Inst, Opcode, Value};
 
+use crate::alias::{Access, Alias};
 use crate::cfg::Cfg;
 use crate::dom::{Dominators, PostDominators};
 use crate::live::Liveness;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
+use crate::modref::Summaries;
+use crate::outside::Outside;
 use crate::pressure::{Class, Pressure, class_of};
 use crate::range::query::Ranges;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, speculate};
@@ -126,6 +129,23 @@ const MEMORY: &str = "left in the loop, the loop writes memory and nothing here 
 const NO_PREHEADER: &str = "loop left as it was, it has not been canonicalized";
 const SPINS: &str = "loop left as it was, it has no way out, so nothing in it is known to run";
 const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
+const NO_STEPS: &str =
+    "left in the loop, the oracle ran out of questions before it got through the loop's writes";
+
+/// How many questions this pass asks the alias oracle about one loop before it stops asking.
+///
+/// The walk below is one question per instruction in the loop that writes memory per load in it,
+/// which is quadratic in the loop, and section 09.2's rule for a quadratic thing in the optimizer
+/// is that it has a number written next to it rather than a hope. A loop that runs out is left
+/// exactly where the coarse answer would have left it, so the budget costs precision and never
+/// correctness.
+///
+/// 2000 rather than a larger number because a larger one was measured and bought nothing. On the
+/// SQLite amalgamation at `-O2` it is 773 loads that run out of questions, and at 20000 it is 545:
+/// the 228 in between all get a full answer of no. Not one extra load comes out of a loop for the
+/// ten times the questions, so what the bigger budget buys is a more accurate remark about loads
+/// that were staying anyway.
+const ALIAS_STEPS: usize = 2_000;
 
 /// Section 27.5's pass.
 #[derive(Debug)]
@@ -184,7 +204,16 @@ impl Pass for Licm {
                 pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
                 stale.clear();
             }
-            let job = Job { machine, cfg, dom, post, loops, invented: &invented };
+            let job = Job {
+                machine,
+                outside: an.outside(),
+                modref: an.modref(),
+                cfg,
+                dom,
+                post,
+                loops,
+                invented: &invented,
+            };
             if job.run(func, &pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
                 // asked what it holds. The alternative to noticing that is deciding the outer loop
@@ -211,11 +240,114 @@ enum Move {
 /// What one loop is being looked at against, gathered once so the walk below reads.
 struct Job<'a> {
     machine: Machine,
+    outside: &'a Outside,
+    modref: &'a Summaries,
     cfg: &'a Cfg,
     dom: &'a Dominators,
     post: &'a PostDominators,
     loops: &'a Loops,
     invented: &'a HashSet<Block>,
+}
+
+/// Whether anything this loop writes can be what this instruction reads.
+///
+/// tamnd/rucc#1530 is this question. The pass used to answer it once for the whole loop,
+/// because the memory chain is built and taken off inside `crate::reload` and no instruction
+/// carries one by the time this runs, and one write anywhere in the loop therefore kept every
+/// load in it. On the SQLite amalgamation that was 7828 loads at `-O2`, and 463 of them are
+/// loads the oracle can clear one at a time.
+///
+/// Two things are left where they were on purpose. An instruction that writes is not asked about,
+/// since hoisting a write out of a loop is a different question with a different answer and the
+/// walk below would be answering it by accident. And a shape [`Alias::reads`] does not describe
+/// is refused, which is 874 of the 7828 and is the honest answer rather than a guess.
+///
+/// The lifetime boundaries are asked about one at a time for the same reason the writes are.
+/// `bounds_a_lifetime` is a per loop answer as well, and a loop with any call in it that is not
+/// `nofree` has one, which is most loops with a call in them. What a boundary threatens is a load
+/// of the object whose boundary it is, so the object is what gets asked about.
+fn untouched(
+    func: &Func,
+    inst: Inst,
+    writers: &[Inst],
+    boundaries: &[Inst],
+    oracle: Option<&mut Alias<'_>>,
+    asked: &mut usize,
+) -> Clear {
+    if func[inst].opcode.writes_memory() {
+        return Clear::No;
+    }
+    let Some(oracle) = oracle else {
+        return Clear::No;
+    };
+    let Some(it) = oracle.reads(inst) else {
+        return Clear::No;
+    };
+    for &other in boundaries {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        match func[other].opcode {
+            // The one this pass has to ask about by hand. A load must not move above the
+            // instruction saying the object it reads has come into being, and these are not
+            // memory the oracle will answer about, since a plane is not memory the program can
+            // name. So the question is asked about the object the row is for instead.
+            Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                let args = &func[func[other].args];
+                let about = Access::through(func, args[0]);
+                if !oracle.query(&it, &about).is_no() {
+                    return Clear::No;
+                }
+            }
+            // A call that might free is in `writers` too, and a callee whose write of these bytes
+            // the oracle ruled out is one that did not free them either: freeing them is writing
+            // them in every answer this oracle gives, and a summary that says a callee touches
+            // nothing, or touches only what it was handed, is a summary of a callee that reaches
+            // no `free` at all. Section 27.5's own reason applies as well, which is that this
+            // moves a load earlier rather than later, and storage a loop-invariant address names
+            // is storage that was already there when the loop started.
+            Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => (),
+            // Assembly nobody can read, which is the honest no.
+            _ => return Clear::No,
+        }
+    }
+    for &other in writers {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let wrote = oracle.writes(other);
+        let answer = match wrote {
+            Some(wrote) => oracle.query(&it, &wrote),
+            // A call, which is the blocker for 5476 of the 7828 and what the mod and ref
+            // summaries of tamnd/rucc#1557 are read for.
+            None => oracle.clobbered_by(&it, other),
+        };
+        if !answer.is_no() {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether the loop's writes are clear of one load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clear {
+    Yes,
+    No,
+    OutOfSteps,
+}
+
+/// Memory a name in the program reaches, which is not every write.
+///
+/// The safety instrumentation writes the planes and a plane is storage the runtime keeps for
+/// itself, so a loop whose only writes are those is a loop that writes nothing a load in it could
+/// read. Leaving that out is what made this useless on a `-fsafety=detect` build, where there is a
+/// `meta_` beside almost every access and every loop therefore wrote memory.
+fn writes_named_memory(func: &Func, inst: Inst) -> bool {
+    let opcode = func[inst].opcode;
+    opcode.writes_memory() && !opcode.touches_only_planes()
 }
 
 impl Job<'_> {
@@ -281,18 +413,29 @@ impl Job<'_> {
         // writes are those is a loop that writes nothing a load in it could read. Leaving that out
         // is what made this useless on a `-fsafety=detect` build, where there is a `meta_` beside
         // almost every access and every loop therefore wrote memory.
-        let writes = self.loops.blocks(id).iter().any(|block| {
-            func.insts(*block).any(|inst| {
-                let opcode = func[inst].opcode;
-                opcode.writes_memory() && !opcode.touches_only_planes()
-            })
-        });
-        let bounds = self
+        let writers: Vec<Inst> = self
             .loops
             .blocks(id)
             .iter()
-            .any(|block| func.insts(*block).any(|inst| bounds_a_lifetime(func, inst)));
+            .flat_map(|block| func.insts(*block))
+            .filter(|&inst| writes_named_memory(func, inst))
+            .collect();
+        let writes = !writers.is_empty();
+        let boundaries: Vec<Inst> = self
+            .loops
+            .blocks(id)
+            .iter()
+            .flat_map(|block| func.insts(*block))
+            .filter(|&inst| bounds_a_lifetime(func, inst))
+            .collect();
+        let bounds = !boundaries.is_empty();
         let mut ranges = Ranges::new(func, self.cfg, self.dom);
+        // One oracle for the loop, built only where there is something to ask about, since
+        // building one walks the whole body for the escape set. The count is shared by every
+        // load in the loop, so one loop cannot ask more than [`ALIAS_STEPS`] however many
+        // candidates it has.
+        let mut oracle = writes.then(|| Alias::new(func, self.outside).knowing(self.modref));
+        let mut asked = 0usize;
         let mut plan = Vec::new();
         // The ones in the plan that are only in it because something after them might want them.
         // A cheap computation under pressure is worth moving when it is a link in a chain that
@@ -349,9 +492,11 @@ impl Job<'_> {
                     continue;
                 }
                 // The address does not change, which is not the question. What is behind it is,
-                // and asking that needs either the memory chain, which is not in this function, or
-                // the module, which is not handed to a pass. Both are absent, so anything that
-                // reads memory stays in a loop that writes any.
+                // and that is [`Job::untouched`], which asks the alias oracle about this one load
+                // against every write in the loop. It used to be that anything reading memory
+                // stayed in a loop that wrote any, because the memory chain is not in this
+                // function and the module is not handed to a pass, and tamnd/rucc#1530 measured
+                // what that cost.
                 //
                 // A question about an allocation is not a question about what is in it, which is
                 // why [`Opcode::touches_only_planes`] is allowed past this. `cap_extent` and
@@ -366,8 +511,19 @@ impl Job<'_> {
                     && func[inst].opcode.touches_memory()
                     && func.mem_in(inst).is_none()
                 {
-                    stats.missed(MEMORY);
-                    continue;
+                    let answer =
+                        untouched(func, inst, &writers, &boundaries, oracle.as_mut(), &mut asked);
+                    match answer {
+                        Clear::Yes => (),
+                        Clear::No => {
+                            stats.missed(MEMORY);
+                            continue;
+                        }
+                        Clear::OutOfSteps => {
+                            stats.missed(NO_STEPS);
+                            continue;
+                        }
+                    }
                 }
                 let cost = cost(func, inst);
                 match movement(speculate::why_not(func, inst, &mut ranges, preheader)) {
@@ -576,12 +732,16 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        EFFECTS, HOISTED, LICM, MEMORY, NO_FUEL, NO_PREHEADER, PRESSURE, SPECULATIVE, SPINS,
+        ALIAS_STEPS, EFFECTS, HOISTED, LICM, MEMORY, NO_FUEL, NO_PREHEADER, NO_STEPS, PRESSURE,
+        SPECULATIVE, SPINS,
     };
     use crate::canon::Canon;
     use crate::header_copy::SPEED;
+    use crate::modref::{Summaries, Summary};
+    use crate::outside::Outside;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
+    use std::sync::Arc;
 
     /// Runs the pass over the function as it stands.
     fn hoist(func: &mut Func, fuel: &mut Fuel) -> Stats {
@@ -1238,12 +1398,12 @@ mod tests {
 
     /// An alloca is here so the load below has an address the function can vouch for.
     #[test]
-    fn the_same_load_stays_once_the_loop_writes_anything_at_all() {
-        // The address is the same address and the storage is the same four bytes, and the store
-        // is to somewhere else entirely. It does not matter: this function does not carry the
-        // memory chain, so there is nothing to read that says the store and the load are apart,
-        // and a load in a loop that writes is a load that stays. Coarse on purpose, and the
-        // remark says which of the reasons it was rather than leaving it to be guessed at.
+    fn a_load_of_a_local_comes_out_of_a_loop_that_writes_somewhere_else() {
+        // The store is through a pointer this function was handed and the load is of storage it
+        // made itself and never let out, so nothing the loop writes is what the load reads. Until
+        // tamnd/rucc#1530 this stayed, because the answer was taken once for the loop and the loop
+        // writes: the pass carries no memory chain and had nothing else to read. It asks the alias
+        // oracle about the one load now.
         let mut it = counted(0);
         let mem = it.func.add_mem(record(4));
         let slot = Builder::new(&mut it.func, it.entry)
@@ -1255,7 +1415,98 @@ mod tests {
         tucked(&mut it.func, it.body);
 
         let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, read), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_stays_where_the_loop_writes_the_address_it_reads() {
+        // The same shape with the store through the pointer the load reads, which is the case the
+        // coarse answer was right about all along.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.store(read, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_stays_where_a_call_in_the_loop_might_have_written_it() {
+        // The address is one the function was handed, so the escape analysis has nothing to say
+        // about it, and without a summary of `g` the honest answer about the call is that it may
+        // have written anything.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new());
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 0, "it never got that far");
+        assert_eq!(lives_in(&it.func, read), it.body);
+    }
+
+    #[test]
+    fn a_load_comes_out_past_a_call_the_summaries_say_touches_nothing() {
+        // The same function and the same call, with the module's answer for `g` in hand. This is
+        // what tamnd/rucc#1557 was built for, seen from the pass that asks: 463 of the 7828 loads
+        // this used to leave in a loop on the SQLite amalgamation come out this way.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new());
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        // The oracle reads what the module says about `g` before it reads the summary, so the
+        // module has to have a `g` in it for the question to get that far.
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(it.names.intern("t.c"), &target);
+        module.add_func(Func::new(called, Signature::new()));
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(Outside::of(&module)))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the call is not in the way");
+        // It stays anyway, and the remark says the other reason: the address came in as a
+        // parameter, so working the load out in front of a loop that might not run is a read that
+        // might fault where the program did not. That is section 27.1's question and not this one.
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+    }
+
+    #[test]
+    fn a_loop_with_more_writes_than_the_budget_leaves_the_load_where_it_is() {
+        // One question per write per load, which is quadratic in the loop, so there is a number.
+        // A loop over it is left exactly where the coarse answer would have left it, and the
+        // remark says it was the budget and not the memory.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), slot, record(4), Flags::NONE);
+        for _ in 0..=ALIAS_STEPS {
+            build.store(read, it.pointer, record(4), Flags::NONE);
+        }
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, NO_STEPS), 1);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
         assert_eq!(lives_in(&it.func, read), it.body);
         sound(&it.func, &mut it.names);
     }
