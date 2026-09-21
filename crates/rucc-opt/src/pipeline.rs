@@ -280,6 +280,7 @@ const O1: &[&str] = &[
     "dead-plane",
     "coalesce",
     "dce",
+    "loop-delete",
 ];
 
 /// `-O2`. The level the code quality claim is about. Section 9.1 asks for two e-graph rounds
@@ -351,6 +352,7 @@ const O2: &[&str] = &[
     "dead-plane",
     "coalesce",
     "dce",
+    "loop-delete",
 ];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
@@ -389,6 +391,7 @@ const O3: &[&str] = &[
     "dead-plane",
     "coalesce",
     "dce",
+    "loop-delete",
 ];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
@@ -444,6 +447,7 @@ const OS: &[&str] = &[
     "dead-plane",
     "coalesce",
     "dce",
+    "loop-delete",
 ];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
@@ -477,6 +481,7 @@ const OZ: &[&str] = &[
     "dead-plane",
     "coalesce",
     "dce",
+    "loop-delete",
 ];
 
 /// The passes this level runs, before the command line adds to or removes from them.

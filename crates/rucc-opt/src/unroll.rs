@@ -311,11 +311,14 @@ fn consider(
 
 /// Whether anything outside the loop reads a value defined inside it.
 ///
+/// [`crate::loop_delete`] asks the same question for a different reason, and asks one more of
+/// its own about the edge out, which this does not look at because a copy keeps that edge.
+///
 /// After [`crate::canon`] there is no such value, because loop closed form has already routed every
 /// one of them through a parameter of the block the loop leaves to. Where there is one, the copies
 /// would leave it reading the first iteration's value instead of the last, so this is refused
 /// rather than repaired.
-fn escapes(func: &Func, blocks: &[Block], inside: &HashSet<Block>) -> bool {
+pub(crate) fn escapes(func: &Func, blocks: &[Block], inside: &HashSet<Block>) -> bool {
     let mut defined: HashSet<Value> = HashSet::new();
     for &block in blocks {
         defined.extend(func[block].params.iter().copied());

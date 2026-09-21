@@ -231,6 +231,16 @@ fn does_nothing(func: &Func, inst: Inst, facts: &Facts) -> bool {
         .is_some_and(|callee| facts.purity_of(callee).can_be_deleted_when_unused())
 }
 
+/// Whether not doing this instruction is something nothing can tell.
+///
+/// The [`Verdict::Effects`] half of the verdict below, asked on its own because
+/// [`crate::loop_delete`] wants it without the use counts. Every instruction in a loop it is
+/// looking at is used by something else in that loop, so a count driven to zero is not the
+/// question there and this is.
+pub(crate) fn removable(func: &Func, inst: Inst, facts: &Facts) -> bool {
+    !func[inst].opcode.has_effects() || reads_only(func, inst) || does_nothing(func, inst, facts)
+}
+
 /// What to do with this instruction.
 fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     let data = &func[inst];
@@ -243,7 +253,7 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     if !data.results().all(|value| uses[value.index()] == 0) {
         return Verdict::Used;
     }
-    if data.opcode.has_effects() && !reads_only(func, inst) && !does_nothing(func, inst, facts) {
+    if !removable(func, inst, facts) {
         return Verdict::Effects;
     }
     debug_assert!(
