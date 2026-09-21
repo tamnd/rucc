@@ -40,7 +40,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use rucc_base::Interner;
+use rucc_base::{Idx, Interner};
 use rucc_ir::{
     CallInfo, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
     Opcode, Signature, Type, Value,
@@ -984,10 +984,10 @@ fn checkable(ty: Type) -> bool {
 /// IR for every target. Here rather than in [`crate::lower`] because it is arithmetic, which is the
 /// one thing a lowering rule deliberately cannot do, and that is what this module is for.
 ///
-/// An array asking for more alignment than `to` is not rounded any further and is refused later by
-/// name. Giving it what it asked for means masking the stack pointer as well as subtracting from
-/// it, and after that nothing in the frame has a constant distance from anywhere. See `Growing` in
-/// [`crate::frame`].
+/// An array asking for more alignment than `to` asks for `to` bytes more than it needs and takes
+/// the address it wanted out of the middle of them, which `aligns` below writes. The stack pointer
+/// itself is left where a call can be made from, so nothing about a frame like that is different
+/// from any other frame that grows.
 pub fn rounds(func: &mut Func, to: u32) {
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
@@ -1000,13 +1000,66 @@ pub fn rounds(func: &mut Func, to: u32) {
         if !ty.is_int() {
             continue;
         }
+        let Extra::Mem(mem) = func[inst].extra else { continue };
+        let align = func[mem].align;
         let up = ahead_const(func, inst, Imm::int(i128::from(to) - 1, ty), ty);
         let mask = ahead_const(func, inst, Imm::int(-i128::from(to), ty), ty);
         let over = ahead(func, inst, Opcode::Add, &[size, up], ty);
-        let rounded = ahead(func, inst, Opcode::And, &[over, mask], ty);
+        let mut rounded = ahead(func, inst, Opcode::And, &[over, mask], ty);
+        if align > to {
+            // The whole of the alignment rather than the difference between the two, so that the
+            // number coming off the stack pointer is still a multiple of `to` and so that the
+            // room is there wherever the outgoing argument area below the array happens to leave
+            // the first byte of it.
+            let slack = ahead_const(func, inst, Imm::int(i128::from(align), ty), ty);
+            rounded = ahead(func, inst, Opcode::Add, &[rounded, slack], ty);
+        }
         let args = func.push_values(&[rounded]);
         func[inst].args = args;
+        if align > to {
+            aligns(func, inst, mem, align, to);
+        }
     }
+}
+
+/// Splits an over-aligned variable length array into the bytes it takes and the address it hands
+/// out, which are not the same address any more.
+///
+/// The bytes come off the stack pointer, and a call leaves the stack pointer on a multiple of the
+/// convention's alignment and no more than that, so an array wanting more has to be given an
+/// address inside the block rather than the block's own first byte. Rounding the stack pointer
+/// down again instead would work for the array and for nothing else: the outgoing argument area
+/// sits below it, the rest of the frame is reached from a register at a constant distance, and a
+/// register that has been masked is at no constant distance from where it was.
+///
+/// So the instruction that was the array becomes `ptr_add` of the offset that rounds the block's
+/// address up, and a new `alloca` above it takes the block. The value the rest of the function
+/// reads is the one the `ptr_add` writes, which is the value the `alloca` used to write, so
+/// nothing that referred to the array has to be pointed anywhere else. The block asked for `to`
+/// and gets it, which is the truth about it: what wanted the larger alignment is the object, and
+/// the object is now the offset into the block rather than the block.
+///
+/// The offset is `-address & (align - 1)`, which is how far up the next multiple of the alignment
+/// is, and [`rounds`] took the room for it above. It is computed at the width the size was
+/// written at, which is `size_t` on the target, and a target whose pointers are wider than its
+/// `size_t` would be counting the low bits of the address either way: every bit the mask keeps is
+/// a bit below the alignment, and the alignment is smaller than the narrower of the two.
+fn aligns(func: &mut Func, inst: Inst, mem: Idx<MemInfo>, align: u32, to: u32) {
+    let ty = func[func[func[inst].args][0]].ty;
+    let mut info = func[mem];
+    info.align = to;
+    let block = InstData {
+        args: func[inst].args,
+        extra: Extra::Mem(func.add_mem(info)),
+        ..InstData::new(Opcode::Alloca)
+    };
+    let raw = written(func, inst, block, Type::PTR);
+    let address = ahead(func, inst, Opcode::PtrToInt, &[raw], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let below = ahead(func, inst, Opcode::Sub, &[zero, address], ty);
+    let bits = ahead_const(func, inst, Imm::int(i128::from(align) - 1, ty), ty);
+    let offset = ahead(func, inst, Opcode::And, &[below, bits], ty);
+    becomes(func, inst, Opcode::PtrAdd, &[raw, offset]);
 }
 
 /// The most moves a copy or a fill becomes before it is left alone for a call instead.
@@ -1351,7 +1404,7 @@ mod tests {
 
     use super::{
         UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings, overflows,
-        spread,
+        rounds, spread,
     };
 
     fn target() -> TargetInfo {
@@ -2495,5 +2548,71 @@ mod tests {
         let before = printed(&func, &mut names);
         orderings(&mut func, 8);
         assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A variable length array, built the way the front end builds one.
+    fn growing(build: &mut Builder<'_>, size: rucc_ir::Value, align: u32) -> rucc_ir::Value {
+        let info = MemInfo {
+            size: 0,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::default(),
+        };
+        let mem = build.func().add_mem(info);
+        let args = build.func().push_values(&[size]);
+        build.value(
+            InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+            Type::PTR,
+        )
+    }
+
+    /// The bytes an array asks for are rounded up to what a call leaves the stack pointer on.
+    #[test]
+    fn the_bytes_a_variable_length_array_takes_are_a_multiple_of_the_stack_alignment() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let slot = growing(build, args[0], 8);
+            build.ret(&[slot]);
+        });
+        rounds(&mut func, 16);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("%3 = add %0, %1"), "{text}");
+        assert!(text.contains("%4 = and %3, %2"), "{text}");
+        assert!(text.contains("%5 = alloca %4, align 8"), "{text}");
+        // One array and one allocation of it, since nothing here wanted an address the stack
+        // pointer does not already land on.
+        assert_eq!(text.matches("alloca").count(), 1, "{text}");
+        assert!(!text.contains("ptr_add"), "{text}");
+    }
+
+    /// One that wants more alignment than that takes the room for it and lands inside it.
+    ///
+    /// The instruction the rest of the function reads is the `ptr_add`, which is the instruction
+    /// the array was, so the value it writes is the value everything already held. What the
+    /// `alloca` above it asks for is the convention's alignment, which is the truth about the
+    /// block: the object wanted thirty two and the object is the offset into the block.
+    #[test]
+    fn a_variable_length_array_wanting_more_alignment_is_placed_inside_the_bytes_it_took() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let slot = growing(build, args[0], 32);
+            build.ret(&[slot]);
+        });
+        rounds(&mut func, 16);
+        let text = printed(&func, &mut names);
+        // The size, rounded up and then given the whole of the alignment as room to move in.
+        assert!(text.contains("%5 = iconst.i64 32"), "{text}");
+        assert!(text.contains("%6 = add %4, %5"), "{text}");
+        // The offset, which is how far above the block the next multiple of thirty two is.
+        assert!(text.contains("ptrtoint"), "{text}");
+        assert!(text.contains("%11 = iconst.i64 31"), "{text}");
+        assert!(text.contains("%10 = sub %9, %8"), "{text}");
+        assert!(text.contains("%12 = and %10, %11"), "{text}");
+        // The block itself asks for what a call leaves the stack pointer on and no more.
+        assert!(text.contains("%7 = alloca %6, align 16"), "{text}");
+        // The last instruction of the rewrite is the array itself, so the value the function
+        // returns is the value it already returned.
+        assert!(text.contains("%13 = ptr_add %7, %12"), "{text}");
+        assert!(text.contains("return %13"), "{text}");
     }
 }

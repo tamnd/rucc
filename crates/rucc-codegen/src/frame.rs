@@ -80,6 +80,11 @@
 //! argument area rather than at the stack pointer, because that area stays at the bottom of the
 //! frame wherever the bottom has moved to, which is what [`Frame::below`] is for.
 //!
+//! An array asking for more alignment than that is not a realignment of the frame, and nothing
+//! here has to know about it. [`crate::expand::rounds`] asks for the alignment in extra bytes and
+//! hands out an address inside them, so the stack pointer moves by a multiple of the convention's
+//! alignment as it always did and the frame is an ordinary growing one.
+//!
 //! Realigning and growing together is the one combination that is not here. After the prologue has
 //! forced an alignment the distance from the frame pointer to the body's stack pointer is already
 //! not a constant, so there is no register left for the rest of the frame to be counted from, and
