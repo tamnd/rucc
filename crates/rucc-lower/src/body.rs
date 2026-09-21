@@ -1769,8 +1769,9 @@ impl<'u> Body<'_, 'u> {
     /// The scope is opened here and closed by the caller, since the value has to be taken out
     /// before the objects the block declared are given back: `({ int a[n]; a[0]; })` reads the
     /// array while it is still there. What is answered is the last statement when it is an
-    /// expression statement, which is where the value of one of these comes from, and nothing
-    /// when it is anything else, which is what makes `({ })` and `({ int x; })` both `void`.
+    /// expression statement under whatever labels it carries, which is where the value of one of
+    /// these comes from, and nothing when it is anything else, which is what makes `({ })` and
+    /// `({ int x; })` both `void`.
     ///
     /// The cursor is left somewhere whatever the statements did, so that the expression this
     /// sits in has a block to be built in. `({ return 1; 0; })` leaves it in a block nothing
@@ -1785,9 +1786,10 @@ impl<'u> Body<'_, 'u> {
                 let count = tast[list].len();
                 for index in 0..count {
                     let stmt = self.tast()[list][index];
-                    match self.tast()[stmt] {
-                        Stmt::Expr(expr) if index + 1 == count => value = Some(expr),
-                        _ => self.stmt(stmt),
+                    if index + 1 == count {
+                        value = self.value_of(stmt);
+                    } else {
+                        self.stmt(stmt);
                     }
                 }
             }
@@ -1810,6 +1812,16 @@ impl<'u> Body<'_, 'u> {
     /// label labels, which is what the case table and the label table both hold, so the block a
     /// `switch` or a `goto` was built with and the block the walk arrives at are the same one.
     fn labelled(&mut self, body: StmtId, span: Span) {
+        self.label_start(body, span);
+        self.stmt(body);
+    }
+
+    /// The block of a label, up to the point where what it labels is walked.
+    ///
+    /// This is the whole of [`Self::labelled`] except the last line, and it is apart from it
+    /// because the last statement of a statement expression is not walked the way an ordinary
+    /// statement is: its value is wanted. The label is the same either way.
+    fn label_start(&mut self, body: StmtId, span: Span) {
         let block = self.label_block(body);
         if self.grows || self.cleans {
             // The scopes control lands in, which is what a jump to this label has to put the
@@ -1822,7 +1834,29 @@ impl<'u> Body<'_, 'u> {
             self.jump(block, span);
         }
         self.at = Some(block);
-        self.stmt(body);
+    }
+
+    /// The value of the last statement of a `({ ... })`, and what it takes to get there.
+    ///
+    /// An expression statement is not walked at all, because the caller wants the expression
+    /// itself and walking it here would evaluate it for its effect and throw the value away. A
+    /// label in front of it is built and then looked through, since `({ __label__ again; again:
+    /// n; })` is worth what `({ n; })` is worth and the label is still a block something may
+    /// branch to. Anything else is an ordinary statement and answers nothing, which is the
+    /// `void` the checking already gave this expression.
+    fn value_of(&mut self, id: StmtId) -> Option<ExprId> {
+        match self.tast()[id] {
+            Stmt::Expr(expr) => Some(expr),
+            Stmt::Label { body, .. } => {
+                let span = self.tast().stmt_span(id);
+                self.label_start(body, span);
+                self.value_of(body)
+            }
+            _ => {
+                self.stmt(id);
+                None
+            }
+        }
     }
 
     /// `goto name;`, which is a jump to the block the label starts.

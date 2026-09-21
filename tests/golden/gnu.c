@@ -61,6 +61,37 @@ int never_finishes(int x) {
   });
 }
 
+// A label on the last statement, which is still the last statement. This is how a block whose
+// value is the address of a label inside it is written, and the label is a block of its own
+// because a jump may arrive at it.
+void *the_label_inside(void) {
+  return ({
+    __label__ here;
+  here:
+    &&here;
+  });
+}
+
+// More than one label on it, each of which is looked through to reach the value.
+int two_labels(int c) {
+  return ({
+  first:
+  second:
+    c + 1;
+  });
+}
+
+// A jump to the label the value is taken at, which is what makes the label matter: the value
+// comes out of the block the label started and not the one the statement expression opened in.
+int a_label_jumped_back_to(int n) {
+  int t = 0;
+  return ({
+    __label__ again;
+  again:
+    t++, t < n ? ({ goto again; }) : (void)0, t;
+  });
+}
+
 // One argument off a variable argument list, which stays an intrinsic because what it becomes
 // is the target's answer. A `va_list` parameter is an array of one on this target, so it has
 // already been adjusted to the address of the list by the time it is read.

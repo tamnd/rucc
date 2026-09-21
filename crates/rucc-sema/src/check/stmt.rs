@@ -298,15 +298,31 @@ impl Checker<'_> {
         let stmt = self.stmt(id);
         let ty = match self.tast[stmt] {
             Stmt::Block(body) => match self.tast[body].last() {
-                Some(&last) => match self.tast[last] {
-                    Stmt::Expr(value) => self.tast[value].ty,
-                    _ => self.types.void(),
-                },
+                Some(&last) => self.value_type(last),
                 None => self.types.void(),
             },
             _ => self.types.void(),
         };
         self.tast.expr(Expr::new(ExprKind::StmtExpr(stmt), ty, Category::Rvalue), span)
+    }
+
+    /// The type of the last statement of a statement expression, which is the whole one's type.
+    ///
+    /// A label in front of that statement does not take the value away. `({ __label__ again;
+    /// again: n; })` is an `int` the way `({ n; })` is, which is how a block that jumps back to
+    /// its own start and then answers is written, and a label is what a `goto` inside the block
+    /// needs to exist at all. Anything that is not an expression statement under whatever labels
+    /// it carries leaves the whole thing `void`.
+    ///
+    /// Only a label is looked through. A `case` or a `default` here is a jump into the middle of
+    /// a statement expression from a `switch` outside it, which gcc refuses, so one of those is
+    /// not a statement with a value to take.
+    fn value_type(&mut self, id: StmtId) -> TypeId {
+        match self.tast[id] {
+            Stmt::Expr(value) => self.tast[value].ty,
+            Stmt::Label { body, .. } => self.value_type(body),
+            _ => self.types.void(),
+        }
     }
 
     /// `&&name`, GNU's label address, whose type is `void *` and whose target is a label.
