@@ -42,6 +42,11 @@
 //! it is the mechanism behind a surprising fraction of GCC's memory optimization. Without it the
 //! walk is a stopping condition. With it, it is a way to rewrite the question.
 //!
+//! A rewrite is counted, as [`Counts::rewritten`], for the same reason the steps and the budget
+//! exhaustions are: it is the one thing in the walk that starts the walk again, so it is where the
+//! work goes when the work goes somewhere unexpected, and it is what says whether the callback is
+//! reaching anything at all on a build rather than only on the build somebody last looked at.
+//!
 //! # Five answers, not two
 //!
 //! [`Clobber`] has five variants and the shape of it is deliberate. Section 9.6 names two ways
@@ -159,6 +164,7 @@ pub struct Counts {
     walks: u64,
     steps: u64,
     exhausted: u64,
+    rewritten: u64,
 }
 
 impl Counts {
@@ -181,6 +187,16 @@ impl Counts {
     #[must_use]
     pub const fn exhausted(&self) -> u64 {
         self.exhausted
+    }
+
+    /// How many times a caller rewrote the reference and the walk carried on with the new one.
+    ///
+    /// A rewrite starts a walk of its own, so this is both how much work the `translate` callback
+    /// is asking for and how much it is getting, and it is the counter that says whether the
+    /// callback is doing anything at all on a given build.
+    #[must_use]
+    pub const fn rewritten(&self) -> u64 {
+        self.rewritten
     }
 }
 
@@ -658,6 +674,7 @@ impl<'a> Walk<'a> {
                         // disagree would come back holding whichever of them was walked first
                         // rather than `Unknown`.
                         Step::Retry(next) => {
+                            self.counts.rewritten += 1;
                             let before = self.func.mem_in(inst)?;
                             let mut fresh = HashSet::new();
                             return self.back(next, before, budget, &mut fresh, translate);
@@ -1229,6 +1246,10 @@ block2:
         });
         assert_eq!(seen, [Opcode::Memcpy, Opcode::Store]);
         assert_eq!(answer.inst().map(|inst| func[inst].opcode), Some(Opcode::Store));
+
+        // One rewrite offered and one taken, which is the counter a caller reads to find out
+        // whether its callback reached anything.
+        assert_eq!(walk.counts().rewritten(), 1);
     }
 
     #[test]
