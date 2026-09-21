@@ -315,6 +315,15 @@ extern const int table_count;
 
 int reads_the_table(int i) { return table[i] + table_count; }
 
+// A `.set` in one of those, which says a name stands for another name and is therefore a second
+// symbol at the first one's address. What the directives around it said about the name is what
+// the name gets, so this one is weak and another object defining it wins. The name it stands for
+// is a `static` function nothing in the file calls, and the equate is the only thing keeping it:
+// being what a name stands for is a use of it, the same way an attribute alias is.
+static void the_default(void) { use(0); }
+
+__asm__(".weak an_override\n.set an_override, the_default");
+
 // `__attribute__((constructor))` and `__attribute__((destructor))`, which ask for a function to
 // run without anything calling it. Each one becomes an object holding the function's address, in
 // the section the startup code of the target walks, and the priority is what orders them: a lower

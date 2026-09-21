@@ -633,28 +633,36 @@ decl #95 reads_the_table : int(int) function external defined
                 decl #94 i : int lvalue
           convert lvalue : int
             decl #93 table_count : const int lvalue
-decl #96 ran : int object internal static tentative
-decl #97 opens : void(void) function internal defined constructor
+decl #96 the_default : void(void) function internal defined
   body
     block
       expr
-        assign = : int
-          decl #96 ran : int lvalue
-          const 1 : int
-decl #98 closes : void(void) function internal defined destructor(101)
-  body
-    block
-      expr
-        assign = : int
-          decl #96 ran : int lvalue
+        call : int
+          convert function-decay : int (*)(int)
+            decl #1 use : int(int) function
           const 0 : int
-decl #99 both_ways : void(void) function internal defined constructor(101) destructor
+decl #97 ran : int object internal static tentative
+decl #98 opens : void(void) function internal defined constructor
   body
     block
       expr
         assign = : int
-          decl #96 ran : int lvalue
+          decl #97 ran : int lvalue
+          const 1 : int
+decl #99 closes : void(void) function internal defined destructor(101)
+  body
+    block
+      expr
+        assign = : int
+          decl #97 ran : int lvalue
+          const 0 : int
+decl #100 both_ways : void(void) function internal defined constructor(101) destructor
+  body
+    block
+      expr
+        assign = : int
+          decl #97 ran : int lvalue
           binary + : int
             convert lvalue : int
-              decl #96 ran : int lvalue
+              decl #97 ran : int lvalue
             const 1 : int

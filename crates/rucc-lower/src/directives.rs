@@ -115,6 +115,15 @@ impl Item {
     }
 }
 
+/// What a template said, which is the globals it defines and the names it equates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Assembled {
+    /// The globals, in the order the template defined them.
+    pub pieces: Vec<Piece>,
+    /// The names a `.set` gave to something else, in the order they were written.
+    pub sets: Vec<Set>,
+}
+
 /// One global a template defines, which is one label and everything written under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Piece {
@@ -135,6 +144,24 @@ pub(crate) struct Piece {
     pub visibility: Visibility,
 }
 
+/// One `.set`, which is one name standing for another.
+///
+/// A name rather than anything else, because a name is what the thing on the right of one of
+/// these is in every program that writes one: a second symbol at the first one's address, which
+/// is an alias and is the one shape of `.set` the module has somewhere to put. The two other
+/// shapes, a number and a name with a distance on it, are refused where the template is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Set {
+    /// The name being given.
+    pub name: String,
+    /// The name it stands for.
+    pub target: String,
+    /// How the linker sees the name being given, which is internal unless a directive said more.
+    pub linkage: Linkage,
+    /// How far outside a shared library that name reaches.
+    pub visibility: Visibility,
+}
+
 /// Reads a template and gives back the globals it defines, in the order it defined them.
 ///
 /// `read` is asked for the bytes of a file `.incbin` names. It is a function rather than a list
@@ -150,7 +177,7 @@ pub(crate) struct Piece {
 pub(crate) fn assemble(
     template: &str,
     read: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
-) -> Result<Vec<Piece>, Failed> {
+) -> Result<Assembled, Failed> {
     let mut asm = Assembler::new(read);
     for statement in statements(template)? {
         asm.statement(&statement)?;
@@ -223,6 +250,8 @@ struct Assembler<'a> {
     current: usize,
     /// The globals finished so far.
     pieces: Vec<Piece>,
+    /// The names a `.set` equated to another name, in the order they were written.
+    sets: Vec<(String, String)>,
     /// The one being filled in.
     open: Option<Open>,
     /// Where every label of this block is.
@@ -246,6 +275,7 @@ impl<'a> Assembler<'a> {
             sections: vec![Where { section: Section::Text, at: 0 }],
             current: 0,
             pieces: Vec::new(),
+            sets: Vec::new(),
             open: None,
             labels: HashMap::new(),
             linkage: HashMap::new(),
@@ -319,6 +349,7 @@ impl<'a> Assembler<'a> {
             // there is nothing here to keep. It is accepted because every exported symbol in
             // real assembly is written with one and refusing it would refuse the whole file.
             ".type" | ".ident" | ".file" | ".cfi_sections" => {}
+            ".set" | ".equ" => self.equate(operands)?,
             ".size" => self.size(operands)?,
             ".balign" | ".align" => self.align(operands, false)?,
             ".p2align" => self.align(operands, true)?,
@@ -361,6 +392,28 @@ impl<'a> Assembler<'a> {
                 }
             }
         }
+    }
+
+    /// `.set name, thing` and `.equ`, which are one directive under two names.
+    ///
+    /// Only a name on the right, which is what an alias is. A number there is an absolute symbol,
+    /// which is a thing the object writers have no way to say, and a name with a distance on it is
+    /// an address rather than a symbol, which is a thing an alias has no room for. Both are
+    /// refused with what was written in the message, so a program that needs one says so itself.
+    fn equate(&mut self, operands: &str) -> Result<(), Failed> {
+        let parts = split(operands);
+        let [name, thing] = parts.as_slice() else {
+            return Err(unsupported("a '.set' that is not a name and a thing".to_owned()));
+        };
+        let (name, thing) = (name.trim(), thing.trim());
+        if !is_a_name(name) {
+            return Err(unsupported(format!("a '.set' of '{name}'")));
+        }
+        if !is_a_name(thing) {
+            return Err(unsupported(format!("a '.set' of '{name}' to '{thing}'")));
+        }
+        self.sets.push((name.to_owned(), thing.to_owned()));
+        Ok(())
     }
 
     /// `.size name, expression`, kept so it can be held against what was written.
@@ -521,7 +574,7 @@ impl<'a> Assembler<'a> {
     }
 
     /// The globals the template defined, with what the directives said about the names put on.
-    fn finish(mut self) -> Result<Vec<Piece>, Failed> {
+    fn finish(mut self) -> Result<Assembled, Failed> {
         self.close();
         // A name in the text section is a function, and what is under it here is nothing, since
         // anything that would have been is an instruction and was refused where it was written.
@@ -555,7 +608,20 @@ impl<'a> Assembler<'a> {
                 first.align = largest;
             }
         }
-        Ok(self.pieces)
+        // A name a `.set` gave takes what the directives said about it from the same two maps the
+        // labels take theirs from, since `.weak name` says the same thing about a name whichever
+        // of the two ways the name came to stand for something.
+        let sets = self
+            .sets
+            .iter()
+            .map(|(name, target)| Set {
+                name: name.clone(),
+                target: target.clone(),
+                linkage: self.linkage.get(name).copied().unwrap_or(Linkage::Internal),
+                visibility: self.visibility.get(name).copied().unwrap_or(Visibility::Default),
+            })
+            .collect();
+        Ok(Assembled { pieces: self.pieces, sets })
     }
 
     /// What one expression works out to.
@@ -716,6 +782,16 @@ impl<'a> Assembler<'a> {
 /// Whether that character may be part of a name, which is more than C allows.
 fn is_name(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')
+}
+
+/// Whether that text is one name and nothing else.
+///
+/// A name that starts with a digit is a local label, which is a name that may be written again
+/// further down and is therefore not a name anything outside the template can be given. Those are
+/// not read here at all yet, and this is where one written in a `.set` is turned down.
+fn is_a_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| is_name(c) && !c.is_ascii_digit()) && chars.all(is_name)
 }
 
 /// A number in one of the four bases an assembler writes them in.
@@ -932,15 +1008,20 @@ fn round_up(at: u64, align: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Reads a template, with no file for `.incbin` to find.
+    /// Reads a template, with no file for `.incbin` to find, and keeps the globals.
     fn read(template: &str) -> Result<Vec<Piece>, Failed> {
+        all_of(template).map(|read| read.pieces)
+    }
+
+    /// The same, keeping what it said rather than only the globals.
+    fn all_of(template: &str) -> Result<Assembled, Failed> {
         assemble(template, &mut |name| Err(format!("no file '{name}'")))
     }
 
     /// Reads a template, with one file `.incbin` may name.
     fn with_file(template: &str, bytes: &[u8]) -> Result<Vec<Piece>, Failed> {
         let held = bytes.to_vec();
-        assemble(template, &mut |_| Ok(held.clone()))
+        assemble(template, &mut |_| Ok(held.clone())).map(|read| read.pieces)
     }
 
     /// The bytes a piece's image adds up to, with a zero run written out.
@@ -1090,6 +1171,57 @@ gSize:
 
         let pieces = read(".data\nx:\n/* nothing */ .byte 3\n").expect("read");
         assert_eq!(image(&pieces[0]), [3]);
+    }
+
+    /// `.set` is a second name, and what the directives around it said about that name.
+    ///
+    /// The template is the one tcc's test file writes, which is a weak name equated to a function
+    /// the file defines. The name is weak because `.weak` said so and the one below it is local
+    /// because nothing said anything, which is an assembler's answer and not a default chosen
+    /// here: a name is only in the symbol table for other objects to see when a directive asked.
+    #[test]
+    fn a_set_is_one_name_standing_for_another_with_what_was_said_about_it() {
+        let read = all_of(".weak one\n.set one, base\n.set two, base\n").expect("read");
+        assert!(read.pieces.is_empty(), "a name for something else defines nothing of its own");
+        assert_eq!(
+            read.sets,
+            [
+                Set {
+                    name: "one".to_owned(),
+                    target: "base".to_owned(),
+                    linkage: Linkage::Weak,
+                    visibility: Visibility::Default,
+                },
+                Set {
+                    name: "two".to_owned(),
+                    target: "base".to_owned(),
+                    linkage: Linkage::Internal,
+                    visibility: Visibility::Default,
+                },
+            ]
+        );
+
+        // `.equ` is the same directive under its other name, and a label of this template is a
+        // name like any other to stand for.
+        let read = all_of(".data\nx:\n.byte 1\n.globl y\n.equ y, x\n").expect("read");
+        assert_eq!(read.pieces.len(), 1);
+        assert_eq!(read.sets[0].target, "x");
+        assert_eq!(read.sets[0].linkage, Linkage::External);
+    }
+
+    /// The two other shapes of `.set`, which are refused with what was written in the message.
+    #[test]
+    fn a_set_of_anything_but_a_name_is_refused_by_what_it_was_set_to() {
+        let cases = [
+            (".set n, 42\n", "a '.set' of 'n' to '42'"),
+            (".set n, base + 8\n", "a '.set' of 'n' to 'base + 8'"),
+            (".set 661, base\n", "a '.set' of '661'"),
+            (".set n\n", "a '.set' that is not a name and a thing"),
+        ];
+        for (template, want) in cases {
+            let failed = read(template).expect_err(template);
+            assert_eq!(failed, Failed::Unsupported(want.to_owned()), "{template}");
+        }
     }
 
     /// An instruction is the thing this does not do, and the message says which one it was.

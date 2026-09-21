@@ -7724,6 +7724,41 @@ block2:
         assert!(text.contains("global @counter : i32 = 7"), "{text}");
     }
 
+    /// A `.set` says one name stands for another, which is a second symbol at the first one's
+    /// address and is an alias and nothing else. What the directives around it said about the
+    /// name is what the name gets, and a name the file defines itself keeps its own definition,
+    /// which is what gcc's symbol table shows for the block tcc's test file writes.
+    #[test]
+    fn a_set_at_file_scope_is_a_second_name_for_what_it_names() {
+        let text = ir(concat!(
+            "void base(void) {}\n",
+            "__asm__(\".weak one\\n.set one, base\");\n",
+            "__asm__(\".globl two\\n.set two, base\");\n",
+            "__asm__(\".set three, base\");\n",
+            "void three(void) {}\n",
+        ));
+        assert!(text.contains("alias @one = @base, linkage(weak)"), "{text}");
+        assert!(text.contains("alias @two = @base"), "{text}");
+        assert!(!text.contains("alias @three"), "a definition of the name wins: {text}");
+        assert!(text.contains("func @three"), "{text}");
+    }
+
+    /// The target has to be something this file defines, because an alias is a symbol at an
+    /// address in this object and a name only declared here has none to be at. The same rule and
+    /// the same words as for `__attribute__((alias))`, since it is the same thing written another
+    /// way.
+    #[test]
+    fn a_set_of_a_name_this_file_does_not_define_says_so() {
+        let messages = errors("__asm__(\".set here, elsewhere\");\n");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("'here' is aliased to undefined symbol 'elsewhere'")
+                    && m.contains("E0697")),
+            "{messages:?}"
+        );
+    }
+
     /// `.incbin` is the one directive that reads something, and what it reads comes through the
     /// same file system the sources did.
     #[test]
