@@ -74,12 +74,35 @@
 //! side of where it stands into that slot's area, which is the gap between two points the edit
 //! really sits in, and after that the question is the same question everywhere else in this file.
 //!
+//! # A spill slot is not a variable
+//!
+//! The two kinds are asked about separately, because the reason a frame ever lays two things out
+//! apart that could share is the debugger, and that reason covers one kind and not the other. A
+//! local is a variable somebody wrote down and can ask the value of, so two locals sharing bytes
+//! means a variable that is out of scope reads as whatever took its place, which is what `-O0`
+//! exists not to do and what `-fstack-reuse=none` turns off at every level. A spill slot holds a
+//! value the allocator ran out of registers for, it has no name, nothing can ask for it, and the
+//! only thing that ever reads it is the instruction the allocator wrote. Laying those out one
+//! each buys a debugger nothing and costs a frame everything, since most frames are mostly spill
+//! slots.
+//!
+//! So spill slots share at every level and locals share only where the level says they may. What
+//! says which is whether this pass is handed a [`Reach`]: with one, the locals it followed join
+//! in, and without one every local gets bytes of its own and the spill slots are fitted around
+//! them.
+//!
 //! # How big it is allowed to get
 //!
 //! Fitting each thing into the first cell it does not clash with compares it against the cells so
-//! far, so a function with a very large number of them costs the square of that number. Past
-//! [`CROWDED`] the frame is laid out the old way, one cell each, because a function with that many
-//! slots is rare and a compile that takes a visible pause over one is not worth the bytes.
+//! far, so a function whose things mostly cannot share costs the square of how many there are.
+//! What bounds that is a budget of comparisons rather than a count of things: the fit spends
+//! [`BUDGET`] of them and lays out whatever is left one cell each. A function whose things do
+//! share never comes near it, because what each one is compared against is the cells and not the
+//! things, and the whole point of sharing is that there are far fewer cells than things. lua's
+//! interpreter, which is 2802 slots fitted into 144 cells and the largest function in the corpus,
+//! spends an eighth of the budget and adds a seventh of a second to the file it is in. A function
+//! with that many slots that are all live at once would spend the lot, and it gets the layout it
+//! would have got anyway.
 
 use std::collections::{HashMap, HashSet};
 
@@ -94,12 +117,14 @@ use rucc_target::FrameInsts;
 
 use crate::frame::Local;
 
-/// How many locals and spill slots a function may have before its frame is laid out the old way.
+/// How many cells the fit may look at before it stops pairing things up and gives everything left
+/// a cell of its own.
 ///
-/// See the note on crowding in the module documentation. Over the corpus the largest function has
-/// far fewer than this, so the limit is a guard against a generated file rather than something the
+/// See the note on how big it is allowed to get in the module documentation. One unit is one thing
+/// compared against one cell, which is what costs. The largest function in the corpus spends an
+/// eighth of this, so the budget is a guard against a generated file rather than something the
 /// ordinary path meets.
-pub const CROWDED: usize = 2048;
+pub const BUDGET: usize = 1 << 20;
 
 /// One run of bytes in the frame, holding one local, one spill slot, or several of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +168,9 @@ impl Slots {
 
     /// The frame with everything that can share sharing, worked out from the allocator's liveness.
     ///
-    /// `reach` is what [`reach`] said about this function before the allocator ran, `widths` is how
+    /// `reach` is what [`reach`] said about this function before the allocator ran, or `None` for a
+    /// build whose locals keep bytes of their own, which is `-O0` and `-fstack-reuse=none`. The
+    /// spill slots share either way, for the reason in the module documentation. `widths` is how
     /// many bytes a slot of each of the allocation's spill slots takes, and `locals` is the
     /// function's own objects in the order the lowering recorded them. `func` is the function the
     /// allocator has finished with, which is asked for the shape of its control flow and nothing
@@ -151,16 +178,15 @@ impl Slots {
     #[must_use]
     pub fn share(
         func: &Func,
-        reach: &Reach,
+        reach: Option<&Reach>,
         allocation: &Allocation,
         locals: &[Local],
         widths: &[u32],
     ) -> Self {
-        if locals.len() + widths.len() > CROWDED {
-            return Self::apart(locals, widths);
-        }
         let mut wants = Vec::with_capacity(locals.len() + widths.len());
-        let mut reached = areas(func, reach, &allocation.live, &allocation.order);
+        let mut reached = reach
+            .map(|reach| areas(func, reach, &allocation.live, &allocation.order))
+            .unwrap_or_default();
         for (local, &Local { size, align }) in locals.iter().enumerate() {
             let area = reached.get_mut(local).and_then(Option::take);
             wants.push(Want { what: What::Local(local), size, align, area });
@@ -173,7 +199,7 @@ impl Slots {
                 .map(|live| merged(live.pieces().chain(moved[slot].iter().copied())));
             wants.push(Want { what: What::Slot(slot), size: width, align: width, area });
         }
-        fit(wants, locals.len(), widths.len())
+        fit(wants, locals.len(), widths.len(), BUDGET)
     }
 
     /// The cells the frame is made of, which is what [`crate::frame`] places.
@@ -229,7 +255,11 @@ enum What {
 /// leaves the same bytes taken and a worse chance for everything after. The order is settled
 /// entirely by the want rather than partly by which came first, so the same function lays out the
 /// same way every time.
-fn fit(mut wants: Vec<Want>, locals: usize, slots: usize) -> Slots {
+///
+/// What `budget` is is comparisons of one thing against one cell, which is what costs. Past that
+/// everything left opens a cell of its own, which is the layout a frame had before this pass
+/// existed, and the wants are in a settled order so which ones those are is settled too.
+fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> Slots {
     let mut order: Vec<usize> = (0..wants.len()).collect();
     order.sort_by_key(|&want| {
         let Want { size, align, .. } = wants[want];
@@ -247,10 +277,19 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize) -> Slots {
             &mut wants[want],
             Want { what: What::Local(0), size: 0, align: 0, area: None },
         );
-        let into = area.as_ref().and_then(|area| {
-            (0..cells.len())
-                .find(|&cell| busy[cell].as_ref().is_some_and(|busy| !clashes(busy, area)))
-        });
+        let mut into = None;
+        if let Some(area) = &area {
+            for (cell, held) in busy.iter().enumerate() {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                if held.as_ref().is_some_and(|held| !clashes(held, area)) {
+                    into = Some(cell);
+                    break;
+                }
+            }
+        }
         let cell = match into {
             Some(cell) => {
                 cells[cell].size = cells[cell].size.max(size);
@@ -696,6 +735,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_mir::{Block, BlockCall, Mem, Operand};
     use rucc_regalloc::assign::Env;
+    use rucc_regalloc::order::Point;
     use rucc_target::x86_64::{FRAME, GPR, REGS, SYSV};
 
     use super::*;
@@ -775,7 +815,7 @@ mod tests {
         building.through(block, second);
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 1, "one run of bytes for the two of them");
         assert_eq!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 1);
@@ -792,7 +832,7 @@ mod tests {
         building.through(block, second);
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
         assert_ne!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 0);
@@ -812,7 +852,7 @@ mod tests {
         let (reach, allocation) = building.allocate(1, 2);
 
         assert_eq!(allocation.assignment.spilled(), 1, "one value went to the stack");
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD], &[8]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD], &[8]);
         assert_eq!(plan.cells().len(), 1);
         assert_eq!(plan.local(0), plan.slot(0));
     }
@@ -830,7 +870,7 @@ mod tests {
 
         assert!(!reach.shares(0), "an address that got away");
         assert!(reach.shares(1));
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
         assert_ne!(plan.local(0), plan.local(1));
     }
@@ -864,7 +904,7 @@ mod tests {
         building.through(block, again);
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_ne!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 0);
     }
@@ -893,7 +933,7 @@ mod tests {
         building.func.succs_mut(body).push(BlockCall::to(header));
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_ne!(plan.local(0), plan.local(1));
     }
 
@@ -918,7 +958,7 @@ mod tests {
         building.func.succs_mut(loops).push(BlockCall::to(loops));
         let (reach, allocation) = building.allocate(2, 4);
 
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_ne!(plan.local(0), plan.local(1));
     }
 
@@ -937,7 +977,7 @@ mod tests {
         let (reach, allocation) = building.allocate(2, 4);
 
         assert!(reach.shares(0), "a derived address is still an address into this frame");
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2, "the two locals are wanted at once after all");
     }
 
@@ -952,7 +992,7 @@ mod tests {
 
         let narrow = Local { size: 4, align: 4 };
         let wide = Local { size: 16, align: 16 };
-        let plan = Slots::share(&building.func, &reach, &allocation, &[narrow, wide], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[narrow, wide], &[]);
         assert_eq!(plan.cells(), [Cell { size: 16, align: 16 }]);
         assert_eq!(plan.local(0), plan.local(1));
     }
@@ -967,7 +1007,7 @@ mod tests {
         // A list with nothing on it for a local is this pass having no account of it rather than
         // a local nothing touches, so it keeps bytes of its own.
         assert!(!reach.shares(1));
-        let plan = Slots::share(&building.func, &reach, &allocation, &[WORD, WORD], &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
     }
 
@@ -997,7 +1037,7 @@ mod tests {
         let locals = [Local { size: 64, align: 8 }; 2];
         let base = Layout { leaf: false, locals: &locals, ..Layout::new(&SYSV, REGS) };
         let apart = Frame::of(&building.func, &allocation, &base);
-        let plan = Slots::share(&building.func, &reach, &allocation, &locals, &[]);
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &locals, &[]);
         let layout = Layout { share: Some(&plan), ..base };
         let together = Frame::of(&building.func, &allocation, &layout);
 
@@ -1033,15 +1073,41 @@ mod tests {
     }
 
     #[test]
-    fn a_function_with_more_slots_than_anything_real_is_laid_out_the_old_way() {
+    fn a_build_whose_locals_keep_their_own_bytes_still_shares_the_spill_slots() {
         let (mut building, block) = Building::new();
-        let addr = building.local(block, 0);
-        building.through(block, addr);
-        let (reach, allocation) = building.allocate(1, 4);
+        let first = building.local(block, 0);
+        building.through(block, first);
+        let second = building.local(block, 1);
+        building.through(block, second);
+        // Two stretches of three values with two registers to hand out, one after the other, so
+        // what goes to the stack in the first is finished with before the second starts.
+        for _ in 0..2 {
+            let values: Vec<Reg> = (0..3).map(|_| building.value(block)).collect();
+            for &reg in &values {
+                building.held(block, reg);
+            }
+        }
+        let (_, allocation) = building.allocate(2, 2);
 
-        let locals = vec![WORD; CROWDED + 1];
-        let plan = Slots::share(&building.func, &reach, &allocation, &locals, &[]);
-        assert_eq!(plan.cells().len(), locals.len());
-        assert_eq!(plan.saved(), 0);
+        let widths = vec![8; allocation.assignment.spilled()];
+        let plan = Slots::share(&building.func, None, &allocation, &[WORD, WORD], &widths);
+        assert_ne!(plan.local(0), plan.local(1), "a variable somebody can ask for keeps its bytes");
+        assert_eq!(plan.slot(0), plan.slot(1), "and two spilled values that never meet share");
+    }
+
+    /// A spill slot wanting bytes over one stretch of the line.
+    fn slot(number: usize, start: Point, end: Point) -> Want {
+        Want { what: What::Slot(number), size: 8, align: 8, area: Some(vec![Range { start, end }]) }
+    }
+
+    #[test]
+    fn what_is_left_when_the_budget_runs_out_gets_bytes_of_its_own() {
+        // Three that are never both wanted, which is one run of bytes for the three of them when
+        // there is anything to spend on finding that out.
+        let three = || vec![slot(0, 0, 10), slot(1, 20, 30), slot(2, 40, 50)];
+        assert_eq!(fit(three(), 0, 3, BUDGET).cells().len(), 1);
+        // One comparison puts the second beside the first and leaves nothing for the third.
+        assert_eq!(fit(three(), 0, 3, 1).cells().len(), 2);
+        assert_eq!(fit(three(), 0, 3, 0).cells().len(), 3);
     }
 }
