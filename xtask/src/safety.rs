@@ -1202,7 +1202,7 @@ mod tests {
         // calling that a fault would be six problems a run of the check can do nothing about.
         // `Case::judge` does not look at a gap's status for the same reason.
         let (a, b) = nowhere();
-        let gap = case("a-gap", "/* row: S2 */\n/* refuse: J1 */\n/* gap: #428 */\n");
+        let gap = case("a-gap-that-faults", "/* row: S2 */\n/* refuse: J1 */\n/* gap: #428 */\n");
         assert!(faulted(&gap, &died(11)).is_none(), "a gap is allowed to fall over");
         assert!(crashed(&died(11)).is_some(), "and it still died, which is the other question");
         assert!(diverged(&gap, &died(11), &died(11), (&a, &b)).is_ok());
