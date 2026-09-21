@@ -47,15 +47,37 @@
 //! float being the obvious pair, so the types have to be equal as well and a load whose type is not
 //! the stored value's stays and is counted.
 //!
+//! # The same address read twice
+//!
+//! A load is not a def of memory, so the walk goes straight past an earlier load of the same
+//! address and arrives at whatever wrote it last, which is often nothing it can name. That leaves
+//! the easiest redundant load of all in place: two loads of the same address at the same version of
+//! memory read the same bytes, and the version of memory is exactly the statement that nothing
+//! wrote them in between.
+//!
+//! So there is a table alongside the walk, keyed by the version of memory, the address and the
+//! type, holding what the first load of that key is known to be equal to, and a later load whose
+//! key is in it takes that value. It is value numbering over memory rather than a walk, which is
+//! why it is a table here and not another [`Clobber`] variant in [`crate::memssa`].
+//!
+//! Two things make it right. Memory is threaded through every instruction that touches it, so two
+//! loads carrying the same version have no write between them on any path from the one to the
+//! other. That is a statement about paths through the earlier load, so the earlier load has to be
+//! on every path to the later one, and that is dominance and is the one thing this pass computes
+//! that the walk did not need. On a safety build the two are usually separated by a check, and a
+//! check reads the planes and writes nothing, so the version survives it.
+//!
+//! What goes in the table is the value the load is equal to rather than the load's own result. A
+//! load that was itself forwarded is about to be removed, [`substitute`] does not chase a rewrite
+//! through another rewrite, and a later load of the same key can still reach the table when its own
+//! walk was the one that ran out of budget.
+//!
 //! # What is not here
 //!
 //! Phi translation, which is asking about a load whose address is a block parameter in the
-//! predecessor's terms. Section 9.2's `translate`, which is what lets a load be followed through a
-//! `memcpy` and which [`Walk::clobber_with`] already takes a callback for. And a load forwarded
-//! from an earlier load rather than from a store, which the chain does not answer, because a load
-//! is not a def of memory and the walk goes past it: two loads of the same address with the same
-//! version of memory are the same value and saying so is value numbering over memory rather than a
-//! walk. All three are on tamnd/rucc#1476.
+//! predecessor's terms. And section 9.2's `translate`, which is what lets a load be followed
+//! through a `memcpy` and which [`Walk::clobber_with`] already takes a callback for. Both are on
+//! tamnd/rucc#1476.
 //!
 //! # The chain goes on and comes off again
 //!
@@ -85,6 +107,9 @@ pub const NAME: &str = "redundant-load";
 
 /// Recorded for a load that took the value of the store the walk said it sees.
 const FORWARDED: &str = "load replaced by the value of the store the walk found";
+
+/// Recorded for a load that took the value an earlier load of the same address already had.
+const REUSED: &str = "load replaced by the value an earlier load of the same address already had";
 
 /// Recorded for a load the walk placed on a write that covered only part of it.
 const PARTIAL: &str = "load kept, what wrote it covers only part of what it reads";
@@ -140,42 +165,65 @@ impl Pass for RedundantLoad {
         // it. Built once, because the alias oracle inside it holds an escape analysis that is one
         // walk over the function and every step of every walk may ask it.
         {
+            let dom = an.dominators(func);
             let mut walk = Walk::new(func, an.outside());
+            // One entry per address read at a version of memory, holding the block the first load
+            // of it was in and the value that load is known to be equal to.
+            let mut seen: HashMap<(Value, Value, Type), (Block, Value)> = HashMap::new();
             for block in func.blocks().collect::<Vec<Block>>() {
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
                     let Some((result, ty)) = reads(func, inst) else {
                         continue;
                     };
-                    match walk.clobber(inst) {
-                        Clobber::Exact(wrote) => {
-                            let Some(value) = stored(func, wrote) else {
-                                stats.missed(NOT_A_STORE);
-                                continue;
-                            };
-                            if func[value].ty != ty {
-                                stats.missed(WIDTH);
-                                continue;
-                            }
-                            if !fuel.take() {
-                                // Out of fuel is a request to stop transforming and not to stop
-                                // looking, so the walk goes on and the count of what could have
-                                // gone is the same at every setting, which is what makes a
-                                // bisection over it monotonic.
-                                stats.missed(NO_FUEL);
-                                continue;
-                            }
-                            forward.insert(result, value);
-                            gone.push(inst);
-                            stats.optimized(FORWARDED);
-                        }
-                        Clobber::Partial(_) => stats.missed(PARTIAL),
-                        Clobber::Maybe(_) => stats.missed(MAYBE),
-                        Clobber::Unknown => stats.missed(UNKNOWN),
+                    let key = func.mem_in(inst).map(|mem| (mem, func[func[inst].args][0], ty));
+                    let found = match walk.clobber(inst) {
+                        Clobber::Exact(wrote) => match stored(func, wrote) {
+                            None => Found::Kept(Some(NOT_A_STORE)),
+                            Some(value) if func[value].ty != ty => Found::Kept(Some(WIDTH)),
+                            Some(value) => Found::Store(value),
+                        },
+                        Clobber::Partial(_) => Found::Kept(Some(PARTIAL)),
+                        Clobber::Maybe(_) => Found::Kept(Some(MAYBE)),
+                        Clobber::Unknown => Found::Kept(Some(UNKNOWN)),
                         // Nothing in the function wrote it, so the load reads whatever was there
                         // when the function started. There is no value here to take and nothing
                         // was missed either, so it is not counted as one.
-                        Clobber::NoClobber => {}
+                        Clobber::NoClobber => Found::Kept(None),
+                    };
+                    // The walk had nothing, so ask whether an earlier load of the same address at
+                    // this version of memory had something. The dominance is what the walk did not
+                    // have to compute and this does: two arms of the same branch share a version of
+                    // memory and neither of them runs before the other.
+                    let found = match found {
+                        Found::Kept(reason) => match key.and_then(|key| seen.get(&key)) {
+                            Some(&(at, value)) if dom.dominates(at, block) => Found::Earlier(value),
+                            _ => Found::Kept(reason),
+                        },
+                        taken => taken,
+                    };
+                    let (value, why) = match found {
+                        Found::Store(value) => (value, FORWARDED),
+                        Found::Earlier(value) => (value, REUSED),
+                        Found::Kept(reason) => {
+                            if let Some(reason) = reason {
+                                stats.missed(reason);
+                            }
+                            remember(&mut seen, key, block, result);
+                            continue;
+                        }
+                    };
+                    if !fuel.take() {
+                        // Out of fuel is a request to stop transforming and not to stop looking, so
+                        // the walk goes on and the count of what could have gone is the same at
+                        // every setting, which is what makes a bisection over it monotonic.
+                        stats.missed(NO_FUEL);
+                        remember(&mut seen, key, block, result);
+                        continue;
                     }
+                    forward.insert(result, value);
+                    gone.push(inst);
+                    stats.optimized(why);
+                    remember(&mut seen, key, block, value);
                 }
             }
             let counts = walk.counts();
@@ -201,6 +249,32 @@ impl Pass for RedundantLoad {
         // them.
         an.settle(func, self.preserves(), false);
         stats
+    }
+}
+
+/// What there is to put in place of a load, and where it came from.
+enum Found {
+    /// The store the walk arrived at wrote this.
+    Store(Value),
+    /// An earlier load of the same address at the same version of memory already had this.
+    Earlier(Value),
+    /// The load stays, with the reason when there is one worth recording.
+    Kept(Option<&'static str>),
+}
+
+/// Records what a load of this address at this version of memory is equal to.
+///
+/// The first one of a key wins. A second one is either dominated by the first, in which case it was
+/// forwarded and there is nothing left to record, or it is not, and then neither block dominates
+/// the other and keeping the one already there is as good as swapping it.
+fn remember(
+    seen: &mut HashMap<(Value, Value, Type), (Block, Value)>,
+    key: Option<(Value, Value, Type)>,
+    block: Block,
+    value: Value,
+) {
+    if let Some(key) = key {
+        seen.entry(key).or_insert((block, value));
     }
 }
 
@@ -469,6 +543,127 @@ block2:
         let (_, stats) = run(&text);
         assert!(!stats.changed());
         assert_eq!(stats.count(crate::stats::Kind::Missed, WIDTH), 1);
+    }
+
+    #[test]
+    fn the_same_address_read_twice_over_is_read_once() {
+        // Nothing in the function writes memory at all, so the walk says nobody wrote it for both
+        // of these and has no value for either. The two of them are still the same value.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    %2 = load.i32 %0, align 4
+    %3 = add %1, %2
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_check_between_them_is_not_a_write() {
+        // What this is worth on a safety build, which is the shape above with the check the
+        // instrumentation puts in front of the second access. A check reads the planes and writes
+        // nothing, so the version of memory the second load carries is the first one's.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    %2 = cap_of %0
+    check_bounds %2, %0, size 4, align 4
+    %3 = load.i32 %0, align 4
+    %4 = add %1, %3
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+        assert_eq!(count_of(func, Opcode::CheckBounds), 1);
+    }
+
+    #[test]
+    fn a_write_that_may_be_the_same_address_ends_it() {
+        // The two pointers are two parameters and neither of them is restrict, so the store may be
+        // to the same place. The store is a def of memory, so the second load carries a version the
+        // first one never had and the table cannot match it, which is the check being the version
+        // rather than a list of what the pass thinks is in the way.
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = load.i32 %0, align 4
+    %3 = iconst.i32 7
+    store %3 -> %1, align 4
+    %4 = load.i32 %0, align 4
+    %5 = add %2, %4
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn one_arm_reading_it_is_not_the_other_arm_having_read_it() {
+        // Nothing here writes memory, so both loads carry the version the function started with and
+        // the table matches. Neither block runs before the other, which is what the dominance is
+        // there to say, and without it this is a use of a value that is not in scope.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = load.i32 %0, align 4
+    jump block3(%2)
+
+block2:
+    %3 = load.i32 %0, align 4
+    jump block3(%3)
+
+block3(%4: i32):
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_load_above_the_branch_reaches_both_arms() {
+        // The same shape the other way up, where the first load is on every path to the other two.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    br_if %1, block1, block2
+
+block1:
+    %3 = load.i32 %0, align 4
+    jump block3(%3)
+
+block2:
+    %4 = load.i32 %0, align 4
+    jump block3(%4)
+
+block3(%5: i32):
+    %6 = add %2, %5
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 2);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
     }
 
     #[test]
