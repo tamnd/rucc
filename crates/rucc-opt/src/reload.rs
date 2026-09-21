@@ -72,12 +72,20 @@
 //! through another rewrite, and a later load of the same key can still reach the table when its own
 //! walk was the one that ran out of budget.
 //!
+//! # A load followed through a copy
+//!
+//! A struct assignment lowers to a copy, so a field read after one is a load whose walk stops at a
+//! `memcpy` with the value it wants sitting in the copy's source. Section 9.2's answer to that is
+//! `translate`: the walk hands the reference and the def in the way to the caller, and a caller
+//! that can see past the def rewrites the reference and the walk carries on with the new one.
+//! [`Walk::clobber_with`] has taken the callback since it was written and this is what fills it in,
+//! by asking about the same distance into the copy's source instead. `through` says what has to be
+//! known for that to be the same bytes rather than a guess.
+//!
 //! # What is not here
 //!
 //! Phi translation, which is asking about a load whose address is a block parameter in the
-//! predecessor's terms. And section 9.2's `translate`, which is what lets a load be followed
-//! through a `memcpy` and which [`Walk::clobber_with`] already takes a callback for. Both are on
-//! tamnd/rucc#1476.
+//! predecessor's terms. It is on tamnd/rucc#1476.
 //!
 //! # The chain goes on and comes off again
 //!
@@ -95,9 +103,10 @@
 
 use std::collections::HashMap;
 
-use rucc_ir::{Block, Flags, Func, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
-use crate::memssa::{Clobber, Walk};
+use crate::alias::{Access, origin};
+use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, memssa};
 
@@ -165,8 +174,12 @@ impl Pass for RedundantLoad {
         // it. Built once, because the alias oracle inside it holds an escape analysis that is one
         // walk over the function and every step of every walk may ask it.
         {
-            let dom = an.dominators(func);
-            let mut walk = Walk::new(func, an.outside()).knowing(an.modref());
+            // The walk holds the function and so does the callback it is handed, so there is a name
+            // for the shared borrow of it rather than two reborrows of the same `&mut` written
+            // where a reader has to work out that they are both reads.
+            let body: &Func = func;
+            let dom = an.dominators(body);
+            let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
             // One entry per address read at a version of memory, holding the block the first load
             // of it was in and the value that load is known to be equal to.
             let mut seen: HashMap<(Value, Value, Type), (Block, Value)> = HashMap::new();
@@ -176,7 +189,9 @@ impl Pass for RedundantLoad {
                         continue;
                     };
                     let key = func.mem_in(inst).map(|mem| (mem, func[func[inst].args][0], ty));
-                    let found = match walk.clobber(inst) {
+                    let found = match walk.clobber_with(inst, &mut |reference, def| {
+                        through(body, reference, def).map_or(Step::Stop, Step::Retry)
+                    }) {
                         Clobber::Exact(wrote) => match stored(func, wrote) {
                             None => Found::Kept(Some(NOT_A_STORE)),
                             Some(value) if func[value].ty != ty => Found::Kept(Some(WIDTH)),
@@ -250,6 +265,64 @@ impl Pass for RedundantLoad {
         an.settle(func, self.preserves(), false);
         stats
     }
+}
+
+/// The bytes a copy took its answer from, for a load the copy covered all of.
+///
+/// Section 9.2's `translate`, and the one case that section says is worth having it for. A copy
+/// moves a run of bytes, so the value at a place inside the destination is the value that was at
+/// the same distance into the source when the copy ran, and asking the walk to carry on from the
+/// copy about that place is asking what the source held then.
+///
+/// Everything has to be known or the answer is nothing, which is what keeps this from being a
+/// guess. Both ends have to be an object the walk could name at a fixed distance into it. The load
+/// has to be inside what the copy wrote rather than across its edge, since a load half covered by a
+/// copy is half the source and half whatever the destination held before. And the reference has to
+/// be about the object the copy wrote rather than one the oracle merely could not tell apart from
+/// it, because a `may` is the reason to stop rather than a reason to follow.
+///
+/// `memmove` is here alongside `memcpy`. An overlapping move puts the bytes that were in the source
+/// into the destination the same way a copy does, and what this asks for is what the source held
+/// before the move, which is the version of memory the walk carries on from.
+///
+/// The new reference carries neither the type node nor the `restrict` scope. A copy moves bytes and
+/// says nothing about what they are, so the load's type node is about the destination, and letting
+/// it rule out a write to the source is exactly the rewrite section 9.6 calls the subtlest bug in
+/// that document.
+fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
+    let data = func[inst];
+    if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
+        || data.flags.contains(Flags::VOLATILE)
+    {
+        return None;
+    }
+    let Extra::Mem(info) = data.extra else {
+        return None;
+    };
+    let args = &func[data.args];
+    let (&to, &from) = (args.first()?, args.get(1)?);
+    let (to_origin, Some(to_offset)) = origin(func, to) else {
+        return None;
+    };
+    let (from_origin, Some(from_offset)) = origin(func, from) else {
+        return None;
+    };
+    if reference.origin != to_origin {
+        return None;
+    }
+    let (start, end) = reference.range()?;
+    let (wrote, length) = (i128::from(to_offset), i128::from(func[info].size));
+    if start < wrote || end > wrote + length {
+        return None;
+    }
+    Some(Access {
+        origin: from_origin,
+        offset: Some(i64::try_from(i128::from(from_offset) + (start - wrote)).ok()?),
+        size: reference.size,
+        tbaa: None,
+        restrict: Restrict::NONE,
+        volatile: reference.volatile,
+    })
 }
 
 /// What there is to put in place of a load, and where it came from.
@@ -688,6 +761,121 @@ block3(%5: i32):
         let func = one(&module);
         off(func);
         assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_field_read_after_a_struct_assignment_comes_out_of_the_source() {
+        // What `translate` is for. The copy is from part way into one object to the start of
+        // another and the load is part way into that, so the place asked about on the other side
+        // of the copy is neither operand's own offset and the arithmetic has to be right.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = alloca, size 16, align 8
+    %2 = iconst.i64 12
+    %3 = ptr_add %0, %2
+    %4 = iconst.i32 7
+    store %4 -> %3, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %0, %5
+    memcpy %1, %6, size 8, align 8
+    %7 = iconst.i64 4
+    %8 = ptr_add %1, %7
+    %9 = load.i32 %8, align 4
+    return %9
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        assert_eq!(
+            count_of(func, Opcode::Memcpy),
+            1,
+            "the copy itself is not this pass's to remove"
+        );
+    }
+
+    #[test]
+    fn what_the_copy_moved_is_what_the_source_held_when_it_ran() {
+        // The store after the copy is not the answer, and it is the one that would come back if
+        // the walk carried on from the load rather than from the copy.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 4, align 4
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    memcpy %1, %0, size 4, align 4
+    %3 = iconst.i32 9
+    store %3 -> %0, align 4
+    %4 = load.i32 %1, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        assert_eq!(count_of(func, Opcode::IConst), 2);
+        let ret = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .find(|&inst| func[inst].opcode == Opcode::Return)
+            .expect("a return");
+        let seven = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .find(|&inst| func[inst].opcode == Opcode::IConst)
+            .expect("the first constant, which is the one stored before the copy");
+        assert_eq!(func[func[ret].args][0], func[seven].results().next().expect("a result"));
+    }
+
+    #[test]
+    fn a_load_across_the_edge_of_a_copy_stays() {
+        // Half of what this reads came through the copy and half of it was already there, and a
+        // reference rewritten to the source would be asking about the wrong two bytes as well as
+        // about the right two.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 8, align 4
+    %1 = alloca, size 8, align 4
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    memcpy %1, %0, size 4, align 4
+    %3 = iconst.i64 2
+    %4 = ptr_add %1, %3
+    %5 = load.i32 %4, align 2
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_copy_the_oracle_could_not_tell_apart_from_the_load_is_not_followed() {
+        // The copy writes through one parameter and the load reads through another, so the two may
+        // be the same object and the oracle cannot say they are. Following that would be asking
+        // about the source of a copy that may not have written this at all, and a may is the
+        // reason to stop rather than a reason to carry on.
+        let text = wrap(
+            "(ptr, ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr, %2: ptr):
+    %3 = iconst.i32 7
+    store %3 -> %1, align 4
+    memcpy %0, %1, size 4, align 4
+    %4 = load.i32 %2, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
     }
 
     #[test]
