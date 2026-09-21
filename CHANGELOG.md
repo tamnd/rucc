@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.72
+
 ### Added
 
 - A whole object whose length the program computes can be assigned, `struct S { int a[n]; } x, y; y = x;`, which was refused with `copying a whole object of this type is not supported yet` because it needs a copy whose byte count is a value rather than a number. The three bulk opcodes, `memcpy`, `memmove` and `memset`, now take an optional third operand which is that count, and the payload beside the instruction says zero where it is there. Two answers that can disagree would be worse than one, so it is one: zero in the payload is the shape on an instruction that has the operand and the mistake on one that does not, and the verifier says so. Reading them apart is `Func::bulk`, which hands back the destination, the source or the byte, and the length either as the operand or as nothing at all, and it exists because six places in the compiler took the operands apart with `let [to, from] = ...` and every one of them would have quietly skipped a three operand instruction rather than failed on it. In `expand` that would have deleted the copy and in `safety` it would have dropped the plane writes. The alias oracle reports such an access as one of no known size, which is what it already wrote for an access it cannot measure, rather than as the payload's zero, since an access of no bytes is one nothing overlaps and that is the opposite of the truth here. The code generator sends it to the runtime's routine, because a plan is a list of offsets and there are none to write down when nobody knows how many there are. The three plane writes `-fsafety=detect` puts after a copy use the same operand. Part of tamnd/rucc#202.
