@@ -9,8 +9,9 @@
 //! the start of both. So there is no lookahead that decides it, and the prefix is parsed once and
 //! the decision is made after the first declarator, on one token. A `{` is a body. A declaration
 //! specifier is the parameter declarations of an old-style definition, which is the only other
-//! thing that can follow a declarator. Anything else, including an attribute or an `asm` label,
-//! belongs to the declaration.
+//! thing that can follow a declarator, and it counts only when the declarator declared a function,
+//! since nothing else can have parameters. Anything else, including an attribute or an `asm`
+//! label, belongs to the declaration.
 //!
 //! # Where a name starts existing
 //!
@@ -101,7 +102,7 @@ impl Parser<'_> {
 
         let mut at = self.cursor.span();
         let mut declarator = self.declarator();
-        if self.at_definition() {
+        if self.at_definition(declarator) {
             return self.function_definition(specs, declarator, start);
         }
 
@@ -184,11 +185,29 @@ impl Parser<'_> {
     /// not, and it has to be excluded by name: `__attribute__` is a specifier keyword
     /// everywhere else in the grammar, so the `x` in `int x __attribute__((weak));` would
     /// otherwise look like it was followed by one.
-    fn at_definition(&self) -> bool {
+    ///
+    /// The parameter declarations are only possible when what was declared is a function, and
+    /// that is worth checking rather than assuming, because of what happens when it is not.
+    /// `static __const__ unsigned int f(unsigned x)` on a compiler where `__const__` is not a
+    /// keyword declares an object called `__const__`, and `unsigned` after it is a specifier, so
+    /// without this the parser decides it is reading an old-style definition and eats declarations
+    /// looking for a body. It finds one at the end of the next function, or the one after that, or
+    /// at the end of the file, and reports the mistake there. That is how a missing keyword gets
+    /// reported a thousand lines away from itself, which is tamnd/rucc#1588.
+    fn at_definition(&self, declarator: DeclaratorId) -> bool {
+        if self.cursor.at_punct(Punct::LBrace) {
+            return true;
+        }
         if self.cursor.at_keyword(Keyword::Attribute) {
             return false;
         }
-        self.cursor.at_punct(Punct::LBrace) || self.at_decl_specs()
+        self.declares_a_function(declarator) && self.at_decl_specs()
+    }
+
+    /// Whether a declarator declares a function, which is what a definition's has to do.
+    fn declares_a_function(&self, declarator: DeclaratorId) -> bool {
+        let derived = self.ast[declarator].derived;
+        matches!(self.ast[derived].first(), Some(Derived::Function { .. }))
     }
 
     /// A function definition, from the parameter declarations of an old-style one to the body.

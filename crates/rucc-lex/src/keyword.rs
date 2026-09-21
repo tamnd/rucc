@@ -446,6 +446,7 @@ static KEYWORDS: &[Entry] = &[
     e("__complex", Keyword::Complex, ALWAYS),
     e("__complex__", Keyword::Complex, ALWAYS),
     e("__const", Keyword::Const, ALWAYS),
+    e("__const__", Keyword::Const, ALWAYS),
     e("__extension__", Keyword::Extension, ALWAYS),
     e("__imag", Keyword::Imag, ALWAYS),
     e("__imag__", Keyword::Imag, ALWAYS),
@@ -601,7 +602,7 @@ mod tests {
 
     #[test]
     fn two_spellings_of_one_thing_are_one_keyword() {
-        for spelling in ["const", "__const"] {
+        for spelling in ["const", "__const", "__const__"] {
             assert_eq!(lookup(Std::C23, true, spelling), Some(Keyword::Const));
         }
         for spelling in ["_Thread_local", "thread_local", "__thread"] {
@@ -614,6 +615,37 @@ mod tests {
             lookup(Std::C23, true, "_Alignof"),
             "the two alignments are different questions"
         );
+    }
+
+    #[test]
+    fn a_gnu_spelling_with_one_pair_of_underscores_has_the_other_pair_too() {
+        // gcc's alternate spellings come in twos, `__word` and `__word__`, and the list of words
+        // is closed and is written out here rather than worked out from the table, because the
+        // point of the test is to catch a word the table is missing. `__const__` was missing for a
+        // long time and what found it was tcc's test suite, several thousand lines and about a
+        // minute of reading away from the error the parser actually reported.
+        let words = [
+            "asm",
+            "alignof",
+            "attribute",
+            "complex",
+            "const",
+            "imag",
+            "inline",
+            "real",
+            "restrict",
+            "signed",
+            "typeof",
+            "typeof_unqual",
+            "volatile",
+        ];
+        for word in words {
+            let short = format!("__{word}");
+            let long = format!("__{word}__");
+            let keyword = lookup(Std::C23, true, &short);
+            assert!(keyword.is_some(), "__{word} is not in the table");
+            assert_eq!(lookup(Std::C23, true, &long), keyword, "__{word}__ is not __{word}");
+        }
     }
 
     #[test]
