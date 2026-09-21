@@ -7575,6 +7575,54 @@ block5:
         assert_eq!(body(source), expected);
     }
 
+    /// An interpreter, cut down to the shape that matters: a table of labels, a few values the
+    /// loop keeps in hand, and a jump through the table at the end of every one of them.
+    fn dispatch(labels: usize) -> String {
+        let mask = labels - 1;
+        let mut source = String::from("int spin(int n)\n{\n\tstatic void *table[] = {");
+        for index in 0..labels {
+            source.push_str(&format!(" &&a{index},"));
+        }
+        source.push_str(" };\n\tint w = n, x = n + 1, y = n + 2, z = n + 3;\n");
+        source.push_str(&format!("\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"));
+        for index in 0..labels {
+            let step = match index % 4 {
+                0 => "w += x;",
+                1 => "x += y;",
+                2 => "y += z;",
+                _ => "z += w;",
+            };
+            source.push_str(&format!("a{index}:\n\t{step}\n"));
+            source.push_str("\tif (--n <= 0) return w + x + y + z;\n");
+            source.push_str(&format!("\tgoto *table[n & {mask}];\n"));
+        }
+        source.push_str("}\n");
+        source
+    }
+
+    /// How many moves are written in front of the first jump through a register.
+    fn in_front_of_the_jump(text: &str) -> usize {
+        let (before, _) = text.split_once("\tjmp\t*%").expect("a jump through a register");
+        before.lines().rev().take_while(|line| line.starts_with("\tmov")).count()
+    }
+
+    /// What a branch writes in front of its jump is what it carries, not what every label it can
+    /// reach would like to be handed.
+    ///
+    /// A label an indirect branch reaches is given its values in registers the branch writes
+    /// before it goes, because the moves cannot go after a jump and cannot go across the register
+    /// the jump reads. Writing a register for each parameter of each label costs the table's
+    /// length on every dispatch, which is a few moves in a program with two labels and five
+    /// hundred in an interpreter with seventy. The values are the same values, so the registers
+    /// are the same registers, and the cost stays where the number of values puts it.
+    #[test]
+    fn a_jump_through_a_register_writes_what_it_carries_and_not_the_whole_table() {
+        let small = in_front_of_the_jump(&asm(&dispatch(4)));
+        let large = in_front_of_the_jump(&asm(&dispatch(32)));
+        assert_eq!(small, large, "eight times the labels and the same values in hand");
+        assert!(large <= 8, "the values the loop keeps, and not a set of them per label: {large}");
+    }
+
     #[test]
     fn a_jump_to_an_address_no_label_in_the_function_has_arrives_nowhere() {
         // The address came from outside the function, and a jump to a label in another function

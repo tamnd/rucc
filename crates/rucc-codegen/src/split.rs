@@ -40,7 +40,7 @@ use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_mir as mir;
-use rucc_target::{BranchInsts, FrameInsts};
+use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
 /// Splits every critical edge that carries values, and gives back how many it split.
 ///
@@ -120,6 +120,26 @@ pub fn critical(func: &mut mir::Func) -> usize {
 /// reach that block is an edge out of a branch, which writes them on the way. So a value written
 /// here and not used is a value overwritten before anything looks, whichever way the jump went.
 ///
+/// # One register for one value, and not one for every place it is given to
+///
+/// That safety is also what makes the cost of it worth watching. A branch writes the registers of
+/// every label it can reach, so a register for every parameter of every label is a whole table's
+/// worth of moves in front of every jump in the function, and a dispatch table is a branch that
+/// reaches hundreds of labels. An interpreter hands each of them whatever its loop had in hand at
+/// the jump, which is the same few values over and over, so a register for each place one of them
+/// lands means those values written a hundred times over before every instruction the interpreter
+/// runs. That is not a small constant. It is what makes an interpreter built this way ten times
+/// slower than the same interpreter built with a `switch` instead of the computed `goto`.
+///
+/// So the register belongs to the value rather than to the place. Two parameters are given one
+/// register when they are drawn from the same class and every branch in the function gives them
+/// the same register, which is exactly when one register can stand for both, and a branch writes
+/// each register it has to write once however many labels asked for it. A dispatch table where
+/// every label wants the instruction pointer writes the instruction pointer once. A label
+/// something else reaches, or a label given something no other label is given, keeps a register of
+/// its own, and a branch that gives one label nothing shares nothing with it, since a register
+/// that branch never wrote is not one the label can be given.
+///
 /// # Panics
 ///
 /// Panics on a class of register the machine named no move for, which is a function carrying a
@@ -154,10 +174,34 @@ pub fn indirect(
         }
     }
 
+    // One register per thing a branch has to give, rather than one per place it is given to. The
+    // key is what every branch gives that parameter, so two parameters given the same register by
+    // the same branches are given it in one register and a branch writes that register once.
+    let mut homes: HashMap<Given, mir::Reg> = HashMap::new();
+    // What each branch writes in front of its jump, in the order it was first asked for, and never
+    // the same register twice. Two parameters that share a register are given it by the one move.
+    let mut writes: Vec<Vec<(mir::Reg, mir::Reg, RegClass)>> = vec![Vec::new(); branches.len()];
     let mut entries: HashMap<mir::Block, mir::Block> = HashMap::new();
+
     for target in targets {
         let params = func[target].params.clone();
-        let homes: Vec<mir::Reg> = params.iter().map(|param| func.new_vreg(param.class)).collect();
+        let given = given(func, &branches, target);
+        let mut carried: Vec<mir::Reg> = Vec::new();
+        for (index, param) in params.iter().enumerate() {
+            let key: Given = (
+                param.class,
+                given.iter().map(|edges| edges.iter().map(|args| args[index]).collect()).collect(),
+            );
+            let home = *homes.entry(key).or_insert_with(|| func.new_vreg(param.class));
+            carried.push(home);
+            for (branch, edges) in given.iter().enumerate() {
+                for args in edges {
+                    if !writes[branch].iter().any(|&(written, _, _)| written == home) {
+                        writes[branch].push((home, args[index], param.class));
+                    }
+                }
+            }
+        }
         let entry = func.create_block();
         let mut total = mir::Weight::NEVER;
         for &block in &branches {
@@ -165,28 +209,29 @@ pub fn indirect(
                 if func[block].succs[index].block != target {
                     continue;
                 }
-                let call = func[block].succs[index].clone();
-                let last = func.terminator(block).expect("a block that ends in a jump");
-                for (home, (arg, param)) in homes.iter().zip(call.args.iter().zip(&params)) {
-                    let name = frame.moves(param.class).expect("a class this machine can move").mov;
-                    let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
-                    let inst = func
-                        .build_loose(opcode)
-                        .def(*home, param.class)
-                        .uses(*arg, param.class)
-                        .finish();
-                    func.insert_before(last, inst);
-                }
                 // The block in front of the label runs as often as every branch that reaches it,
                 // which is the same sum the weight of a block with that many edges into it would
                 // be.
-                total = mir::Weight::parts(total.raw().saturating_add(call.weight.raw()));
-                func.succs_mut(block)[index] = mir::BlockCall::to(entry).taken(call.weight);
+                let weight = func[block].succs[index].weight;
+                total = mir::Weight::parts(total.raw().saturating_add(weight.raw()));
+                func.succs_mut(block)[index] = mir::BlockCall::to(entry).taken(weight);
             }
         }
         func.set_weight(entry, total);
-        *func.succs_mut(entry) = vec![mir::BlockCall::with(target, homes).taken(total)];
+        *func.succs_mut(entry) = vec![mir::BlockCall::with(target, carried).taken(total)];
         entries.insert(target, entry);
+    }
+
+    // And the moves themselves, once every label has asked for what it wants, since what one label
+    // asks for is what another may already have asked the same branch for.
+    for (branch, moves) in branches.iter().zip(&writes) {
+        let last = func.terminator(*branch).expect("a block that ends in a jump");
+        for &(home, arg, class) in moves {
+            let name = frame.moves(class).expect("a class this machine can move").mov;
+            let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
+            let inst = func.build_loose(opcode).def(home, class).uses(arg, class).finish();
+            func.insert_before(last, inst);
+        }
     }
 
     // And the addresses, which is the half of this that is not about edges. Every `&&label` in the
@@ -256,6 +301,34 @@ pub fn pads(
         func.prepend_inst(block, inst);
     }
     addressed.len()
+}
+
+/// What decides whether two parameters can be given their value in one register: the class the
+/// parameter is drawn from, and the register every branch in the function gives it, in the order
+/// the branches are in and with one entry per edge inside that. A branch that does not reach the
+/// label gives nothing, which is a length of zero and is as much a part of the answer as a
+/// register is, since sharing with a parameter a branch never gives anything to would be reading a
+/// register that branch never wrote.
+type Given = (RegClass, Vec<Vec<mir::Reg>>);
+
+/// What each branch gives that label, edge by edge.
+///
+/// One entry per branch and in the branches' own order, since a label two branches reach and a
+/// label one branch reaches twice are not given the same thing. A branch is allowed to reach one
+/// label twice, which a table with the same label in two of its cells is, so what a branch gives
+/// is a list of what it gives rather than one set of registers.
+fn given(func: &mir::Func, branches: &[mir::Block], target: mir::Block) -> Vec<Vec<Vec<mir::Reg>>> {
+    branches
+        .iter()
+        .map(|&block| {
+            func[block]
+                .succs
+                .iter()
+                .filter(|call| call.block == target)
+                .map(|call| call.args.clone())
+                .collect()
+        })
+        .collect()
 }
 
 /// How many edges arrive at each block, counted by index rather than in layout order so that a
@@ -439,6 +512,75 @@ mod tests {
             }
         }
         assert_eq!(addressed(&func), vec![4, 4]);
+    }
+
+    /// A function with one computed `goto` that reaches as many labels as the test asks for, each
+    /// given the one value the branch has in hand, which is the shape of a dispatch table.
+    fn table(labels: usize) -> (Interner, mir::Func, Vec<mir::Block>) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let arg = func.append_param(head, GPR);
+        let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+        let jump = mir::Opcode::new(names.intern("x64.jmp_reg"));
+        let mut targets = Vec::new();
+        for _ in 0..labels {
+            let label = func.create_block();
+            func.append_param(label, GPR);
+            targets.push(label);
+            func.succs_mut(head).push(mir::BlockCall::with(label, vec![arg]));
+        }
+        let address = func.new_vreg(GPR);
+        func.build(head, lea).def(address, GPR).mem(mir::Mem::block(targets[0])).finish();
+        func.build(head, jump).operand(mir::Operand::read(address, GPR)).finish();
+        (names, func, targets)
+    }
+
+    #[test]
+    fn labels_a_branch_gives_the_same_value_are_given_it_in_one_register() {
+        let (mut names, mut func, _) = table(8);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+
+        // One move in front of the jump and not eight, because the eight labels are given the one
+        // value and it is now in the one register. Eight blocks were still made, since each label
+        // needs the block that moves that register on to its own parameter.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_label_given_something_else_keeps_a_register_of_its_own() {
+        let (mut names, mut func, targets) = table(8);
+        let head = mir::Block::new(0);
+        let other = func.append_param(head, GPR);
+        let last = func[head].succs.len() - 1;
+        func.succs_mut(head)[last] = mir::BlockCall::with(targets[7], vec![other]);
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+        // Two moves: one register for the seven labels given the same value, and one for the label
+        // given the other. Sharing is about what a label is given and not about how many there are.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn labels_that_take_different_numbers_of_values_still_share_the_ones_they_agree_on() {
+        let (mut names, mut func, targets) = table(8);
+        let head = mir::Block::new(0);
+        let arg = func[head].params[0].reg;
+        let other = func.append_param(head, GPR);
+        // The last label takes a second value, which is what an interpreter looks like: each of
+        // its labels uses what it needs and no two of them need quite the same list.
+        func.append_param(targets[7], GPR);
+        let last = func[head].succs.len() - 1;
+        func.succs_mut(head)[last] = mir::BlockCall::with(targets[7], vec![arg, other]);
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+        // Two moves, not nine. The first parameter of the long label is given what the other seven
+        // are given, so it takes the same register, and only the value nothing else is given needs
+        // one of its own.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
     }
 
     #[test]
