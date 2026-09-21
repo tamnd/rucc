@@ -67,6 +67,25 @@
 //! And on this machine rather than in a container, because the corpus is a directory outside the
 //! build and the container only has the build mounted. A replay is run on the machine that has the
 //! corpora on it, which is an x86-64 Linux machine, and the task says so on any other.
+//!
+//! # Objects with a line table, rather than assembly
+//!
+//! [`crate::libraries`] compiles to assembly so that the link belongs to whoever runs it and a
+//! machine that cannot run an x86-64 program can still do everything up to the link. That reason
+//! does not apply here, since a replay only happens on the machine the corpus is on and that
+//! machine runs what it built, and against it is the one thing this task needs that assembly cannot
+//! carry. `-g` writes a line table into an object, and the assembly printer writes no directives
+//! for one, so a replay built out of assembly has no line table anywhere in it no matter what is
+//! passed.
+//!
+//! Which matters because of what a report is. The descriptor a report is rendered from carries a
+//! judgement, a class, a width and a program counter, and deliberately carries no file and no line,
+//! for the reason `spec/safe-memory/06-instrumentation.md` section 6.5 gives: a compiler that ships
+//! two line tables ships two answers that can disagree. So the one line table has to be in the
+//! program, and until it was, every address in a report had to be taken to a disassembler and read
+//! backwards, or the whole replay had to be built again with something that would say. It is built
+//! with `-g` now, the linked program is left where it was run from, and the task says where it is
+//! and checks that a line table really arrived rather than assuming it. Part of tamnd/rucc#1558.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -212,6 +231,7 @@ pub(crate) fn replay() -> Result<()> {
         let work = build(target, project, &source)?;
         let out = run(&work, &corpus)?;
         read(target, &out, &mut problems);
+        resolvable(target, &mut problems);
     }
 
     if !ran_any || problems.is_empty() {
@@ -263,7 +283,14 @@ fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
     for (file, stem) in files(target, project, source) {
         let mut command = Command::new(&rucc);
         command
-            .args(["-S", &format!("--target={TRIPLE}"), "-fsafety=detect", LEVEL, crate::VERIFY])
+            .args([
+                "-c",
+                "-g",
+                &format!("--target={TRIPLE}"),
+                "-fsafety=detect",
+                LEVEL,
+                crate::VERIFY,
+            ])
             .arg("-I")
             .arg(source)
             .args(
@@ -274,7 +301,7 @@ fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
             )
             .args(project.defines.iter().map(|define| format!("-D{define}")))
             .arg("-o")
-            .arg(work.join(format!("{stem}.s")))
+            .arg(work.join(format!("{stem}.o")))
             .arg(&file);
         let out = command
             .current_dir(root())
@@ -298,7 +325,7 @@ fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
     Ok(work)
 }
 
-/// Every file to compile and the name its assembly goes under.
+/// Every file to compile and the name its object goes under.
 ///
 /// The library's own files, then the harness under the name `harness` and the driver under the name
 /// `driver`, so that the script can name the last two without knowing which project it is running.
@@ -326,16 +353,20 @@ fn files(target: &Target, project: &Project, source: &Path) -> Vec<(PathBuf, Str
 /// Everything the replay prints goes through `tee` as well as back here, because a few thousand
 /// inputs is the better part of an hour and a task that shows nothing until it is finished is a
 /// task a person kills. The copy sits beside the linked program and can be watched while it fills.
+///
+/// Where it links to is [`linked`] rather than a path written here, because the task reads the
+/// program back afterwards to see whether a line table arrived in it and the two have to be the
+/// same program.
 fn script(target: &Target, project: &Project) -> String {
     let stems: Vec<String> =
         files(target, project, Path::new("")).into_iter().map(|(_, stem)| stem).collect();
-    let objects = stems.iter().map(|stem| format!("\"{stem}.s\"")).collect::<Vec<_>>().join(" ");
+    let objects = stems.iter().map(|stem| format!("\"{stem}.o\"")).collect::<Vec<_>>().join(" ");
     let libraries = libraries::LIBRARIES.join(" ");
     format!(
         "\
 #!/bin/sh
 exec 2>/dev/null
-out=/tmp/rucc-replay-{name}
+out={out}
 mkdir -p \"$out\"
 RUCC_SAFETY_ON_ERROR=continue
 export RUCC_SAFETY_ON_ERROR
@@ -346,8 +377,57 @@ else
     printf '<<<status nolink>>>\\n'
 fi
 ",
-        name = target.project
+        out = linked(target).display()
     )
+}
+
+/// Where the replay is linked and run from.
+///
+/// Outside the build tree, because the build tree is what a container mounts and this is a program
+/// built for the machine the corpus is on. It stays there after the task is finished, on purpose:
+/// it is built with `-g` now, so an address out of a report is an `addr2line` away from a file and
+/// a line for as long as nobody deletes it, which is the whole point of passing the flag.
+fn linked(target: &Target) -> PathBuf {
+    PathBuf::from(format!("/tmp/rucc-replay-{}", target.project))
+}
+
+/// How many line table rows the linked program carries.
+///
+/// Read with `readelf` rather than with anything of ours, for the reason [`crate::lines`] reads it
+/// that way: a check on our own output that goes through our own reader is a check against
+/// ourselves. Counted rather than looked for, because a line program with a header and no rows in
+/// it is a section that exists and answers nothing, and the question here is whether an address can
+/// be resolved.
+///
+/// None when `readelf` is not on the machine, which is not a failure. A replay that ran is worth
+/// more than a check on the build that ran it, and the task says which of the two happened.
+fn carried(program: &Path) -> Option<usize> {
+    let out = Command::new("readelf")
+        .arg("--debug-dump=decodedline")
+        .arg(program)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    Some(count_rows(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The rows in a decoded line table, which are the lines with a file, a number and an address on
+/// them, and not the headings or the end of a sequence.
+fn count_rows(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            let mut parts = line.split_whitespace();
+            let (Some(_name), Some(which), Some(at)) = (parts.next(), parts.next(), parts.next())
+            else {
+                return false;
+            };
+            let address = match at.strip_prefix("0x") {
+                Some(rest) => u64::from_str_radix(rest, 16).is_ok(),
+                None => at.parse::<u64>().is_ok(),
+            };
+            which.parse::<u32>().is_ok() && address
+        })
+        .count()
 }
 
 /// Runs the script over the corpus and hands back everything the replay printed.
@@ -454,6 +534,44 @@ fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
     }
 }
 
+/// Says whether an address out of one of this replay's reports can be turned into a source line.
+///
+/// A descriptor carries a program counter and no file and no line, for the reason
+/// `spec/safe-memory/06-instrumentation.md` section 6.5 gives, so the only way from one to the
+/// other is the line table in the program. The build passes `-g` and the program is left where it
+/// ran, and this is the part that checks the flag did something rather than trusting that it did.
+/// A program with no rows in it is a failure and not a remark, because a corpus run whose findings
+/// cannot be read is most of an hour spent to learn a number.
+///
+/// Nothing is said about a build that did not link, since [`read`] has already said it and a
+/// missing program is that same news a second time.
+fn resolvable(target: &Target, problems: &mut Vec<String>) {
+    let program = linked(target).join("run");
+    if !program.is_file() {
+        return;
+    }
+    match carried(&program) {
+        Some(0) => problems.push(format!(
+            "{}: {} carries no line table, so an address out of a report cannot be turned into a \
+             file and a line. The build passes -g, so this is a compiler bug rather than a missing \
+             flag.",
+            target.project,
+            program.display()
+        )),
+        Some(rows) => println!(
+            "{}: {rows} line table rows in {}, so addr2line resolves an address out of a report \
+             without building any of this again.",
+            target.project,
+            program.display()
+        ),
+        None => println!(
+            "{}: no readelf on this machine, so whether {} carries a line table was not checked.",
+            target.project,
+            program.display()
+        ),
+    }
+}
+
 /// Splits a replay's output into one entry per input.
 fn split(out: &str) -> Vec<Took> {
     let mut all = Vec::new();
@@ -515,7 +633,7 @@ mod tests {
         }
     }
 
-    /// The script names the assembly the compile loop writes, and the two are written out in two
+    /// The script names the objects the compile loop writes, and the two are written out in two
     /// places because one is shell and the other is Rust.
     #[test]
     fn the_script_names_every_file_the_compile_loop_writes() {
@@ -523,9 +641,38 @@ mod tests {
             let project = row(target).expect("a row");
             let script = script(target, project);
             for (_, stem) in files(target, project, Path::new("")) {
-                assert!(script.contains(&format!("\"{stem}.s\"")), "{stem}");
+                assert!(script.contains(&format!("\"{stem}.o\"")), "{stem}");
             }
         }
+    }
+
+    /// The script links to the directory the line table check reads back from. They are one path in
+    /// two languages, and a change to either alone would have the task looking at a program that
+    /// was never written.
+    #[test]
+    fn the_script_links_where_the_line_table_check_looks() {
+        for target in TARGETS {
+            let project = row(target).expect("a row");
+            let script = script(target, project);
+            let out = format!("out={}\n", linked(target).display());
+            assert!(script.contains(&out), "{out}");
+        }
+    }
+
+    /// A decoded line table is rows, headings and ends of sequences, and only the rows are rows.
+    ///
+    /// The first address of a program is printed with no `0x` in front of it, so a count that only
+    /// took the prefixed form would miss the one row the front of a function is about. A row whose
+    /// line column is a dash ends a sequence and is a position rather than a line.
+    #[test]
+    fn a_decoded_table_is_counted_by_its_rows_and_nothing_else() {
+        let text = "CU: ./g.c:\n\
+                    File name    Line number    Starting address    View    Stmt\n\
+                    g.c                    3                   0               x\n\
+                    g.c                    4                 0x5               x\n\
+                    g.c                    -                0x1a\n";
+        assert_eq!(count_rows(text), 2);
+        assert_eq!(count_rows(""), 0);
     }
 
     /// The driver's two markers are what the reader splits on, so a change to either without a
