@@ -237,8 +237,10 @@ pub struct Flags {
     /// shape of the graph says, which `-freorder-blocks` asks for and every level above `-O0`
     /// turns on. See [`crate::layout`].
     pub reorder: bool,
-    /// Whether two things in the frame that are never both wanted may be the same bytes, which
-    /// `-fstack-reuse=none` turns off. See [`crate::slots`].
+    /// Whether two locals that are never both wanted may be the same bytes, which
+    /// `-fstack-reuse=none` turns off and `-O0` does not ask for. Spill slots share whatever this
+    /// says, since a spill slot is not a variable and nothing can ask a debugger for one. See
+    /// [`crate::slots`].
     pub reuse: bool,
     /// Whether the instructions of a block are put in the order the machine finishes soonest,
     /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
@@ -496,6 +498,10 @@ pub fn compile_recording(
     // a value is written once only until the allocator's rewrite has been through. What is done
     // with the answer waits until afterwards, since the liveness it is read against is the
     // allocator's. See [`crate::slots`].
+    //
+    // Only asked at all where the locals are allowed to share, since this is the whole of what says
+    // whether a local may. The spill slots are laid out either way and this says nothing about
+    // them.
     let reach = flags
         .reuse
         .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
@@ -507,11 +513,9 @@ pub fn compile_recording(
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers,
     // and because a spill slot cannot be shared with a local until it is known there is one.
-    let share = reach.map(|reach| {
-        let widths = frame::widths(&layout, &allocation);
-        Slots::share(&func, &reach, &allocation, &stack.locals, &widths)
-    });
-    let layout = Layout { share: share.as_ref(), ..layout };
+    let widths = frame::widths(&layout, &allocation);
+    let share = Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths);
+    let layout = Layout { share: Some(&share), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
     let scratch = machine.env.scratch(machine.conv.int_class);
     let protect = guard.map(|guard| Protect {

@@ -277,6 +277,8 @@ interference computation the register allocator already did. That is a simplific
 **one slot allocator, running after allocation, sharing slots between locals and spills using the
 allocator's own liveness.** GCC cannot do this because its stack layout is fixed before reload.
 
+**The two kinds are gated differently, and only one of them is gated at all.** The reason a frame ever lays two things apart that could share is the debugger: a local is a variable somebody can ask the value of, and one that is out of scope reading as whatever took its place is what `-O0` exists not to do, so locals share above `-O0` and where `-fstack-reuse` says they may. A spill slot has no name, nothing can ask for it, and the only thing that ever reads it is an instruction the allocator wrote, so a spill slot shares at every level including `-O0`. That is not a refinement: an interpreter whose dispatch table reaches seventy labels spills the same loop values once per label, and a slot each is a frame of tens of kilobytes at a level where GCC's is three.
+
 ## 36.8 What rucc builds, and what changes from spec 10
 
 Spec 10 is the design and it stands. What this document adds is four things.

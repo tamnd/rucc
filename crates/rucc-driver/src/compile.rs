@@ -7623,6 +7623,31 @@ block5:
         assert!(large <= 8, "the values the loop keeps, and not a set of them per label: {large}");
     }
 
+    /// How many bytes of frame the first function in a listing opens.
+    fn the_frame(text: &str) -> u64 {
+        text.lines()
+            .find_map(|line| {
+                let (size, _) = line.strip_prefix("\tsubq\t$")?.split_once(", %rsp")?;
+                size.parse().ok()
+            })
+            .expect("a function that opens a frame")
+    }
+
+    /// A frame holds what a function wants at once, and an interpreter does not want the whole
+    /// table at once.
+    ///
+    /// Every label a dispatch table reaches is handed the values the loop keeps, and what the
+    /// allocator has no register for goes on the stack. They are the same few values one label at
+    /// a time, so they are the same bytes. A slot each put forty kilobytes on the frame of lua's
+    /// interpreter and ran the C stack out at a depth lua's own limit was supposed to catch,
+    /// which is tamnd/rucc#1630.
+    #[test]
+    fn a_frame_holds_what_is_wanted_at_once_and_not_a_slot_for_every_label() {
+        let small = the_frame(&asm(&dispatch(16)));
+        let large = the_frame(&asm(&dispatch(64)));
+        assert!(large <= small * 2, "four times the labels and the same values: {small}, {large}");
+    }
+
     #[test]
     fn a_jump_to_an_address_no_label_in_the_function_has_arrives_nowhere() {
         // The address came from outside the function, and a jump to a label in another function
