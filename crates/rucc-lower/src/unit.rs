@@ -36,8 +36,8 @@ use rucc_ir::{
     Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
-    Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind, InitEntry,
-    InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
+    Address, Base, Const, Conversion, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind,
+    InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible};
@@ -1229,6 +1229,15 @@ impl Unit<'_> {
             // A complex constant is two scalars and this answers with one, so it is not one of
             // these. [`Self::complex_image`] puts one in before this is reached.
             Const::Complex { .. } | Const::ComplexInt { .. } => None,
+            // An address into nothing is a number, so it goes into the image as one and there is
+            // no relocation for the linker to fill in. `static char *p = &((struct S *)0)->f;` is
+            // a pointer whose value is known here, and the walk that folded it already said so.
+            Const::Address(Address { base: Base::Absolute, offset }) => {
+                let ty = repr::value_type(self.types, self.target, ty)?;
+                let ty = if ty.is_ptr() { Type::int(self.target.pointer_width) } else { ty };
+                let imm = self.module.add_imm(Imm::int(offset, ty));
+                Some(Datum::Scalar { ty, value: imm })
+            }
             Const::Address(address) => {
                 let symbol = match address.base {
                     Base::Decl(decl) => {
@@ -1244,6 +1253,8 @@ impl Unit<'_> {
                     }
                     Base::Str(id) => self.string(id),
                     Base::Label(label) => self.label_name(label),
+                    // Answered above, where it becomes a number rather than a reference.
+                    Base::Absolute => return None,
                 };
                 let addend = i64::try_from(address.offset).unwrap_or(0);
                 let size = u32::try_from(size).unwrap_or(0);

@@ -74,7 +74,7 @@ use crate::decl::{
     StorageDuration,
 };
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
-use crate::tast::Const;
+use crate::tast::{Address, Base, Const};
 
 /// Where one sub-object of the object being initialized sits, and what it is.
 #[derive(Debug, Clone, Copy)]
@@ -757,7 +757,12 @@ impl<'a> Checker<'a> {
             }
         }
         let folded = self.eval_constant(value);
-        if w.constant && matches!(folded, Ok(Const::Address(_))) {
+        // An address into nothing whose offset is zero is a null pointer written the long way
+        // round, and a null pointer is the one a `constexpr` object may hold. Anything else with
+        // a number for an address is a number and not null, so it falls to the rule below.
+        let null =
+            matches!(folded, Ok(Const::Address(Address { base: Base::Absolute, offset: 0 })));
+        if w.constant && !null && matches!(folded, Ok(Const::Address(_))) {
             self.report(
                 Diagnostic::error("'constexpr' pointer initializer is not null", span)
                     .with_code("E0646"),

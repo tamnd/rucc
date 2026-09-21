@@ -4746,6 +4746,14 @@ impl<'u> Body<'_, 'u> {
                         let addr = self.label_addr(label, span)?;
                         return Some(self.offset(addr, address.offset as u64, span));
                     }
+                    // No symbol, so the address is the number and the only thing left to do with
+                    // it is what a cast of a number to a pointer already does.
+                    rucc_sema::Base::Absolute => {
+                        let at = self.address;
+                        let mut build = self.build(span);
+                        let number = build.iconst(at, address.offset);
+                        return Some(build.unary(Opcode::IntToPtr, number, Type::PTR));
+                    }
                 };
                 let addr = self.global_addr(symbol, span);
                 Some(self.offset(addr, address.offset as u64, span))
