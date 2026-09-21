@@ -10,8 +10,12 @@
 //! propagation in [`crate::ipcp`] putting a constant into the body so that the parameter is named
 //! nowhere. Both of those leave a caller computing a value and handing it to nobody.
 //!
-//! This is the parameter half. The return value half is the same machinery pointed the other way,
-//! rewriting the call sites rather than the body, and it is not here yet.
+//! The return value half is the same question pointed the other way. A function whose result no
+//! call in the unit reads can stop handing one back, which lets the body stop computing it. Gcc's
+//! header describes the two as two sweeps, callees to callers for parameters and callers to
+//! callees for return values, and that is the direction each of them reads in: a parameter is dead
+//! because of what the callee does not do, and a return value is dead because of what the callers
+//! do not do.
 //!
 //! # What a function has to be
 //!
@@ -51,7 +55,13 @@
 //!
 //! Not an aggregate, per the split above.
 //!
-//! Not a return value, yet.
+//! Not a function that hands back more than one value, and not one whose single return value
+//! travels by some route other than a register. Neither shape comes out of C at this point in the
+//! pipeline, and a rule that is never exercised is a rule that is never tested.
+//!
+//! Not a function a tail call is the way out of. A tail call hands back whatever it called, so
+//! stopping this function returning a value is a change to that call rather than to this function,
+//! and it is a change that stops the call being in tail position.
 //!
 //! Not a parameter whose only reader is the recursive call that hands it back to itself. Nothing
 //! outside the cycle reads it and gcc's sweep over a component takes it. Here the count of readers
@@ -62,17 +72,25 @@
 //! changed yet is read as it stands. Whatever ran [`crate::dce`] before this is what decides how
 //! much of that there is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::Interner;
-use rucc_ir::{CallInfo, Extra, Func, FuncId, Inst, Module, Signature, Value};
+use rucc_ir::{Abi, CallInfo, Extra, Func, FuncId, Inst, Module, Opcode, Signature, Value};
 
+use crate::ipa::Sites;
 use crate::purity::Facts;
 use crate::stats::Kind;
 use crate::{CallGraph, Fuel, Stats, dce, ipa, purity};
 
 /// Recorded for each parameter that went, and for the argument that went with it at every call.
 const GONE: &str = "parameter nothing reads removed, and the argument at every call with it";
+
+/// Recorded for each function that stopped handing a value back, and for each call that stopped
+/// reading one.
+const VOIDED: &str = "return value no call reads removed, and the result at every call with it";
+
+/// Recorded for a return value that would have gone if there had been fuel for it.
+const NO_FUEL_RETURN: &str = "return value left alone, the pass ran out of fuel";
 
 /// Recorded for a parameter that would have gone if there had been fuel for it.
 ///
@@ -91,7 +109,8 @@ pub const NAME: &str = "ipa-sra";
 /// which is one more than the shape section 34.5 quotes needs.
 const ROUNDS: usize = 3;
 
-/// Takes out the parameters nothing reads, and the arguments the calls were passing to them.
+/// Takes out the parameters nothing reads and the return values no call reads, and the arguments
+/// and results the call sites had for them.
 ///
 /// Hands back what it did to each function it changed, one entry per function, for the manager to
 /// turn into the remark a `-fopt-info` line comes from. Both sides of a removal are in that list:
@@ -141,10 +160,12 @@ pub fn remove(
     module.funcs().filter_map(|id| Some((id, stats.remove(&id)?))).collect()
 }
 
-/// One round, which hands back the callers whose argument lists it shortened.
+/// One round, which hands back every function it left a value in that nothing reads.
 ///
-/// The callers rather than the functions that lost a parameter, because the caller is where the
-/// value that stopped being read is. A callee's body is the same body it was before.
+/// For a parameter that is the callers, because the caller is where the argument was worked out
+/// and the callee's body is the same body it was before. For a return value it is the other way
+/// round: the callers lose a result nothing was reading anyway, and it is the callee that is left
+/// computing a value its return no longer hands over.
 ///
 /// The call sites are read once at the top and the rewriting happens under them. A function that
 /// is a callee here and a caller there can therefore be read after it has already been changed,
@@ -195,12 +216,126 @@ fn round(
         narrow(&mut module[id], signature.clone(), &keep);
         for &(caller, at) in &calls.calls {
             shorten(&mut module[caller], at, signature.clone(), &keep);
-            if !changed.contains(&caller) {
-                changed.push(caller);
-            }
+            note(&mut changed, caller);
         }
     }
+    // After the parameters and not before, because taking an argument out takes a use out, and the
+    // value that use was reading can be the result of the very call this is about to look at.
+    void_returns(module, closed, &sites, fuel, stats, &mut changed);
     changed
+}
+
+/// Stops the functions whose result nothing reads from handing one back.
+///
+/// The call sites are what decide, so this reads every caller once and asks whether the value the
+/// call produced is named anywhere in it. Nothing in a round adds a use, which is what makes one
+/// reading of a caller good for the whole round: a result that looks read is read.
+fn void_returns(
+    module: &mut Module,
+    closed: &[FuncId],
+    sites: &HashMap<FuncId, Sites>,
+    fuel: &mut Fuel,
+    stats: &mut HashMap<FuncId, Stats>,
+    changed: &mut Vec<FuncId>,
+) {
+    let mut reads: HashMap<FuncId, HashSet<Value>> = HashMap::new();
+    for &id in closed {
+        let Some(calls) = sites.get(&id) else { continue };
+        if calls.ragged || calls.calls.is_empty() || !returning(&module[id]) {
+            continue;
+        }
+        if !calls.calls.iter().all(|&(caller, at)| plain_call(module, caller, at)) {
+            continue;
+        }
+        let mut unread = true;
+        for &(caller, at) in &calls.calls {
+            let named = reads.entry(caller).or_insert_with(|| ipa::operands(&module[caller]));
+            let handed = module[caller][at].first_result.expect("a call that returns a value");
+            if named.contains(&handed) {
+                unread = false;
+                break;
+            }
+        }
+        if !unread {
+            continue;
+        }
+        let counted = stats.entry(id).or_default();
+        if !fuel.take() {
+            counted.record(Kind::Missed, NO_FUEL_RETURN, 1);
+            continue;
+        }
+        counted.record(Kind::Optimized, VOIDED, 1);
+        let mut signature = module[id].signature().clone();
+        signature.returns.clear();
+        void(&mut module[id], signature.clone());
+        note(changed, id);
+        for &(caller, at) in &calls.calls {
+            discard(&mut module[caller], at, signature.clone());
+            note(changed, caller);
+        }
+    }
+}
+
+/// Whether a function hands back one value by the ordinary route and every way out is a return.
+///
+/// One value, because more than one does not come out of C here. The ordinary route, because a
+/// return that travels some other way is a return the back end has already made arrangements for.
+/// And a tail call is not a return, per the module documentation.
+fn returning(func: &Func) -> bool {
+    let returns = &func.signature().returns;
+    let [only] = returns.as_slice() else { return false };
+    if !matches!(only.abi, Abi::Plain | Abi::Sext | Abi::Zext) {
+        return false;
+    }
+    func.blocks().all(|block| func.insts(block).all(|inst| func[inst].opcode != Opcode::TailCall))
+}
+
+/// Whether a call site is one whose result can simply stop existing.
+///
+/// A tail call is not, because the value it produces is the value its own function hands back, so
+/// the result is read by the return whether or not anything names it.
+fn plain_call(module: &Module, caller: FuncId, at: Inst) -> bool {
+    module[caller][at].opcode == Opcode::Call && module[caller][at].first_result.is_some()
+}
+
+/// Puts a function in the list of functions a round changed, once.
+fn note(changed: &mut Vec<FuncId>, id: FuncId) {
+    if !changed.contains(&id) {
+        changed.push(id);
+    }
+}
+
+/// Stops a function handing a value back.
+///
+/// The signature loses its return type and every return loses the value it was handing over. What
+/// a return keeps is the memory it carries, which is the last operand where there is one and is
+/// not a value the caller ever reads.
+fn void(func: &mut Func, signature: Signature) {
+    func.set_signature(signature);
+    let returns: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Return)
+        .collect();
+    for inst in returns {
+        let kept: Vec<Value> = func.mem_in(inst).into_iter().collect();
+        let args = func.push_values(&kept);
+        func[inst].args = args;
+    }
+}
+
+/// Stops a call reading the value it was handed.
+///
+/// The signature the call carries has to be the callee's, per the verifier, so it is the callee's
+/// trimmed one that goes on here. The result goes in the same breath, because a call that produces
+/// a value its signature does not return is a call the verifier will not have either.
+fn discard(func: &mut Func, inst: Inst, signature: Signature) {
+    let Extra::Call(at) = func[inst].extra else { return };
+    let signature = func.add_signature(signature);
+    let info = CallInfo { signature, ..func[at] };
+    let call = func.add_call(info);
+    func[inst].extra = Extra::Call(call);
+    func.drop_results(inst, 1);
 }
 
 /// Which of a function's parameters have to stay, one answer per parameter in signature order.
@@ -270,6 +405,9 @@ mod tests {
 
     /// The type every test below uses.
     const INT: Type = Type::int(32);
+
+    /// What a branch asks its condition to be.
+    const BIT: Type = Type::int(1);
 
     /// A module for a sixty four bit Linux, with somewhere to keep the names.
     struct Unit {
@@ -405,6 +543,61 @@ mod tests {
             }
         }
 
+        /// The same as [`Unit::private`], handing back the value the body worked out.
+        ///
+        /// The closure answers with the value the return takes, so that a test can say what the
+        /// body computed the value for and then watch it stop being computed.
+        fn handing_back(
+            &mut self,
+            name: &str,
+            linkage: Linkage,
+            params: &[Type],
+            body: impl FnOnce(&mut Builder<'_>, &[Value]) -> Value,
+        ) -> Symbol {
+            let name = self.name(name);
+            let signature = Signature::new().with_params(params).with_returns(&[INT]);
+            let mut func = Func::new(name, signature);
+            func.linkage = linkage;
+            let block = func.create_block();
+            let values: Vec<Value> =
+                params.iter().map(|&ty| func.append_param(block, ty)).collect();
+            let mut build = Builder::new(&mut func, block);
+            let answer = body(&mut build, &values);
+            build.ret(&[answer]);
+            self.module.add_func(func);
+            name
+        }
+
+        /// What that function hands back, by its signature.
+        fn gives(&self, at: Symbol) -> Vec<Type> {
+            self.func(at).signature().return_types().collect()
+        }
+
+        /// How many values the first call from one function to another produces.
+        fn produces(&self, at: Symbol, to: Symbol) -> usize {
+            let func = self.func(at);
+            for block in func.blocks() {
+                for inst in func.insts(block) {
+                    let Extra::Call(call) = func[inst].extra else { continue };
+                    if func[call].callee != Some(to) {
+                        continue;
+                    }
+                    return func[inst].results().count();
+                }
+            }
+            panic!("the caller still has a call to that function")
+        }
+
+        /// How many values each return in that function hands over, one entry per return.
+        fn hands_over(&self, at: Symbol) -> Vec<usize> {
+            let func = self.func(at);
+            func.blocks()
+                .flat_map(|block| func.insts(block))
+                .filter(|&inst| func[inst].opcode == Opcode::Return)
+                .map(|inst| func[func[inst].args].len())
+                .collect()
+        }
+
         /// What the run said about the function of that name.
         fn said(&self, done: &[(FuncId, Stats)], at: Symbol) -> Stats {
             done.iter()
@@ -430,6 +623,14 @@ mod tests {
     fn opaque(build: &mut Builder<'_>, side: Symbol) {
         let signature = build.func().add_signature(Signature::new());
         build.call(side, signature, &[]);
+    }
+
+    /// Calls that function and hands back the value it produced.
+    fn call_reading(build: &mut Builder<'_>, at: Symbol, params: &[Type], args: &[Value]) -> Value {
+        let signature = Signature::new().with_params(params).with_returns(&[Type::int(32)]);
+        let signature = build.func().add_signature(signature);
+        let inst = build.call(at, signature, args);
+        build.func()[inst].results().next().expect("a call that hands a value back")
     }
 
     /// Calls that function with those arguments, under a signature matching what it takes.
@@ -653,5 +854,145 @@ mod tests {
         assert_eq!(unit.said(&done, g).count(Kind::Missed, NO_FUEL), 2);
         assert_eq!(unit.said(&done, g).count(Kind::Optimized, GONE), 0);
         assert_eq!(unit.shape(g), (vec![INT, INT], vec![INT, INT]));
+    }
+
+    #[test]
+    fn a_return_value_no_call_reads_goes_and_so_does_the_result() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::Internal, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        let f = unit.outside(|build, _| {
+            call_reading(build, g, &[], &[]);
+        });
+        let done = unit.remove();
+        assert_eq!(unit.said(&done, g).count(Kind::Optimized, VOIDED), 1);
+        assert_eq!(unit.gives(g), Vec::new());
+        assert_eq!(unit.produces(f, g), 0);
+        assert_eq!(unit.hands_over(g), vec![0]);
+        unit.verified();
+    }
+
+    #[test]
+    fn the_value_the_body_was_computing_for_the_return_goes_with_it() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::Internal, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        unit.outside(|build, _| {
+            call_reading(build, g, &[], &[]);
+        });
+        unit.remove();
+        assert_eq!(unit.counts(g, Opcode::IConst), 0, "the three was only there for the return");
+        unit.verified();
+    }
+
+    #[test]
+    fn a_return_value_a_call_reads_stays() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::Internal, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        let h = unit.private("h", &[INT], |build, params| {
+            build.binary(Opcode::SDiv, params[0], params[0], Flags::NONE);
+            opaque(build, side);
+        });
+        unit.outside(|build, _| {
+            let answer = call_reading(build, g, &[], &[]);
+            call(build, h, &[INT], &[answer]);
+        });
+        unit.remove();
+        assert_eq!(unit.gives(g), vec![INT]);
+        assert_eq!(unit.hands_over(g), vec![1]);
+        unit.verified();
+    }
+
+    #[test]
+    fn every_return_in_the_body_stops_handing_a_value_over() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let name = unit.name("g");
+        let signature = Signature::new().with_params(&[BIT]).with_returns(&[INT]);
+        let mut func = Func::new(name, signature);
+        func.linkage = Linkage::Internal;
+        let entry = func.create_block();
+        let yes = func.create_block();
+        let no = func.create_block();
+        let cond = func.append_param(entry, BIT);
+        let mut build = Builder::new(&mut func, entry);
+        opaque(&mut build, side);
+        build.br_if(cond, yes, &[], no, &[]);
+        let mut build = Builder::new(&mut func, yes);
+        let three = build.iconst(INT, 3);
+        build.ret(&[three]);
+        let mut build = Builder::new(&mut func, no);
+        let four = build.iconst(INT, 4);
+        build.ret(&[four]);
+        unit.module.add_func(func);
+        let g = name;
+        unit.outside(|build, _| {
+            let one = build.iconst(BIT, 1);
+            call_reading(build, g, &[BIT], &[one]);
+        });
+        unit.remove();
+        assert_eq!(unit.gives(g), Vec::new());
+        assert_eq!(unit.hands_over(g), vec![0, 0]);
+        unit.verified();
+    }
+
+    #[test]
+    fn a_function_another_object_can_call_keeps_its_return_value() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::External, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        unit.outside(|build, _| {
+            call_reading(build, g, &[], &[]);
+        });
+        unit.remove();
+        assert_eq!(unit.gives(g), vec![INT]);
+    }
+
+    #[test]
+    fn a_function_whose_address_this_unit_hands_out_keeps_its_return_value() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::Internal, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        unit.outside(|build, _| {
+            call_reading(build, g, &[], &[]);
+            let extra = Extra::Symbol(g);
+            build.value(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, Type::PTR);
+        });
+        unit.remove();
+        assert_eq!(unit.gives(g), vec![INT]);
+    }
+
+    #[test]
+    fn without_fuel_the_return_value_stays_and_the_chance_is_still_counted() {
+        let mut unit = Unit::new();
+        let side = unit.side();
+        let g = unit.handing_back("g", Linkage::Internal, &[], |build, _| {
+            opaque(build, side);
+            build.iconst(INT, 3)
+        });
+        unit.outside(|build, _| {
+            call_reading(build, g, &[], &[]);
+        });
+        let done = unit.run(&mut Fuel::of(0));
+        assert_eq!(unit.said(&done, g).count(Kind::Optimized, VOIDED), 0);
+        assert_eq!(unit.said(&done, g).count(Kind::Missed, NO_FUEL_RETURN), 1);
+        assert_eq!(unit.gives(g), vec![INT]);
+        unit.verified();
     }
 }
