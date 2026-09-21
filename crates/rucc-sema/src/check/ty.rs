@@ -861,14 +861,14 @@ impl Checker<'_> {
                     )
                     .with_code("E0539"),
                 );
-                return ArrayLen::Unknown;
+                return self.refused_size();
             }
             ArraySize::Expr(expr) => expr,
         };
 
         let value = self.expr(expr);
         if self.is_poisoned(value) {
-            return ArrayLen::Unknown;
+            return self.refused_size();
         }
         // As a value, since this is a size and not an object, and because the same node is what
         // `sizeof` of the array is built out of: the walk to the IR evaluates it once where the
@@ -880,7 +880,7 @@ impl Checker<'_> {
                 Diagnostic::error("size of array has non-integer type".to_string(), span)
                     .with_code("E0535"),
             );
-            return ArrayLen::Unknown;
+            return self.refused_size();
         }
 
         match self.eval_integer(value) {
@@ -890,7 +890,7 @@ impl Checker<'_> {
                     Diagnostic::error(format!("size of {who} is negative"), span)
                         .with_code("E0536"),
                 );
-                ArrayLen::Unknown
+                self.refused_size()
             }
             Ok(count) => {
                 let count = u64::try_from(count).unwrap_or(u64::MAX);
@@ -899,7 +899,7 @@ impl Checker<'_> {
                     let max = self.cx.target.max_object_size();
                     let message = format!("size of {who} exceeds maximum object size '{max}'");
                     self.report(Diagnostic::error(message, span).with_code("E0537"));
-                    return ArrayLen::Unknown;
+                    return self.refused_size();
                 }
                 ArrayLen::Fixed(count)
             }
@@ -907,7 +907,7 @@ impl Checker<'_> {
             // an error, except where there is no run time to evaluate it in.
             Err(failure) => {
                 if failure.poisoned {
-                    return ArrayLen::Unknown;
+                    return self.refused_size();
                 }
                 if self.scopes.at_file_scope() {
                     let who = match subject.name {
@@ -921,11 +921,25 @@ impl Checker<'_> {
                         )
                         .with_code("E0538"),
                     );
-                    return ArrayLen::Unknown;
+                    return self.refused_size();
                 }
                 ArrayLen::Variable(self.tast.add_vla(value))
             }
         }
+    }
+
+    /// An array whose size did not check, which is answered with no size and counted.
+    ///
+    /// No size is the nearest type that does check, which is the rule the rest of the builder
+    /// follows, but it is also what `int a[]` is written as, and the two are not the same thing
+    /// anywhere the difference decides something. The count is what tells them apart. It is not
+    /// a flag saying that something went wrong, which `rucc_diag::errors` gives the reasons
+    /// against: it is read across one declarator by whoever is about to make a decision that
+    /// turns on the size having been left out, and a refusal that happened inside that
+    /// declarator is what the reader is asking about.
+    fn refused_size(&mut self) -> ArrayLen {
+        self.refused_sizes += 1;
+        ArrayLen::Unknown
     }
 
     /// Whether an array of this many of these does not fit in an object.

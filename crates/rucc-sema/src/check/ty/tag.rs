@@ -258,7 +258,16 @@ impl Checker<'_> {
 
     /// One member, or nothing where what was written does not declare one.
     fn member_decl(&mut self, field: ast::Field) -> Option<(FieldDecl, Span)> {
+        let refused = self.refused_sizes;
         let (ty, subject) = self.member_type(field)?;
+        // A member left with no size by a size that was refused is dropped, the way a member
+        // whose type did not check at all is dropped below. What it looks like from here is a
+        // flexible array member, and the rules about where one of those may sit are about what
+        // the program wrote rather than about what is left of it, so letting one through means
+        // `struct D { int a[k]; }` at file scope is told to add a named member it does not need.
+        if self.refused_sizes != refused && self.is_flexible(ty) {
+            return None;
+        }
         let canonical = self.types.canonical(ty);
         let who = self.member_named(subject.name);
         if is_function(&self.types, canonical) {
