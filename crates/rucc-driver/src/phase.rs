@@ -430,6 +430,18 @@ pub fn last_phase(emit: EmitKind) -> Phase {
     }
 }
 
+/// What an input written on the command line is when it means standard input rather than a file.
+pub const STDIN: &str = "-";
+
+/// What a file reads as in a message, in a line marker and in `__FILE__`.
+///
+/// Standard input has no name, so it gets the one gcc gives it. A build that pipes a file in and
+/// then greps the output for a name is reading gcc's name for it, and `-` is not that name.
+#[must_use]
+pub fn source_name(path: &str) -> &str {
+    if path == STDIN { "<stdin>" } else { path }
+}
+
 /// The extension of a path, without the dot, or the empty string when there is none.
 fn extension(path: &str) -> &str {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -556,6 +568,17 @@ impl Plan {
 
         let mut kinds = Vec::with_capacity(inputs.len());
         for input in inputs {
+            // Standard input has no extension to read a language out of, so either `-x` said what
+            // it is or `-E` did, and gcc refuses the rest rather than guessing. The refusal is
+            // worth keeping: `rucc -` on a terminal with nothing else on the line would otherwise
+            // sit there waiting for a program to be typed at it.
+            if input.role == Role::File && input.path == STDIN && input.forced.is_none() {
+                if opts.emit != EmitKind::Preprocessed {
+                    return Err(plan_err("-E or -x required when input is from standard input"));
+                }
+                kinds.push(InputKind::C);
+                continue;
+            }
             kinds.push(input.kind().map_err(|e| plan_err(format!("{}: {e}", input.path)))?);
         }
 
@@ -807,6 +830,41 @@ mod tests {
         assert_eq!(InputKind::from_path("a.o").unwrap(), InputKind::LinkerInput);
         assert_eq!(InputKind::from_path("libm.a").unwrap(), InputKind::LinkerInput);
         assert_eq!(InputKind::from_path("libm.so.6").unwrap(), InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn standard_input_is_c_under_dash_e_and_wants_telling_otherwise() {
+        // `$(CPP) $(CFLAGS) -` is how a generated header gets preprocessed in a Makefile, and
+        // there is no extension on `-` to read a language out of. Under `-E` gcc takes it as C
+        // and otherwise it refuses, which is the difference between a build that works and one
+        // that sits waiting for a program to be typed at a terminal.
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        let plan = plan(&o, &["-"], None);
+        assert_eq!(plan.jobs.len(), 1);
+        assert_eq!(plan.jobs[0].kind, InputKind::C);
+        assert_eq!(plan.jobs[0].phases, [Phase::Preprocess]);
+        assert_eq!(plan.jobs[0].output, Output::Stdout);
+
+        let o = linux();
+        let error = Plan::new(&o, &[Input::new("-")], None).expect_err("expected this refused");
+        assert_eq!(error.message, "-E or -x required when input is from standard input");
+
+        // `-x` is the other way of saying it, and then the whole pipeline runs and the object
+        // is named after the dash, which is the name gcc derives too.
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let inputs = [Input { path: "-".to_owned(), forced: Some(InputKind::C), role: Role::File }];
+        let plan = Plan::new(&o, &inputs, None).expect("expected a plan");
+        assert_eq!(plan.jobs[0].kind, InputKind::C);
+        assert_eq!(plan.jobs[0].output, Output::File("-.o".to_owned()));
+    }
+
+    #[test]
+    fn standard_input_is_named_the_way_gcc_names_it_and_a_file_is_named_after_itself() {
+        assert_eq!(source_name("-"), "<stdin>");
+        assert_eq!(source_name("a.c"), "a.c");
+        assert_eq!(source_name("sub/-"), "sub/-");
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
         Ok(bytes) => bytes,
         Err(e) => return failure(format!("{name}: {e}")),
     };
-    let Ok(file) = sess.sources.add_shared(name, bytes, None) else {
+    let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
         return failure(format!("{name}: the source map has no room left for this file"));
     };
 

@@ -194,7 +194,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         Ok(bytes) => bytes,
         Err(e) => return failure(format!("{name}: {e}")),
     };
-    let Ok(file) = sess.sources.add_shared(name, bytes, None) else {
+    let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
         return failure(format!("{name}: the source map has no room left for this file"));
     };
 
@@ -330,7 +330,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             .map_err(|why| why.to_string())
                     };
                     let mut lowered = rucc_lower::lower(
-                        name,
+                        crate::phase::source_name(name),
                         rucc_lower::Context {
                             tast: &checked.tast,
                             types: &checked.types,
