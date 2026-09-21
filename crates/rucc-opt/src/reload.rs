@@ -84,8 +84,11 @@
 //!
 //! # What is not here
 //!
-//! Phi translation, which is asking about a load whose address is a block parameter in the
-//! predecessor's terms. It is on tamnd/rucc#1476.
+//! Phi translation, which is asking about a load whose address is a block parameter in the terms of
+//! the predecessor the walk is going into. It was built and measured, and over four libraries at
+//! `-O2` with and without `-fsafety=detect` it forwarded not one load that was not already being
+//! forwarded and emitted the same bytes. Section 9.2 of `spec/optimizer/09-memory-ssa.md` has the
+//! numbers and the reason, so the numbers are what this repository keeps rather than the code.
 //!
 //! # The chain goes on and comes off again
 //!
