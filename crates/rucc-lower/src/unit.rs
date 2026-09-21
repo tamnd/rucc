@@ -162,6 +162,14 @@ pub struct Context<'a> {
     /// generator and by the time it runs the command line is gone and the two operations it might
     /// fuse may have come from different statements.
     pub contract: FpContract,
+    /// What every function in the unit is aligned to unless it asked for more itself, which is
+    /// `-falign-functions` and is `None` for the alignment the target gives anyway.
+    ///
+    /// A fact about the compilation like the ones above it, and it meets a fact about a
+    /// declaration here rather than further down: `__attribute__((aligned(N)))` is a statement
+    /// about one function and this is a preference about all of them, so the function takes the
+    /// larger of the two and everything below reads one number.
+    pub align: Option<u32>,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -183,6 +191,7 @@ impl fmt::Debug for Context<'_> {
             .field("aliasing", &self.aliasing)
             .field("padding", &self.padding)
             .field("contract", &self.contract)
+            .field("align", &self.align)
             .finish_non_exhaustive()
     }
 }
@@ -246,6 +255,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         aliasing,
         padding,
         contract,
+        align,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -262,6 +272,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         cliques: 0,
         tree: aliasing::Tree::default(),
         contract,
+        align,
         read,
         module,
         diagnostics: Vec::new(),
@@ -302,6 +313,8 @@ pub(crate) struct Unit<'a> {
     tree: aliasing::Tree,
     /// How far a multiply and an addition may be fused. See [`Context::contract`].
     pub(crate) contract: FpContract,
+    /// What every function is aligned to unless it asked for more. See [`Context::align`].
+    align: Option<u32>,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
@@ -574,7 +587,13 @@ impl Unit<'_> {
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
-        func.align = align;
+        // The larger of what this function asked for and what the command line asked of all of
+        // them, since the attribute is a requirement and the flag is a preference, and a
+        // preference does not get to move a function off a boundary its own source named.
+        func.align = match (align, self.align) {
+            (Some(mine), Some(everyones)) => Some(mine.max(everyones)),
+            (mine, everyones) => mine.or(everyones),
+        };
         // The one thing a declaration says that nobody downstream can work out for themselves.
         // What `abort` does belongs to `abort`, and a translation unit that only declares it has
         // nothing to look at, so the claim has to travel on the declaration or not at all.

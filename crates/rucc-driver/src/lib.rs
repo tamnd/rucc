@@ -293,6 +293,39 @@ fn joined_or_next(
     Ok(next.clone())
 }
 
+/// The smallest boundary a function is put on when the command line asked for no alignment at all.
+///
+/// Eight bytes, which is what gcc 16 gives `-fno-align-functions` on x86-64 and is a boundary every
+/// target this compiler has is happy with. It is not zero: a function still has to start somewhere
+/// an instruction may start, and the flag asks for the target's minimum rather than for none.
+const MIN_FUNC_ALIGN: u32 = 8;
+
+/// What `-falign-functions=N` asks for, as a power of two, or `None` for the target's own answer.
+///
+/// Zero and one both mean the default, which is gcc's reading of them, and everything else is
+/// rounded up to the next power of two, which is also gcc's: `-falign-functions=3` puts a function
+/// on a four byte boundary rather than being refused. Gives back `Err` shaped as an outer `None`
+/// only when the text is not a number, since that is the one thing gcc will not read either. A
+/// number larger than any alignment makes sense at is clamped rather than refused, for the same
+/// reason: this is a preference about speed and a build that wrote a silly one still deserves to
+/// compile.
+fn function_alignment(text: &str) -> Option<Option<u32>> {
+    // gcc takes `N:M:N2:M2`, where everything after the first number is about how far it is willing
+    // to go to reach the boundary. Only the boundary is answerable here, so the rest is read to
+    // check that it is numbers and then dropped.
+    let mut parts = text.split(':');
+    let first = parts.next()?;
+    if parts.any(|part| part.parse::<u64>().is_err()) {
+        return None;
+    }
+    let want: u64 = first.parse().ok()?;
+    if want <= 1 {
+        return Some(None);
+    }
+    let bytes = want.min(1 << 16).next_power_of_two();
+    Some(Some(u32::try_from(bytes).ok()?))
+}
+
 /// Every name that may follow `-fsanitize=`, which is gcc 16's list and three of this compiler's
 /// own.
 ///
@@ -1535,6 +1568,33 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             | "-fno-inline-functions-called-once" => {}
             "-foptimize-strlen" | "-fno-optimize-strlen" => {}
             "-fira-share-spill-slots" | "-fno-ira-share-spill-slots" => {}
+            // Where a function starts, which is a thing this compiler already decides and so is a
+            // request it can answer rather than one it has to drop. The bare form asks for the
+            // target's default and the default here is the sixteen bytes gcc also gives, so it
+            // says nothing; a number is a floor under every function that did not ask for more
+            // itself; and the negative form asks for the smallest boundary the target has. gcc 16
+            // rounds a number that is not a power of two up rather than refusing it, which is what
+            // `=3` giving `.p2align 2` on x86-64 means, so this rounds too.
+            "-falign-functions" => opts.align_functions = None,
+            "-fno-align-functions" => opts.align_functions = Some(MIN_FUNC_ALIGN),
+            _ if arg.starts_with("-falign-functions=") => {
+                opts.align_functions = function_alignment(&arg["-falign-functions=".len()..])
+                    .ok_or_else(|| {
+                        err(format!("{arg}: the alignment has to be a number of bytes"))
+                    })?;
+            }
+            // The other three of the family, which are about padding in front of a label inside a
+            // body. This compiler writes none, and what they ask for is speed: a loop that starts
+            // on a cache line boundary computes what a loop that does not computes. So they are
+            // taken and dropped for the reason `-march=` is, and they are kept out of the arm
+            // above because the question they ask is a different one and the day one of them is
+            // answered it will be answered separately.
+            _ if arg.starts_with("-falign-labels")
+                || arg.starts_with("-falign-loops")
+                || arg.starts_with("-falign-jumps")
+                || arg.starts_with("-fno-align-labels")
+                || arg.starts_with("-fno-align-loops")
+                || arg.starts_with("-fno-align-jumps") => {}
             // The charset flags are not in that pile, because an encoding is a statement about
             // what the bytes of the source mean rather than about how fast the output is. The
             // preprocessor reads UTF-8 and has no converter, so the one name that describes what
@@ -3531,6 +3591,62 @@ mod tests {
         assert_eq!(opts.passes, vec![("unroll".to_owned(), true)]);
         let (opts, _) = compile(&["-c", "-fno-unroll-loops", "a.c"]);
         assert_eq!(opts.passes, vec![("unroll".to_owned(), false)]);
+    }
+
+    /// Where a function starts is a question this compiler answers, so the flag that asks about it
+    /// is answered rather than dropped. femtolisp's Makefile writes the bare form on every compile
+    /// of the project, and before this it was an unknown option and the build stopped on its first
+    /// file. The numbers are gcc 16's, read off `-S` on x86-64: nothing and the bare form both
+    /// give `.p2align 4`, `=32` gives 5, `=3` gives 2, and the negative form gives `.align 8`.
+    #[test]
+    fn the_alignment_of_a_function_is_a_request_this_compiler_can_answer() {
+        let (opts, _) = compile(&["-c", "-falign-functions", "a.c"]);
+        assert_eq!(opts.align_functions, None, "the bare form asks for the default");
+
+        let (opts, _) = compile(&["-c", "-falign-functions=32", "a.c"]);
+        assert_eq!(opts.align_functions, Some(32));
+
+        let (opts, _) = compile(&["-c", "-falign-functions=3", "a.c"]);
+        assert_eq!(opts.align_functions, Some(4), "rounded up rather than refused");
+
+        let (opts, _) = compile(&["-c", "-falign-functions=32:8", "a.c"]);
+        assert_eq!(opts.align_functions, Some(32), "the boundary is the answerable half");
+
+        for flag in ["-falign-functions=0", "-falign-functions=1"] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.align_functions, None, "{flag} means the default");
+        }
+
+        let (opts, _) = compile(&["-c", "-fno-align-functions", "a.c"]);
+        assert_eq!(opts.align_functions, Some(8), "the smallest boundary the target has");
+
+        // The last one on the line wins, which is how gcc reads a repeated flag.
+        let (opts, _) = compile(&["-c", "-falign-functions=32", "-falign-functions", "a.c"]);
+        assert_eq!(opts.align_functions, None);
+
+        let e = parse_args(&args(&["-c", "-falign-functions=big", "a.c"])).unwrap_err();
+        assert!(e.message.contains("number of bytes"), "{}", e.message);
+    }
+
+    /// The other three of the family are about padding inside a body, which nothing here writes,
+    /// so they are taken and say nothing. Every spelling of each, since a build writes whichever
+    /// one its author typed.
+    #[test]
+    fn the_alignment_flags_about_the_inside_of_a_body_are_taken_and_say_nothing() {
+        for flag in [
+            "-falign-labels",
+            "-falign-loops",
+            "-falign-jumps",
+            "-falign-loops=16",
+            "-falign-labels=32",
+            "-fno-align-loops",
+            "-fno-align-labels",
+            "-fno-align-jumps",
+        ] {
+            let (opts, _) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(opts.emit, EmitKind::Object, "{flag}");
+            assert_eq!(opts.align_functions, None, "{flag} is not about where a function starts");
+        }
     }
 
     /// The encoding of the source is not a question about speed, so the one name that describes
