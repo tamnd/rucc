@@ -425,14 +425,24 @@ pub const fn keeps_address(opcode: Opcode, index: usize) -> bool {
         // of it: the storage these reach is the runtime's, and no name in the program reaches one,
         // so nothing the program can run afterwards can get at the object through what one of them
         // did. Every operand, because every pointer one of them takes is a locator.
-        //
         (op, _) if op.touches_only_planes() => true,
+        // The aux pair reaches the runtime's storage the same way, and the operands named here are
+        // the ones that say which slot rather than the ones that say what goes in it. `cap_load`
+        // takes the capability of the object the word is in and the address of the word.
+        // `cap_store` takes those two as well, and its other two are the pointer being written and
+        // that pointer's own capability, which are the thing being put somewhere a later `cap_load`
+        // can read, so they are not here. `cap_copy` is two ranges of slots and a length, and a run
+        // of slots ends up saying what the run it came from said, which is a statement about the
+        // pointers in those words and not about the two objects holding them.
+        (Opcode::CapLoad | Opcode::CapStore | Opcode::CapCopy, 0 | 1) => true,
         // Asking what object a pointer is in is not letting the pointer out. The capability that
         // comes back is about the object and the walk in [`origin`] goes through it, which is
         // what makes this safe: a use of the capability that could let the object out is a use
         // that arrives back here under its own opcode, and the ones that can are not in this
-        // list. `cap_store` writes one into memory, `cap_copy` moves a run of them, `cap_narrow`
-        // makes a second one from it, and `cap_recover` is the road back to a usable pointer.
+        // list. `cap_store` is above for the operand that takes a capability as a locator, so what
+        // is left out is its other one, which hands a capability over to be written down, and then
+        // `cap_narrow`, which makes a second capability from it, and `cap_recover`, which is the
+        // road back to a usable pointer.
         (Opcode::CapOf, 0) => true,
         _ => false,
     }
@@ -1229,10 +1239,70 @@ mod tests {
                 assert!(keeps_address(opcode, index), "{opcode} at {index}");
             }
         }
-        for opcode in [Opcode::CapStore, Opcode::CapCopy, Opcode::CapNarrow, Opcode::CapRecover] {
+        for opcode in [Opcode::CapNarrow, Opcode::CapRecover] {
             assert!(!keeps_address(opcode, 0), "{opcode}");
         }
+        // The two operands of the aux pair that say which slot, against the two of `cap_store`
+        // that say what goes in it.
+        for opcode in [Opcode::CapLoad, Opcode::CapStore, Opcode::CapCopy] {
+            for index in 0..2 {
+                assert!(keeps_address(opcode, index), "{opcode} at {index}");
+            }
+        }
+        assert!(!keeps_address(Opcode::CapStore, 2));
+        assert!(!keeps_address(Opcode::CapStore, 3));
         assert!(keeps_address(Opcode::CapOf, 0));
+    }
+
+    #[test]
+    fn a_local_a_pointer_is_written_into_does_not_leave_the_function_for_the_writing_down() {
+        // What `int *slot; slot = p;` lowers to with the checks on, which is the store and a
+        // `cap_store` behind it putting the pointer's capability in the slot beside the word. The
+        // local holding the pointer is the container and it is named twice, once as its capability
+        // and once as the address of the word, and neither of those is a way to reach it later.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let written = param(&f, 0);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 8);
+        let args = build.func().push_values(&[object]);
+        let container = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[written]);
+        let held = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        build.store(written, object, plain(8), Flags::NONE);
+        let args = build.func().push_values(&[container, object, written, held]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        assert_eq!(alias.escapes().count(), 0);
+    }
+
+    #[test]
+    fn a_local_whose_capability_is_written_into_a_slot_does_leave_the_function() {
+        // The other two operands, and the line between them and the two above. Here the local is
+        // the pointer being stored rather than the object being stored into, so its address goes
+        // into somebody else's memory and its capability goes into the slot beside it, and both of
+        // those are places a later `cap_load` in another function can read.
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let into = param(&f, 0);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 8);
+        let args = build.func().push_values(&[into]);
+        let container = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[object]);
+        let held = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[container, into, object, held]);
+        build.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        assert!(alias.escapes().escaped(first(&f, Opcode::Alloca)));
     }
 
     #[test]
