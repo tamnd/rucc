@@ -795,8 +795,15 @@ impl<'a> Eval<'a> {
             }
             // `&*p` is `p`, which is what makes `int *q = &*a;` a constant and is not a
             // simplification: the dereference of an address constant is the object it names.
+            //
+            // A pointer that folded to a number is a place too, and the address of it is that
+            // number. `*(int *)4` is what a program driving a device writes and `&((T *)0)->f` is
+            // what every program that predates `__builtin_offsetof` writes, including tcc's own
+            // headers, which is what asked for this. Nothing is read here, so nothing depends on
+            // there being an object at the other end: the walk is about where a place is.
             ExprKind::Unary { op: UnaryOp::Deref, operand } => match self.eval(operand)? {
                 Const::Address(address) => Ok(address),
+                Const::Int(number) => Ok(Address { base: Base::Absolute, offset: number }),
                 _ => Err(self.stop(expr)),
             },
             _ => Err(self.stop(expr)),
@@ -950,6 +957,16 @@ impl<'a> Eval<'a> {
                         Some(Const::Int(real.to_integer(info.width, info.signed).0))
                     }
                     Const::ComplexInt { real, .. } => Some(Const::Int(info.wrap(real))),
+                    // An address into nothing is a number this compiler already knows, so it
+                    // becomes one and is wrapped to the target's width like any other. That is
+                    // what makes `(size_t) &((struct S *)0)->field` a constant expression and
+                    // therefore an initializer, which is how `offsetof` is spelled everywhere
+                    // `__builtin_offsetof` is not. The width rule below does not apply to it,
+                    // because there is no relocation for a narrow type to lose half of: gcc takes
+                    // `(int) &((struct S *)0)->field` too.
+                    Const::Address(Address { base: Base::Absolute, offset }) => {
+                        Some(Const::Int(info.wrap(offset)))
+                    }
                     // An address written as a number is still an address, and it survives only
                     // where every bit of it does. That is the whole difference between gcc
                     // taking `long n = (long)&a;` as a static initializer and refusing
@@ -1278,6 +1295,8 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
                 Base::Decl(decl) => decl.index(),
                 Base::Str(id) => id.index(),
                 Base::Label(label) => label.index(),
+                // No object, so there is no number to print and the offset says the whole of it.
+                Base::Absolute => return format!("{}", address.offset),
             };
             format!("&#{base} + {}", address.offset)
         }
@@ -1444,6 +1463,12 @@ mod tests {
             self.expr(ast::Expr::Member { base, name, arrow: false })
         }
 
+        /// `base->field`, which is the member of what a pointer points at.
+        fn arrow(&mut self, base: ast::ExprId, field: &str) -> ast::ExprId {
+            let name = self.name(field);
+            self.expr(ast::Expr::Member { base, name, arrow: true })
+        }
+
         /// One member of a record.
         fn field(&mut self, specs: DeclSpecs, name: &str) -> ast::Member {
             let declarator = Some(self.declarator(Some(name), &[]));
@@ -1555,6 +1580,7 @@ mod tests {
                     Base::Decl(decl) => decl.index(),
                     Base::Str(id) => id.index(),
                     Base::Label(label) => label.index(),
+                    Base::Absolute => return None,
                 };
                 Some((base, address.offset))
             }
@@ -1621,6 +1647,39 @@ mod tests {
         c.check_decl(object);
         assert_eq!(address(value(&mut c, taken)), Some((0, 4)));
         assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn a_member_of_nothing_is_the_distance_to_it_and_nothing_else() {
+        // `((size_t) &((struct S *)0)->y)`, which is how offsetof is spelled by everything that
+        // predates `__builtin_offsetof` and by every header that still has to work without it.
+        // tcc's own `tcc.h` is one of those. There is no object under the address, so the whole
+        // of it is a number, and being a number is what makes it an initializer.
+        let mut f = Fixture::new();
+        let x = f.field(f.int_specs(), "x");
+        let y = f.field(f.int_specs(), "y");
+        let specs = f.record("S", &[x, y]);
+        let zero = f.int(0, IntKind::Int);
+        let null = f.cast(specs, &[pointer()], zero);
+        let member = f.arrow(null, "y");
+        let taken = f.unary(UnaryOp::AddrOf, member);
+        // As wide as a pointer, which is what `size_t` is and what a narrower one would be warned
+        // about, since the warning is about a cast that loses half of an address rather than about
+        // this one.
+        let measured = f.cast(f.builtin(BuiltinSet::LONG), &[], taken);
+
+        let mut c = f.checker();
+        assert_eq!(
+            address(value(&mut c, taken)),
+            None,
+            "there is no object for the address to be into"
+        );
+        assert_eq!(
+            value(&mut c, taken),
+            Ok(Const::Address(Address { base: Base::Absolute, offset: 4 }))
+        );
+        assert_eq!(fold(&mut c, measured), Ok(4), "and as a number it is the distance");
+        assert_eq!(messages(&c), Vec::<String>::new());
     }
 
     #[test]

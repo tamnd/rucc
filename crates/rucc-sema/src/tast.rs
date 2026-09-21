@@ -108,6 +108,16 @@ pub enum Base {
     /// address of a label is arithmetic on a `void *`, which has no element to scale by, and
     /// landing in the middle of an instruction is not somewhere a jump may go.
     Label(LabelId),
+    /// No object at all, which is an address the program wrote as a number.
+    ///
+    /// `*(int *)4` is a place, so `&*(int *)4` is an address, and the whole of it is in the
+    /// offset because there is nothing for the linker to fill in. The one that matters is the
+    /// offset from nothing: `((size_t) &((struct S *)0)->field)` is how every program that
+    /// predates `__builtin_offsetof` spells `offsetof`, and tcc's own headers still spell it that
+    /// way. Since there is no symbol, this is the one base whose address is a number this
+    /// compiler knows, which is why converting one to an integer gives an integer rather than a
+    /// relocation that happens to be written in an integer's place.
+    Absolute,
 }
 
 /// A label, and the statement it names.
