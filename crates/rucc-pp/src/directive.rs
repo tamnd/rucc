@@ -383,6 +383,7 @@ impl Preprocessor {
                 reader.line(cx.interner, &mut body);
                 let opens =
                     matches!(scan, Scan::Start).then(|| guard_opener(&body, names)).flatten();
+                let alternative = is_alternative(body.first().and_then(ident_of), names);
                 self.directive(&body, first.span, out, cx, names);
                 scan = match scan {
                     // The guard has to be the first line of the file and it has to open a
@@ -393,6 +394,14 @@ impl Preprocessor {
                         _ => Scan::No,
                     },
                     Scan::Inside(name) if self.conds.len() == depth_on_entry => Scan::Closed(name),
+                    // A second branch of the guard's own conditional is a branch that has
+                    // something in it for the reader who comes back, so the file does not
+                    // produce nothing the second time and the optimization does not apply.
+                    // The depth is what tells the guard's own `#else` from one belonging to a
+                    // conditional nested inside it, which says nothing about the file.
+                    Scan::Inside(_) if alternative && self.conds.len() == depth_on_entry + 1 => {
+                        Scan::No
+                    }
                     Scan::Inside(name) => Scan::Inside(name),
                     Scan::Closed(_) | Scan::No => Scan::No,
                 };
@@ -1634,6 +1643,12 @@ fn guard_opener(body: &[PpToken], names: &Names) -> Option<Symbol> {
     }
 }
 
+/// Whether a directive name opens another branch of a conditional already open.
+fn is_alternative(name: Option<Symbol>, names: &Names) -> bool {
+    let Some(name) = name else { return false };
+    name == names.r#else || name == names.elif || name == names.elifdef || name == names.elifndef
+}
+
 /// Whether a directive name is one that may be followed by a header name.
 fn is_include(name: Option<Symbol>, names: &Names) -> bool {
     name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
@@ -2690,6 +2705,35 @@ mod tests {
         run.dir("/dir");
         assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "twice twice");
         assert_eq!(run.files(), 3);
+    }
+
+    #[test]
+    fn a_file_whose_opening_conditional_has_another_branch_is_read_again() {
+        // A file that counts how many times it has been read, which is a real shape and not a
+        // puzzle: tcc's own test suite includes one three times through three spellings of the
+        // same header name to check that computed includes work. The opening line is `#ifndef`
+        // and the macro does get defined, so everything the optimization looks at says guard,
+        // and the branch behind the `#elif` is what makes that wrong. The second read produces
+        // the second branch rather than nothing at all.
+        let mut run = Run::new();
+        let file = "#ifndef G\n#define G\nfirst\n#elif !defined H\n#define H\nsecond\n#else\nthird\n#endif\n";
+        run.file("/dir/g.h", file);
+        run.dir("/dir");
+        let out = run.go("#include <g.h>\n#include <g.h>\n#include <g.h>\n");
+        assert_eq!(out, "first second third");
+        assert_eq!(run.files(), 4, "the file is opened once for each include");
+    }
+
+    #[test]
+    fn a_branch_inside_the_guard_is_not_the_guard_having_a_branch() {
+        // The `#else` here belongs to a conditional nested inside the guard and says nothing
+        // about whether reading the file again produces anything, so the optimization holds.
+        let mut run = Run::new();
+        let file = "#ifndef G\n#define G\n#if 0\nno\n#else\nonce\n#endif\n#endif\n";
+        run.file("/dir/g.h", file);
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+        assert_eq!(run.files(), 2, "the second include is skipped");
     }
 
     #[test]
