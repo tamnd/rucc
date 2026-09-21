@@ -30,6 +30,7 @@ mod pressure;
 mod quad;
 mod real_libc;
 mod repeatable;
+mod replay;
 mod runner;
 mod safety;
 mod sides;
@@ -77,6 +78,8 @@ tasks:
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
   libraries         build real libraries instrumented at -O0 and -O2, run a real workload
                     against each, and hold it to its own answers and to what was reported
+  replay            build a real library instrumented at -O0 and hand it every input of the
+                    corpus its OSS-Fuzz target accumulated, one process per input
   fuzz              generate C programs with one memory error each and hold both builds to it
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
@@ -126,6 +129,7 @@ fn main() -> ExitCode {
         Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
+        Some("replay") => replay::replay(),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
         Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),

@@ -91,7 +91,7 @@ const LEVELS: [&str; 2] = ["-O0", "-O2"];
 /// The runtime's own three, which SQLite's configure script asks for as well and which are a
 /// superset of what Lua's makefile asks for, so one list covers every row so far and will cover most
 /// of the next ones.
-const LIBRARIES: [&str; 3] = ["-lpthread", "-lm", "-ldl"];
+pub(crate) const LIBRARIES: [&str; 3] = ["-lpthread", "-lm", "-ldl"];
 
 /// A report a library earns honestly, so that the check can tell one from a false positive.
 ///
@@ -109,10 +109,10 @@ struct Known {
 }
 
 /// A library, everything needed to build it, and everything the monitor is expected to say.
-struct Project {
+pub(crate) struct Project {
     /// The name, which is the case name in the report, the directory the build goes in, and the
     /// directory under `tests` the workload lives in.
-    name: &'static str,
+    pub(crate) name: &'static str,
     /// The variable somebody points at the sources, which may name the directory or the file inside
     /// it that [`Project::marker`] gives.
     variable: &'static str,
@@ -122,15 +122,15 @@ struct Project {
     /// likely to have put it.
     usual: &'static [&'static str],
     /// The C files to build, relative to the source directory.
-    sources: &'static [&'static str],
+    pub(crate) sources: &'static [&'static str],
     /// Anything else to put on the include path, relative to the source directory.
     ///
     /// The source directory itself is always searched, which is all the first rows needed. A project
     /// that keeps its public headers apart from its C, which is most of the larger ones, names the
     /// directory here and the workload gets the same path the library does.
-    includes: &'static [&'static str],
+    pub(crate) includes: &'static [&'static str],
     /// What the project's configure script would have defined on a Linux machine.
-    defines: &'static [&'static str],
+    pub(crate) defines: &'static [&'static str],
     /// Every report the monitor should make, and nothing else.
     known: &'static [Known],
     /// Why the monitor's reports are not held against [`Project::known`] yet, when they are not.
@@ -154,7 +154,7 @@ struct Project {
 ///
 /// SQLite first because it is the one four holes were found with, and because nine megabytes of C
 /// compiled twice is most of the time this check takes either way.
-const PROJECTS: &[Project] = &[
+pub(crate) const PROJECTS: &[Project] = &[
     Project {
         name: "sqlite",
         variable: "RUCC_SQLITE_AMALGAMATION",
@@ -718,14 +718,14 @@ fn reports(output: &str) -> Vec<(u32, u32)> {
 }
 
 /// The number that starts right after `tag`.
-fn number_after(text: &str, tag: &str) -> Option<u32> {
+pub(crate) fn number_after(text: &str, tag: &str) -> Option<u32> {
     let at = text.find(tag)? + tag.len();
     let digits: String = text[at..].chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
 
 /// The number that ends right before `tag`.
-fn number_before(text: &str, tag: &str) -> Option<u32> {
+pub(crate) fn number_before(text: &str, tag: &str) -> Option<u32> {
     let at = text.find(tag)?;
     let digits: String =
         text[..at].chars().rev().take_while(char::is_ascii_digit).collect::<String>();
@@ -733,7 +733,7 @@ fn number_before(text: &str, tag: &str) -> Option<u32> {
 }
 
 /// Where a project's sources are, if they are anywhere this knows to look.
-fn found(project: &Project) -> Option<PathBuf> {
+pub(crate) fn found(project: &Project) -> Option<PathBuf> {
     if let Some(said) = std::env::var_os(project.variable) {
         if let Some(said) = declared(Path::new(&said), project.marker) {
             return Some(said);
