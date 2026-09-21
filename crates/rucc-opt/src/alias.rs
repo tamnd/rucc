@@ -370,12 +370,39 @@ impl Escapes {
     /// Works out which locals of this function escaped it.
     #[must_use]
     pub fn of(func: &Func) -> Self {
+        Self::with(func, |_, _| false)
+    }
+
+    /// The same, given what the functions this one calls do to what they are handed.
+    ///
+    /// Section 34.6 calls this the upgrade the mod and ref summary makes possible: the question
+    /// goes from does the address leave this function to does the address leave this function
+    /// given what the callees do. An address handed to a call is an address gone as far as
+    /// [`Escapes::of`] is concerned, and that is most of what a C program does with the address
+    /// of a local, so a callee whose summary says it keeps nothing takes a whole class of locals
+    /// out of the escaped set and every question about them afterwards is answered.
+    ///
+    /// Note what this does to the reader of the answer. The invariant that a call reaching the
+    /// escape layer of the oracle cannot have been handed the address does not hold any more, so
+    /// that layer asks whether this call was handed it rather than assuming not.
+    #[must_use]
+    pub fn knowing(func: &Func, summaries: &Summaries) -> Self {
+        Self::with(func, |inst, index| {
+            summaries.at(func, inst).is_some_and(|summary| !summary.param(index).escapes)
+        })
+    }
+
+    /// The same, where `kept` says which operands of which calls hand the address to something
+    /// that does not let it out. For [`crate::modref`], whose own answers are still moving while
+    /// it asks and which therefore cannot hand over a finished [`Summaries`].
+    #[must_use]
+    pub fn with(func: &Func, kept: impl Fn(Inst, usize) -> bool) -> Self {
         let mut escaped = HashSet::new();
         for block in func.blocks() {
             for inst in func.insts(block) {
                 let data = func[inst];
                 for (index, &arg) in func[data.args].iter().enumerate() {
-                    if keeps_address(data.opcode, index) {
+                    if keeps_address(data.opcode, index) || kept(inst, index) {
                         continue;
                     }
                     if let (Origin::Local(local), _) = origin(func, arg) {
@@ -533,6 +560,7 @@ impl<'a> Alias<'a> {
     /// unit is answered from what that function's body actually does. See [`crate::modref`].
     #[must_use]
     pub fn knowing(mut self, summaries: &'a Summaries) -> Self {
+        self.escapes = Escapes::knowing(self.func, summaries);
         self.summaries = Some(summaries);
         self
     }
@@ -690,6 +718,16 @@ impl<'a> Alias<'a> {
         }
     }
 
+    /// Whether one of this call's operands is the address of that local.
+    ///
+    /// Only for a local that did not escape, where it is the difference between the one call that
+    /// was handed the address and every other call in the function.
+    fn handed(&self, local: Inst, call: Inst) -> bool {
+        self.func[self.func[call].args]
+            .iter()
+            .any(|&arg| matches!(origin(self.func, arg).0, Origin::Local(it) if it == local))
+    }
+
     /// Whether these two origins are two objects.
     fn distinct(&self, a: Origin, b: Origin) -> bool {
         match (a, b) {
@@ -766,10 +804,14 @@ impl<'a> Alias<'a> {
         }
 
         // Everything a call reaches, it reaches through an address, and an object whose address
-        // never left this function is not one it has. Reaching here means the address was not
-        // handed to this call either, because that would have been an escape.
-        if self.private(reference).is_some() {
-            return Answer::No(Reason::Escape);
+        // never left this function is not one it has. The second half used to be free: reaching
+        // here meant the address was not handed to this call either, because that would have been
+        // an escape. [`Escapes::knowing`] is what took it away, since a local handed to a callee
+        // that keeps nothing no longer counts as escaped, so the question gets asked outright.
+        if let Some(local) = self.private(reference) {
+            if !self.handed(local, call) {
+                return Answer::No(Reason::Escape);
+            }
         }
 
         let Some(attrs) = self.callee(call) else {
@@ -1887,7 +1929,20 @@ mod tests {
         body: fn(&mut Builder<'_>, &[Value]),
         args: &[Value],
     ) -> Inst {
-        let name = names.intern("g");
+        defines(names, module, "g", arity, body);
+        calls_it(names, f, "g", arity, args)
+    }
+
+    /// Adds a function of that name to the module, with that many pointer parameters and that
+    /// body.
+    fn defines(
+        names: &mut Interner,
+        module: &mut Module,
+        called: &str,
+        arity: usize,
+        body: fn(&mut Builder<'_>, &[Value]),
+    ) {
+        let name = names.intern(called);
         let params = vec![Type::PTR; arity];
         let mut callee = Func::new(name, Signature::new().with_params(&params));
         let entry = callee.create_block();
@@ -1895,7 +1950,18 @@ mod tests {
         let mut build = Builder::new(&mut callee, entry);
         body(&mut build, &got);
         module.add_func(callee);
-        let signature = f.add_signature(Signature::new().with_params(&params));
+    }
+
+    /// A call to a function of that name, for a test that wants more than one of them.
+    fn calls_it(
+        names: &mut Interner,
+        f: &mut Func,
+        called: &str,
+        arity: usize,
+        args: &[Value],
+    ) -> Inst {
+        let name = names.intern(called);
+        let signature = f.add_signature(Signature::new().with_params(&vec![Type::PTR; arity]));
         let mut build = builder(f);
         build.call(name, signature, args)
     }
@@ -1922,6 +1988,12 @@ mod tests {
     fn body_writes_the_first(build: &mut Builder<'_>, args: &[Value]) {
         let zero = build.iconst(Type::int(32), 0);
         build.store(zero, args[0], plain(4), Flags::NONE);
+        build.ret(&[]);
+    }
+
+    /// Writes the first pointer it was handed down at the second, so the address gets out.
+    fn body_keeps_the_first(build: &mut Builder<'_>, args: &[Value]) {
+        build.store(args[0], args[1], plain(8), Flags::NONE);
         build.ret(&[]);
     }
 
@@ -2000,6 +2072,95 @@ mod tests {
         let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
         let mut alias = Alias::new(&f, &outside).knowing(&summaries);
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Summary));
+    }
+
+    #[test]
+    fn a_local_lent_to_a_callee_that_keeps_it_not_is_still_private_everywhere_else() {
+        // Section 34.6's upgrade. Handing the address of a local to a call is what a C program
+        // does with most of the locals it takes the address of at all, and without a summary of
+        // the callee that is the end of every question about that local.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let x = names.intern("x");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        let elsewhere = global(&mut build, &mut module, x);
+        build.load(Type::int(32), object, plain(4), Flags::NONE);
+        defines(&mut names, &mut module, "g", 1, body_writes_the_first);
+        let lent = calls_it(&mut names, &mut f, "g", 1, &[object]);
+        let other = calls_it(&mut names, &mut f, "g", 1, &[elsewhere]);
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        // Without the summaries the address went out at the first call and stayed out.
+        let mut blind = Alias::new(&f, &outside);
+        assert_eq!(blind.clobbered_by(&reference, lent), Answer::May);
+        assert_eq!(blind.clobbered_by(&reference, other), Answer::May);
+
+        let summaries = worked_out(&module);
+        let mut alias = Alias::new(&f, &outside).knowing(&summaries);
+        // The call that was handed it can still have written it, and is asked about rather than
+        // assumed away, which is the invariant the upgrade took off the escape layer.
+        assert_eq!(alias.clobbered_by(&reference, lent), Answer::May);
+        // The one that was not never had the address and never could get it.
+        assert_eq!(alias.clobbered_by(&reference, other), Answer::No(Reason::Escape));
+        assert_eq!(alias.escapes().count(), 0);
+    }
+
+    #[test]
+    fn a_local_written_down_by_a_callee_is_gone_exactly_as_before() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let x = names.intern("x");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        let elsewhere = global(&mut build, &mut module, x);
+        build.load(Type::int(32), object, plain(4), Flags::NONE);
+        defines(&mut names, &mut module, "g", 2, body_keeps_the_first);
+        defines(&mut names, &mut module, "h", 1, body_does_nothing);
+        calls_it(&mut names, &mut f, "g", 2, &[object, elsewhere]);
+        let other = calls_it(&mut names, &mut f, "h", 1, &[elsewhere]);
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let summaries = worked_out(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        let mut alias = Alias::new(&f, &outside).knowing(&summaries);
+        // That callee put the address somewhere, so the upgrade does not save it and every
+        // question about the local is back to the answer that cannot be wrong.
+        assert_eq!(alias.escapes().count(), 1);
+        assert_eq!(alias.private(&reference), None);
+        // `h` touches nothing at all, so it is still answered, just not by the escape layer.
+        assert_eq!(alias.clobbered_by(&reference, other), Answer::No(Reason::Summary));
+    }
+
+    #[test]
+    fn a_local_handed_to_a_const_declaration_is_still_gone() {
+        // `const` says the result comes out of the arguments. It does not say the function did
+        // not hand one of them back, so the address may be in the caller's hands after the call
+        // under a name the escape walk cannot follow to this local, and the upgrade has to leave
+        // this one alone.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        build.load(Type::int(32), object, plain(4), Flags::NONE);
+        call_to(&mut names, &mut module, &mut f, attrs(AttrSet::READNONE), &[object]);
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let summaries = worked_out(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        let alias = Alias::new(&f, &outside).knowing(&summaries);
+        assert_eq!(alias.escapes().count(), 1);
+        assert_eq!(alias.private(&reference), None);
     }
 
     #[test]
