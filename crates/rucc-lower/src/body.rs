@@ -904,7 +904,21 @@ impl<'u> Body<'_, 'u> {
         // Nothing could tell the difference, since no other thread can name a local whose
         // address never leaves the function, and gcc keeps the slot as well rather than
         // reasoning about what a program is able to observe.
-        if !escaped && !self.saves && !self.is_atomic(ty) && value.is_some() {
+        //
+        // A volatile object gets one for the same reason and for a second one. The same reason
+        // is that what makes an access volatile is the instruction that reaches memory, so a
+        // variable in a register has nothing to carry the flag. The second is that the thing a
+        // program can observe is not only this function: 6.2.4p2 and 7.13.2.1p3 between them
+        // say that an object of automatic storage in a frame a `longjmp` has landed back in
+        // holds whatever was last written to it if it is `volatile` and is indeterminate
+        // otherwise, so the memory is where the value has to be by the time the call that can
+        // be returned to twice is made. A register is thrown away by the jump.
+        if !escaped
+            && !self.saves
+            && !self.is_atomic(ty)
+            && !self.is_volatile(ty)
+            && value.is_some()
+        {
             let var = self.temp();
             self.vars.insert(decl, Local::Value(var));
             return;
@@ -1341,7 +1355,12 @@ impl<'u> Body<'_, 'u> {
                     Some(Local::Value(var)) => self.ssa.write(var, entry, value),
                     Some(Local::Slot(slot)) => {
                         let info = self.access(ty);
-                        self.build(span).store(value, slot, info, Flags::NONE);
+                        // A `volatile` parameter is written to by the call itself, and what the
+                        // object is written with is an access to it like any other, so the store
+                        // that puts the argument in the object carries the flag. gcc keeps this
+                        // store in a function with an empty body for the same reason.
+                        let flags = self.flags(ty);
+                        self.build(span).store(value, slot, info, flags);
                     }
                     None => {}
                 }
@@ -1524,7 +1543,12 @@ impl<'u> Body<'_, 'u> {
 
     /// The flags an access to that type carries.
     fn flags(&self, ty: TypeId) -> Flags {
-        if self.types().quals(ty).has(Qualifiers::VOLATILE) { Flags::VOLATILE } else { Flags::NONE }
+        if self.is_volatile(ty) { Flags::VOLATILE } else { Flags::NONE }
+    }
+
+    /// Whether the type has `volatile` on it.
+    fn is_volatile(&self, ty: TypeId) -> bool {
+        self.types().quals(ty).has(Qualifiers::VOLATILE)
     }
 
     /// Whether the type has `_Atomic` on it.
@@ -2924,7 +2948,12 @@ impl<'u> Body<'_, 'u> {
         }
         let Some(value) = self.eval(value) else { return };
         let info = self.access(ty);
-        let flags = self.flags(ty);
+        // The object's qualifiers as well as the entry's, because what makes a write volatile is
+        // the object written rather than the value written to it. The entry of
+        // `volatile int n = 0;` is a plain `int`, and 6.5.2.3p3 gives a member of a qualified
+        // structure the qualified version of its own type, so an entry of a volatile aggregate is
+        // a plain type landing in an object no pass may fold a write to away.
+        let flags = self.flags(ty).union(self.flags(place.ty));
         self.build(span).store(value, addr, info, flags);
     }
 
