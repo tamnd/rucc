@@ -93,3 +93,18 @@ int through_a_pointer(struct pair (*fp)(int, int)) { return fp(5, 6).a; }
 // Passing back what was passed in, which arrives in registers, goes into the object, and comes
 // out of it again.
 struct mixed forward(struct mixed m) { return m; }
+
+// A comma expression whose value is one of these, which is the shape a library that gives up
+// loudly is written with: a call that does not return, then a value after it so that the arm is
+// worth something of the type the other arm is. The left side happens for what it does and the
+// answer is where the right side is, so the object is the one the right side named rather than a
+// copy of it, which is what makes the member read below read that object.
+extern void bail(void);
+
+struct pair after_a_call(int a, int b) { return (bail(), make_pair(a, b)); }
+
+int a_member_after_a_call(void) { return (bail(), make_pair(1, 2)).b; }
+
+// An object the program already has rather than one a call produced, which the comma names and
+// does not copy on the way past.
+struct pair an_object_after_a_call(struct pair p) { return (bail(), p); }
