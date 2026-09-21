@@ -36,6 +36,15 @@
 //! since what this pass calls a plane write is `meta_type` and `meta_init` and nothing else.
 //! `meta_epoch` is not here either, for the reason [`crate::coalesce`] gives about it.
 //!
+//! # The third rule of 7.6, which is not here and is not anywhere
+//!
+//! Aux elision by escape analysis, dropping a `cap_store` into a local that does not escape and
+//! whose capability slots nothing reads back. It was measured at this point in the pipeline over
+//! SQLite, libwebp, zlib and Lua at `-O2 -fsafety=detect` and it fires on none of their 4475
+//! `cap_store`, because a pointer written into a local nobody can see and nobody reads back is a
+//! dead store in the ordinary sense and dead store elimination has already taken it and its
+//! `cap_store` away. Section 7.6 has the census and the ceiling.
+//!
 //! # What the rule proves and what this file decides
 //!
 //! Section 7.7's split again. Working out that two plane writes are about one base a constant
