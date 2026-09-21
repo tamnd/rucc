@@ -342,6 +342,11 @@ impl CallGraph {
                     continue;
                 }
             }
+            // Far more rounds than a lattice of finite height could need over a component this
+            // size. Nothing is decided by the number and no code is any different either side of
+            // it: a walk that reaches it has been handed a transfer function that is not monotone,
+            // which is a bug in the caller rather than a component that wanted more rounds.
+            let ceiling = 1000 + part.len() * 64;
             let mut rounds = 0usize;
             loop {
                 let mut settled = true;
@@ -356,10 +361,7 @@ impl CallGraph {
                     break;
                 }
                 rounds += 1;
-                debug_assert!(
-                    rounds < 1000 + part.len() * 64,
-                    "the transfer function is not monotone"
-                );
+                debug_assert!(rounds < ceiling, "the transfer function is not monotone");
             }
         }
         answers
