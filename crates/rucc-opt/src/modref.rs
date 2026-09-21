@@ -25,16 +25,18 @@
 //! end and raising would answer "writes everything" for a pair of functions that call each other
 //! and touch nothing, which is the case the optimism is for.
 //!
-//! Two things are deliberately not as precise as they could be, and both are written down in
-//! tamnd/rucc#1557 rather than done here. A local of this function that is handed to a call has
-//! escaped as far as [`Escapes`] is concerned, whatever the callee does with it, so a body that
-//! passes its own buffer to something that writes it comes out writing the outside. And a
-//! parameter is a whole object, so a callee that writes one field of a structure is a callee that
-//! wrote the structure.
+//! The escape analysis underneath is the same walk [`Escapes`] does and it runs with what this
+//! module has worked out so far, which is section 34.6's upgrade to it: an address handed to a
+//! call is an address gone to [`Escapes::of`], and that is most of what a C program does with the
+//! address of a local, so a callee whose summary says it keeps nothing takes a whole class of
+//! locals back out of the escaped set. Both directions of that are used here. A local this
+//! function only lent out stays private, so what the callee did to it never reaches the summary,
+//! and a parameter handed on takes the callee's own answer for that position rather than the
+//! blanket one.
 //!
-//! A parameter's escape bit is the one place this does better than the plain walk, because the
-//! callee's summary is in hand at the call: a parameter handed to a call that does not let it out
-//! has not left this function either, where [`Escapes`] would have said it had.
+//! One thing is deliberately not as precise as it could be, and it is written down in
+//! tamnd/rucc#1557 rather than done here: a parameter is a whole object, so a callee that writes
+//! one field of a structure is a callee that wrote the structure.
 
 use std::collections::HashMap;
 
@@ -310,9 +312,16 @@ impl Summaries {
 }
 
 /// What the attributes a person wrote already promise, which is where the analysis starts.
+///
+/// None of the three says anything about whether the address is kept, so every parameter of a
+/// declared summary escapes. `const` is the one to watch: it promises the result comes out of the
+/// arguments and it does not promise the function did not hand one of them back, and a caller that
+/// took the escape bit at face value would go on to treat a local it had passed in as one nothing
+/// else can reach. Where there is a body the walk overrules this, because the walk looks.
 fn from_attributes(set: AttrSet, arity: usize) -> Option<Summary> {
     if set.contains(AttrSet::READNONE) {
-        return Some(Summary::nothing(arity));
+        let params = vec![Touch { effect: Effect::Nothing, escapes: true }; arity];
+        return Some(Summary { outside: Effect::Nothing, params: params.into() });
     }
     // `readonly` writes nothing anywhere, so the effect is a read wherever it reaches. The
     // addresses are left alone: a function that does not write cannot have put one anywhere a
@@ -374,8 +383,11 @@ fn what_the_body_does(
     if func[entry].params.len() != arity {
         return Summary::everything(arity);
     }
-    let escapes = Escapes::of(func);
-    let mut summary = Summary::nothing(arity);
+    // What each call in this body reaches, worked out before anything else because the escape
+    // analysis below reads it. A call that keeps nothing it is handed is a call that did not let
+    // this function's own locals out, which is section 34.6's upgrade, and the answers are still
+    // moving while this asks, which is why it is these rather than a finished [`Summaries`].
+    let mut callees: HashMap<Inst, Summary> = HashMap::new();
     let mut steps = 0;
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -383,11 +395,22 @@ fn what_the_body_does(
             if steps > MAX_STEPS {
                 return Summary::everything(arity);
             }
+            if let Some(summary) = what_that_call_does(func, inst, graph, answers, said) {
+                callees.insert(inst, summary);
+            }
+        }
+    }
+    let escapes = Escapes::with(func, |inst, index| {
+        callees.get(&inst).is_some_and(|summary| !summary.param(index).escapes)
+    });
+    let mut summary = Summary::nothing(arity);
+    for block in func.blocks() {
+        for inst in func.insts(block) {
             // Before the call check, because an `asm goto` is a call by [`Callee::of`] and still
             // hands operands to the blocks it can land in.
             add_block_escapes(func, entry, &mut summary, inst);
-            if let Some(callee) = what_that_call_does(func, inst, graph, answers, said) {
-                add_call(func, entry, &escapes, &mut summary, inst, &callee);
+            if let Some(callee) = callees.get(&inst) {
+                add_call(func, entry, &escapes, &mut summary, inst, callee);
                 continue;
             }
             add_access(func, entry, &escapes, &mut summary, inst);
@@ -853,6 +876,52 @@ mod tests {
     }
 
     #[test]
+    fn what_a_callee_did_to_a_local_it_was_only_lent_stays_inside() {
+        // Section 34.6's upgrade to the escape analysis, read from the other end. Without it the
+        // address of `place` is gone the moment it is an argument, so what the callee wrote
+        // through it is a write of memory this function's own callers would have to be told
+        // about, and every one of them loses every load across this call.
+        fn callee(_: &mut Interner, build: &mut Builder<'_>, args: &[Value]) {
+            writes(build, args[0]);
+            build.ret(&[]);
+        }
+        fn caller(names: &mut Interner, build: &mut Builder<'_>, _: &[Value]) {
+            let place = stack(build);
+            calls(build, names, "callee", &[place]);
+            build.ret(&[]);
+        }
+        let mut worked = Worked::out(&[
+            ("callee", 1, AttrSet::NONE, Some(callee)),
+            ("caller", 0, AttrSet::NONE, Some(caller)),
+        ]);
+        assert_eq!(worked.about("callee").param(0).effect, Effect::Writes);
+        assert!(worked.about("caller").touches_nothing());
+    }
+
+    #[test]
+    fn a_local_the_callee_wrote_down_is_one_this_function_lost() {
+        // The same shape with the one difference that matters, which is that the callee keeps the
+        // address rather than only using it. Everything after the call has to give up on it.
+        fn callee(names: &mut Interner, build: &mut Builder<'_>, args: &[Value]) {
+            let global = somewhere(build, names);
+            build.store(args[0], global, access(), Flags::NONE);
+            build.ret(&[]);
+        }
+        fn caller(names: &mut Interner, build: &mut Builder<'_>, _: &[Value]) {
+            let place = stack(build);
+            calls(build, names, "callee", &[place]);
+            writes(build, place);
+            build.ret(&[]);
+        }
+        let mut worked = Worked::out(&[
+            ("callee", 1, AttrSet::NONE, Some(callee)),
+            ("caller", 0, AttrSet::NONE, Some(caller)),
+        ]);
+        assert!(worked.about("callee").param(0).escapes);
+        assert_eq!(worked.about("caller").outside(), Effect::Writes);
+    }
+
+    #[test]
     fn a_call_through_an_address_did_everything_to_everything() {
         fn body(names: &mut Interner, build: &mut Builder<'_>, args: &[Value]) {
             calls(build, names, "unknown", &[args[0]]);
@@ -927,6 +996,20 @@ mod tests {
         assert!(args.only_through_arguments());
         assert!(!args.writes_nothing());
         assert_eq!(args.param(0), Touch::everything());
+    }
+
+    #[test]
+    fn no_attribute_promises_the_address_was_not_kept() {
+        // The one that has to be got right, because the escape bit is what takes a local out of
+        // the escaped set and a `const` function is allowed to hand its argument straight back.
+        let mut worked = Worked::out(&[
+            ("none", 1, AttrSet::READNONE, None),
+            ("only", 1, AttrSet::READONLY, None),
+            ("args", 1, AttrSet::ARGMEM_ONLY, None),
+        ]);
+        for name in ["none", "only", "args"] {
+            assert!(worked.about(name).param(0).escapes, "{name} promised no such thing");
+        }
     }
 
     #[test]
