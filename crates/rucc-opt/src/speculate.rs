@@ -20,6 +20,15 @@
 //! predicates overlap and neither implies the other, and a pass that uses the wrong one produces a
 //! program that crashes on an input the original handled.
 //!
+//! # What the module has to say
+//!
+//! A call is the one instruction whose answer is not in the function. Nothing at the call site
+//! says whether the callee reads memory, so the answer used to be no for every call. Document 34's
+//! mod and ref summaries say it for the callees this unit can see, so they are handed in, and a
+//! callee that touches no memory gets the answer a division gets: it may go where it was going to
+//! run anyway. What is left to worry about for that one is not memory, it is whether the program
+//! comes back.
+//!
 //! # No means no rather than not yet
 //!
 //! Every arm that cannot prove safety returns a reason, and the reasons are public so that a pass
@@ -29,6 +38,7 @@
 use rucc_ir::{Block, Extra, Flags, Func, Inst, MemOrder, Opcode};
 
 use crate::alias::{Origin, origin};
+use crate::modref::Summaries;
 use crate::range::query::Ranges;
 
 /// Every access to it is part of what the program does, so doing one more is doing more.
@@ -40,8 +50,11 @@ pub const ATOMIC: &str = "it is atomic and its place in the order is part of the
 /// It writes memory, calls something, or is otherwise not a value being worked out.
 pub const EFFECTS: &str = "it does something rather than working out a value";
 
-/// A call, which needs the module to say what it may do.
+/// A call the summaries have nothing to say about, so nothing here knows what it may do.
 pub const CALL: &str = "nothing here knows what the call does";
+
+/// A call the summaries say touches no memory, which may still trap inside or never come back.
+pub const MIGHT_NOT_RETURN: &str = "the call touches no memory but is not known to come back";
 
 /// The divisor could be zero, which traps.
 pub const BY_ZERO: &str = "the divisor is not known to be other than zero";
@@ -57,8 +70,14 @@ pub const ADDRESS: &str = "the address is not known to be one it may read";
 /// The wrapper for a caller that has nothing to say about why. Everything else should take the
 /// reason and report it, because a missed optimization nobody can explain is one nobody fixes.
 #[must_use]
-pub fn is_safe(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool {
-    why_not(func, inst, ranges, at).is_none()
+pub fn is_safe(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    ranges: &mut Ranges<'_>,
+    at: Block,
+) -> bool {
+    why_not(func, modref, inst, ranges, at).is_none()
 }
 
 /// Why this instruction may not be worked out early at `at`, or `None` when it may.
@@ -72,9 +91,14 @@ pub fn is_safe(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> b
 ///
 /// What is still the caller's question is whether that block is reached and whether the operands
 /// are available there. This does not ask either.
+///
+/// `modref` is what the module says about the callees, and it changes the answer for nothing but a
+/// call. A caller with no summaries in hand has [`Summaries::nothing`] to pass, which is the honest
+/// thing to hand over rather than a reason to skip the question.
 #[must_use]
 pub fn why_not(
     func: &Func,
+    modref: &Summaries,
     inst: Inst,
     ranges: &mut Ranges<'_>,
     at: Block,
@@ -99,7 +123,19 @@ pub fn why_not(
         // infinity and raises a flag, and a program that reads the flag has said so with
         // `#pragma STDC FENV_ACCESS`, which the front end turns into a volatile access.
         Opcode::Load => load(func, inst),
-        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Some(CALL),
+        // A callee that touches no memory reads nothing that could have changed and writes
+        // nothing anything could see, so the first two verbs in the header do not apply to it and
+        // the third has no access to be observed. What is left is that it may divide by zero
+        // inside or never come back, and both of those are only a problem on a run that was not
+        // going to reach it, which is the shape a division has and gets the same sort of answer.
+        //
+        // A call through an address has no summary to have, and a tail call is a return with a
+        // call in front of it, so neither of those is asked.
+        Opcode::Call => match modref.at(func, inst) {
+            Some(summary) if summary.touches_nothing() => Some(MIGHT_NOT_RETURN),
+            _ => Some(CALL),
+        },
+        Opcode::CallIndirect | Opcode::TailCall => Some(CALL),
         // Asking the planes how much room is left from a pointer reads no memory the program has
         // and dereferences nothing, so it cannot trap, cannot fault and cannot be observed, which
         // is the whole of the question this file asks. It is on [`Opcode::has_effects`] all the
@@ -197,9 +233,13 @@ mod tests {
         Signature, Type, Value,
     };
 
-    use super::{ADDRESS, ATOMIC, BY_ZERO, CALL, EFFECTS, OVERFLOW, VOLATILE, is_safe, why_not};
+    use super::{
+        ADDRESS, ATOMIC, BY_ZERO, CALL, EFFECTS, MIGHT_NOT_RETURN, OVERFLOW, VOLATILE, is_safe,
+        why_not,
+    };
     use crate::cfg::Cfg;
     use crate::dom::Dominators;
+    use crate::modref::{Summaries, Summary};
     use crate::range::query::Ranges;
 
     /// A memory record of that many bytes with that ordering.
@@ -213,17 +253,28 @@ mod tests {
         build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
     }
 
-    /// The answer about the last instruction the caller wrote.
+    /// The answer about the last instruction the caller wrote, with nothing known about the
+    /// callee.
+    fn asked(write: impl FnOnce(&mut Builder<'_>, [Value; 3], Symbol)) -> Option<&'static str> {
+        knowing(|_, _| (), write)
+    }
+
+    /// The same, with a chance to say what the module knows about the callee first.
     ///
     /// One block, three parameters, two 32 bit integers and a pointer, and the pointer is there
     /// because the interesting thing about a load is whether the function knows how much storage
     /// is behind the address, and for a parameter it does not. The symbol is a name to call,
     /// because the interner is not the function and a caller cannot reach it through the builder.
-    fn asked(write: impl FnOnce(&mut Builder<'_>, [Value; 3], Symbol)) -> Option<&'static str> {
+    fn knowing(
+        tell: impl FnOnce(&mut Summaries, Symbol),
+        write: impl FnOnce(&mut Builder<'_>, [Value; 3], Symbol),
+    ) -> Option<&'static str> {
         let mut names = Interner::new();
         let params = [Type::int(32), Type::int(32), Type::PTR];
         let mut func = Func::new(names.intern("f"), Signature::new().with_params(&params));
         let callee = names.intern("g");
+        let mut modref = Summaries::nothing();
+        tell(&mut modref, callee);
         let entry = func.create_block();
         let handed = params.map(|ty| func.append_param(entry, ty));
         let mut build = Builder::new(&mut func, entry);
@@ -237,8 +288,12 @@ mod tests {
         let cfg = Cfg::new(&func);
         let dom = Dominators::new(&cfg);
         let mut ranges = Ranges::new(&func, &cfg, &dom);
-        let answer = why_not(&func, last, &mut ranges, entry);
-        assert_eq!(is_safe(&func, last, &mut ranges, entry), answer.is_none(), "the two agree");
+        let answer = why_not(&func, &modref, last, &mut ranges, entry);
+        assert_eq!(
+            is_safe(&func, &modref, last, &mut ranges, entry),
+            answer.is_none(),
+            "the two agree"
+        );
         answer
     }
 
@@ -367,6 +422,33 @@ mod tests {
             let signature = build.func().add_signature(Signature::new());
             build.call(callee, signature, &[]);
         });
+        assert_eq!(why, Some(CALL));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_touches_nothing_may_happen_where_it_was_going_to_run() {
+        // A reason rather than `None`, because a callee that reads and writes nothing can still
+        // divide by zero inside it or spin forever, and neither of those is worth handing to a
+        // program that was not going to make the call.
+        let why = knowing(
+            |modref, callee| modref.record(callee, Summary::nothing(0)),
+            |build, [_, _, _], callee| {
+                let signature = build.func().add_signature(Signature::new());
+                build.call(callee, signature, &[]);
+            },
+        );
+        assert_eq!(why, Some(MIGHT_NOT_RETURN));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_writes_is_no_better_off_than_one_they_do_not_know() {
+        let why = knowing(
+            |modref, callee| modref.record(callee, Summary::everything(0)),
+            |build, [_, _, _], callee| {
+                let signature = build.func().add_signature(Signature::new());
+                build.call(callee, signature, &[]);
+            },
+        );
         assert_eq!(why, Some(CALL));
     }
 
