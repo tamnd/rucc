@@ -393,6 +393,11 @@ pub enum Growing {
     /// Rounding the stack pointer down again after the bytes have been taken would put it
     /// somewhere no constant reaches the rest of the frame from, so a frame like this needs a
     /// second base register held for the whole of the function. Nothing here holds one.
+    ///
+    /// [`crate::expand::rounds`] takes the array away before this sees it, by asking for the
+    /// alignment in extra bytes and handing out an address inside them, so what is left of this
+    /// is IR that arrived without going through that pass and the fixed local in
+    /// [`crate::pipeline`] that wants the same thing from the other side.
     Aligned,
 }
 
@@ -1344,10 +1349,13 @@ impl<'a> Lowering<'a> {
     /// walks the same distance a page at a time, which [`crate::finish`] writes. That is why the
     /// instruction is written down in [`Stack::grown`] as well as left where it is.
     ///
-    /// Refused for an array wanting more alignment than the convention leaves the stack pointer
-    /// with. Forcing that would be a second rounding of a register the frame already rounded, and
-    /// after it no constant reaches the rest of the frame from anywhere. See `Growing` in
-    /// [`crate::frame`].
+    /// An array wanting more alignment than the convention leaves the stack pointer with does not
+    /// reach here asking for it: [`crate::expand::rounds`] gives it the alignment in extra bytes
+    /// and turns the array into a `ptr_add` of the offset that lands inside them, so what arrives
+    /// is a block asking for the convention's alignment like any other. The refusal below is what
+    /// answers IR that came from somewhere other than that pass, since forcing the alignment here
+    /// would be a second rounding of a register the frame already rounded, and after it no
+    /// constant reaches the rest of the frame from anywhere. See `Growing` in [`crate::frame`].
     fn grow(&mut self, inst: Inst, size: Value) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Mem(mem) = data.extra else { return Err(self.unsupported(inst)) };

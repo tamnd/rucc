@@ -2376,12 +2376,19 @@ decl #0 x : int object external static defined
     /// is valid C either way, so it carries the note that says where the work is tracked. Both
     /// functions are attempted, so a file that is ahead of the back end in three places says so
     /// three times rather than one recompilation at a time.
+    ///
+    /// The construct is a local of a fixed size wanting more alignment than a call leaves the
+    /// stack pointer on, in a function whose frame also grows. The prologue would force the
+    /// alignment and the array would move the stack pointer afterwards, and those are two frames
+    /// that each want the one register the rest of the frame is counted from.
     #[test]
     fn a_construct_the_back_end_cannot_reach_yet_is_reported_against_its_function() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "void a(int n) { int v[n] __attribute__((aligned(32))); v[0] = 1; }\n\
-                      void b(int n) { int v[n] __attribute__((aligned(32))); v[0] = 1; }\n";
+        let source = "void a(int n) { int v[n]; struct __attribute__((aligned(32))) S { int x; } \
+                      s; s.x = 1; v[0] = s.x; }\n\
+                      void b(int n) { int v[n]; struct __attribute__((aligned(32))) S { int x; } \
+                      s; s.x = 1; v[0] = s.x; }\n";
         let result = run(&opts, source);
         assert!(result.failed());
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
