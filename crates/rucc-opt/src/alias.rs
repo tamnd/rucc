@@ -639,11 +639,14 @@ impl<'a> Alias<'a> {
 
     /// Whether this call can write the bytes the reference covers.
     ///
-    /// GCC's `call_may_clobber_ref_p_1`. Without interprocedural summaries the honest answer for
-    /// anything whose address escaped is yes, and section 8.4 says so plainly: the full mod and
-    /// ref summary is `ipa-modref`, it is five and a half thousand lines, and it is document
-    /// 34's. What is here is the cheap part of it, which is the attributes a C programmer
-    /// already wrote and the escape analysis.
+    /// GCC's `call_may_clobber_ref_p_1`. Three things answer it and they are asked in that
+    /// order: the escape analysis, which is the cheap one and needs nothing outside this
+    /// function; the attributes a C programmer already wrote, which are section 8.4's; and the
+    /// mod and ref summaries of document 34, which are what the same three questions look like
+    /// when the callee's body is read rather than taken on trust. Without the last of those the
+    /// honest answer for anything whose address escaped was yes, and `crate::modref` is where it
+    /// stopped being. All three are in `Alias::decide_call`, which is also what
+    /// [`Alias::read_by`] asks.
     pub fn clobbered_by(&mut self, reference: &Access, call: Inst) -> Answer {
         self.touched_by(reference, call, true)
     }

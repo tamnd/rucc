@@ -25,9 +25,10 @@
 //! A call is the one instruction whose answer is not in the function. Nothing at the call site
 //! says whether the callee reads memory, so the answer used to be no for every call. Document 34's
 //! mod and ref summaries say it for the callees this unit can see, so they are handed in, and a
-//! callee that touches no memory gets the answer a division gets: it may go where it was going to
-//! run anyway. What is left to worry about for that one is not memory, it is whether the program
-//! comes back.
+//! callee that writes no memory gets the answer a division gets: it may go where it was going to
+//! run anyway. What is left to worry about for that one is not what it does to the caller's
+//! memory, it is what it does inside itself, which is that it may fault on an address it was
+//! handed and that it may never come back.
 //!
 //! # No means no rather than not yet
 //!
@@ -53,8 +54,8 @@ pub const EFFECTS: &str = "it does something rather than working out a value";
 /// A call the summaries have nothing to say about, so nothing here knows what it may do.
 pub const CALL: &str = "nothing here knows what the call does";
 
-/// A call the summaries say touches no memory, which may still trap inside or never come back.
-pub const MIGHT_NOT_RETURN: &str = "the call touches no memory but is not known to come back";
+/// A call the summaries say writes nothing, which may still fault inside or never come back.
+pub const INSIDE_THE_CALL: &str = "the call writes nothing but may fault inside or not come back";
 
 /// The divisor could be zero, which traps.
 pub const BY_ZERO: &str = "the divisor is not known to be other than zero";
@@ -123,16 +124,21 @@ pub fn why_not(
         // infinity and raises a flag, and a program that reads the flag has said so with
         // `#pragma STDC FENV_ACCESS`, which the front end turns into a volatile access.
         Opcode::Load => load(func, inst),
-        // A callee that touches no memory reads nothing that could have changed and writes
-        // nothing anything could see, so the first two verbs in the header do not apply to it and
-        // the third has no access to be observed. What is left is that it may divide by zero
-        // inside or never come back, and both of those are only a problem on a run that was not
-        // going to reach it, which is the shape a division has and gets the same sort of answer.
+        // A callee that writes no memory writes nothing anything could see, so the third verb
+        // in the header does not apply to it. What is left is that it may fault on an address it
+        // was handed, and that it may divide by zero inside itself or never come back, and all of
+        // those are only a problem on a run that was not going to reach it. That is the shape a
+        // division has and it gets the same sort of answer.
+        //
+        // The writing is what is asked about rather than the touching. A callee that reads is one
+        // whose answer could be different in front of the loop than inside it, and that is the
+        // caller's question rather than this one: a load one arm up is treated the same way, and
+        // in `crate::licm` the two of them go through the same oracle before they reach here.
         //
         // A call through an address has no summary to have, and a tail call is a return with a
         // call in front of it, so neither of those is asked.
         Opcode::Call => match modref.at(func, inst) {
-            Some(summary) if summary.touches_nothing() => Some(MIGHT_NOT_RETURN),
+            Some(summary) if summary.writes_nothing() => Some(INSIDE_THE_CALL),
             _ => Some(CALL),
         },
         Opcode::CallIndirect | Opcode::TailCall => Some(CALL),
@@ -234,7 +240,7 @@ mod tests {
     };
 
     use super::{
-        ADDRESS, ATOMIC, BY_ZERO, CALL, EFFECTS, MIGHT_NOT_RETURN, OVERFLOW, VOLATILE, is_safe,
+        ADDRESS, ATOMIC, BY_ZERO, CALL, EFFECTS, INSIDE_THE_CALL, OVERFLOW, VOLATILE, is_safe,
         why_not,
     };
     use crate::cfg::Cfg;
@@ -437,7 +443,24 @@ mod tests {
                 build.call(callee, signature, &[]);
             },
         );
-        assert_eq!(why, Some(MIGHT_NOT_RETURN));
+        assert_eq!(why, Some(INSIDE_THE_CALL));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_only_reads_gets_the_same_answer() {
+        // The callee reads what it likes and writes nothing, which is `pure`. What it reads is
+        // not this file's question: whether the bytes are the same in front of the loop as they
+        // were inside it belongs to the caller that wants to move the call, and the load one arm
+        // up is treated the same way for the same reason.
+        let why = knowing(
+            |modref, callee| modref.record(callee, Summary::reading(1)),
+            |build, [_, _, pointer], callee| {
+                let params = [Type::PTR];
+                let signature = build.func().add_signature(Signature::new().with_params(&params));
+                build.call(callee, signature, &[pointer]);
+            },
+        );
+        assert_eq!(why, Some(INSIDE_THE_CALL));
     }
 
     #[test]

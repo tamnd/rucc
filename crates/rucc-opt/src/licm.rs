@@ -99,12 +99,15 @@
 //! and an alias query needs the module, which a pass holding one function does not have. It is the
 //! half with the risk and it should arrive with the measurement section 27.7 asks for.
 //!
-//! Hoisting every call. The one that moves now is the call whose summary says the callee touches
-//! no memory, which is document 34's answer handed to this pass and read in `untouched` and in
-//! [`speculate::why_not`]. It moves on a division's argument rather than a load's: it cannot fault
-//! and it cannot be observed, so what is left is whether the program was going to reach it. What
-//! does not move yet is the callee that writes nothing and the callee that writes only through its
-//! arguments, and both of those need a walk against what the callee may read rather than a line.
+//! Hoisting every call. The one that moves now is the call whose summary says the callee writes
+//! no memory, which is document 34's answer handed to this pass and read in `call_untouched` and
+//! in [`speculate::why_not`]. It moves on a division's argument rather than a load's: nothing it
+//! did can be observed after it returns, so what is left is whether the program was going to
+//! reach it and whether what it reads is the same in front of the loop as it was inside, and the
+//! second of those is the oracle's question and gets asked once per write in the loop. What does
+//! not move is the callee that writes, and the reason is not that the question is hard: moving
+//! the call takes its writes out of the loop along with it, which is section 27.3's store motion
+//! and a different proof.
 
 use std::collections::HashSet;
 
@@ -267,9 +270,8 @@ struct Job<'a> {
 ///
 /// A call is the one exception to the first of those, and it is tamnd/rucc#1571. A call writes
 /// memory by opcode whatever the callee does, and tamnd/rucc#1530 counted 838 of them left in a
-/// loop by that line with nothing having asked which memory. A summary that says the callee
-/// touches nothing settles it without the oracle: a callee that reads nothing cannot read what the
-/// loop wrote, so there is no write in the loop worth asking about and the answer is yes.
+/// loop by that line with nothing having asked which memory. It goes to `call_untouched`, because
+/// the question a call asks the oracle is the other way round from the one a load asks.
 ///
 /// The lifetime boundaries are asked about one at a time for the same reason the writes are.
 /// `bounds_a_lifetime` is a per loop answer as well, and a loop with any call in it that is not
@@ -284,10 +286,8 @@ fn untouched(
     oracle: Option<&mut Alias<'_>>,
     asked: &mut usize,
 ) -> Clear {
-    if func[inst].opcode == Opcode::Call
-        && modref.at(func, inst).is_some_and(Summary::touches_nothing)
-    {
-        return Clear::Yes;
+    if func[inst].opcode == Opcode::Call {
+        return call_untouched(func, modref, inst, writers, boundaries, oracle, asked);
     }
     if func[inst].opcode.writes_memory() {
         return Clear::No;
@@ -340,6 +340,137 @@ fn untouched(
             None => oracle.clobbered_by(&it, other),
         };
         if !answer.is_no() {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether anything this loop writes can be what this call reads.
+///
+/// The same question `untouched` asks, turned around. A load has one access and the loop has many
+/// writes, so the walk there holds the load's access and asks about each write. A call has no
+/// access at all: a callee that reads may read anything its arguments reach and anything a global
+/// leads to, and there is no one address to hand the oracle. So what is held is the call and what
+/// varies is the write, and the question per write is [`Alias::read_by`] rather than
+/// [`Alias::query`]. GCC calls that one `ref_maybe_used_by_call_p`, and everything the oracle
+/// knows about a callee already sits behind it, so the attributes and the per parameter summary
+/// walk are not written again here.
+///
+/// A callee that writes is refused before any of that, and not because the question is hard.
+/// Hoisting a call that writes takes its writes out of the loop along with it, so a loop that ran
+/// ten times leaves the memory of one, which is not a question about aliasing at all. That is
+/// section 27.3's store motion and it wants its own proof.
+fn call_untouched(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    writers: &[Inst],
+    boundaries: &[Inst],
+    oracle: Option<&mut Alias<'_>>,
+    asked: &mut usize,
+) -> Clear {
+    let summary = modref.at(func, inst);
+    // A callee that reads nothing cannot read what the loop wrote, so there is no write in the
+    // loop worth asking about and the oracle is not needed. This is the one tamnd/rucc#1576 did.
+    if summary.is_some_and(Summary::touches_nothing) {
+        return Clear::Yes;
+    }
+    if !summary.is_some_and(Summary::writes_nothing) {
+        return Clear::No;
+    }
+    let Some(oracle) = oracle else {
+        return Clear::No;
+    };
+    for &other in boundaries {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        match func[other].opcode {
+            // The object a row is for, asked about the same way `untouched` asks about it and for
+            // the same reason: a call that reads the object must not be made before the
+            // instruction saying the object has come into being.
+            Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                let args = &func[func[other].args];
+                let about = Access::through(func, args[0]);
+                if !oracle.read_by(&about, inst).is_no() {
+                    return Clear::No;
+                }
+            }
+            // A call that might free, which is in `writers` as well and is answered there. The
+            // callee being moved writes nothing, so it is not one of these itself.
+            Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => (),
+            _ => return Clear::No,
+        }
+    }
+    for &other in writers {
+        // It is a call, so it is in this list too, and a call does not keep itself in a loop.
+        if other == inst {
+            continue;
+        }
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let clear = match oracle.writes(other) {
+            Some(wrote) => oracle.read_by(&wrote, inst).is_no(),
+            // Another call, so neither end of the question has an access and the oracle has
+            // nothing to be handed. One has to be made out of the writer, which is the helper.
+            None => match reads_what_call_wrote(func, modref, oracle, inst, other, asked) {
+                Clear::Yes => true,
+                Clear::No => false,
+                Clear::OutOfSteps => return Clear::OutOfSteps,
+            },
+        };
+        if !clear {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether the call being moved can read what another call in the loop wrote.
+///
+/// Neither of the two has an access [`Alias::writes`] describes, so there is no reference to hand
+/// the oracle and one has to be built. The writer's summary is what builds it: a callee that
+/// writes only through its arguments wrote through one of the pointers it was handed, and each of
+/// those is an address this function holds, so the question becomes [`Alias::read_by`] once per
+/// argument the writer writes through. A writer that writes anywhere else has no such address and
+/// is the honest no.
+fn reads_what_call_wrote(
+    func: &Func,
+    modref: &Summaries,
+    oracle: &mut Alias<'_>,
+    reader: Inst,
+    writer: Inst,
+    asked: &mut usize,
+) -> Clear {
+    let Some(summary) = modref.at(func, writer) else {
+        return Clear::No;
+    };
+    // Nothing was written, so there is nothing for the reader to have read. Freeing is writing in
+    // every answer this oracle gives, so this is a callee that did not free anything either.
+    if summary.writes_nothing() {
+        return Clear::Yes;
+    }
+    if !summary.only_through_arguments() {
+        return Clear::No;
+    }
+    let args = &func[func[writer].args];
+    for (at, &arg) in args.iter().enumerate() {
+        // Only the arguments it writes through, and only the ones that are addresses. A position
+        // past the end of the summary is an argument no parameter stands for, and `Summary::param`
+        // answers that one with everything, so a variadic call is refused here rather than missed.
+        if !func[arg].ty.is_ptr() || !summary.param(at).effect.writes() {
+            continue;
+        }
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let through = Access::through(func, arg);
+        if !oracle.read_by(&through, reader).is_no() {
             return Clear::No;
         }
     }
@@ -640,13 +771,13 @@ fn movement(why: Option<&'static str>) -> Move {
         None => Move::Anywhere,
         // The four that are only a problem on a run that was not going to reach them. The call is
         // the one of them that is not about this function at all: it is here because the summaries
-        // say the callee touches no memory, and what is left of the question is whether the
-        // program comes back from it.
+        // say the callee writes no memory, so nothing it did outlives it, and what is left of the
+        // question is whether the program was going to reach it and come back.
         Some(
             speculate::BY_ZERO
             | speculate::OVERFLOW
             | speculate::ADDRESS
-            | speculate::MIGHT_NOT_RETURN,
+            | speculate::INSIDE_THE_CALL,
         ) => Move::IfItWasGoingToRun,
         Some(_) => Move::Nowhere,
     }
@@ -773,7 +904,7 @@ mod tests {
     };
     use crate::canon::Canon;
     use crate::header_copy::SPEED;
-    use crate::modref::{Summaries, Summary};
+    use crate::modref::{Effect, Summaries, Summary, Touch};
     use crate::outside::Outside;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
@@ -853,6 +984,26 @@ mod tests {
             owns: 0,
             restrict: Restrict::NONE,
         }
+    }
+
+    /// A module with nothing in it but a declaration of each of these.
+    ///
+    /// What the alias oracle wants before it will read a summary. A callee it cannot find in the
+    /// module is one it knows nothing about, and it says so before the summaries get a turn, so a
+    /// test about a summary has to put the name somewhere the oracle can find it.
+    fn declaring(names: &mut Interner, called: &[Symbol]) -> Outside {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        for &name in called {
+            module.add_func(Func::new(name, Signature::new()));
+        }
+        Outside::of(&module)
+    }
+
+    /// A local of that many bytes, written where the builder is writing.
+    fn local(build: &mut Builder<'_>, size: u64) -> Value {
+        let mem = build.func().add_mem(record(size));
+        build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
     }
 
     /// A counted loop that tests at the top, which is what `while (i < n)` lowers to.
@@ -1578,6 +1729,153 @@ mod tests {
 
         let stats = hoist(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_only_reads_comes_out_past_a_store_somewhere_else() {
+        // tamnd/rucc#1571's second third. The callee reads what it likes and writes nothing, and
+        // the loop stores into a local whose address never left this function and was not handed
+        // to the call, so there is no way for the store to be what the call reads. The oracle says
+        // that one without knowing anything about `g` at all.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(called, signature, &[]);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, slot, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::reading(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the store cannot be what it reads");
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(it.func.block_of(call), Some(it.entry));
+    }
+
+    #[test]
+    fn the_same_call_stays_where_the_loop_writes_what_it_was_handed() {
+        // The same callee with the address the loop stores through passed to it. The parameter is
+        // an address this function knows nothing about, so the oracle cannot rule the store out,
+        // and a call that may read what the iteration before it wrote is one whose answer is not
+        // the same in front of the loop.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let params = [Type::PTR];
+        let signature = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(called, signature, &[it.pointer]);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::reading(1));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_that_writes_stays_even_where_nothing_in_the_loop_could_read_it() {
+        // Not an aliasing question. Moving this call takes its write out of the loop with it, so a
+        // loop that ran ten times leaves the memory of one, and no oracle answer makes that the
+        // same program. Section 27.3 is where it belongs.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let params = [Type::PTR];
+        let signature = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[it.pointer]);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::through_arguments(1));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_only_reads_comes_out_past_a_call_that_writes_elsewhere() {
+        // The write in the loop is another call, so neither end of the question has an access and
+        // the oracle has nothing to be handed. The writer's summary is what makes one: `h` writes
+        // only through what it was passed, so the address it was passed is what `g` gets asked
+        // about, and `g` reads only through what it was passed and was passed a different local.
+        // Neither summary alone answers this. It takes both.
+        let mut it = counted(0);
+        let reader = it.names.intern("g");
+        let writer = it.names.intern("h");
+        let mut build = Builder::new(&mut it.func, it.entry);
+        let mine = local(&mut build, 4);
+        let theirs = local(&mut build, 4);
+        tucked(&mut it.func, it.entry);
+        let params = [Type::PTR];
+        let reads = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let writes = it.func.add_signature(Signature::new().with_params(&params));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(reader, reads, &[mine]);
+        build.call(writer, writes, &[theirs]);
+        tucked(&mut it.func, it.head);
+
+        let looked = Touch { effect: Effect::Reads, escapes: false };
+        let mut summaries = Summaries::nothing();
+        summaries.record(reader, Summary::doing(Effect::Nothing, &[looked]));
+        summaries.record(writer, Summary::through_arguments(1));
+        let outside = declaring(&mut it.names, &[reader, writer]);
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(outside))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "not the one `g` reads");
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(it.func.block_of(call), Some(it.entry));
+    }
+
+    #[test]
+    fn the_same_two_calls_where_they_were_handed_the_same_local() {
+        // The same pair with one local between them, which is the case the walk has to get right:
+        // what `h` wrote is exactly what `g` reads, so the call stays where the loop wrote it.
+        let mut it = counted(0);
+        let reader = it.names.intern("g");
+        let writer = it.names.intern("h");
+        let mut build = Builder::new(&mut it.func, it.entry);
+        let shared = local(&mut build, 4);
+        tucked(&mut it.func, it.entry);
+        let params = [Type::PTR];
+        let reads = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let writes = it.func.add_signature(Signature::new().with_params(&params));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(reader, reads, &[shared]);
+        build.call(writer, writes, &[shared]);
+        tucked(&mut it.func, it.head);
+
+        let looked = Touch { effect: Effect::Reads, escapes: false };
+        let mut summaries = Summaries::nothing();
+        summaries.record(reader, Summary::doing(Effect::Nothing, &[looked]));
+        summaries.record(writer, Summary::through_arguments(1));
+        let outside = declaring(&mut it.names, &[reader, writer]);
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(outside))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
         assert_eq!(it.func.block_of(call), Some(it.head));
     }
