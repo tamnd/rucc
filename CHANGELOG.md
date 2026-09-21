@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A structure or a union as wide as a register travels in one when a constraint asks for it. `asm("" : "=r" (r) : "0" (s))` over a one word structure is how a program written before `_Generic` gets at the bits of a pointer it keeps in a structure of its own, and rucc turned every one of them down with `a structure or a union in a register constraint is not supported yet`, because a record has no value of its own and the only way one could travel was as an address. The one that fits in a register now travels as the integer its bytes spell: the object is read where it is, the number is what the assembly is handed, and an output of that kind is written back into the object. Both of those accesses are the whole object at once and go through no type at all, which is what a copy does and for the same reason, since the bytes have a type at each end rather than one in the middle. What fits is a size a register has, which is a power of two up to the width of an address, so a three byte structure is still refused, because the load and the store either side would touch a fourth byte the object does not own, and so is a sixteen byte one, because that is two registers and an operand is one. gcc takes both of those and gives the second half of the second one away, which is a thing to do rather than a rule to copy. The rule is one function, `rucc_sema::in_a_register`, because the checking is what decides whether an operand is a value or an address and the walk to the IR has to reach the same answer about the same operand. Found in tcc, whose test file puts a one word structure through exactly the statement above to check that a compiler can load a structure of the right layout into a register at all. Closes tamnd/rucc#1604.
+
 ## 0.10.73
 
 ### Added
