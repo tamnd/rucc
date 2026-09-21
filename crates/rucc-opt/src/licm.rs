@@ -275,16 +275,23 @@ impl Job<'_> {
             stats.missed(SPINS);
         }
         // Asked once for the loop rather than once per load, because the answer is about the loop.
-        let writes = self
+        //
+        // Memory the program can name, which is not every write. The safety instrumentation writes
+        // the planes and a plane is storage the runtime keeps for itself, so a loop whose only
+        // writes are those is a loop that writes nothing a load in it could read. Leaving that out
+        // is what made this useless on a `-fsafety=detect` build, where there is a `meta_` beside
+        // almost every access and every loop therefore wrote memory.
+        let writes = self.loops.blocks(id).iter().any(|block| {
+            func.insts(*block).any(|inst| {
+                let opcode = func[inst].opcode;
+                opcode.writes_memory() && !opcode.touches_only_planes()
+            })
+        });
+        let bounds = self
             .loops
             .blocks(id)
             .iter()
-            .any(|block| func.insts(*block).any(|inst| func[inst].opcode.writes_memory()));
-        let ends = self
-            .loops
-            .blocks(id)
-            .iter()
-            .any(|block| func.insts(*block).any(|inst| ends_a_lifetime(func, inst)));
+            .any(|block| func.insts(*block).any(|inst| bounds_a_lifetime(func, inst)));
         let mut ranges = Ranges::new(func, self.cfg, self.dom);
         let mut plan = Vec::new();
         // The ones in the plan that are only in it because something after them might want them.
@@ -347,10 +354,14 @@ impl Job<'_> {
                 // reads memory stays in a loop that writes any.
                 //
                 // A question about an allocation is not a question about what is in it, which is
-                // why [`asks_the_plane`] is allowed past this. The loop still has to be one that
-                // does not end a lifetime, and that is [`ends_a_lifetime`] rather than `writes`.
-                let settled = asks_the_plane(func[inst].opcode) && !ends;
-                if writes
+                // why [`Opcode::touches_only_planes`] is allowed past this. `cap_extent` and
+                // `cap_extent_back` are the only two of those with a result, so they are the only
+                // two that reach here, and what they answer is how much room there is from a
+                // pointer to the end of whatever holds it, which a store does not change. The loop
+                // still has to be one that does not move a lifetime boundary, and that is
+                // [`bounds_a_lifetime`] rather than `writes`.
+                let settled = func[inst].opcode.touches_only_planes() && !bounds;
+                if (writes || bounds)
                     && !settled
                     && func[inst].opcode.touches_memory()
                     && func.mem_in(inst).is_none()
@@ -486,36 +497,24 @@ fn goes_on(func: &Func, inst: Inst, ranges: &mut Ranges<'_>, at: Block) -> bool 
     }
 }
 
-/// Whether this asks the allocator about an object rather than reading what is in one.
+/// Whether this could move the boundary of something a plane holds a row for.
 ///
-/// `cap_extent` and `cap_extent_back` read the planes and nothing else does. What they answer is
-/// how much room there is from a pointer to the end of whatever holds it, and a store through a
-/// pointer does not change that, so the loop writing memory is not the question for them the way it
-/// is for a load. What is the question is whether the loop ends the allocation, which
-/// [`ends_a_lifetime`] answers.
+/// Nearly the list `crate::split` refuses a loop for, and for the same reason: a call that might
+/// free changes what the planes say, and so does assembly nobody can read and the instructions that
+/// say a lifetime has started or finished. A call the module summary calls `nofree` is not one of
+/// them, which is what makes this worth asking at all, since a loop with a `memcpy` in it is still
+/// a loop whose allocations stay where they are.
 ///
-/// This is not an exception to the rule above it so much as the rule being asked about the right
-/// memory. The comment there says the pass would need a memory chain or the module to know what is
-/// behind an address, and for these two it needs neither: `spec/safe-memory/05-representation.md`
-/// puts the planes somewhere the program cannot reach and section 6.2.4 calls the checks
-/// `readonly`, so the set of things that can change the answer is small enough to list.
-const fn asks_the_plane(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::CapExtent | Opcode::CapExtentBack)
-}
-
-/// Whether this could end the lifetime of something a plane holds a row for.
-///
-/// The same list `crate::split` refuses a loop for, and for the same reason: a call that might free
-/// changes what the planes say, and so does assembly nobody can read and the two instructions that
-/// end a lifetime by saying so. A call the module summary calls `nofree` is not one of them, which
-/// is what makes this worth asking at all, since a loop with a `memcpy` in it is still a loop whose
-/// allocations stay where they are.
-fn ends_a_lifetime(func: &Func, inst: Inst) -> bool {
+/// `meta_begin` is here and is the one `crate::split` does not need. A load whose address is
+/// loop-invariant but whose object is created inside the loop must not move above the instruction
+/// that says the object now exists, and since the planes stopped counting as memory the loop writes
+/// there is nothing else left to stop it.
+fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
             !func[inst].flags.contains(Flags::NOFREE)
         }
-        Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => true,
+        Opcode::InlineAsm | Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => true,
         _ => false,
     }
 }
@@ -572,7 +571,7 @@ mod tests {
     use rucc_base::{Interner, Symbol};
     use rucc_ir::{
         Block, Builder, Def, Extra, Flags, Func, Global, Inst, InstData, IntPred, MemInfo,
-        MemOrder, Module, Opcode, Restrict, Signature, Type, Value, verify_func,
+        MemOrder, Module, Opcode, Restrict, Signature, StorageClass, Type, Value, verify_func,
     };
     use rucc_target::{TargetInfo, Triple};
 
@@ -1253,6 +1252,84 @@ mod tests {
         let mut build = Builder::new(&mut it.func, it.body);
         let read = build.load(Type::int(32), slot, record(4), Flags::NONE);
         build.store(read, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// Builds a plane write of that kind over that pointer in `block`.
+    ///
+    /// `meta_begin` is the one of these that has to say which kind of storage has come into being,
+    /// and everything these tests start is a local.
+    fn plane(func: &mut Func, block: Block, kind: Opcode, pointer: Value) {
+        let extra = match kind {
+            Opcode::MetaBegin => Extra::Class(StorageClass::Automatic),
+            _ => Extra::None,
+        };
+        let mut build = Builder::new(func, block);
+        let width = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[pointer, width]);
+        build.inst(InstData { args, extra, ..InstData::new(kind) }, &[]);
+    }
+
+    #[test]
+    fn the_same_load_comes_out_of_a_loop_whose_only_write_is_a_plane() {
+        // The same loop as the test above with the store swapped for a `meta_init`, which is what
+        // the loop looks like once the program is built with `-fsafety=detect`. A plane is storage
+        // the runtime keeps for itself and no name in the program reaches one, so a loop whose
+        // only write is that is a loop that writes nothing this load could read.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        plane(&mut it.func, it.body, Opcode::MetaInit, it.pointer);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, read), it.entry, "the plane is not memory it could read");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_load_stays_in_a_loop_that_says_an_object_has_started_existing() {
+        // `meta_begin` says the object under that address exists from here, and a load of it must
+        // not be moved to before that. Nothing else would stop it now that a plane write is not a
+        // write the loop makes, which is why the lifetime boundaries are asked about separately.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        plane(&mut it.func, it.body, Opcode::MetaBegin, slot);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_load_stays_in_a_loop_that_ends_a_lifetime() {
+        // The other end of the same argument. After `meta_end` the object is gone, so a load that
+        // reads it once a round is not a load whose answer holds in front of the loop.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        plane(&mut it.func, it.body, Opcode::MetaEnd, slot);
         tucked(&mut it.func, it.body);
 
         let stats = hoist(&mut it.func, &mut Fuel::unlimited());
