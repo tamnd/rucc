@@ -117,11 +117,31 @@ The writes are as expensive as the checks and are less studied. Three rules.
 
 **Aux elision by escape analysis.** A `cap_store` is only needed if some other code can `cap_load` the slot. If a structure never escapes the function and every pointer field's capability is available in a register at every use, the aux traffic disappears entirely. This is ordinary escape analysis and it is where the most memory-traffic savings are, because per document 05 the aux traffic is the real cost. `mem2reg` gets the easy cases before the optimizer starts.
 
+That last sentence turned out to be the whole story, and the rule as written above fires on nothing. It was measured at the end of the pass pipeline, which is where the aux writes that survive everything else are, on four libraries built at `-O2 -fsafety=detect`. Every `cap_store` was classified by where its destination pointer comes from, and the ones the rule is about are the ones writing into a local the function can name, that does not escape, and whose capability slots nothing reads back.
+
+| | SQLite | libwebp | zlib | Lua |
+| --- | --- | --- | --- | --- |
+| `cap_store` reaching the end of the pipeline | 2585 | 954 | 186 | 750 |
+| destination is a parameter of the function | 773 | 378 | 93 | 300 |
+| destination is a pointer read out of memory | 525 | 33 | 26 | 164 |
+| destination is the result of a call | 416 | 37 | 25 | 90 |
+| destination is a block parameter | 210 | 18 | 0 | 122 |
+| destination is a global | 40 | 421 | 0 | 8 |
+| destination is a local that escapes | 574 | 59 | 42 | 66 |
+| destination is a local whose slots are read back | 47 | 8 | 0 | 0 |
+| **the rule fires** | **0** | **0** | **0** | **0** |
+
+The zero is not an accident of these four libraries, it is what the rule asks for. A pointer written into a local that nothing else can see and that nothing reads back afterwards is a dead store in the ordinary sense, so plain dead store elimination has already taken it away, and it takes the `cap_store` with it because the two travel together. By the time anything could ask the escape question there is nothing left in the category. Every local-destination `cap_store` still standing is in one of the two rows above the zero, 574 and 47 on SQLite and 59 and 8 on libwebp, and in both of those rows the aux write is genuinely needed.
+
+Counting local destinations with no reader but ignoring escape gives the ceiling for the whole direction: 261 of SQLite's 2585, 23 of libwebp's, 10 of zlib's and 21 of Lua's. All of those are blocked on the escape question and none on the reader test, so a sharper escape analysis is the only thing that could ever move the number, and ten percent of the aux writes is the most it could pay back. Widening the rule from stack slots to allocation results that do not escape, which is the cheap version of the same idea, reaches 8 `cap_store` on SQLite and 3 on Lua.
+
+Where the aux traffic actually is, is the other half of the measurement. Three quarters of SQLite's `cap_store` and half of libwebp's write through a pointer the function cannot name at all, meaning a parameter, a pointer that was itself read out of memory, the result of a call, or a block parameter. Those need a caller to say something about the object, which is section 7.5 and document 11's summaries, or they need the whole program. libwebp's 421 writes into a global are the one group a link unit could answer on its own, and they are 44 percent of its aux traffic. An escape analysis, however good, reaches none of this.
+
 **What may never be eliminated:** `meta_begin` and `meta_end` for a storage instance whose address escapes, and `meta_transfer`. Ending a lifetime is the event that makes future checks correct; skipping it is not an optimization, it is a bug that manifests as a missed use-after-free.
 
 ## 7.7 The rules are data, and they are verified
 
-Every transformation in sections 7.3 through 7.6 is expressed in the parent's document 09 rewrite DSL, in a `safety/` rule namespace under `rucc-codegen`'s rule tree alongside the middle-end and lowering rules, per the parent's document 18 packaging constraint. `rucc-verify` covers them.
+Every transformation in sections 7.3 through 7.6 is expressed in the parent's document 09 rewrite DSL, in a `safety/` rule namespace under `rucc-codegen`'s rule tree alongside the middle-end and lowering rules, per the parent's document 18 packaging constraint. `rucc-verify` covers them. The one exception is aux elision, which has no data form because it has no instances: the census above is the reason, and a rule that fires on nothing is not worth a row in the table.
 
 **What is verified.** For each rule of the form "check *C* may be removed in context *Γ*", the obligation is
 
