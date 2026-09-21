@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The three windows-gnu rows in `crates/rucc-sysroot/src/artifact.rs` pin `sysroots-2026-09-21`, which is the same three trees out of the same pinned mingw-w64 14.0.0 and the same pinned zig 0.16.0, rebuilt so that two hosts produce the same bytes. The old archives did not, and the reason was one string. clang puts a `.debug$S` section in every COFF object whether or not debug information was asked for, holding an `S_OBJNAME` record that names the object being written, and zig cc compiles into its own cache and copies the result to `-o`, so that name was `<zig cache>/tmp/<token>-<file>.obj`: the home directory of whoever ran the build plus a token fresh on every invocation. Two hosts agreed on all 1702 headers of `x86_64-windows-gnu` and disagreed on 78 of the 938 files under `lib`, and in `crt1.o`, 7439 bytes on both, exactly 48 differed, 44 of them inside that string and four in the COMDAT checksum of the section that holds it. `-g0` does not reach it and no `-g` flag turns it off, so the producer sets the name rather than suppressing the section, with `-Xclang -object-file-name=` writing the empty string clang writes when its own driver passes no name. All three targets were then built on two machines with the zig cache pointed at different places, and the manifests match line for line, 2642 for x86_64, 2184 for i686 and 2154 for aarch64, and the packed archives hash the same on both, which covers the packing as well as the tree. These are the first artifacts this table has pinned that claim 5 of `spec/cross-compile/02-the-goal.md` holds for, and `spec/cross-compile/13-distribution.md` section 13.8 says so. The producing side is tamnd/rucc-cross#30 and tamnd/rucc-cross#31.
+
 ## 0.10.70
 
 ### Added

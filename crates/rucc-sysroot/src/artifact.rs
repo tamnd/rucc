@@ -35,8 +35,8 @@
 //! Three rows, which are the three windows-gnu targets. `bin/mingw-headers` in `tamnd/rucc-cross`
 //! installs mingw-w64 14.0.0's headers, `bin/mingw-runtime` builds the runtime and the import
 //! libraries into the `lib` directory beside them, `bin/artifact` packs the tree, and the release
-//! `sysroots-2026-09-19` is where the files are. The archives are 15.2 MiB for x86_64, 15.0 MiB for
-//! i686 and 12.6 MiB for aarch64, installing to 134 MB, 129 MB and 113 MB. The header half is the
+//! `sysroots-2026-09-21` is where the files are. The archives are 15.2 MiB for x86_64, 14.8 MiB for
+//! i686 and 12.5 MiB for aarch64, installing to 134 MB, 128 MB and 113 MB. The header half is the
 //! same 1702 files in all three, because mingw-w64 has no per architecture split and
 //! [`crate::Sysroot::splits_by_arch`] says so, and the `lib` half is what differs.
 //!
@@ -90,18 +90,18 @@ impl Pinned {
 pub const PINNED: &[Pinned] = &[
     Pinned {
         tuple: "aarch64-windows-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-19/rucc-sysroot-aarch64-windows-gnu.tar.gz",
-        sha256: "088a7f95d1589900eccaf0d6a22445db751ee068ad856399d5137903fef8a9d4",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-aarch64-windows-gnu.tar.gz",
+        sha256: "cc6be4263b09a475895d9054bb4b096d837010b7e5ed25ebc8934accccd5258e",
     },
     Pinned {
         tuple: "i686-windows-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-19/rucc-sysroot-i686-windows-gnu.tar.gz",
-        sha256: "6de3c21f857749762144e9d9e0d57dbd9212539024248afb5ee9e7adaa62838d",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-i686-windows-gnu.tar.gz",
+        sha256: "296de7554f57d308c00b405c145eb314886e1e28ff8507aa6e7b34e7e4def7f1",
     },
     Pinned {
         tuple: "x86_64-windows-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-19/rucc-sysroot-x86_64-windows-gnu.tar.gz",
-        sha256: "cbd8487331a863f888810bda981ec78c3b9fed14460ff59ce3917d7695d29181",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-x86_64-windows-gnu.tar.gz",
+        sha256: "2f1e34ea0ad3e1ae8be08c054c61030e0a916053e194916f4045e08dcfd69545",
     },
 ];
 
