@@ -538,6 +538,15 @@ impl<'a> Walk<'a> {
         &self.counts
     }
 
+    /// The same walk, with what the module's functions were worked out to do to memory.
+    ///
+    /// Handed straight to the oracle underneath, where [`Alias::knowing`] says what it is for.
+    #[must_use]
+    pub fn knowing(mut self, summaries: &'a crate::modref::Summaries) -> Self {
+        self.alias = self.alias.knowing(summaries);
+        self
+    }
+
     /// The alias analysis underneath, whose own counters say which layer answered.
     #[must_use]
     pub const fn alias(&self) -> &Alias<'a> {

@@ -88,6 +88,7 @@ use rucc_ir::{
     Value,
 };
 
+use crate::modref::Summaries;
 use crate::outside::Outside;
 
 /// How far back through address arithmetic a pointer is chased before the answer is given up on.
@@ -122,19 +123,22 @@ pub enum Reason {
     Restrict,
     /// The callee's attributes say it does not touch memory this way.
     Attribute,
+    /// What the callee does to memory was worked out from its body, and it does not do this.
+    Summary,
     /// One of them touches only the safety planes, which nothing the program can name reaches.
     Plane,
 }
 
 impl Reason {
     /// Every reason, which is what a report walks.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Distinct,
         Self::Escape,
         Self::Offset,
         Self::Tbaa,
         Self::Restrict,
         Self::Attribute,
+        Self::Summary,
         Self::Plane,
     ];
 
@@ -151,7 +155,8 @@ impl Reason {
             Self::Tbaa => 3,
             Self::Restrict => 4,
             Self::Attribute => 5,
-            Self::Plane => 6,
+            Self::Summary => 6,
+            Self::Plane => 7,
         }
     }
 
@@ -165,6 +170,7 @@ impl Reason {
             Self::Tbaa => "tbaa",
             Self::Restrict => "restrict",
             Self::Attribute => "attribute",
+            Self::Summary => "summary",
             Self::Plane => "plane",
         }
     }
@@ -179,6 +185,7 @@ impl Reason {
             Self::Tbaa => "no object has both of those types",
             Self::Restrict => "restrict says those two pointers do not reach the same object",
             Self::Attribute => "the callee is declared not to touch memory that way",
+            Self::Summary => "what that callee does to memory was worked out, and it does not",
             Self::Plane => "that one touches only the planes, which the program cannot name",
         }
     }
@@ -493,6 +500,7 @@ impl Counts {
 pub struct Alias<'a> {
     func: &'a Func,
     outside: &'a Outside,
+    summaries: Option<&'a Summaries>,
     options: Options,
     escapes: Escapes,
     counts: Counts,
@@ -508,7 +516,25 @@ impl<'a> Alias<'a> {
     /// The same, with the type-based layer where the command line left it.
     #[must_use]
     pub fn with(func: &'a Func, outside: &'a Outside, options: Options) -> Self {
-        Self { func, outside, options, escapes: Escapes::of(func), counts: Counts::default() }
+        Self {
+            func,
+            outside,
+            summaries: None,
+            options,
+            escapes: Escapes::of(func),
+            counts: Counts::default(),
+        }
+    }
+
+    /// The same, with what the whole module's functions were worked out to do to memory.
+    ///
+    /// Without this the only thing known about a call is what somebody declared about it, which
+    /// for most of a real translation unit is nothing. With it, a call to a function in the same
+    /// unit is answered from what that function's body actually does. See [`crate::modref`].
+    #[must_use]
+    pub fn knowing(mut self, summaries: &'a Summaries) -> Self {
+        self.summaries = Some(summaries);
+        self
     }
 
     /// Which locals escaped, for a caller that wants the fact on its own.
@@ -769,6 +795,43 @@ impl<'a> Alias<'a> {
             }
         }
 
+        // The same three questions again, this time answered from the callee's body rather than
+        // from what somebody wrote above it. Below the declarations because a declaration is a
+        // promise the caller was told to rely on, and a body that does less than it promised is
+        // still reached here.
+        if let Some(summary) = self.summaries.and_then(|known| known.at(self.func, call)) {
+            if summary.touches_nothing() || (writing && summary.writes_nothing()) {
+                return Answer::No(Reason::Summary);
+            }
+            // Everything it touched, it reached through an argument. Unlike the attribute above
+            // this is worked out rather than asserted, and the walk that worked it out gave up on
+            // any address it could not follow back to a parameter, so a callee that follows a
+            // pointer out of the memory it was handed is not one that reaches here.
+            if summary.only_through_arguments() {
+                let args = &self.func[self.func[call].args];
+                let mut all = true;
+                for (at, &arg) in args.iter().enumerate() {
+                    if !self.func[arg].ty.is_ptr() {
+                        continue;
+                    }
+                    // And not every argument, only the ones it does this to. A callee that reads
+                    // one array and writes another is one whose write cannot be the read of the
+                    // array it only reads, which is the thing an attribute cannot say.
+                    let touch = summary.param(at);
+                    let reached =
+                        if writing { touch.effect.writes() } else { touch.effect.reads() };
+                    if !reached {
+                        continue;
+                    }
+                    let through = Access::through(self.func, arg);
+                    all &= self.decide(reference, &through).is_no();
+                }
+                if all {
+                    return Answer::No(Reason::Summary);
+                }
+            }
+        }
+
         Answer::May
     }
 
@@ -856,8 +919,11 @@ mod tests {
     use rucc_base::{Interner, Symbol};
     use rucc_ir::{
         AttrSet, Attrs, Builder, CallInfo, Extra, Flags, Func, Global, InstData, IntPred, MemInfo,
-        MemOrder, MetaNode, Module, Opcode, Restrict, Signature, TbaaNode, Type, Value,
+        MemOrder, MetaNode, Module, Opcode, Pic, Restrict, Signature, TbaaNode, Type, Value,
     };
+
+    use crate::callgraph::CallGraph;
+    use crate::modref::{Summaries, summarize};
     use rucc_target::{TargetInfo, Triple};
 
     use super::*;
@@ -1773,6 +1839,133 @@ mod tests {
         let mut alias = Alias::new(&f, &outside);
         let reference = alias.reads(first(&f, Opcode::Load)).unwrap();
         assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Attribute));
+    }
+
+    /// A call to a function of that many pointer parameters whose body is that.
+    ///
+    /// Unlike [`call_to`] the callee is defined, which is what gives [`crate::modref`] something
+    /// to read. Nothing is declared about it, so every answer below comes from the body.
+    fn call_to_body(
+        names: &mut Interner,
+        module: &mut Module,
+        f: &mut Func,
+        arity: usize,
+        body: fn(&mut Builder<'_>, &[Value]),
+        args: &[Value],
+    ) -> Inst {
+        let name = names.intern("g");
+        let params = vec![Type::PTR; arity];
+        let mut callee = Func::new(name, Signature::new().with_params(&params));
+        let entry = callee.create_block();
+        let got: Vec<Value> = params.iter().map(|&ty| callee.append_param(entry, ty)).collect();
+        let mut build = Builder::new(&mut callee, entry);
+        body(&mut build, &got);
+        module.add_func(callee);
+        let signature = f.add_signature(Signature::new().with_params(&params));
+        let mut build = builder(f);
+        build.call(name, signature, args)
+    }
+
+    /// What the module's functions were worked out to do to memory.
+    fn worked_out(module: &Module) -> Summaries {
+        let mut summaries = Summaries::of_module(module);
+        summarize(module, &CallGraph::of(module, Pic::Executable), &mut summaries);
+        summaries
+    }
+
+    /// Comes back and does nothing on the way.
+    fn body_does_nothing(build: &mut Builder<'_>, _: &[Value]) {
+        build.ret(&[]);
+    }
+
+    /// Reads four bytes through the first pointer it was handed.
+    fn body_reads_the_first(build: &mut Builder<'_>, args: &[Value]) {
+        let value = build.load(Type::int(32), args[0], plain(4), Flags::NONE);
+        build.ret(&[value]);
+    }
+
+    /// Writes four bytes through the first pointer it was handed and leaves the rest alone.
+    fn body_writes_the_first(build: &mut Builder<'_>, args: &[Value]) {
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, args[0], plain(4), Flags::NONE);
+        build.ret(&[]);
+    }
+
+    #[test]
+    fn a_callee_nobody_declared_anything_about_is_read_out_of_its_body() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let x = names.intern("x");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let object = global(&mut build, &mut module, x);
+        build.load(Type::int(32), object, plain(4), Flags::NONE);
+        let call = call_to_body(&mut names, &mut module, &mut f, 0, body_does_nothing, &[]);
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        // Without the summaries there is nothing to go on, because nobody wrote an attribute.
+        let mut blind = Alias::new(&f, &outside);
+        assert_eq!(blind.clobbered_by(&reference, call), Answer::May);
+
+        let summaries = worked_out(&module);
+        let mut alias = Alias::new(&f, &outside).knowing(&summaries);
+        assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Summary));
+        assert_eq!(alias.read_by(&reference, call), Answer::No(Reason::Summary));
+    }
+
+    #[test]
+    fn a_callee_worked_out_to_write_nothing_clobbers_nothing() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let handed = param(&f, 0);
+        let mut build = builder(&mut f);
+        build.load(Type::int(32), handed, plain(4), Flags::NONE);
+        let call =
+            call_to_body(&mut names, &mut module, &mut f, 1, body_reads_the_first, &[handed]);
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let summaries = worked_out(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        let mut alias = Alias::new(&f, &outside).knowing(&summaries);
+        assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Summary));
+        // It was handed that very object and it does read, so the other question is still open.
+        assert_eq!(alias.read_by(&reference, call), Answer::May);
+    }
+
+    #[test]
+    fn a_callee_that_writes_one_of_the_two_it_was_handed_leaves_the_other() {
+        // The answer no attribute can give. `argmemonly` says the call touched nothing it was not
+        // handed, and it was handed both of these, so the declaration alone has to say `May`.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let (x, y) = (names.intern("x"), names.intern("y"));
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let watched = global(&mut build, &mut module, x);
+        let written = global(&mut build, &mut module, y);
+        build.load(Type::int(32), watched, plain(4), Flags::NONE);
+        let call = call_to_body(
+            &mut names,
+            &mut module,
+            &mut f,
+            2,
+            body_writes_the_first,
+            &[written, watched],
+        );
+        let mut build = builder(&mut f);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let summaries = worked_out(&module);
+        let reference = Alias::new(&f, &outside).reads(first(&f, Opcode::Load)).unwrap();
+        let mut alias = Alias::new(&f, &outside).knowing(&summaries);
+        assert_eq!(alias.clobbered_by(&reference, call), Answer::No(Reason::Summary));
     }
 
     #[test]

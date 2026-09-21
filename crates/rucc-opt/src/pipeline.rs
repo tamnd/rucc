@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    load, nofree, outside, params, pass, purity, reload,
+    load, modref, nofree, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -81,6 +81,13 @@ const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME];
 /// the start for the reason the two above it are lists, which is that a pass left out of one reads
 /// the empty answer and loses an optimization rather than producing a wrong program.
 const READS_PURITY: &[&str] = &[dce::NAME];
+
+/// Which passes ask what a call does to the memory it was handed.
+///
+/// The two that move a load, which is the question section 34.6 says the per parameter answer is
+/// worth having for: whether the call in the middle of this loop can have written the array about
+/// to be reloaded. A list for the same reason as the three above it.
+const READS_MODREF: &[&str] = &[load::NAME, reload::NAME];
 
 /// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -777,14 +784,32 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // outside of each one. Section 34.6 puts it at `-O1` and above, which is where gcc turns
     // `-fipa-pure-const` on, and the level is the gate rather than the pass list alone because
     // `-O0` has `dce` in it and the promise of that level is compile time.
-    let purity = if opts.level != OptLevel::O0
-        && passes.iter().any(|pass| READS_PURITY.contains(&pass.name()))
-    {
-        let mut facts = purity::Facts::of_module(module, names);
-        purity::infer(module, &CallGraph::of(module, opts.interposition), &mut facts);
-        Arc::new(facts)
-    } else {
-        Arc::default()
+    let wants_purity =
+        opts.level != OptLevel::O0 && passes.iter().any(|pass| READS_PURITY.contains(&pass.name()));
+    // And the per parameter answer a level above that, where section 34.6 puts it and where gcc
+    // turns `-fipa-modref` on for anything that is not `-O0` or a debug build. A level above
+    // because this one reads every instruction of every body rather than every call in each one,
+    // so it is the more expensive of the two and `-O1` is the level whose promise is compile time.
+    let wants_modref = !matches!(opts.level, OptLevel::O0 | OptLevel::O1)
+        && passes.iter().any(|pass| READS_MODREF.contains(&pass.name()));
+    // One graph for both, because building it is a walk over the module and neither of them
+    // changes it.
+    let graph = (wants_purity || wants_modref).then(|| CallGraph::of(module, opts.interposition));
+    let purity = match (wants_purity, graph.as_ref()) {
+        (true, Some(graph)) => {
+            let mut facts = purity::Facts::of_module(module, names);
+            purity::infer(module, graph, &mut facts);
+            Arc::new(facts)
+        }
+        _ => Arc::default(),
+    };
+    let modref = match (wants_modref, graph.as_ref()) {
+        (true, Some(graph)) => {
+            let mut summaries = modref::Summaries::of_module(module);
+            modref::summarize(module, graph, &mut summaries);
+            Arc::new(summaries)
+        }
+        _ => Arc::default(),
     };
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
@@ -818,6 +843,7 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                     .reading(Arc::clone(&images))
                     .about(Arc::clone(&outside))
                     .calling(Arc::clone(&purity))
+                    .touching(Arc::clone(&modref))
             });
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
