@@ -39,8 +39,8 @@ use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, Fuel, Gates, Machine, Pass, Preserved, Stats, extents, heap, image, load, nofree,
-    outside, params, pass, reload,
+    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
+    load, nofree, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -72,6 +72,15 @@ const READS_SUMMARIES: &[&str] = &[
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
 const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME];
+
+/// Which passes ask what a call is allowed to do.
+///
+/// One so far, and section 34.6 of `spec/optimizer/34-ipa.md` names the other three it is waiting
+/// for: the value numbering treating two calls with the same arguments as one value, the
+/// speculation predicate, and document 08.4's call handling inside the alias oracle. A list from
+/// the start for the reason the two above it are lists, which is that a pass left out of one reads
+/// the empty answer and loses an optimization rather than producing a wrong program.
+const READS_PURITY: &[&str] = &[dce::NAME];
 
 /// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -763,6 +772,20 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     } else {
         Arc::default()
     };
+    // And once more for what each function is allowed to do, which wants the call graph under it
+    // and is the one thing here that reads every body in the module rather than looking at the
+    // outside of each one. Section 34.6 puts it at `-O1` and above, which is where gcc turns
+    // `-fipa-pure-const` on, and the level is the gate rather than the pass list alone because
+    // `-O0` has `dce` in it and the promise of that level is compile time.
+    let purity = if opts.level != OptLevel::O0
+        && passes.iter().any(|pass| READS_PURITY.contains(&pass.name()))
+    {
+        let mut facts = purity::Facts::of_module(module, names);
+        purity::infer(module, &CallGraph::of(module, opts.interposition), &mut facts);
+        Arc::new(facts)
+    } else {
+        Arc::default()
+    };
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -791,7 +814,10 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
                 continue;
             }
             let an = cached.entry(id).or_insert_with(|| {
-                Analyses::new(machine).reading(Arc::clone(&images)).about(Arc::clone(&outside))
+                Analyses::new(machine)
+                    .reading(Arc::clone(&images))
+                    .about(Arc::clone(&outside))
+                    .calling(Arc::clone(&purity))
             });
             let stats = pass.run(&mut module[id], an, &mut fuel);
             // A pass that changed nothing preserved everything, whatever it says about itself,
