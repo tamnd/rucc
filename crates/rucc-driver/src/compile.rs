@@ -359,6 +359,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Contract::On => FpContract::On,
                                 Contract::Fast => FpContract::Fast,
                             },
+                            align: opts.align_functions,
                             read: &mut read,
                         },
                     );
@@ -1753,6 +1754,41 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.p2align\t6\n\t.type\tv, @object\n"), "{text}");
         assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "{text}");
         assert!(text.contains("\t.p2align\t4, 0x90\n\t.globl\tplain\n"), "{text}");
+    }
+
+    /// The same question asked by the command line instead of by a declaration, which is
+    /// `-falign-functions` and is what femtolisp's Makefile writes on every compile. The flag is a
+    /// floor: a function that named a larger boundary itself keeps it, and one that named a
+    /// smaller one is moved up, because the attribute is a requirement about one function and the
+    /// flag is a preference about all of them.
+    #[test]
+    fn the_alignment_the_command_line_asked_of_every_function_is_a_floor_under_all_of_them() {
+        let source = concat!(
+            "void g(void) __attribute__((aligned(256)));\n",
+            "void g(void) {}\n",
+            "void small(void) __attribute__((aligned(4)));\n",
+            "void small(void) {}\n",
+            "void plain(void) {}\n",
+        );
+        let listing = |align: Option<u32>| {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.align_functions = align;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+            result.text().to_owned()
+        };
+
+        let text = listing(Some(32));
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "the larger one wins: {text}");
+        assert!(text.contains("\t.p2align\t5, 0x90\n\t.globl\tsmall\n"), "{text}");
+        assert!(text.contains("\t.p2align\t5, 0x90\n\t.globl\tplain\n"), "{text}");
+
+        // And the negative form, which asks for the smallest boundary the target has and is the
+        // one spelling that takes a function below the sixteen bytes it would get anyway.
+        let text = listing(Some(8));
+        assert!(text.contains("\t.p2align\t3, 0x90\n\t.globl\tplain\n"), "{text}");
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "{text}");
     }
 
     /// And the one position where the attribute means something else. On a declaration it raises

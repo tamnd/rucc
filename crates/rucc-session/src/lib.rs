@@ -1933,6 +1933,16 @@ pub struct Options {
     pub gnu89_inline: bool,
     /// What a name that nothing in the source said anything about reaches, from `-fvisibility=`.
     pub visibility: Visibility,
+    /// What every function is aligned to unless it asked for more itself, from
+    /// `-falign-functions` and `-fno-align-functions`.
+    ///
+    /// `None` is the target's own answer, which is `rucc_object::FUNC_ALIGN`, and it is what a
+    /// bare `-falign-functions` asks for as well, since gcc's bare form means the default and the
+    /// default on this target is the same sixteen bytes. A number is a floor rather than a
+    /// setting: a function carrying `__attribute__((aligned(N)))` keeps the larger of the two,
+    /// because the attribute is a statement about that function and this is a preference about
+    /// the unit.
+    pub align_functions: Option<u32>,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
     pub pic: Pic,
     /// Whether a definition in this unit may be replaced at load time by one in another object,
@@ -2169,6 +2179,7 @@ impl Options {
             permissive: false,
             gnu89_inline: false,
             visibility: Visibility::default(),
+            align_functions: None,
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,
