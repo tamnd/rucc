@@ -172,6 +172,8 @@ This is a bit per `alloca`, computed by walking uses, and it is the single most 
 interprocedural-flavoured fact available without interprocedural analysis, because it covers every
 local struct that a C programmer takes the address of only to pass a field.
 
+*What is not a call.* The memory chain sends everything that touches memory without an access of its own through this query, and the two `setjmp` markers arrive here looking like calls without being them. Every rule above rests on a callee reaching only what it was handed, and neither marker was handed anything. Control arrives at what follows a `setjmp_marker` from wherever the matching `longjmp` sits, so the memory there is a join of the chain that flows into the marker and the memory at every one of those points, and a `longjmp_marker` is the other end of that join and so reads everything the landing will look at. A local whose address never left this function is as exposed to both as a global is, because the jump comes back into this frame and what the program reads afterwards is the frame's own slots. So the two markers are turned away before the escape rule is reached and the answer about them is always that the reference may be touched.
+
 The full mod/ref summary is document 34's, at `-O2` with LTO, post-M4.
 
 ## 8.5 Attribution, which is not optional
