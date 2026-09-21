@@ -7724,6 +7724,30 @@ block2:
         assert!(text.contains("global @counter : i32 = 7"), "{text}");
     }
 
+    /// Bytes written before any label are a global with a name minted for them, in front of the
+    /// label written under them, which is what makes the first byte of the name the one written
+    /// under it. The block is the one tcc's test file writes, without the line of it that measures
+    /// from one section to another.
+    #[test]
+    fn bytes_under_no_label_at_file_scope_are_a_global_in_front_of_the_label() {
+        let text = ir(concat!(
+            "__asm__(\".data\\n.byte 41\\nstuff:\\n661:\\n.byte 42\\n662:\\n",
+            ".pushsection .data.ignore\\n.byte 7\\n.popsection\\n.byte 662b - 661b\\n\");\n",
+            "extern unsigned char stuff[];\n",
+            "int read(void) { return stuff[0]; }\n",
+        ));
+        let under = text.find("global @.Lasm.0 : i8 = 41").expect(&text);
+        let named = text.find("global @stuff : i8 = 42").expect(&text);
+        assert!(under < named, "the bytes under no label come first: {text}");
+        assert!(text.contains("global @.Lasm.1 : i8 = 7, align 1, linkage(internal), section"));
+        // The byte after the pop is a run of its own, because coming back to a section finishes
+        // what was being written to it the way a label does. It is the next global of that
+        // section all the same, so the byte lands where the template put it, which is the one
+        // after the byte under `stuff`.
+        let after = text.find("global @.Lasm.2 : i8 = 1").expect(&text);
+        assert!(named < after, "{text}");
+    }
+
     /// A `.set` says one name stands for another, which is a second symbol at the first one's
     /// address and is an alias and nothing else. What the directives around it said about the
     /// name is what the name gets, and a name the file defines itself keeps its own definition,

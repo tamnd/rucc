@@ -641,28 +641,42 @@ decl #96 the_default : void(void) function internal defined
           convert function-decay : int (*)(int)
             decl #1 use : int(int) function
           const 0 : int
-decl #97 ran : int object internal static tentative
-decl #98 opens : void(void) function internal defined constructor
+decl #97 stuff : unsigned char[] object external static declared
+decl #99 reads_the_stuff : int(int) function external defined
+  params
+    decl #98 i : int object automatic defined
+  body
+    block
+      return
+        convert arithmetic : int
+          convert lvalue : unsigned char
+            subscript : unsigned char lvalue
+              convert array-decay : unsigned char *
+                decl #97 stuff : unsigned char[] lvalue
+              convert lvalue : int
+                decl #98 i : int lvalue
+decl #100 ran : int object internal static tentative
+decl #101 opens : void(void) function internal defined constructor
   body
     block
       expr
         assign = : int
-          decl #97 ran : int lvalue
+          decl #100 ran : int lvalue
           const 1 : int
-decl #99 closes : void(void) function internal defined destructor(101)
+decl #102 closes : void(void) function internal defined destructor(101)
   body
     block
       expr
         assign = : int
-          decl #97 ran : int lvalue
+          decl #100 ran : int lvalue
           const 0 : int
-decl #100 both_ways : void(void) function internal defined constructor(101) destructor
+decl #103 both_ways : void(void) function internal defined constructor(101) destructor
   body
     block
       expr
         assign = : int
-          decl #97 ran : int lvalue
+          decl #100 ran : int lvalue
           binary + : int
             convert lvalue : int
-              decl #97 ran : int lvalue
+              decl #100 ran : int lvalue
             const 1 : int

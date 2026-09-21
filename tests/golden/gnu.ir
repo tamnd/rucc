@@ -6,6 +6,8 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 global @table : bytes 12 = { i32 11, i32 22, i32 33 }, align 8, linkage(external), constant
 global @table_end : bytes 0 = {}, align 1, linkage(internal), constant
 global @table_count : i32 = 3, align 4, linkage(external), constant
+global @.Lasm.0 : i8 = 41, align 1, linkage(internal)
+global @stuff : bytes 2 = { i8 42, i8 1 }, align 1, linkage(internal)
 global @table.0 : bytes 16 = { addr.8 @.Llbl.0, addr.8 @.Llbl.1 }, align 8, linkage(internal), constant
 global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
@@ -421,6 +423,16 @@ block0:
     %0 = iconst.i32 0
     %1 = call @use(%0) : (i32) -> i32
     return
+}
+
+func @reads_the_stuff(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @stuff
+    %2 = sext.i64 %0
+    %3 = ptr_add %1, %2
+    %4 = load.i8 %3, align 1, tbaa !0
+    %5 = zext.i32 %4
+    return %5
 }
 
 func @opens(), linkage(internal) {
