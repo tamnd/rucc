@@ -244,8 +244,7 @@ options:
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
-  -Werror -pedantic -pedantic-errors -w   how much to say, and whether it is fatal
-  -W[no-]system-headers  warn about a header that came with the machine, off by default
+  -Werror -pedantic -pedantic-errors -w -W[no-]system-headers   how much to say, and how fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
