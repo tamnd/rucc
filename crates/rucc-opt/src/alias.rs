@@ -465,10 +465,10 @@ pub const fn keeps_address(opcode: Opcode, index: usize) -> bool {
         // takes the capability of the object the word is in and the address of the word.
         // `cap_store` takes those two as well, and its other two are the pointer being written and
         // that pointer's own capability, which are the thing being put somewhere a later `cap_load`
-        // can read, so they are not here. `cap_copy` is two ranges of slots and a length, and a run
-        // of slots ends up saying what the run it came from said, which is a statement about the
-        // pointers in those words and not about the two objects holding them.
-        (Opcode::CapLoad | Opcode::CapStore | Opcode::CapCopy, 0 | 1) => true,
+        // can read, so they are not here. `cap_copy` is not here either, and for the opposite
+        // reason: every one of its operands is a locator, so it is above under the arm that takes
+        // all of them.
+        (Opcode::CapLoad | Opcode::CapStore, 0 | 1) => true,
         // Asking what object a pointer is in is not letting the pointer out. The capability that
         // comes back is about the object and the walk in [`origin`] goes through it, which is
         // what makes this safe: a use of the capability that could let the object out is a use

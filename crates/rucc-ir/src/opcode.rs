@@ -994,12 +994,21 @@ impl Opcode {
     /// and an opcode added later that lands in here without anybody reading what it does would be
     /// a wrong answer about memory in the safety pass of all places.
     ///
-    /// Three families are deliberately not here even though their names look like they belong.
-    /// The capability instructions other than the two extent queries go through a slot in the
-    /// caller's frame, which is a local like any other. The `restrict` markers take the block's own
-    /// stack slot as an operand and write their record into it. The synchronization edges say
-    /// something about the ordering of program memory rather than only about a plane, and a wrong
-    /// answer there is a false report rather than a missed one.
+    /// Two families are deliberately not here even though their names look like they belong. The
+    /// `restrict` markers take the block's own stack slot as an operand and write their record into
+    /// it. The synchronization edges say something about the ordering of program memory rather than
+    /// only about a plane, and a wrong answer there is a false report rather than a missed one.
+    ///
+    /// The capability instructions are mostly out and not all of them, so the line between them is
+    /// worth saying plainly: it is whether every pointer the instruction takes is a locator.
+    /// `cap_load`, `cap_store` and `cap_recover` each have one that is not, because the point of
+    /// the aux pair is that a pointer written into a slot comes back out of one, so an address
+    /// handed to any of those has gone somewhere a later instruction can get it from. `cap_copy`
+    /// has no such operand. Its three are a destination, a source and a length, it writes nothing
+    /// but the slots over the destination and reads nothing but the slots over the source, and a
+    /// slot holds a displacement from the pointer beside it rather than an address, so a run of
+    /// slots that ends up saying what another run said has moved no address anywhere the copy of
+    /// the words themselves did not move it already.
     #[must_use]
     pub const fn touches_only_planes(self) -> bool {
         matches!(
@@ -1013,6 +1022,7 @@ impl Opcode {
                 | Self::CheckFree
                 | Self::CapExtent
                 | Self::CapExtentBack
+                | Self::CapCopy
                 | Self::MetaBegin
                 | Self::MetaEnd
                 | Self::MetaType
@@ -1943,7 +1953,8 @@ mod tests {
             assert!(opcode.touches_memory(), "{name}");
             let instrumentation = name.starts_with("check_")
                 || name.starts_with("meta_")
-                || name.starts_with("cap_extent");
+                || name.starts_with("cap_extent")
+                || name == "cap_copy";
             assert!(instrumentation, "{name}");
         }
         for opcode in [Opcode::MetaInit, Opcode::MetaType, Opcode::CheckBounds, Opcode::CapExtent] {
@@ -1953,16 +1964,14 @@ mod tests {
 
     #[test]
     fn what_goes_through_a_frame_slot_is_not_a_plane_access() {
-        // The three families the list leaves out on purpose, and the reason is the same each time:
-        // an operand of one of these is memory the program has a name for. The capability
-        // instructions other than the two extent queries go through a slot in the frame, and the
-        // `restrict` markers write their record into the block's own slot. The synchronization
-        // edges are left out for a different reason, which is that they say something about the
-        // ordering of program memory and not only about a plane.
+        // What the list leaves out on purpose. The three capability instructions here each take a
+        // pointer that is not a locator, since a pointer written into a slot is one a later
+        // instruction reads back out, and the `restrict` markers write their record into the
+        // block's own slot. The synchronization edges are left out for a different reason, which is
+        // that they say something about the ordering of program memory and not only about a plane.
         let outside = [
             Opcode::CapLoad,
             Opcode::CapStore,
-            Opcode::CapCopy,
             Opcode::CapRecover,
             Opcode::CheckRestrictRead,
             Opcode::CheckRestrictWrite,
