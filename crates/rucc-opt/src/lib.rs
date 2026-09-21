@@ -74,6 +74,11 @@
 //! call nobody has taught it about costs a missed optimization rather than a wrong program. The
 //! declaration the user wrote and the answer an analysis works out are kept in separate fields and
 //! combined where they are read, which is what makes it possible to check one against the other.
+//! `purity::infer` is that analysis, which is section 34.2's and is the one thing in this crate
+//! that reads every body in the module: it walks the graph above, starts each function at `const`
+//! and lowers it where the body says otherwise, and a cycle in the call graph or in a body's own
+//! control flow is what stops a function promising to come back. [`dce`] is the first pass to read
+//! the answer, and a call whose result nothing wanted from a function that does nothing now goes.
 //!
 //! [`analysis`] is where a pass gets one from. It computes on demand, caches per function, and
 //! throws out what a pass broke, working from what the pass said it preserved rather than from a

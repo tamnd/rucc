@@ -19,8 +19,15 @@
 //! nothing, and when it does not happen for a reason of its own. [`Opcode::has_effects`] is the
 //! predicate for the last of those and it answers one question for two different things: it means
 //! both that an instruction writes memory or does something the program can observe, and that it
-//! reads memory. An allocation, a call and a `va_arg` are the first and stay. A plain load is only
-//! the second, and it goes.
+//! reads memory. An allocation and a `va_arg` are the first and stay. A plain load is only the
+//! second, and it goes.
+//!
+//! A call is the one instruction where the opcode is not the answer, because what a call does is
+//! what the function it calls does. [`crate::purity`] is who works that out and the cache carries
+//! it here, so a call whose result nothing reads goes away when the callee reads memory at most
+//! and comes back. That is section 34.6 of `spec/optimizer/34-ipa.md` naming this pass as one of
+//! the four consumers the analysis was written for. Where nothing worked the purity out, which is
+//! `-O0` and every caller that builds an analysis cache by hand, every call stays.
 //!
 //! Removing a dead load needs no memory analysis, which is why it does not wait for one. It cannot
 //! change what any byte holds, it cannot change what another load sees, and nothing after it can
@@ -58,23 +65,38 @@
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, MemOrder, Opcode};
 
+use crate::purity::{Callee, Facts};
 use crate::uses::{count, operands};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each instruction taken out.
 const REMOVED: &str = "instruction with no effects and no users removed";
 
+/// Recorded for a call taken out, which is a different thing from the line above it.
+///
+/// Worth its own line in the remarks because it is the only removal here that rests on something
+/// other than the opcode. Everything else this pass takes out is dead by inspection; a call is
+/// dead because [`crate::purity`] worked out what the callee does, and somebody reading a remark
+/// about a call that went away wants to know which of those two it was.
+const REMOVED_CALL: &str =
+    "call whose result nothing reads removed, the callee does nothing the caller can tell";
+
 /// Recorded for an instruction that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "dead instruction kept, the pass ran out of fuel";
 
 /// Recorded once for a function that has an instruction this pass is not allowed to look at.
 ///
-/// The honest miss of this pass, and the one worth reading. A store nothing can read again, an
-/// allocation nothing addresses and a call that returns nothing and does nothing are all removable
-/// once there is a memory analysis to say so, and all of them stay. A function with none of these
-/// is a function where this pass found everything there was.
+/// The honest miss of this pass, and the one worth reading. A store nothing can read again and an
+/// allocation nothing addresses are both removable once there is a memory analysis to say so, and
+/// both of them stay. A function with none of these is a function where this pass found everything
+/// there was. A call that stays is counted here as well, and what it is waiting on is not a memory
+/// analysis but a body: a call to a function this unit cannot see is opaque and will stay opaque
+/// until there is cross module summary information, which is document 35's.
 const NEEDS_MEMORY_ANALYSIS: &str =
     "instruction with effects left alone, removing it needs a memory analysis";
+
+/// What this pass is called, for the lists in [`crate::pipeline`] that name it.
+pub const NAME: &str = "dce";
 
 /// The pass. It holds nothing, because the counts are per function and live in [`Pass::run`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +104,7 @@ pub struct Dce;
 
 impl Pass for Dce {
     fn name(&self) -> &'static str {
-        "dce"
+        NAME
     }
 
     fn describe(&self) -> &'static str {
@@ -99,13 +121,14 @@ impl Pass for Dce {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let facts = an.purity();
         let mut stats = Stats::new();
         let mut uses = count(func);
         let mut work: Vec<Inst> = Vec::new();
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block) {
-                match verdict(func, inst, &uses) {
+                match verdict(func, inst, &uses, facts) {
                     Verdict::Dead => work.push(inst),
                     // Nothing reads it and it stays anyway, which is the one thing this pass
                     // gives up on rather than the thousands of instructions that are simply
@@ -122,7 +145,7 @@ impl Pass for Dce {
             if func.block_of(inst).is_none() {
                 continue;
             }
-            if verdict(func, inst, &uses) != Verdict::Dead {
+            if verdict(func, inst, &uses, facts) != Verdict::Dead {
                 continue;
             }
             if !fuel.take() {
@@ -142,8 +165,9 @@ impl Pass for Dce {
                     }
                 }
             });
+            let was_a_call = Callee::of(func, inst).is_some();
             func.remove_inst(inst);
-            stats.optimized(REMOVED);
+            stats.optimized(if was_a_call { REMOVED_CALL } else { REMOVED });
         }
         stats
     }
@@ -182,8 +206,24 @@ fn reads_only(func: &Func, inst: Inst) -> bool {
     func[mem].order == MemOrder::NotAtomic
 }
 
+/// Whether this is a call that can go when nothing reads what it returned.
+///
+/// Both halves of that are [`crate::Purity::can_be_deleted_when_unused`] and both are needed: a
+/// call that writes memory does something even when the result is thrown away, and a call that may
+/// not come back does something by not coming back. Which leaves `const` and `pure`, and a `pure`
+/// call is removable for the same reason a load is, since not reading memory is not something
+/// anything can tell happened.
+///
+/// A tail call never reaches here, because it is a terminator and the verdict says so first.
+/// Inline assembly reaches here and is [`crate::Purity::Opaque`], which is what keeps the
+/// assertion below true.
+fn does_nothing(func: &Func, inst: Inst, facts: &Facts) -> bool {
+    Callee::of(func, inst)
+        .is_some_and(|callee| facts.purity_of(callee).can_be_deleted_when_unused())
+}
+
 /// What to do with this instruction.
-fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
+fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     let data = &func[inst];
     // `is_terminator` on the function rather than on the opcode, because `asm goto` branches
     // and its opcode does not say so. Inline assembly has effects either way, so this is belt
@@ -194,7 +234,7 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
     if !data.results().all(|value| uses[value.index()] == 0) {
         return Verdict::Used;
     }
-    if data.opcode.has_effects() && !reads_only(func, inst) {
+    if data.opcode.has_effects() && !reads_only(func, inst) && !does_nothing(func, inst, facts) {
         return Verdict::Effects;
     }
     debug_assert!(
@@ -206,13 +246,98 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32]) -> Verdict {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
+        AttrSet, Block, Builder, Flags, Func, FuncId, MemInfo, MemOrder, Module, Opcode, Pic,
+        Restrict, Signature, Type,
     };
+    use rucc_target::{TargetInfo, Triple};
 
+    use crate::purity::{Facts, infer};
     use crate::stats::Kind;
-    use crate::{Analysis, Fuel, Pass, dce::Dce};
+    use crate::{Analyses, Analysis, CallGraph, Fuel, Pass, dce::Dce};
+
+    /// A module where `f` calls `g` and throws away what came back, with `g` built as asked and
+    /// the purity worked out over the pair.
+    ///
+    /// The call is the last instruction before the return, so a test that wants to know whether it
+    /// went away counts what is left in the block.
+    fn caller(named: &str, attrs: AttrSet, body: fn(&mut Func)) -> (Module, FuncId, Analyses) {
+        let mut names = Interner::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        let mut callee = Func::new(names.intern(named), Signature::new());
+        callee.attrs.set = attrs;
+        body(&mut callee);
+        module.add_func(callee);
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(names.intern(named), signature, &[]);
+        build.ret(&[]);
+        let id = module.add_func(func);
+        let mut facts = Facts::of_module(&module, &names);
+        infer(&module, &CallGraph::of(&module, Pic::Executable), &mut facts);
+        let an = crate::machine::fixtures::analyses().calling(Arc::new(facts));
+        (module, id, an)
+    }
+
+    /// A body that returns at once.
+    fn nothing(func: &mut Func) {
+        let block = func.create_block();
+        Builder::new(func, block).ret(&[]);
+    }
+
+    /// No body at all.
+    fn none(_: &mut Func) {}
+
+    /// How many instructions are left in the one block of `f`.
+    fn left_in_f(module: &Module, id: FuncId) -> usize {
+        let func = &module[id];
+        func.blocks().map(|block| func.insts(block).count()).sum()
+    }
+
+    #[test]
+    fn a_call_whose_result_nothing_reads_goes_away_when_the_callee_does_nothing() {
+        let (mut module, id, mut an) = caller("g", AttrSet::NONE, nothing);
+        assert_eq!(left_in_f(&module, id), 2);
+        let stats = Dce.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert!(stats.changed());
+        assert_eq!(left_in_f(&module, id), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_CALL), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 0);
+    }
+
+    #[test]
+    fn a_call_to_something_nobody_can_see_the_body_of_stays() {
+        let (mut module, id, mut an) = caller("g", AttrSet::NONE, none);
+        assert!(!Dce.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(left_in_f(&module, id), 2);
+    }
+
+    #[test]
+    fn a_call_to_a_function_that_may_not_come_back_stays() {
+        // Its result depends on nothing and the call still does something, which is not come
+        // back. This is the whole reason the looping levels are in the enum.
+        let (mut module, id, mut an) =
+            caller("g", AttrSet::READNONE.union(AttrSet::NORETURN), none);
+        assert!(!Dce.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(left_in_f(&module, id), 2);
+    }
+
+    #[test]
+    fn a_call_stays_when_nothing_worked_the_purity_out() {
+        // Which is the `-O0` pipeline, and every caller that builds an analysis cache by hand.
+        // A pass has to be correct against the empty facts, because that is what it is handed
+        // until somebody fills them in.
+        let (mut module, id, _) = caller("g", AttrSet::NONE, nothing);
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(!Dce.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(left_in_f(&module, id), 2);
+    }
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
