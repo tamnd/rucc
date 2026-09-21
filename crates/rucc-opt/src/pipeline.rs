@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    load, modref, nofree, number, outside, params, pass, purity, reload,
+    ipcp, load, modref, nofree, number, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -641,6 +641,17 @@ impl Options {
         }
         names.into_iter().filter_map(pass::find).map(Pass::name).collect()
     }
+
+    /// Whether a module at a time transformation the level asked for is still asked for.
+    ///
+    /// [`Options::chosen`] cannot answer this. Everything it returns is a [`Pass`], which is one
+    /// function at a time, and section 34.6's propagation is a module at a time because what a
+    /// parameter holds is something the callers say. The last word wins, as it does there, so a
+    /// command line with both spellings on it means the one written second.
+    #[must_use]
+    pub fn wants(&self, name: &str) -> bool {
+        self.toggles.iter().rfind(|(it, _)| it == name).is_none_or(|&(_, on)| on)
+    }
 }
 
 /// Whether the pass of that name is one `-fno-<name>` does not turn off.
@@ -795,9 +806,48 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // so it is the more expensive of the two and `-O1` is the level whose promise is compile time.
     let wants_modref = !matches!(opts.level, OptLevel::O0 | OptLevel::O1)
         && passes.iter().any(|pass| READS_MODREF.contains(&pass.name()));
-    // One graph for both, because building it is a walk over the module and neither of them
-    // changes it.
-    let graph = (wants_purity || wants_modref).then(|| CallGraph::of(module, opts.interposition));
+    // And section 34.6's propagation, at the level it puts it at, which is where gcc turns
+    // `-fipa-cp` on (`gcc/opts.cc:654`). A transformation rather than an analysis, so it is not in
+    // the pass list: everything in that list is a [`Pass`], which is one function at a time, and
+    // what a parameter holds is something the callers say. The level decides and `-fno-ipa-cp`
+    // overrides, which is what the list itself gets from [`Options::chosen`].
+    let wants_ipcp = !matches!(opts.level, OptLevel::O0 | OptLevel::O1) && opts.wants(ipcp::NAME);
+    // One graph for all three, because building it is a walk over the module and none of them
+    // changes the edges in it.
+    let graph = (wants_purity || wants_modref || wants_ipcp)
+        .then(|| CallGraph::of(module, opts.interposition));
+    // Before the two below rather than after them, because it is the one of the three that changes
+    // a body, and an answer worked out from a body should be worked out from the body the passes
+    // will see. It leaves the edges alone, so the graph under it is the same graph either way.
+    if let (true, Some(graph)) = (wants_ipcp, graph.as_ref()) {
+        let mut fuel = match (allowance.get(ipcp::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        for (id, stats) in ipcp::propagate(module, graph, &mut fuel) {
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the {} pass left invalid IR in {func}, {error}",
+                            ipcp::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: ipcp::NAME, func: module[id].name, stats });
+        }
+        report.spent.push((ipcp::NAME, fuel.spent()));
+        if let Some(left) = &mut budget {
+            *left -= fuel.spent();
+        }
+        if let Some(left) = allowance.get_mut(ipcp::NAME) {
+            *left -= fuel.spent();
+        }
+    }
     let purity = match (wants_purity, graph.as_ref()) {
         (true, Some(graph)) => {
             let mut facts = purity::Facts::of_module(module, names);
@@ -952,7 +1002,7 @@ mod tests {
 
     use super::{Dumps, Options, for_level};
     use crate::stats::Kind;
-    use crate::{Pass, pass};
+    use crate::{Pass, ipcp, pass};
 
     /// A module with one function whose body has something to fold in it.
     fn module() -> (Interner, Module) {
@@ -1518,11 +1568,27 @@ mod tests {
         // different pipeline at every step. One line per name rather than one per place the list
         // names it, because what a name was given is one allowance across all of them.
         let mut want: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
+        // And the one transformation that is not in that list, because it is a module at a time
+        // rather than one function at a time. It spends out of the same budget and is bisected the
+        // same way, so it belongs in the same accounting.
+        want.push(ipcp::NAME);
         want.sort_unstable();
         want.dedup();
         let mut got: Vec<&str> = report.spent.iter().map(|&(name, _)| name).collect();
         got.sort_unstable();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn the_module_at_a_time_propagation_is_on_at_the_level_and_off_when_the_flag_says_so() {
+        // The same reading of a toggle that [`Options::chosen`] gives the pass list, done by hand
+        // because what this names is not a pass.
+        let mut opts = Options::for_level(OptLevel::O2);
+        assert!(opts.wants(ipcp::NAME));
+        opts.toggles.push((ipcp::NAME.to_owned(), false));
+        assert!(!opts.wants(ipcp::NAME));
+        opts.toggles.push((ipcp::NAME.to_owned(), true));
+        assert!(opts.wants(ipcp::NAME), "the last word on the command line is the one that wins");
     }
 
     #[test]
