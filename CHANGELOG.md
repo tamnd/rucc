@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- An input written as `-` is standard input. Until now `-` was only ever an output path in the driver, so `rucc -E -` planned nothing, read nothing, printed nothing and exited zero, which is how micropython's build ends up with an empty `qstrdefs.generated.h`: `py/py.mk` writes `$(CPP) $(CFLAGS) -` to put a generated list of strings through the preprocessor, and the build then fails several steps later at something that is not what went wrong. What gcc 16 does was measured rather than remembered, and this is the same: standard input is accepted under `-E` or under an explicit `-x`, and anything else is refused with gcc's own words, `-E or -x required when input is from standard input`, because there is no extension on a dash to read a language out of and a compiler that guessed would sit on a terminal waiting for a program to be typed at it. The name it goes by in a message, in a line marker and in `__FILE__` is `<stdin>`, which is gcc's name for it and the name a build that greps the output is looking for, and `phase::source_name` is the one place that translation happens. An output name derived from it keeps the dash, so `-x c -c -` writes `-.o` the way gcc does. The read itself sits in `crates/rucc-driver/src/map.rs`, which is the one place a path becomes bytes, and it cannot be confused with a file of that name reached through an `#include`, since an include is resolved against a directory and comes back with the directory on the front of it, so a bare dash only ever arrives from the command line. Closes tamnd/rucc#1577.
+
 ## 0.10.72
 
 ### Added

@@ -1,4 +1,5 @@
-//! Getting the bytes of a source file, by mapping it when that is cheaper than copying it.
+//! Getting the bytes of a source file, by mapping it when that is cheaper than copying it, and
+//! reading standard input when that is what the command line named.
 //!
 //! Design: `spec/05-preprocessor.md` section 5.1, which asks that a file be memory mapped
 //! rather than read into a buffer, so that a large translation unit is not copied before it is
@@ -47,6 +48,16 @@ pub(crate) const MAP_THRESHOLD: u64 = 2 * 1024 * 1024;
 /// an error: it falls back to reading, because a file the kernel will not map is still a file
 /// the compiler can compile.
 pub(crate) fn read(path: &Path) -> io::Result<SourceBytes> {
+    // `-` is standard input, which is what `gcc -E -` reads and what a build that pipes a
+    // generated file through the preprocessor depends on. It is checked here because this is the
+    // one place a path becomes bytes, and it cannot collide with a file of that name reached by an
+    // `#include`: an include is resolved against a directory and comes back with the directory on
+    // the front of it, so the bare name only ever arrives from the command line.
+    if path == Path::new(crate::phase::STDIN) {
+        let mut bytes = Vec::new();
+        io::stdin().lock().read_to_end(&mut bytes)?;
+        return Ok(SourceBytes::new(bytes));
+    }
     let file = File::open(path)?;
     let meta = file.metadata()?;
 
