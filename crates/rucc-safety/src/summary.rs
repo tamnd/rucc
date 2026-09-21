@@ -164,13 +164,25 @@ pub struct Summary {
     /// insertion pass can take the capability of. A hole rather than a discharge, which is why it
     /// is not folded into either number above.
     pub unchecked: usize,
-    /// Calls that were pointed at an interposition wrapper.
+    /// Calls, and addresses taken, that were pointed at an interposition wrapper.
+    ///
+    /// One number for both because both are the same event: a mention of an interposed name that
+    /// this build turned into a mention of the wrapper. The address half is there because a
+    /// library that keeps its system calls in a table calls every one of them through the table,
+    /// and a count that only saw the direct calls would read as zero on exactly that library.
     pub interposed: usize,
     /// How many rows the table has, so that a reader can tell "no calls to interposed functions"
     /// apart from "no interposition table in this build".
     pub rows: usize,
-    /// Names this unit calls, does not define, and has no wrapper for. Section 10.2's unwrapped
-    /// symbol list, which is the boundary this build did not model, by name.
+    /// Names this unit calls or takes the address of, does not define, and has no wrapper for.
+    /// Section 10.2's unwrapped symbol list, which is the boundary this build did not model, by
+    /// name.
+    ///
+    /// The address counts for the same reason the call does. A name written where a pointer is
+    /// wanted is a call that will happen later through a site saying nothing about where it goes,
+    /// so the place to notice it is here, where the name is still legible. That it appears once
+    /// whether the unit mentions it once or a hundred times is deliberate: this is a list of
+    /// boundaries to argue about, not a frequency table.
     pub external: Vec<String>,
     /// Calls through a pointer, which cannot be redirected because nothing at the call site says
     /// which function the address names.
@@ -294,6 +306,15 @@ pub fn summarize(
     // The wrappers are ours and are not the boundary this build failed to model, so they do not
     // belong on the unwrapped list even though every one of them is an undefined symbol here.
     let mut external: Vec<Symbol> = Vec::new();
+    // The functions this unit mentions and does not define, so that an address taken of one can be
+    // told from an address taken of anything else. An extern variable is section 10.2's
+    // uninstrumented object row and is not the unwrapped symbol list, so the question has to be
+    // asked of the function table rather than of the name alone.
+    let declared_elsewhere: Vec<Symbol> = module
+        .funcs()
+        .filter(|&id| module[id].is_declaration())
+        .map(|id| module[id].name)
+        .collect();
     // Counted here rather than anywhere later, because `crate::lower` takes the markers out once
     // this has run and a region is then a thing the object file has no trace of. That order is on
     // purpose: the count is the whole of what a declared region costs the back end.
@@ -318,6 +339,20 @@ pub fn summarize(
                     summary.restrict.remaining += 1;
                 }
                 Opcode::CheckRace => summary.races.remaining += 1,
+                // An address taken of a function this unit does not define and has no wrapper for.
+                // By the time this runs `crate::redirect` has already turned the ones it has rows
+                // for into wrappers, so what reaches here is the leftover, and section 10.1 says
+                // the leftover is counted rather than ignored.
+                Opcode::GlobalAddr => {
+                    if let Extra::Symbol(named) = func[inst].extra {
+                        if declared_elsewhere.contains(&named)
+                            && !external.contains(&named)
+                            && !ours(names.resolve(named))
+                        {
+                            external.push(named);
+                        }
+                    }
+                }
                 Opcode::PtrToInt => summary.exposed += 1,
                 Opcode::IntToPtr => summary.synthesized += 1,
                 Opcode::InlineAsm => summary.asm += 1,
@@ -360,6 +395,18 @@ pub fn summarize(
                 }
                 _ => {}
             }
+        }
+    }
+
+    // And the same question of a static initializer, which is where a table of function pointers
+    // usually gets filled in. The code walk above never sees these, because an initialized table is
+    // data the back end writes out rather than instructions anything runs.
+    for reloc in module.relocs() {
+        if declared_elsewhere.contains(&reloc.symbol)
+            && !external.contains(&reloc.symbol)
+            && !ours(names.resolve(reloc.symbol))
+        {
+            external.push(reloc.symbol);
         }
     }
 

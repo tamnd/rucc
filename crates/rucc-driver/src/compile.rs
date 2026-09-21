@@ -3871,6 +3871,24 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     }
 
     #[test]
+    fn an_address_taken_of_a_library_function_is_counted_the_way_a_call_to_one_is() {
+        // The shape SQLite's syscall table has, cut down to two rows. `memcpy` has a wrapper so the
+        // table holds the wrapper's address and the build modelled it; `puts` has none, so what the
+        // table holds is the real function and the build did not, and section 10.1 says the one it
+        // did not is named rather than passed over.
+        let text = summary(
+            rucc_session::Safety::Detect,
+            "void *memcpy(void *, const void *, unsigned long);\n\
+             int puts(const char *);\n\
+             void *table[2] = { (void *)memcpy, (void *)puts };\n\
+             void *f(int i) { return table[i]; }\n",
+        );
+        assert!(text.contains("\"interposed\": 1"), "{text}");
+        assert!(text.contains("\"puts\""), "{text}");
+        assert!(!text.contains("\"memcpy\""), "{text}");
+    }
+
+    #[test]
     fn the_two_directions_a_pointer_crosses_the_boundary_are_counted_apart() {
         // `f` is a name the linker can bind to and takes a pointer, so a pointer arrives there.
         // `notes_open` is a library this build did not instrument, so a pointer comes back from
