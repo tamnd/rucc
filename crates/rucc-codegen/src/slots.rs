@@ -98,10 +98,11 @@
 //! What bounds that is a budget of comparisons rather than a count of things: the fit spends
 //! [`BUDGET`] of them and lays out whatever is left one cell each. A function whose things do
 //! share never comes near it, because what each one is compared against is the cells and not the
-//! things, and the whole point of sharing is that there are far fewer cells than things. An
-//! interpreter with three thousand spill slots and a hundred and sixty cells spends a fifth of
-//! the budget and takes a tenth of a second over it. A function with three thousand of them that
-//! are all live at once would spend the lot, and it gets the layout it would have got anyway.
+//! things, and the whole point of sharing is that there are far fewer cells than things. lua's
+//! interpreter, which is 2802 slots fitted into 144 cells and the largest function in the corpus,
+//! spends an eighth of the budget and adds a seventh of a second to the file it is in. A function
+//! with that many slots that are all live at once would spend the lot, and it gets the layout it
+//! would have got anyway.
 
 use std::collections::{HashMap, HashSet};
 
@@ -120,9 +121,9 @@ use crate::frame::Local;
 /// a cell of its own.
 ///
 /// See the note on how big it is allowed to get in the module documentation. One unit is one thing
-/// compared against one cell, which is what costs, and a million of them is about a tenth of a
-/// second. The largest function in the corpus spends a fifth of this, so the budget is a guard
-/// against a generated file rather than something the ordinary path meets.
+/// compared against one cell, which is what costs. The largest function in the corpus spends an
+/// eighth of this, so the budget is a guard against a generated file rather than something the
+/// ordinary path meets.
 pub const BUDGET: usize = 1 << 20;
 
 /// One run of bytes in the frame, holding one local, one spill slot, or several of each.
