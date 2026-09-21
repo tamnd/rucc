@@ -2350,6 +2350,7 @@ mod tests {
             last_param: Some(param),
             params: crate::decl::DeclList::EMPTY,
             name: None,
+            emitted: true,
         });
         let started = c.check_expr(start);
         let copied = c.check_expr(copied);
@@ -2399,6 +2400,7 @@ mod tests {
             last_param: Some(param),
             params: crate::decl::DeclList::EMPTY,
             name: None,
+            emitted: true,
         });
         c.check_expr(right);
         c.check_expr(c23);

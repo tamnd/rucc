@@ -1150,6 +1150,26 @@ status = "implemented"
 used_by = ["glibc", "musl", "curl"]
 tests = ["rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing", "rucc-parse::the_variable_argument_family_is_syntax_and_not_four_calls"]
 
+[[feature]]
+name = "__builtin_va_arg_pack"
+kind = "builtin"
+gcc_version = "4.3"
+status = "partial"
+signature = "int(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it"]
+notes = "Every anonymous argument of the function around it, forwarded to another variadic call. gcc accepts it only inside a function it is going to inline, and it forwards the arguments while inlining. This compiler does not inline, so what it accepts is the one place that needs no inlining: a variadic definition nothing is emitted for, which is what GNU's `extern inline` gives and is where every use of it in glibc is. Accepted there and refused everywhere else, and since nothing is emitted for the function the call never reaches the IR. What that costs is the fortification: a call to `sprintf` in a program compiled with `_FORTIFY_SOURCE` reaches the library's `sprintf` rather than `__sprintf_chk`, which is the same thing that happens today to every other wrapper in those headers because none of them is inlined either. The signature is a fiction for the type checker, since this is not a function and has no type."
+
+[[feature]]
+name = "__builtin_va_arg_pack_len"
+kind = "builtin"
+gcc_version = "4.3"
+status = "partial"
+signature = "int(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it"]
+notes = "How many anonymous arguments the function around it was handed, which glibc's `open` wrapper tests to catch a mode argument that is missing or a third argument that should not be there. Accepted in the same one place as `__builtin_va_arg_pack` and refused in the same way everywhere else, and the count is never worked out because nothing is emitted for the function it stands in."
+
 # The library builtins, the family where the answer is the library function of the same name
 # with the prefix taken off. A program writes `__builtin_memcpy` rather than `memcpy` to reach
 # the function the C library promises even where a macro or a definition of its own has taken

@@ -80,6 +80,8 @@ pub(in crate::check) struct Body {
     params: DeclList,
     /// The name the definition was written with, which is what `__func__` answers.
     name: Option<Symbol>,
+    /// Whether a definition of this function is emitted, which is [`Enclosing::emitted`].
+    emitted: bool,
     /// The string each of the three spellings was made into, so that every mention of one of them
     /// in a function is one object rather than one per use. They are three objects and not one,
     /// because gcc gives each spelling its own and a program is allowed to notice: comparing
@@ -158,6 +160,13 @@ pub(in crate::check) struct Enclosing {
     pub params: DeclList,
     /// The name the function was written with, absent for a body that is not a definition.
     pub name: Option<Symbol>,
+    /// Whether a definition of this function is emitted, which is false for the inline definition
+    /// GNU's `extern inline` gives and true for every other definition.
+    ///
+    /// What reads it is the argument pack pair in `check/builtin/pack.rs`, which stands only in a
+    /// body nothing is emitted for. True for a body that is not a definition, since a statement
+    /// being checked on its own is not somewhere either of them may stand either.
+    pub emitted: bool,
 }
 
 impl Enclosing {
@@ -171,6 +180,7 @@ impl Enclosing {
             last_param: None,
             params: DeclList::EMPTY,
             name: None,
+            emitted: true,
         }
     }
 }
@@ -321,6 +331,7 @@ impl Checker<'_> {
             last_param: func.last_param,
             params: func.params,
             name: func.name,
+            emitted: func.emitted,
             func_name: [None; FUNCTION_NAMES.len()],
             labels: HashMap::new(),
             shadowed: Vec::new(),
@@ -348,6 +359,15 @@ impl Checker<'_> {
     /// second argument ought to name.
     pub(in crate::check) fn last_named_parameter(&self) -> Option<DeclId> {
         self.body.as_ref().and_then(|body| body.last_param)
+    }
+
+    /// Whether the function being checked is a variadic one that nothing is emitted for.
+    ///
+    /// That pairing is what the argument pack builtins need and the only thing they need, since a
+    /// body nothing emits is a body whose calls never reach the IR. False outside a function,
+    /// where there is no argument pack to talk about at all.
+    pub(in crate::check) fn in_unemitted_variadic_function(&self) -> bool {
+        self.body.as_ref().is_some_and(|body| body.variadic && !body.emitted)
     }
 
     /// The string the `which`th spelling stands for in the function being checked, made on first

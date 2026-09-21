@@ -69,6 +69,7 @@ mod generic;
 mod jump;
 mod math;
 mod overflow;
+mod pack;
 mod prefetch;
 mod sign;
 mod size;

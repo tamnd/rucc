@@ -323,7 +323,10 @@ impl Checker<'_> {
         if nested {
             return Some(id);
         }
-        let (stmt, params) = self.function_body(ty, name, span, params, body);
+        // Read after the merge, because a declaration above the definition has a say in whether
+        // the definition is emitted and the merge is what has settled it.
+        let emitted = self.tast[id].inline.emits();
+        let (stmt, params) = self.function_body(ty, name, span, params, body, emitted);
         let mut node = self.tast[id].clone();
         node.params = params;
         node.body = Some(stmt);
@@ -393,6 +396,10 @@ impl Checker<'_> {
     /// is why `void f(int a) { int a; }` is a redeclaration and `void f(int a) { { int a; } }` is
     /// not, so the body's own compound statement is walked here rather than through the statement
     /// that would open a scope of its own.
+    ///
+    /// `emitted` says whether a definition of this function is emitted, which the body carries so
+    /// that the argument pack builtins can ask: they stand in a body nothing emits and nowhere
+    /// else.
     fn function_body(
         &mut self,
         ty: TypeId,
@@ -400,6 +407,7 @@ impl Checker<'_> {
         span: Span,
         params: ast::ParamList,
         body: ast::StmtId,
+        emitted: bool,
     ) -> (crate::stmt::StmtId, DeclList) {
         let (ret, variadic) = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Function(signature) => {
@@ -420,8 +428,15 @@ impl Checker<'_> {
         let last_param = params.last().copied();
         let params = self.tast.add_decl_refs(&params);
         let name = Some(name);
-        let previous =
-            self.open_body(Enclosing { ret, at: span, variadic, last_param, params, name });
+        let previous = self.open_body(Enclosing {
+            ret,
+            at: span,
+            variadic,
+            last_param,
+            params,
+            name,
+            emitted,
+        });
         let stmt = self.body_block(body);
         self.close_body(previous);
         self.scopes.pop();
