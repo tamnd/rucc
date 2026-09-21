@@ -97,6 +97,7 @@
 //! widest call in the function asked for and cannot know that until every call has been seen.
 
 use rucc_base::{Interner, Symbol};
+use rucc_diag::Span;
 use rucc_ir::{Abi, Param, Type};
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -499,6 +500,18 @@ pub struct Calling<'a> {
     /// arguments get the second copy is exactly the ones the callee has no prototype for. Every
     /// other convention treats the two the same and never asks.
     pub named: usize,
+    /// Where the call was written, which every instruction built for it is filed under.
+    ///
+    /// A call is one of the few places in the machine IR where a run of instructions comes from no
+    /// term in the IR at all: the stores into the outgoing area, the copies a structure passed by
+    /// value is made of and the call itself are the convention's answer rather than anything a rule
+    /// matched. So there is nothing for them to inherit a span from, and without this the bytes of
+    /// an entire call statement are covered by whichever row came before them, which is usually the
+    /// line above. gcc names the line the call is written on over all of it.
+    ///
+    /// [`Span::DUMMY`] in a call this crate builds for itself, which is the copy into the argument
+    /// area that the runtime does, since that one is under whatever the call it belongs to is under.
+    pub at: Span,
 }
 
 /// Builds one call: what it passes, what comes back, and what it destroys.
@@ -520,7 +533,7 @@ pub fn call(
     conv: &CallRegs,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
-    let &Calling { callee, args, returns, variadic, named } = made;
+    let &Calling { callee, args, returns, variadic, named, at: span } = made;
     // Where everything goes, worked out before anything is built, so that a call this cannot make
     // leaves no half of one behind.
     let mut places = Places::new(conv);
@@ -628,7 +641,7 @@ pub fn call(
     for (reg, class, store, up) in on_stack {
         let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
-        let build = out.build(block, mir::Opcode::new(store));
+        let build = out.build(block, mir::Opcode::new(store)).at(span);
         build.uses(reg, class).mem(mir::Mem::at(sp).plus(up)).finish();
     }
 
@@ -647,7 +660,8 @@ pub fn call(
     for (from, up, count, plan) in as_bytes {
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
         let Some(plan) = plan else {
-            nested = nested.max(by_runtime(out, block, conv, names, from, up, count));
+            let what = Copying { from, up, count, span };
+            nested = nested.max(by_runtime(out, block, conv, names, what));
             continue;
         };
         for (at, width) in plan {
@@ -657,12 +671,12 @@ pub fn call(
             let load = names
                 .intern(load_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
             let there = mir::Operand::read(from, conv.int_class);
-            let build = out.build(block, mir::Opcode::new(load));
+            let build = out.build(block, mir::Opcode::new(load)).at(span);
             build.def(word, conv.int_class).mem(mir::Mem::at(there).plus(at)).finish();
             let store = names
                 .intern(store_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
             let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
-            let build = out.build(block, mir::Opcode::new(store));
+            let build = out.build(block, mir::Opcode::new(store)).at(span);
             build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(up + at)).finish();
         }
     }
@@ -675,7 +689,11 @@ pub fn call(
     for (from, into) in in_both {
         let word = out.new_vreg(conv.int_class);
         let movq = mir::Opcode::new(names.intern("x64.movq_from_xmm"));
-        out.build(block, movq).def(word, conv.int_class).uses(from, conv.sse_class).finish();
+        out.build(block, movq)
+            .at(span)
+            .def(word, conv.int_class)
+            .uses(from, conv.sse_class)
+            .finish();
         passed.push((word, into, conv.int_class));
     }
 
@@ -726,7 +744,7 @@ pub fn call(
     if let Some(at) = counted {
         let count = out.new_vreg(conv.int_class);
         let zero = mir::Opcode::new(names.intern("x64.mov_ri_32"));
-        out.build(block, zero).def(count, conv.int_class).imm(i64::from(vectors)).finish();
+        out.build(block, zero).at(span).def(count, conv.int_class).imm(i64::from(vectors)).finish();
         operands.push(mir::Operand::read(count, conv.int_class).with(Constraint::Fixed(at)));
     }
 
@@ -734,7 +752,7 @@ pub fn call(
         Callee::Named(_) => CALL,
         Callee::Through(_) => CALL_REG,
     }));
-    let mut build = out.build(block, opcode);
+    let mut build = out.build(block, opcode).at(span);
     if let Callee::Named(symbol) = callee {
         build = build.symbol(symbol);
     }
@@ -743,6 +761,19 @@ pub fn call(
     }
     build.finish();
     Ok(Made { results, outgoing: places.size().max(nested) })
+}
+
+/// One object whose bytes go into the argument area by a call to the runtime.
+#[derive(Debug, Clone, Copy)]
+struct Copying {
+    /// The register its address is in.
+    from: mir::Reg,
+    /// How far up the outgoing area its copy goes.
+    up: i32,
+    /// How many bytes it is.
+    count: i32,
+    /// Where the call it is an argument of was written.
+    span: Span,
 }
 
 /// One object with more words than a copy into the argument area unrolls to, copied there by a
@@ -757,10 +788,9 @@ fn by_runtime(
     block: mir::Block,
     conv: &CallRegs,
     names: &mut Interner,
-    from: mir::Reg,
-    up: i32,
-    count: i32,
+    what: Copying,
 ) -> u32 {
+    let Copying { from, up, count, span } = what;
     let routine = capability::libcall(rucc_ir::Opcode::Memcpy, "big")
         .expect("the runtime copies a block too large to unroll");
 
@@ -771,7 +801,11 @@ fn by_runtime(
     let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
     let into = out.new_vreg(conv.int_class);
     let lea = mir::Opcode::new(names.intern("x64.lea_64"));
-    out.build(block, lea).def(into, conv.int_class).mem(mir::Mem::at(sp).plus(up)).finish();
+    out.build(block, lea)
+        .at(span)
+        .def(into, conv.int_class)
+        .mem(mir::Mem::at(sp).plus(up))
+        .finish();
 
     // And how many bytes, which C takes as a `size_t` and this has as a number. A thirty two bit
     // move carries it, because writing the low half of a general purpose register clears the high
@@ -779,7 +813,7 @@ fn by_runtime(
     // immediate, which is what the caller checked before anything was built.
     let bytes = out.new_vreg(conv.int_class);
     let mov = mir::Opcode::new(names.intern("x64.mov_ri_32"));
-    out.build(block, mov).def(bytes, conv.int_class).imm(i64::from(count)).finish();
+    out.build(block, mov).at(span).def(bytes, conv.int_class).imm(i64::from(count)).finish();
 
     let args = [
         Passing { ty: Type::PTR, reg: into, abi: Abi::Plain },
@@ -792,6 +826,7 @@ fn by_runtime(
         returns: &[],
         variadic: false,
         named: args.len(),
+        at: span,
     };
     // Three pointer sized arguments and nothing coming back is a call every convention here has
     // registers for, so the only way this could refuse is a convention with fewer than three
@@ -1238,7 +1273,7 @@ mod tests {
             })
             .collect();
         let callee = Callee::Named(names.intern("g"));
-        let what = Calling { callee, args: &passed, returns, variadic, named };
+        let what = Calling { callee, args: &passed, returns, variadic, named, at: Span::DUMMY };
         let made = call(&mut out, block, &what, conv, &mut names);
         (names, out, made)
     }
@@ -1398,6 +1433,7 @@ mod tests {
             returns: &[i32],
             variadic: false,
             named: passed.len(),
+            at: Span::DUMMY,
         };
         call(&mut out, block, &what, &SYSV, &mut names).expect("one integer fits in a register");
 
@@ -1455,8 +1491,14 @@ mod tests {
             abi: Abi::Plain,
         });
         let callee = Callee::Named(names.intern("g"));
-        let what =
-            Calling { callee, args: &args, returns: &[], variadic: false, named: args.len() };
+        let what = Calling {
+            callee,
+            args: &args,
+            returns: &[],
+            variadic: false,
+            named: args.len(),
+            at: Span::DUMMY,
+        };
         let made = call(&mut out, block, &what, conv, &mut names);
         (names, out, made)
     }
