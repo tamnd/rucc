@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A SQLite row in `xtask replay`, which is the OSS-Fuzz `sqlite3_ossfuzz` target replayed through the monitor. The harness is `tests/replay/sqlite.c`, written out from upstream's `test/ossfuzz.c`, and it is the one harness in the table that does real work between inputs: it opens an in memory database, runs the input as SQL with a progress handler that stops a query which has gone on too long, and closes it again, so a single input walks the parser, the code generator, the virtual machine and the pager. The corpus is pinned at 22,578 inputs taken on 2026-09-21. All 22,578 run to completion with no crash and no timeout. 713 reports come out of 352 of them, every one judgement J1, and every one the same shape: eight bytes read at an address inside an instance that is live. That is one shape rather than the two that were there before, because the other one was the stale aux slot fixed in 0.10.71, and what is left is being triaged on tamnd/rucc#1542. Part of tamnd/rucc#1499.
+
+- A Lua row in `xtask replay`, which is the OSS-Fuzz `fuzz_lua` target replayed through the monitor. The harness is `tests/replay/lua.c` and it loads the input as a text chunk and runs it against a state with no standard libraries open, so what an input can reach is the parser, the compiler, the virtual machine, the garbage collector and the table and string internals, and nothing that touches the machine it is running on. The corpus is pinned at 18,693 inputs taken on 2026-09-21. No input produces a report of any judgement, which is the first project in the table to come back completely clean over a corpus this size. 18,180 of them finish and 513 hit the driver's sixty second alarm, and those 513 are not programs that fail to terminate: the same harness built with gcc runs all 513 of them to completion in 334 seconds together, so what the alarm caught is the cost of the monitor rather than a loop in the input. That is worth having written down next to a clean result, because a clean result over a corpus that 2.7 percent of did not finish is a weaker claim than one over a corpus all of which did. Part of tamnd/rucc#1499.
+
+### Fixed
+
+- The replay driver skips an entry in the corpus directory that is not a regular file. It used to skip only names beginning with a dot, and the Lua corpus zip carries a `regressions` directory beside its inputs, which `fopen` opens on Linux and then reads nothing from, so the driver would have printed an input banner for something it never ran and the count would not have matched the pin. An input is a file in the directory the variable points at, which is now both what the driver does and what `xtask/src/replay.rs` says.
+
 ## 0.10.72
 
 ### Added

@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -115,6 +116,24 @@ static int before(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* Whether this entry is an input. Only a regular file is, and the question has to be asked rather
+   than assumed: the lua corpus ships a `regressions` directory inside the same zip, and a directory
+   handed to fopen opens on Linux and then reads nothing, which would print an input that was never
+   run. Nothing goes into the subdirectory either, because a corpus is the set of inputs the pin
+   counts and the pin counts files. */
+static int input(const char *dir, const char *name) {
+    char path[4096];
+    struct stat about;
+
+    if (snprintf(path, sizeof path, "%s/%s", dir, name) >= (int)sizeof path) {
+        return 0;
+    }
+    if (stat(path, &about) != 0) {
+        return 0;
+    }
+    return S_ISREG(about.st_mode);
+}
+
 static char **names(const char *dir, int *count) {
     DIR *open = opendir(dir);
     struct dirent *entry;
@@ -126,7 +145,7 @@ static char **names(const char *dir, int *count) {
         return NULL;
     }
     while ((entry = readdir(open)) != NULL) {
-        if (entry->d_name[0] == '.') {
+        if (entry->d_name[0] == '.' || !input(dir, entry->d_name)) {
             continue;
         }
         if (*count == held) {
