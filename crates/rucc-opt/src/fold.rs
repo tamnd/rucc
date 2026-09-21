@@ -116,36 +116,45 @@ impl Pass for Fold {
     }
 
     fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
-        let blocks: Vec<Block> = func.blocks().collect();
-        let mut stats = Stats::new();
-        for block in blocks {
-            let insts: Vec<Inst> = func.insts(block).collect();
-            for inst in insts {
-                let Some(folded) = evaluate(func, inst) else { continue };
-                if !fuel.take() {
-                    // Out of fuel, which is a request to stop transforming rather than to stop
-                    // looking. Continuing the walk costs nothing and keeps the count of what
-                    // could have been folded the same at every fuel setting, which is what makes
-                    // a bisection over it monotonic.
-                    stats.missed(NO_FUEL);
-                    continue;
-                }
-                let ty = func[result_of(func, inst)].ty;
-                let at = func.add_imm(folded);
-                let data = &mut func[inst];
-                // Which constant instruction holds the answer is the result type's question and
-                // not the folded instruction's. An `fneg` and a bitcast out of an integer both
-                // answer in a floating point type and the rest of what folds here answers in an
-                // integer one, and an immediate is the same bits either way.
-                data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
-                data.flags = Flags::NONE;
-                data.args = rucc_ir::ValueList::EMPTY;
-                data.extra = Extra::Imm(at);
-                stats.optimized(FOLDED);
-            }
-        }
-        stats
+        fold_in(func, fuel)
     }
+}
+
+/// The whole of the pass, without the analysis cache it does not read.
+///
+/// Apart so that [`crate::ipcp`] can fold a function it has just put a constant into. The
+/// arithmetic a constant parameter enables is what makes that propagation reach a second level, and
+/// running this rather than evaluating it there is what keeps the arithmetic written down once.
+pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
+    let blocks: Vec<Block> = func.blocks().collect();
+    let mut stats = Stats::new();
+    for block in blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let Some(folded) = evaluate(func, inst) else { continue };
+            if !fuel.take() {
+                // Out of fuel, which is a request to stop transforming rather than to stop
+                // looking. Continuing the walk costs nothing and keeps the count of what
+                // could have been folded the same at every fuel setting, which is what makes
+                // a bisection over it monotonic.
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            let ty = func[result_of(func, inst)].ty;
+            let at = func.add_imm(folded);
+            let data = &mut func[inst];
+            // Which constant instruction holds the answer is the result type's question and
+            // not the folded instruction's. An `fneg` and a bitcast out of an integer both
+            // answer in a floating point type and the rest of what folds here answers in an
+            // integer one, and an immediate is the same bits either way.
+            data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
+            data.flags = Flags::NONE;
+            data.args = rucc_ir::ValueList::EMPTY;
+            data.extra = Extra::Imm(at);
+            stats.optimized(FOLDED);
+        }
+    }
+    stats
 }
 
 /// The single result of an instruction that folded.

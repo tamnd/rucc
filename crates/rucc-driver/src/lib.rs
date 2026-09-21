@@ -1530,6 +1530,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // unrolls without a trip count, which is a different and usually worse thing.
             "-funroll-loops" => opts.passes.push(("unroll".to_owned(), true)),
             "-fno-unroll-loops" => opts.passes.push(("unroll".to_owned(), false)),
+            // Here rather than through the two arms below, because what this names is not a
+            // `rucc_opt::Pass`. Section 34.6's propagation is a module at a time and everything in
+            // the pass list is one function at a time. `-fipa-cp-clone` is deliberately not here:
+            // gcc turns that one on at `-O3` and it is in the list of what M4 does not build.
+            "-fipa-cp" => opts.passes.push((rucc_opt::ipcp::NAME.to_owned(), true)),
+            "-fno-ipa-cp" => opts.passes.push((rucc_opt::ipcp::NAME.to_owned(), false)),
             _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-fno-".len()..].to_owned(), false));
             }
@@ -3550,7 +3556,6 @@ mod tests {
             "-fno-tree-coalesce-vars",
             "-ftree-vectorize",
             "-ftree-loop-distribution",
-            "-fno-ipa-cp",
             "-fipa-pta",
             "-fmodulo-sched",
             "-fno-vect-cost-model",
