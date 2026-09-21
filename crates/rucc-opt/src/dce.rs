@@ -122,55 +122,64 @@ impl Pass for Dce {
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
-        let facts = an.purity();
-        let mut stats = Stats::new();
-        let mut uses = count(func);
-        let mut work: Vec<Inst> = Vec::new();
-        for block in func.blocks().collect::<Vec<Block>>() {
-            for inst in func.insts(block) {
-                match verdict(func, inst, &uses, facts) {
-                    Verdict::Dead => work.push(inst),
-                    // Nothing reads it and it stays anyway, which is the one thing this pass
-                    // gives up on rather than the thousands of instructions that are simply
-                    // live. Counted here, in the one walk that sees every instruction, so the
-                    // number is per function and not per visit of the worklist.
-                    Verdict::Effects => stats.missed(NEEDS_MEMORY_ANALYSIS),
-                    Verdict::Used | Verdict::Terminator => {}
-                }
-            }
-        }
-        while let Some(inst) = work.pop() {
-            // A worklist can name the same instruction twice, once from the first walk and once
-            // from an operand reaching zero, and the second visit finds it already gone.
-            if func.block_of(inst).is_none() {
-                continue;
-            }
-            if verdict(func, inst, &uses, facts) != Verdict::Dead {
-                continue;
-            }
-            if !fuel.take() {
-                // Out of fuel, which stops the transforming and not the looking, the same way
-                // folding treats it. Draining the rest of the list without removing anything
-                // costs one pass over what is left and keeps the walk's shape independent of
-                // where the fuel ran out.
-                stats.missed(NO_FUEL);
-                continue;
-            }
-            operands(func, inst, |value| {
-                let count = &mut uses[value.index()];
-                *count -= 1;
-                if *count == 0 {
-                    if let Def::Result { inst: def, .. } = func[value].def {
-                        work.push(def);
-                    }
-                }
-            });
-            let was_a_call = Callee::of(func, inst).is_some();
-            func.remove_inst(inst);
-            stats.optimized(if was_a_call { REMOVED_CALL } else { REMOVED });
-        }
-        stats
+        dce_in(func, an.purity(), fuel)
     }
+}
+
+/// The pass over one function, with the purity handed in rather than read off an analysis cache.
+///
+/// [`crate::ipasra`] wants this. It works a module at a time, and what it leaves behind after it
+/// takes a parameter out is the argument the caller was computing, which is read by nothing now.
+/// There is no per function cache where that pass stands, and building one to ask a single question
+/// would build every other analysis the cache holds along with it.
+pub(crate) fn dce_in(func: &mut Func, facts: &Facts, fuel: &mut Fuel) -> Stats {
+    let mut stats = Stats::new();
+    let mut uses = count(func);
+    let mut work: Vec<Inst> = Vec::new();
+    for block in func.blocks().collect::<Vec<Block>>() {
+        for inst in func.insts(block) {
+            match verdict(func, inst, &uses, facts) {
+                Verdict::Dead => work.push(inst),
+                // Nothing reads it and it stays anyway, which is the one thing this pass
+                // gives up on rather than the thousands of instructions that are simply
+                // live. Counted here, in the one walk that sees every instruction, so the
+                // number is per function and not per visit of the worklist.
+                Verdict::Effects => stats.missed(NEEDS_MEMORY_ANALYSIS),
+                Verdict::Used | Verdict::Terminator => {}
+            }
+        }
+    }
+    while let Some(inst) = work.pop() {
+        // A worklist can name the same instruction twice, once from the first walk and once
+        // from an operand reaching zero, and the second visit finds it already gone.
+        if func.block_of(inst).is_none() {
+            continue;
+        }
+        if verdict(func, inst, &uses, facts) != Verdict::Dead {
+            continue;
+        }
+        if !fuel.take() {
+            // Out of fuel, which stops the transforming and not the looking, the same way
+            // folding treats it. Draining the rest of the list without removing anything
+            // costs one pass over what is left and keeps the walk's shape independent of
+            // where the fuel ran out.
+            stats.missed(NO_FUEL);
+            continue;
+        }
+        operands(func, inst, |value| {
+            let count = &mut uses[value.index()];
+            *count -= 1;
+            if *count == 0 {
+                if let Def::Result { inst: def, .. } = func[value].def {
+                    work.push(def);
+                }
+            }
+        });
+        let was_a_call = Callee::of(func, inst).is_some();
+        func.remove_inst(inst);
+        stats.optimized(if was_a_call { REMOVED_CALL } else { REMOVED });
+    }
+    stats
 }
 
 /// Whether this instruction can go, and when it cannot, what kept it.

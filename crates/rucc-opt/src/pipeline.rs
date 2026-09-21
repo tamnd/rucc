@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    ipcp, load, modref, nofree, number, outside, params, pass, purity, reload,
+    ipasra, ipcp, load, modref, nofree, number, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -812,9 +812,16 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // what a parameter holds is something the callers say. The level decides and `-fno-ipa-cp`
     // overrides, which is what the list itself gets from [`Options::chosen`].
     let wants_ipcp = !matches!(opts.level, OptLevel::O0 | OptLevel::O1) && opts.wants(ipcp::NAME);
-    // One graph for all three, because building it is a walk over the module and none of them
-    // changes the edges in it.
-    let graph = (wants_purity || wants_modref || wants_ipcp)
+    // And section 34.6's other half, at the same level, which is where gcc turns `-fipa-sra` on as
+    // well. After the propagation rather than before it: a parameter the propagation turned into a
+    // constant in the body is a parameter nothing reads any more, and this is what then takes it
+    // out along with the argument at every call.
+    let wants_ipasra =
+        !matches!(opts.level, OptLevel::O0 | OptLevel::O1) && opts.wants(ipasra::NAME);
+    // One graph for all four, because building it is a walk over the module and none of them adds
+    // an edge to it. The two transformations take edges away, by leaving a call nothing reaches or
+    // an address nothing hands out, and a graph that still holds those is the conservative one.
+    let graph = (wants_purity || wants_modref || wants_ipcp || wants_ipasra)
         .then(|| CallGraph::of(module, opts.interposition));
     // Before the two below rather than after them, because it is the one of the three that changes
     // a body, and an answer worked out from a body should be worked out from the body the passes
@@ -845,6 +852,35 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
             *left -= fuel.spent();
         }
         if let Some(left) = allowance.get_mut(ipcp::NAME) {
+            *left -= fuel.spent();
+        }
+    }
+    if let (true, Some(graph)) = (wants_ipasra, graph.as_ref()) {
+        let mut fuel = match (allowance.get(ipasra::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        for (id, stats) in ipasra::remove(module, graph, names, &mut fuel) {
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the {} pass left invalid IR in {func}, {error}",
+                            ipasra::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: ipasra::NAME, func: module[id].name, stats });
+        }
+        report.spent.push((ipasra::NAME, fuel.spent()));
+        if let Some(left) = &mut budget {
+            *left -= fuel.spent();
+        }
+        if let Some(left) = allowance.get_mut(ipasra::NAME) {
             *left -= fuel.spent();
         }
     }
@@ -1002,7 +1038,7 @@ mod tests {
 
     use super::{Dumps, Options, for_level};
     use crate::stats::Kind;
-    use crate::{Pass, ipcp, pass};
+    use crate::{Pass, ipasra, ipcp, pass};
 
     /// A module with one function whose body has something to fold in it.
     fn module() -> (Interner, Module) {
@@ -1568,15 +1604,24 @@ mod tests {
         // different pipeline at every step. One line per name rather than one per place the list
         // names it, because what a name was given is one allowance across all of them.
         let mut want: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
-        // And the one transformation that is not in that list, because it is a module at a time
-        // rather than one function at a time. It spends out of the same budget and is bisected the
-        // same way, so it belongs in the same accounting.
+        // And the two transformations that are not in that list, because they are a module at a
+        // time rather than one function at a time. They spend out of the same budget and are
+        // bisected the same way, so they belong in the same accounting.
         want.push(ipcp::NAME);
+        want.push(ipasra::NAME);
         want.sort_unstable();
         want.dedup();
         let mut got: Vec<&str> = report.spent.iter().map(|&(name, _)| name).collect();
         got.sort_unstable();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn the_module_at_a_time_removal_is_on_at_the_level_and_off_when_the_flag_says_so() {
+        let mut opts = Options::for_level(OptLevel::O2);
+        assert!(opts.wants(ipasra::NAME));
+        opts.toggles.push((ipasra::NAME.to_owned(), false));
+        assert!(!opts.wants(ipasra::NAME));
     }
 
     #[test]

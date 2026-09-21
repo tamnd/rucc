@@ -1541,6 +1541,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // gcc turns that one on at `-O3` and it is in the list of what M4 does not build.
             "-fipa-cp" => opts.passes.push((rucc_opt::ipcp::NAME.to_owned(), true)),
             "-fno-ipa-cp" => opts.passes.push((rucc_opt::ipcp::NAME.to_owned(), false)),
+            // The other half of the same section, here for the same reason, and `-fipa-sra` in gcc
+            // is the aggregate splitting as well as the parameter removal. Asking for it gets the
+            // half that is built.
+            "-fipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), true)),
+            "-fno-ipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), false)),
             _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-fno-".len()..].to_owned(), false));
             }
