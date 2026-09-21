@@ -7428,6 +7428,31 @@ block0(%0: i32):
     }
 
     #[test]
+    fn a_comma_whose_value_is_an_object_names_the_object_the_right_side_named() {
+        // What janet writes, which is a call that does not return and then a value after it so
+        // that the arm is worth something. The left side happens for what it did and the answer
+        // is where the right side is, so there is nothing to copy and no temporary for a copy.
+        let source = "\
+struct pair { int a, b; };
+void bail(void);
+int f(struct pair p) {
+  return (bail(), p).b;
+}
+";
+        let expected = "\
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    store %0 -> %1, align 4
+    call @bail() : ()
+    %2 = iconst.i64 4
+    %3 = ptr_add %1, %2
+    %4 = load.i32 %3, align 4, tbaa !1
+    return %4
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
     fn one_of_those_that_control_never_leaves_is_lowered_and_what_follows_it_is_dropped() {
         // A macro that always jumps, which is what this shape is in real code. The value is
         // never taken, and the block the rest of the expression would have been built in is

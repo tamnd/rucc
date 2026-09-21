@@ -178,5 +178,40 @@ block0(%0: f64, %1: i64):
     return %5, %8
 }
 
+func @bail(), linkage(external);
+
+func @after_a_call(i32, i32) -> i64, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = alloca, size 8, align 4
+    call @bail() : ()
+    %3 = call @make_pair(%0, %1) : (i32, i32) -> i64
+    store %3 -> %2, align 4
+    %4 = load.i64 %2, align 4
+    return %4
+}
+
+func @a_member_after_a_call() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 4
+    call @bail() : ()
+    %1 = iconst.i32 1
+    %2 = iconst.i32 2
+    %3 = call @make_pair(%1, %2) : (i32, i32) -> i64
+    store %3 -> %0, align 4
+    %4 = iconst.i64 4
+    %5 = ptr_add %0, %4
+    %6 = load.i32 %5, align 4, tbaa !1
+    return %6
+}
+
+func @an_object_after_a_call(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = alloca, size 8, align 4
+    store %0 -> %1, align 4
+    call @bail() : ()
+    %2 = load.i64 %1, align 4
+    return %2
+}
+
 !0 = tbaa "char", offset 0
 !1 = tbaa "int", parent !0, offset 0

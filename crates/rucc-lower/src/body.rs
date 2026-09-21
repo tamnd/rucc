@@ -3136,6 +3136,16 @@ impl<'u> Body<'_, 'u> {
                 self.close(span);
                 Place::new(at, ty)
             }
+            // `(janet_panic("..."), janet_wrap_nil())`, which is a structure or a union that a
+            // call is written in front of. The left side is worked out and thrown away for what
+            // it did, and the answer is where the right side is, which is the object itself and
+            // not a copy of it, the same as every other place here. janet returns one of these
+            // out of an arm of a conditional and so does every library that panics and then has
+            // to name a value the arm can be worth.
+            ExprKind::Comma { lhs, rhs } => {
+                self.discard(lhs);
+                self.place(rhs)
+            }
             ExprKind::Cond { cond, then, otherwise } => {
                 self.conditional_place(cond, then, otherwise, ty, span)
             }

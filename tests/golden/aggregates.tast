@@ -145,3 +145,48 @@ decl #43 forward : struct mixed(struct mixed) function external defined
       return
         convert lvalue : struct mixed
           decl #42 m : struct mixed lvalue
+decl #44 bail : void(void) function external declared
+decl #47 after_a_call : struct pair(int, int) function external defined
+  params
+    decl #45 a : int object automatic defined
+    decl #46 b : int object automatic defined
+  body
+    block
+      return
+        comma : struct pair
+          call : void
+            convert function-decay : void (*)(void)
+              decl #44 bail : void(void) function
+          call : struct pair
+            convert function-decay : struct pair (*)(int, int)
+              decl #2 make_pair : struct pair(int, int) function
+            convert lvalue : int
+              decl #45 a : int lvalue
+            convert lvalue : int
+              decl #46 b : int lvalue
+decl #48 a_member_after_a_call : int(void) function external defined
+  body
+    block
+      return
+        member #1 b : int
+          comma : struct pair
+            call : void
+              convert function-decay : void (*)(void)
+                decl #44 bail : void(void) function
+            call : struct pair
+              convert function-decay : struct pair (*)(int, int)
+                decl #2 make_pair : struct pair(int, int) function
+              const 1 : int
+              const 2 : int
+decl #50 an_object_after_a_call : struct pair(struct pair) function external defined
+  params
+    decl #49 p : struct pair object automatic defined
+  body
+    block
+      return
+        comma : struct pair
+          call : void
+            convert function-decay : void (*)(void)
+              decl #44 bail : void(void) function
+          convert lvalue : struct pair
+            decl #49 p : struct pair lvalue
