@@ -58,6 +58,8 @@ Array declarators carry a size expression that may be a constant, `*` for a vari
 
 Function declarators distinguish four forms with different semantics: a prototype with named or abstract parameters, `(void)` for explicitly no parameters, `()` which in C23 means the same as `(void)` and before C23 means unspecified, and the old-style identifier list. The C23 change to `()` is a real behavioral difference that projects hit when moving to `gnu23`, and we diagnose the cases where it matters under a dedicated warning.
 
+A declaration turns out to be a definition on the token after its first declarator, and there are two of those: a `{`, which is a body, and a declaration specifier, which is an old-style definition's parameter declarations. The second is read that way only when the declarator declared a function, since nothing else has parameters to declare. That is a rule about recovery rather than about the grammar, because a declarator that is not a function followed by a specifier is a mistake either way, and which mistake the reader is told about depends on it. Reading it as a definition means eating declarations until a brace turns up, and the brace that turns up is the one at the end of some later function, so the message lands there. `static __const__ unsigned int f(unsigned x)` on a compiler missing that spelling is the case that made the point: the error was reported a thousand lines below the line that caused it, on a file-scope `asm` that had nothing to do with it.
+
 ## 6.6 C23 syntax
 
 Implemented in full, because the default dialect is `gnu23`:

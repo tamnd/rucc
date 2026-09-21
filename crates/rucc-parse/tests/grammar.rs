@@ -737,6 +737,27 @@ fn an_old_style_definition_parses_and_c23_warns_about_it() {
 }
 
 #[test]
+fn only_a_function_can_have_the_parameter_declarations_of_an_old_style_definition() {
+    // An identifier the compiler does not know in front of a type is the shape a missing keyword
+    // makes, and `unknown int x;` is a declaration with a mistake in it and not the start of a
+    // definition, because `unknown` has no parameters to declare. Reading it as a definition is
+    // how the message ends up a long way from the mistake: the parser eats declarations until it
+    // finds a brace, and the brace it finds is the end of some later function.
+    let said = complaints("static unknown_keyword unsigned int f(unsigned x) { return x; } int g;");
+    assert!(said.iter().any(|m| m.contains("expected `;`")), "{said:?}");
+    assert!(
+        !said.iter().any(|m| m.contains("expected a function body")),
+        "the mistake is the missing semicolon and not the body: {said:?}"
+    );
+
+    // And the real definition that follows it still parses, because recovery stopped at the
+    // declaration rather than swallowing the rest of the file.
+    let out = Fixture::new(Std::C23).parse("static unknown_keyword int f(int x); void g(void) {}");
+    let top = out.ast.top_level();
+    assert!(matches!(out.ast[top[top.len() - 1]], Decl::Function { .. }), "{:?}", out.diagnostics);
+}
+
+#[test]
 fn a_parameter_is_in_scope_in_the_body() {
     // If the parameter were not re-declared in the body's scope, `T` would still be a type name
     // and `T * x` would be a declaration rather than a multiplication.
