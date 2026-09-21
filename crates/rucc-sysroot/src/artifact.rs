@@ -76,9 +76,18 @@ impl Pinned {
     /// answer for a host that cannot reach the network at all. It is kept after the install for the
     /// same reason and for one more: a fetch of a target that is already installed then moves
     /// nothing and says so.
+    ///
+    /// The directory in front of the name is the first twelve characters of the hash, and it is
+    /// there because the name alone does not say which artifact this is. Two releases of a sysroot
+    /// for one target have the same file name, so a cache that kept the name alone would hold last
+    /// release's archive under the name this release wants, and a fetch refuses a file that does not
+    /// match rather than downloading over the top of it. That refusal is right for a file somebody
+    /// placed by hand and wrong for one we put there ourselves, so the fix is to stop the collision
+    /// rather than to soften the check. The hash is what has to change when the bytes change, so it
+    /// is the thing that separates them.
     #[must_use]
     pub fn archive_in(&self, cache: &Path) -> PathBuf {
-        cache.join("downloads").join(self.file_name())
+        cache.join("downloads").join(&self.sha256[..12]).join(self.file_name())
     }
 }
 
@@ -168,8 +177,21 @@ mod tests {
         assert_eq!(what.file_name(), "rucc-sysroot-aarch64-linux-musl.tar.gz");
         assert_eq!(
             what.archive_in(&PathBuf::from("/tmp/cache")),
-            PathBuf::from("/tmp/cache/downloads/rucc-sysroot-aarch64-linux-musl.tar.gz")
+            PathBuf::from(
+                "/tmp/cache/downloads/111111111111/rucc-sysroot-aarch64-linux-musl.tar.gz"
+            )
         );
+    }
+
+    /// Two releases of the sysroot for one target have the same file name, and the cache has to keep
+    /// them apart, because a fetch refuses a file under the artifact's name that is not the artifact.
+    #[test]
+    fn two_releases_of_one_target_are_not_the_same_path() {
+        let cache = PathBuf::from("/tmp/cache");
+        let old = TABLE[0];
+        let new = Pinned { sha256: TABLE[1].sha256, ..old };
+        assert_eq!(old.file_name(), new.file_name());
+        assert_ne!(old.archive_in(&cache), new.archive_in(&cache));
     }
 
     /// What every row of [`PINNED`] has to be.
