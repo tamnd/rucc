@@ -1452,28 +1452,47 @@ mod tests {
 
     #[test]
     fn a_copy_becomes_the_calls_that_move_the_planes_across() {
-        // Three operands each and no descriptor. A plane write refuses nothing, and neither what
-        // the copied bytes are nor whether anything ever wrote them is a thing the compiler knows,
-        // so there is no type number and no length beyond the range: all three calls read what is
-        // over the source and write it over the destination. The third is the aux rather than a
-        // plane, and it is here because the capability of a pointer inside a structure being copied
-        // whole travels the same way its type and its init do.
+        // Three operands each and no descriptor of their own. A plane write refuses nothing, and
+        // neither what the copied bytes are nor whether anything ever wrote them is a thing the
+        // compiler knows, so there is no type number and no length beyond the range: all three
+        // calls read what is over the source and write it over the destination. The third is the
+        // aux rather than a plane, and it is here because the capability of a pointer inside a
+        // structure being copied whole travels the same way its type and its init do.
+        //
+        // The four descriptors the count reports are the range and lifetime checks in front, one
+        // per end of the copy, which are the accesses the plane writes are not.
         let mut names = Interner::new();
         let mut module = copied(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 0);
+        assert_eq!(lower(&mut module, &mut names), 4);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
             print_func(&module, &module[id], &names),
             "func @move(ptr, ptr), linkage(external) {\n\
              block0(%0: ptr, %1: ptr):\n    \
+             %2 = alloca, size 32, align 8\n    \
+             %3 = alloca, size 32, align 8\n    \
+             call @__rucc_cap_recover(%3, %1) : (ptr, ptr)\n    \
+             call @__rucc_cap_recover(%2, %0) : (ptr, ptr)\n    \
+             %4 = global_addr @__rucc_safety_desc_0\n    \
+             %5 = iconst.i64 24\n    \
+             %6 = iconst.i64 8\n    \
+             call @__rucc_check_bounds(%0, %5, %6, %2, %4) : (ptr, i64, i64, ptr, ptr)\n    \
+             %7 = global_addr @__rucc_safety_desc_1\n    \
+             call @__rucc_check_live(%2, %0, %7) : (ptr, ptr, ptr)\n    \
+             %8 = global_addr @__rucc_safety_desc_2\n    \
+             %9 = iconst.i64 24\n    \
+             %10 = iconst.i64 8\n    \
+             call @__rucc_check_bounds(%1, %9, %10, %3, %8) : (ptr, i64, i64, ptr, ptr)\n    \
+             %11 = global_addr @__rucc_safety_desc_3\n    \
+             call @__rucc_check_live(%3, %1, %11) : (ptr, ptr, ptr)\n    \
              memcpy %0, %1, size 24, align 8\n    \
-             %2 = iconst.i64 24\n    \
-             call @__rucc_meta_type_copy(%0, %1, %2) : (ptr, ptr, i64)\n    \
-             %3 = iconst.i64 24\n    \
-             call @__rucc_meta_init_copy(%0, %1, %3) : (ptr, ptr, i64)\n    \
-             %4 = iconst.i64 24\n    \
-             call @__rucc_cap_copy(%0, %1, %4) : (ptr, ptr, i64)\n    \
+             %12 = iconst.i64 24\n    \
+             call @__rucc_meta_type_copy(%0, %1, %12) : (ptr, ptr, i64)\n    \
+             %13 = iconst.i64 24\n    \
+             call @__rucc_meta_init_copy(%0, %1, %13) : (ptr, ptr, i64)\n    \
+             %14 = iconst.i64 24\n    \
+             call @__rucc_cap_copy(%0, %1, %14) : (ptr, ptr, i64)\n    \
              return\n\
              }\n"
         );

@@ -413,10 +413,25 @@ pub fn insert(
                 None => counts.skipped += 1,
             },
             Opcode::Memcpy | Opcode::Memmove => {
-                // The aux first, so that it ends up behind the two plane copies in the stream. Any
-                // order is right here, since none of the three reads what another writes and all
-                // three happen after the copy, and this one matches the order the wrapper around
-                // the library's own `memcpy` does its three in.
+                // The two ends of a copy are two accesses of the same width, a read through one
+                // pointer and a write through the other, so each gets the pair an access of its own
+                // would get. The destination's pair goes in first and so stands first in the
+                // stream, which is the order a report reads best in when both ends are bad: the
+                // write is what the program was for and the read is how it got there. Both pairs
+                // carry the one payload the copy has, since the width is the same width twice and
+                // the two ends of a copy the front end wrote have the same type as each other.
+                for through in func.bulk(inst).into_iter().flat_map(|bulk| [bulk.to, bulk.with]) {
+                    if spanned(func, &mut origins, inst, through) {
+                        counts.checked += 1;
+                        counts.live += 1;
+                    } else {
+                        counts.skipped += 1;
+                    }
+                }
+                // The aux first of the three behind it, so that it ends up behind the two plane
+                // copies in the stream. Any order is right here, since none of the three reads what
+                // another writes and all three happen after the copy, and this one matches the
+                // order the wrapper around the library's own `memcpy` does its three in.
                 if relocation(func, inst) {
                     counts.relocated += 1;
                 }
@@ -433,7 +448,8 @@ pub fn insert(
                 // write of as many bytes as it says through a pointer somebody handed it and a
                 // fill that runs off the end of an object is the overflow this build exists to
                 // report.
-                if spanned(func, &mut origins, inst) {
+                let filled = func.bulk(inst).map(|bulk| bulk.to);
+                if filled.is_some_and(|to| spanned(func, &mut origins, inst, to)) {
                     counts.checked += 1;
                     counts.live += 1;
                 } else {
@@ -554,27 +570,27 @@ fn check(
 /// The lifetime check has no payload for the reason it has none in front of an access: whether the
 /// capability still names whoever owns the address is a question about the pointer rather than
 /// about how many bytes are going through it.
-fn spanned(func: &mut Func, origins: &mut origin::Origins, fill: Inst) -> bool {
-    let Some(bulk) = func.bulk(fill) else { return false };
-    let Extra::Mem(info) = func[fill].extra else { return false };
+fn spanned(func: &mut Func, origins: &mut origin::Origins, bulk: Inst, through: Value) -> bool {
+    let Some(length) = func.bulk(bulk).map(|bulk| bulk.length) else { return false };
+    let Extra::Mem(info) = func[bulk].extra else { return false };
     let mut info = func[info];
     // Not the padding after it, for the reason [`check`] gives about an access.
     info.owns = 0;
 
-    let span = func.span(fill);
-    let capability = origins.of(func, bulk.to, fill);
+    let span = func.span(bulk);
+    let capability = origins.of(func, through, bulk);
 
-    let mut operands = vec![capability, bulk.to];
-    operands.extend(bulk.length);
+    let mut operands = vec![capability, through];
+    operands.extend(length);
     let args = func.push_values(&operands);
     let extra = Extra::Mem(func.add_mem(info));
     let bounds =
         func.create_inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[], span);
-    func.insert_before(bounds, fill);
+    func.insert_before(bounds, bulk);
 
-    let args = func.push_values(&[capability, bulk.to]);
+    let args = func.push_values(&[capability, through]);
     let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
-    func.insert_before(live, fill);
+    func.insert_before(live, bulk);
 
     true
 }
@@ -2462,21 +2478,28 @@ mod tests {
         let (module, plane) = planed(&mut names, "move.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
         );
 
         assert_eq!(
             print_func(&module, &func, &names),
-            // After the copy, for the same reason a store's judgement is after the store.
+            // The four checks in front and the three copies behind, which is where a store's two
+            // and a store's judgement go for the same reasons.
             "func @move(ptr, ptr), linkage(external) {\n\
              block0(%0: ptr, %1: ptr):\n    \
+             %2 = cap_of %1\n    \
+             %3 = cap_of %0\n    \
+             check_bounds %3, %0, size 24, align 8\n    \
+             check_live %3, %0\n    \
+             check_bounds %2, %1, size 24, align 8\n    \
+             check_live %2, %1\n    \
              memcpy %0, %1, size 24, align 8\n    \
-             %2 = iconst.i64 24\n    \
-             meta_type_copy %0, %1, %2\n    \
-             %3 = iconst.i64 24\n    \
-             meta_init_copy %0, %1, %3\n    \
              %4 = iconst.i64 24\n    \
-             cap_copy %0, %1, %4\n    \
+             meta_type_copy %0, %1, %4\n    \
+             %5 = iconst.i64 24\n    \
+             meta_init_copy %0, %1, %5\n    \
+             %6 = iconst.i64 24\n    \
+             cap_copy %0, %1, %6\n    \
              return\n\
              }\n"
         );
@@ -2496,13 +2519,15 @@ mod tests {
         let (module, plane) = planed(&mut names, "overlap.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
         );
 
         let printed = print_func(&module, &func, &names);
-        assert!(printed.contains("meta_type_copy %0, %1, %2\n"), "{printed}");
-        assert!(printed.contains("meta_init_copy %0, %1, %3\n"), "{printed}");
-        assert!(printed.contains("cap_copy %0, %1, %4\n"), "{printed}");
+        assert!(printed.contains("check_bounds %3, %0, size 24, align 8\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %1, size 24, align 8\n"), "{printed}");
+        assert!(printed.contains("meta_type_copy %0, %1, %4\n"), "{printed}");
+        assert!(printed.contains("meta_init_copy %0, %1, %5\n"), "{printed}");
+        assert!(printed.contains("cap_copy %0, %1, %6\n"), "{printed}");
     }
 
     #[test]
@@ -2537,13 +2562,19 @@ mod tests {
         let (module, plane) = planed(&mut names, "move.c");
         assert_eq!(
             insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
-            Counts { carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
         );
 
         assert_eq!(
             print_func(&module, &func, &names),
             "func @move(ptr, ptr, i64), linkage(external) {\n\
              block0(%0: ptr, %1: ptr, %2: i64):\n    \
+             %3 = cap_of %1\n    \
+             %4 = cap_of %0\n    \
+             check_bounds %4, %0, %2, align 8\n    \
+             check_live %4, %0\n    \
+             check_bounds %3, %1, %2, align 8\n    \
+             check_live %3, %1\n    \
              memcpy %0, %1, %2, align 8\n    \
              meta_type_copy %0, %1, %2\n    \
              meta_init_copy %0, %1, %2\n    \

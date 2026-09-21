@@ -175,6 +175,8 @@ A fill's type-plane operation is the untyped entry over the range rather than an
 
 Both of a fill's range checks are over the same operand, since a fill reads no memory: the byte it writes is a value and not an address. Where the count comes from is the payload where the front end knew it and the third operand of `check_bounds` where the program works it out, which is the same operand section 7.4 put there for the check that stands for a loop. An object whose length the program computes is zeroed by a fill of a length the program computes, so the two are not a rare case and a common one.
 
+A copy's are over one operand each, since the two ends of a copy are two accesses of the same width: a read through the source and a write through the destination, either of which can be the one that runs off an object. Both pairs carry the one payload the copy instruction has, which costs nothing because the width is the same width twice and the two ends of a copy the front end wrote have the same type as each other. The destination's pair stands first in the stream, so that a copy with both ends bad reports the write before the read, which is the order the program reads in: the write is what it was for and the read is how it got there.
+
 ### 6.3.1 The three bounds-check forms
 
 Document 05 chose base-and-extent so that the hot check is one unsigned compare:
