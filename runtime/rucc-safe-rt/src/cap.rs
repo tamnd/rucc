@@ -40,10 +40,21 @@
 //!
 //! # What a store does with nowhere to write
 //!
-//! Nothing, and it says so. A word with no slot is the same three cases
-//! [`crate::aux_slot::address_of`] reports, and the capability is dropped. The load beside it
-//! recovers, so the pair stays honest, and no judgement is made at the store: a store of a pointer
-//! into a local is not a fault.
+//! It finds somewhere, and only gives up when the address is not in an instance at all. A word with
+//! no slot is the same four cases [`crate::aux_slot::address_of`] reports, and three of them are
+//! about the address, but the first one is about the capability the caller happened to be holding.
+//! Dropping the capability was the old answer and the pair it left behind was not honest, because
+//! the store and the load of one word do not have to arrive with the same idea of the object it is
+//! in: the store of a linked list unlink goes through a `T **` whose own capability the aux could
+//! not describe, while the load of the same word two calls later comes through the containing
+//! structure and gets a perfectly good one. The store wrote the word and wrote no slot, the load
+//! found the slot the previous pointer left there, and a same sized object at the same field offset
+//! rebuilds out of it with the right bounds and the last tenant's version. That reads as a use after
+//! free of something nothing ever freed, which is tamnd/rucc#1542.
+//!
+//! So a store whose capability cannot locate the slot recovers the container from the address, the
+//! same recovery the load already does, and writes the slot it finds. No judgement is made at the
+//! store either way: a store of a pointer into a local is not a fault.
 //!
 //! # The torn store
 //!
@@ -91,7 +102,44 @@ use crate::recover;
 /// through, so either may be any value at all.
 pub unsafe fn store(dest: Cap, at: *const c_void, value: *const c_void, cap: Cap) -> bool {
     // SAFETY: the caller's contract is the one `aux_slot::store` asks for, passed straight on.
-    unsafe { aux_slot::store(dest, at as u64, value as u64, cap) }
+    if unsafe { aux_slot::store(dest, at as u64, value as u64, cap) } {
+        return true;
+    }
+    // The word was written whichever way this went, because the instruction that writes the word is
+    // not the one that writes the slot, so leaving the previous pointer's slot in place is the one
+    // answer that cannot be right. Where the slot lives is a fact about the address rather than
+    // about the capability the caller is carrying, and the module comment is the case where those
+    // two disagree.
+    let recovered = recover::recover(at);
+    // SAFETY: as above. `recovered` describes the instance `at` actually lands in, and answers a
+    // class this runtime's allocator did not lay out for an address in anybody else's storage,
+    // which is a case `aux_slot::address_of` turns away on its own.
+    if !unsafe { aux_slot::store(recovered, at as u64, value as u64, cap) } {
+        return false;
+    }
+    // A bottom capability goes in as an empty slot, which reads back as a word holding no pointer,
+    // and this word may well hold one: the capability was missing, not the pointer. The bit that
+    // makes a later load ask the address rather than believe the slot is `Meta::HANDED`, and an
+    // instance somebody stored a pointer into without a capability to write down is exactly what it
+    // is for.
+    if cap.is_bottom() {
+        handed(at);
+    }
+    true
+}
+
+/// Marks the instance `at` lands in as one whose aux may be incomplete.
+///
+/// [`crate::check::handed`] without the init plane half, because nothing was handed anywhere here:
+/// this build wrote the word itself and only failed to describe what it wrote, so saying the bytes
+/// are initialized would be a claim about storage this has no reason to make.
+fn handed(at: *const c_void) {
+    let at = at as usize;
+    let Some(region) = alloc::covering(at) else { return };
+    let Some((lo, _)) = recover::extent(&region, at) else { return };
+    // SAFETY: the address is inside the region, which is what reading its plane asks for.
+    let version = unsafe { region.plane.version(at) };
+    recover::mark_handed(&region, lo, version);
 }
 
 /// The capability of the pointer `value`, which was loaded from the word at `at`.
@@ -594,6 +642,79 @@ mod tests {
             dealloc(holder);
             dealloc(pointee);
         }
+    }
+
+    #[test]
+    fn a_store_the_caller_could_not_place_still_clears_the_last_pointer_s_slot() {
+        let _turn = turn();
+        // tamnd/rucc#1542, which is SQLite unlinking a statement from its connection. The store
+        // arrives through a pointer to the word and brings no capability for the object the word
+        // is in, and the load a couple of calls later arrives through the object and brings a good
+        // one. Dropping the capability at the store left the previous pointer's slot beside a word
+        // that now holds a different pointer.
+        let holder = alloc(64);
+        let first = alloc(128);
+        let second = alloc(128);
+        let word = at(holder, 16);
+
+        // SAFETY: instances this test owns, and no address is read through.
+        let back = unsafe {
+            assert!(store(of(holder), word, first, of(first)));
+            assert!(store(Cap::BOTTOM, word, second, of(second)));
+            load(of(holder), word, second)
+        };
+        assert_eq!(back.lo, second as u64);
+        assert_eq!(back.ver, of(second).ver, "the slot still named the pointer before it");
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(first);
+            dealloc(second);
+        }
+    }
+
+    #[test]
+    fn a_store_with_no_capability_to_write_down_leaves_the_instance_asking_the_address() {
+        let _turn = turn();
+        // The other half of the same unlink, where the pointer being stored has no capability
+        // either because it came out of a structure copy. An empty slot on its own would say the
+        // word holds no pointer, which is a refusal of a correct program, so the instance is
+        // marked and the load recovers.
+        let holder = alloc(64);
+        let pointee = alloc(128);
+        let word = at(holder, 16);
+
+        // SAFETY: instances this test owns, and no address is read through.
+        let back = unsafe {
+            assert!(store(of(holder), word, pointee, of(pointee)));
+            assert!(store(Cap::BOTTOM, word, pointee, Cap::BOTTOM));
+            load(of(holder), word, pointee)
+        };
+        assert!(!back.is_bottom(), "a slot the store could not fill is a question, not an answer");
+        assert_eq!(back.lo, pointee as u64);
+        assert_eq!(back.ver, of(pointee).ver);
+
+        // SAFETY: the addresses `alloc` handed back.
+        unsafe {
+            dealloc(holder);
+            dealloc(pointee);
+        }
+    }
+
+    #[test]
+    fn a_word_that_is_in_no_instance_still_has_nowhere_to_write() {
+        let _turn = turn();
+        // The recovery is allowed to find a slot the caller's capability could not name. It is not
+        // allowed to invent one, and a local is the case where there is none to find.
+        let local = 0u64;
+        let pointee = alloc(128);
+        // SAFETY: the address of a local, which is never read through, and an instance this test
+        // owns.
+        let wrote = unsafe { store(Cap::BOTTOM, (&raw const local).cast(), pointee, of(pointee)) };
+        assert!(!wrote);
+        // SAFETY: the address `alloc` handed back.
+        unsafe { dealloc(pointee) };
     }
 
     #[test]
