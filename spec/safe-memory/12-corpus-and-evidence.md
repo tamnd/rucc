@@ -120,6 +120,8 @@ The process, because axis 2 lives or dies here. Every report from a tier-1 proje
 
 **There is no sixth bucket.** In particular there is no "won't fix, add to suppressions." Every report is one of the five, and the count of each is in the scoreboard.
 
+**All five of those assume a source line.** Deciding between bucket 1 and bucket 2 is deciding whether the code the report is about is doing something the standard permits, and nobody decides that from a judgement number and an address. The descriptor deliberately carries no file and no line, for the reason document 06 section 6.5 gives, so what closes the gap is the line table in the program the report came out of, which means the build that produced the report has to have been built with `-g`. A build that was not has to be done again before any of the five buckets can be assigned, and on a 250,000 line amalgamation that is the difference between a minute and an afternoon per shape. So the corpus runs pass `-g`, the programs they link are left on disk where the run happened, and a task that builds one checks the line table actually arrived rather than assuming the flag did something. Filling the `pc` field itself is a separate matter and is still ahead; the line table is what makes an address worth having.
+
 ## 12.7 Finding bugs the corpus does not contain
 
 The corpus's test suites exercise what the maintainers thought to test, which is not where the bugs are. Three additional sources of executed operations, per document 02's coverage limit.
