@@ -989,9 +989,17 @@ fn version() -> Result<()> {
                 ));
             }
         }
-        // Only the published compiler crates. `xtask` and the build tools have no docs.rs page
-        // to send anyone to.
-        if !dir.starts_with(root.join("crates")) {
+        // Every crate the release publishes, which is every member that does not say it is not
+        // for the registry. This used to be the members under `crates` and nothing else, on the
+        // reasoning that the build tools and the runtime have no docs.rs page to send anyone
+        // to. They do: `.github/publish-crates.sh` publishes every member whose manifest does
+        // not say `publish = false`, and that is all of them but `xtask`. The four it was not
+        // looking at drifted exactly the way the two it was looking at drifted before this task
+        // existed, `rucc-rules` as far back as 0.3.3, so the rule is the publish script's rule
+        // now and the two are read off the same fact.
+        let published =
+            !member.lines().any(|l| l.trim_start().starts_with("publish") && l.contains("false"));
+        if !published {
             continue;
         }
         let lib = dir.join("src/lib.rs");
