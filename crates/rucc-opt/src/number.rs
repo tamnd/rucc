@@ -68,9 +68,38 @@
 //! divisions is safe for a reason that is only true block locally: the first one is in the same
 //! block, so it has already run, and if it was going to trap the second one was never reached.
 //!
+//! # Calls
+//!
+//! Two calls to the same function with the same arguments are one value when the answer is a
+//! function of the arguments and nothing else. That is what `__attribute__((const))` says and
+//! [`crate::purity`] is what works it out, which makes this the third of the four consumers
+//! section 34.6 of `spec/optimizer/34-ipa.md` names for that analysis.
+//!
+//! A `pure` callee reads memory and writes none, so two of its calls are one value exactly when
+//! nothing wrote memory between them. Block local, that question needs no alias oracle and no
+//! memory SSA: count the writes from the top of the block and put the count in the key. Two pure
+//! calls with the same count had nothing written between them, because everything that could have
+//! written is in the block and was counted. A `const` callee reads nothing, so its count is always
+//! zero and a store between the two calls changes nothing.
+//!
+//! What counts as a write is [`Opcode::writes_memory`], which answers yes for a call because a
+//! call in general writes, and then the purity of that particular callee is asked. So an opaque
+//! call between two pure ones ends the pure one's answer and a second const call between them does
+//! not. The lifetime markers are writes here too, because they are the ones that say the bytes
+//! behind a local stopped meaning anything.
+//!
+//! The calls have their own table rather than sharing the one above. A call can have any number of
+//! arguments and the key above is a fixed size on purpose, so putting a call in it would mean
+//! paying for the call's shape on every add in the program. A call is rare enough beside an add
+//! that one allocation each is nothing.
+//!
+//! Only a direct call to a named function. A call through an address is a call to whatever the
+//! address held, and asking what that was is document 34.5's devirtualization rather than this.
+//!
 //! # What it does not do
 //!
-//! Nothing crosses a block boundary, nothing goes through memory, and no instruction moves. A
+//! Nothing crosses a block boundary, no instruction moves, and the only thing that goes through
+//! memory is the write count that a `pure` call's answer is keyed on. A
 //! duplicate is removed where it stands and its readers are pointed at the first one, which is
 //! always above it. That means a computation in two arms of a branch stays in two arms: hoisting it
 //! to the common predecessor is [`crate::hoist`], and it wants the profitability question this pass
@@ -79,8 +108,9 @@
 use std::collections::HashMap;
 
 use rucc_base::Symbol;
-use rucc_ir::{Block, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Type, Value};
+use rucc_ir::{Block, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
 
+use crate::purity::{Callee, Facts};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -90,11 +120,17 @@ const ADDRESS: &str = "address removed, an earlier one in the block computes the
 /// Recorded for any other removed duplicate.
 const MERGED: &str = "instruction removed, an earlier one in the block computes the same thing";
 
+/// Recorded for a removed call, which is what the purity analysis bought this pass.
+const CALLED: &str = "call removed, an earlier call in the block computes the same thing";
+
 /// Recorded for a duplicate that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "duplicate instruction kept, the pass ran out of fuel";
 
 /// The most operands any pure opcode has, which is the three of `select` and `fma`.
 const OPERANDS: usize = 3;
+
+/// What this pass is called, for the lists in [`crate::pipeline`] that name it.
+pub const NAME: &str = "number";
 
 /// The pass.
 #[derive(Debug)]
@@ -102,7 +138,7 @@ pub struct Number;
 
 impl Pass for Number {
     fn name(&self) -> &'static str {
-        "number"
+        NAME
     }
 
     fn describe(&self) -> &'static str {
@@ -119,44 +155,118 @@ impl Pass for Number {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let facts = an.purity();
         let mut stats = Stats::new();
-        // What each removed instruction's result is read as. It is also what an operand is looked
-        // up through while the block is being walked, which is why it is built as the walk goes
-        // and applied to the function once at the end rather than either one alone.
-        let mut same: HashMap<Value, Value> = HashMap::new();
-        let mut gone: Vec<Inst> = Vec::new();
+        let mut decided = Decided { same: HashMap::new(), gone: Vec::new() };
 
         for block in func.blocks().collect::<Vec<Block>>() {
             let mut seen: HashMap<Key, Value> = HashMap::new();
+            // The signature is beside the result rather than in the key, because a signature is
+            // pushed per call site and never interned, so two calls written the same way have two
+            // indices and comparing the indices would answer no to every question asked here. It
+            // is compared by value on a hit, which is once per duplicate rather than once per
+            // call.
+            let mut calls: HashMap<CallKey, (Sig, Value)> = HashMap::new();
+            // How many times memory has been written since the top of the block, which is what a
+            // `pure` call's answer is good for. Taken before the instruction runs, because a call
+            // that reads memory reads the version it was handed.
+            let mut memory = 0u32;
             for inst in func.insts(block).collect::<Vec<Inst>>() {
-                let Some((key, result)) = key(func, &same, inst) else { continue };
-                let Some(&first) = seen.get(&key) else {
-                    seen.insert(key, result);
-                    continue;
-                };
-                if !fuel.take() {
-                    // Out of fuel, which is a request to stop transforming and not to stop
-                    // looking. The walk goes on so that the count of what could have gone is the
-                    // same at every fuel setting, which is what makes a bisection over it
-                    // monotonic. The table is left as it is, so the next duplicate of this same
-                    // thing is counted against the same first instruction.
-                    stats.missed(NO_FUEL);
+                if let Some((key, signature, result)) =
+                    call_key(func, facts, &decided.same, inst, memory)
+                {
+                    match calls.get(&key) {
+                        Some(&(first_signature, first))
+                            if func[first_signature] == func[signature] =>
+                        {
+                            decided.take(fuel, &mut stats, inst, result, first, CALLED);
+                        }
+                        Some(_) => (),
+                        None => {
+                            calls.insert(key, (signature, result));
+                        }
+                    }
                     continue;
                 }
-                same.insert(result, first);
-                gone.push(inst);
-                stats.optimized(if is_address(func[inst].opcode) { ADDRESS } else { MERGED });
+                if wrote_memory(func, facts, inst) {
+                    memory += 1;
+                }
+                let Some((key, result)) = key(func, &decided.same, inst) else { continue };
+                match seen.get(&key) {
+                    Some(&first) => {
+                        let why = if is_address(func[inst].opcode) { ADDRESS } else { MERGED };
+                        decided.take(fuel, &mut stats, inst, result, first, why);
+                    }
+                    None => {
+                        seen.insert(key, result);
+                    }
+                }
             }
         }
 
-        for inst in gone {
+        for inst in decided.gone {
             func.remove_inst(inst);
         }
-        if !same.is_empty() {
-            substitute(func, &same);
+        if !decided.same.is_empty() {
+            substitute(func, &decided.same);
         }
         stats
+    }
+}
+
+/// What the walk has decided, which is one thing read as it goes and applied once at the end.
+struct Decided {
+    /// What each removed instruction's result is read as. It is also what an operand is looked up
+    /// through while the block is being walked, which is why it is built as the walk goes and
+    /// applied to the function at the end rather than either one alone.
+    same: HashMap<Value, Value>,
+    /// The instructions on their way out, in the order they were found.
+    gone: Vec<Inst>,
+}
+
+impl Decided {
+    /// Records that this instruction computes what an earlier one computed, or says why it stays.
+    ///
+    /// One place rather than two, because the arithmetic and the calls differ in how they are
+    /// keyed and not at all in what is done once a key has been found twice.
+    fn take(
+        &mut self,
+        fuel: &mut Fuel,
+        stats: &mut Stats,
+        inst: Inst,
+        result: Value,
+        first: Value,
+        why: &'static str,
+    ) {
+        if !fuel.take() {
+            // Out of fuel, which is a request to stop transforming and not to stop looking. The
+            // walk goes on so that the count of what could have gone is the same at every fuel
+            // setting, which is what makes a bisection over it monotonic. The table is left as it
+            // is, so the next duplicate of this same thing is counted against the same first
+            // instruction.
+            stats.missed(NO_FUEL);
+            return;
+        }
+        self.same.insert(result, first);
+        self.gone.push(inst);
+        stats.optimized(why);
+    }
+}
+
+/// Whether this instruction may have written memory, which is what ends a `pure` call's answer.
+///
+/// [`Opcode::writes_memory`] answers yes for a call, because a call in general writes. Which of
+/// them actually does is the question [`crate::purity`] was built to answer, so a call is sent
+/// there and everything else is taken at the opcode's word. A call whose callee nothing worked out
+/// is [`crate::Purity::Opaque`] and writes, which is the conservative answer and the right one.
+fn wrote_memory(func: &Func, facts: &Facts, inst: Inst) -> bool {
+    if !func[inst].opcode.writes_memory() {
+        return false;
+    }
+    match Callee::of(func, inst) {
+        Some(callee) => facts.purity_of(callee).writes_memory(),
+        None => true,
     }
 }
 
@@ -186,6 +296,32 @@ struct Key {
     tag: Tag,
     /// Its operands, resolved, padded with `None`, and put in order if the opcode does not care.
     args: [Option<Value>; OPERANDS],
+}
+
+/// What a call computes, as something two calls can be equal on.
+///
+/// Not `Copy` and not fixed size, which is why this is a second table and not a case of [`Key`].
+/// A call carries as many arguments as it was written with and there is no bound on that, so the
+/// arguments are a vector, and a vector on the arithmetic key would be an allocation per add.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CallKey {
+    /// Which function. Always a named one, per the module documentation.
+    callee: Symbol,
+    /// What the optimizer was told it may assume about this call site, on the same argument the
+    /// flags are in [`Key`] for.
+    flags: Flags,
+    /// The type of its one result.
+    ty: Type,
+    /// Its arguments, resolved through what the block has decided so far.
+    args: Vec<Value>,
+    /// How many times memory had been written when the call ran.
+    ///
+    /// Always zero for a callee whose result is a function of its arguments alone, because
+    /// nothing that happened to memory can have changed the answer. The count itself for a
+    /// callee that reads memory, so that two of those are one value exactly when nothing wrote
+    /// between them. That is the block local half of the question
+    /// [`crate::Purity::depends_only_on_arguments`] hands to the alias analysis.
+    memory: u32,
 }
 
 /// An instruction's payload, as far as one can be compared with another.
@@ -249,18 +385,67 @@ fn key(func: &Func, same: &HashMap<Value, Value>, inst: Inst) -> Option<(Key, Va
     Some((Key { opcode: data.opcode, flags: data.flags, ty: func[result].ty, tag, args }, result))
 }
 
+/// What a call computes, the signature it computes it under, and where its answer is.
+///
+/// Nothing if it is not a candidate. `memory` is the write count at the call, which is used only
+/// if the callee reads memory. The signature comes back beside the key rather than in it, for the
+/// reason the table it goes into gives.
+fn call_key(
+    func: &Func,
+    facts: &Facts,
+    same: &HashMap<Value, Value>,
+    inst: Inst,
+    memory: u32,
+) -> Option<(CallKey, Sig, Value)> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Call {
+        return None;
+    }
+    let Extra::Call(at) = data.extra else { return None };
+    let info = &func[at];
+    let callee = info.callee?;
+    // A call carrying an ABI note for an argument no parameter stands for, which is a structure
+    // passed through the ellipsis. Refused because the notes are not comparable, and a variadic
+    // function with no side effects is rare enough that nothing is lost by saying so.
+    if !func[info.varargs].is_empty() {
+        return None;
+    }
+    let purity = facts.purity_of(Callee::Direct(callee));
+    if purity.writes_memory() {
+        return None;
+    }
+    // A callee that may not come back is here as well as one that does, and the block is why. The
+    // first call is above this one in the same block, so it has already been made and control has
+    // already come back from it. A second call on the same arguments reading the same memory does
+    // what the first one did, which was come back.
+    let memory = if purity.depends_only_on_arguments() { 0 } else { memory };
+    let mut results = data.results();
+    let (Some(result), None) = (results.next(), results.next()) else { return None };
+    let args = func[data.args].iter().map(|&arg| same.get(&arg).copied().unwrap_or(arg)).collect();
+    let key = CallKey { callee, flags: data.flags, ty: func[result].ty, args, memory };
+    Some((key, info.signature, result))
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_ir::{
         Block, Builder, Def, Extra, InstData, MemInfo, MemOrder, Restrict, Signature, Type,
     };
 
+    use std::sync::Arc;
+
+    use rucc_base::Interner;
+    use rucc_ir::{AttrSet, FuncId, Module, Pic};
+    use rucc_target::{TargetInfo, Triple};
+
     use super::*;
+    use crate::CallGraph;
+    use crate::purity::{Facts, infer};
     use crate::stats::Kind;
 
     /// An empty function with one block, which is where every test below builds.
     fn blank() -> (Func, Block) {
-        let mut names = rucc_base::Interner::new();
+        let mut names = Interner::new();
         let name = names.intern("f");
         let mut func = Func::new(name, Signature::new().with_returns(&[Type::int(64)]));
         let block = func.create_block();
@@ -522,7 +707,7 @@ mod tests {
     #[test]
     fn a_repeated_global_address_is_counted_as_an_address() {
         let (mut func, block) = blank();
-        let mut names = rucc_base::Interner::new();
+        let mut names = Interner::new();
         let global = names.intern("g");
         let mut build = Builder::new(&mut func, block);
         let named = InstData { extra: Extra::Symbol(global), ..InstData::new(Opcode::GlobalAddr) };
@@ -554,5 +739,202 @@ mod tests {
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, NO_FUEL), 1);
         assert_eq!(count(&func, Opcode::Add), 2);
+    }
+
+    /// A module where `f` is built by `body` and every name in `declared` is a function with
+    /// those attributes and no body at all.
+    ///
+    /// No body on purpose. A translation unit is mostly made of calls to functions declared in a
+    /// header with an attribute on them and defined in another file, and that is the case the
+    /// purity analysis answers from the attribute alone. Every one of them takes an integer and
+    /// returns one, which is the shape `abs` has and is enough for every question here.
+    fn calling(
+        declared: &[(&str, AttrSet)],
+        body: fn(&mut Builder<'_>, &[Symbol], Sig) -> Vec<Value>,
+    ) -> (Module, FuncId, Analyses) {
+        let mut names = Interner::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        let shape = shape();
+        let mut called: Vec<Symbol> = Vec::new();
+        for &(name, attrs) in declared {
+            let name = names.intern(name);
+            let mut callee = Func::new(name, shape.clone());
+            callee.attrs.set = attrs;
+            module.add_func(callee);
+            called.push(name);
+        }
+        let returns = [Type::int(64), Type::int(64)];
+        let mut func = Func::new(names.intern("f"), Signature::new().with_returns(&returns));
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let signature = build.func().add_signature(shape);
+        let answers = body(&mut build, &called, signature);
+        build.ret(&answers);
+        let id = module.add_func(func);
+        let mut facts = Facts::of_module(&module, &names);
+        infer(&module, &CallGraph::of(&module, Pic::Executable), &mut facts);
+        let an = crate::machine::fixtures::analyses().calling(Arc::new(facts));
+        (module, id, an)
+    }
+
+    /// What every callee in these tests is declared as, which is what `abs` is declared as.
+    fn shape() -> Signature {
+        Signature::new().with_params(&[Type::int(64)]).with_returns(&[Type::int(64)])
+    }
+
+    /// Makes the call and hands back its one result.
+    fn call_of(build: &mut Builder<'_>, callee: Symbol, signature: Sig, arg: Value) -> Value {
+        let inst = build.call(callee, signature, &[arg]);
+        build.func()[inst].results().next().expect("the signature returns one value")
+    }
+
+    /// Stores something into a fresh local, which is a write to memory and nothing else.
+    fn write(build: &mut Builder<'_>) {
+        let slot = local(build);
+        let value = build.iconst(Type::int(64), 1);
+        build.store(value, slot, plain(8), Flags::NONE);
+    }
+
+    #[test]
+    fn two_calls_to_a_const_function_on_the_same_argument_are_one_call() {
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            vec![call_of(build, at[0], sig, arg), call_of(build, at[0], sig, arg)]
+        });
+        let stats = Number.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, CALLED), 1);
+        assert_eq!(count(&module[id], Opcode::Call), 1);
+        let answers = returned(&module[id]);
+        assert_eq!(answers[0], answers[1]);
+    }
+
+    #[test]
+    fn two_calls_to_a_const_function_on_different_arguments_stay_two() {
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let one = build.iconst(Type::int(64), 7);
+            let other = build.iconst(Type::int(64), 8);
+            vec![call_of(build, at[0], sig, one), call_of(build, at[0], sig, other)]
+        });
+        assert!(!Number.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(count(&module[id], Opcode::Call), 2);
+    }
+
+    #[test]
+    fn a_store_between_two_const_calls_changes_nothing() {
+        // Which is the whole difference between `const` and `pure`. The answer is a function of
+        // the argument, so what happened to memory in between is not part of the question.
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            let first = call_of(build, at[0], sig, arg);
+            write(build);
+            vec![first, call_of(build, at[0], sig, arg)]
+        });
+        let stats = Number.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, CALLED), 1);
+        assert_eq!(count(&module[id], Opcode::Call), 1);
+    }
+
+    #[test]
+    fn two_calls_to_a_pure_function_with_nothing_written_between_them_are_one_call() {
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READONLY)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            vec![call_of(build, at[0], sig, arg), call_of(build, at[0], sig, arg)]
+        });
+        let stats = Number.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, CALLED), 1);
+        assert_eq!(count(&module[id], Opcode::Call), 1);
+    }
+
+    #[test]
+    fn a_store_between_two_pure_calls_keeps_both_of_them() {
+        // The store is to a fresh local nothing else can name, so an alias oracle would say the
+        // callee cannot have read it. This pass has no oracle and does not ask one. A write is a
+        // write and the second call is a different value, which is the conservative answer and
+        // the one that needs no analysis to be right.
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READONLY)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            let first = call_of(build, at[0], sig, arg);
+            write(build);
+            vec![first, call_of(build, at[0], sig, arg)]
+        });
+        assert!(!Number.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(count(&module[id], Opcode::Call), 2);
+    }
+
+    #[test]
+    fn a_const_call_between_two_pure_calls_changes_nothing() {
+        // A call is a write until something says otherwise, and here something does. Without
+        // that this would be the store case and the two reads would stay two.
+        let declared = [("g", AttrSet::READONLY), ("h", AttrSet::READNONE)];
+        let (mut module, id, mut an) = calling(&declared, |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            let first = call_of(build, at[0], sig, arg);
+            call_of(build, at[1], sig, arg);
+            vec![first, call_of(build, at[0], sig, arg)]
+        });
+        let stats = Number.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, CALLED), 1);
+        assert_eq!(count(&module[id], Opcode::Call), 2);
+    }
+
+    #[test]
+    fn two_calls_to_a_function_that_may_write_anything_stay_two() {
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::NONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            vec![call_of(build, at[0], sig, arg), call_of(build, at[0], sig, arg)]
+        });
+        assert!(!Number.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(count(&module[id], Opcode::Call), 2);
+    }
+
+    #[test]
+    fn two_calls_stay_two_when_nothing_worked_the_purity_out() {
+        // Which is the `-O0` pipeline, and every caller that builds an analysis cache by hand. A
+        // pass has to be correct against the empty facts, because that is what it is handed until
+        // somebody fills them in.
+        let (mut module, id, _) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            vec![call_of(build, at[0], sig, arg), call_of(build, at[0], sig, arg)]
+        });
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(!Number.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(count(&module[id], Opcode::Call), 2);
+    }
+
+    #[test]
+    fn two_call_sites_with_their_own_signature_entries_are_still_one_call() {
+        // A signature is pushed per call site and never interned, so a function called twice has
+        // two entries that are equal and not the same index. Every call a real front end makes
+        // looks like this, which is why the fixture above, where both calls share one entry, is
+        // the case that does not happen and this one is the case that does.
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            let first = call_of(build, at[0], sig, arg);
+            let own = build.func().add_signature(shape());
+            assert_ne!(own, sig);
+            vec![first, call_of(build, at[0], own, arg)]
+        });
+        let stats = Number.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, CALLED), 1);
+        assert_eq!(count(&module[id], Opcode::Call), 1);
+    }
+
+    #[test]
+    fn two_calls_under_signatures_that_are_not_the_same_stay_two() {
+        // The same name called two ways, which C does not let a translation unit write and the
+        // pass does not rely on C to prevent. The two signatures agree on what goes in and what
+        // comes out and disagree on whether there is an ellipsis, which is enough to make them a
+        // different call and is the smallest difference that says so.
+        let (mut module, id, mut an) = calling(&[("g", AttrSet::READNONE)], |build, at, sig| {
+            let arg = build.iconst(Type::int(64), 7);
+            let first = call_of(build, at[0], sig, arg);
+            let mut other = shape();
+            other.variadic = true;
+            let other = build.func().add_signature(other);
+            vec![first, call_of(build, at[0], other, arg)]
+        });
+        assert!(!Number.run(&mut module[id], &mut an, &mut Fuel::unlimited()).changed());
+        assert_eq!(count(&module[id], Opcode::Call), 2);
     }
 }

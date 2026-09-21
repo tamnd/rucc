@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    load, modref, nofree, outside, params, pass, purity, reload,
+    load, modref, nofree, number, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -75,12 +75,15 @@ const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
-/// One so far, and section 34.6 of `spec/optimizer/34-ipa.md` names the other three it is waiting
-/// for: the value numbering treating two calls with the same arguments as one value, the
-/// speculation predicate, and document 08.4's call handling inside the alias oracle. A list from
-/// the start for the reason the two above it are lists, which is that a pass left out of one reads
-/// the empty answer and loses an optimization rather than producing a wrong program.
-const READS_PURITY: &[&str] = &[dce::NAME];
+/// Two, which are two of the four consumers section 34.6 of `spec/optimizer/34-ipa.md` names.
+/// Document 17's dead code elimination deletes a call whose result nothing reads. Document 16's
+/// value numbering makes two calls with the same arguments one value. The other two turned out to
+/// want the finer answer rather than this one and are in the list below: document 27.1's
+/// speculation predicate and document 08.4's call handling both read the mod and ref summaries,
+/// which say which memory rather than whether any. A list from the start for the reason the two
+/// above it are lists, which is that a pass left out of one reads the empty answer and loses an
+/// optimization rather than producing a wrong program.
+const READS_PURITY: &[&str] = &[dce::NAME, number::NAME];
 
 /// Which passes ask what a call does to the memory it was handed.
 ///
