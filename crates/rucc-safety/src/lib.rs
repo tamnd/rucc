@@ -428,6 +428,23 @@ pub fn insert(
                     counts.carried += 1;
                 }
             }
+            Opcode::Memset => {
+                // The two checks in front, in the order a store's two go in, because a fill is a
+                // write of as many bytes as it says through a pointer somebody handed it and a
+                // fill that runs off the end of an object is the overflow this build exists to
+                // report.
+                if spanned(func, &mut origins, inst) {
+                    counts.checked += 1;
+                    counts.live += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+                // Both plane writes go in behind it, and they go in together or not at all.
+                if recorded(func, plane, inst) {
+                    counts.wrote += 1;
+                    counts.judged += 1;
+                }
+            }
             Opcode::PtrAdd => {
                 if derivation(func, &mut origins, inst) {
                     counts.derived += 1;
@@ -521,6 +538,104 @@ fn check(
     func.insert_before(live, access);
 
     Some(capability)
+}
+
+/// Puts `check_bounds` and `check_live` immediately before one fill, over the bytes it covers.
+///
+/// The same two instructions [`check`] puts in front of a `load` or a `store`, and a separate
+/// function rather than a case in that one because of where the byte count comes from. That one
+/// takes it out of the access's payload, and half the fills in the IR hold their count in an
+/// operand instead, since an object whose length the program works out is zeroed by a fill of a
+/// length the program works out. `check_bounds` has an operand for exactly that, which
+/// `spec/safe-memory/07-check-elimination.md` section 7.4 put there for the one check that stands
+/// for a loop, and a fill is the other thing that needs it. The payload still travels either way,
+/// because it holds the alignment and what the front end named the bytes.
+///
+/// The lifetime check has no payload for the reason it has none in front of an access: whether the
+/// capability still names whoever owns the address is a question about the pointer rather than
+/// about how many bytes are going through it.
+fn spanned(func: &mut Func, origins: &mut origin::Origins, fill: Inst) -> bool {
+    let Some(bulk) = func.bulk(fill) else { return false };
+    let Extra::Mem(info) = func[fill].extra else { return false };
+    let mut info = func[info];
+    // Not the padding after it, for the reason [`check`] gives about an access.
+    info.owns = 0;
+
+    let span = func.span(fill);
+    let capability = origins.of(func, bulk.to, fill);
+
+    let mut operands = vec![capability, bulk.to];
+    operands.extend(bulk.length);
+    let args = func.push_values(&operands);
+    let extra = Extra::Mem(func.add_mem(info));
+    let bounds =
+        func.create_inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[], span);
+    func.insert_before(bounds, fill);
+
+    let args = func.push_values(&[capability, bulk.to]);
+    let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
+    func.insert_before(live, fill);
+
+    true
+}
+
+/// Puts the two plane writes a fill owes in behind it, and says whether it did.
+///
+/// One function rather than two calls beside each other in the walk, because both read the same
+/// length and the length of a fill whose payload holds it is a constant that has to be made:
+/// asking for it twice would make it twice.
+///
+/// The init plane's write goes in first so that the type plane's ends up in front of it, since both
+/// are inserted after the same instruction and the one that goes in second is the one that lands
+/// nearer to it. That is the order a store's two are in, and it is a matter of what reads well
+/// rather than of what is correct, since neither reads what the other wrote.
+fn recorded(func: &mut Func, plane: &Plane, fill: Inst) -> bool {
+    let Some(to) = func.bulk(fill).map(|bulk| bulk.to) else { return false };
+    let Some((made, length)) = copied(func, fill) else { return false };
+    scrubbed(func, fill, made, to, length);
+    untyped(func, plane, fill, made, to, length);
+    true
+}
+
+/// Puts a `meta_init` immediately after one fill, recording that the bytes it covered hold
+/// something.
+///
+/// What [`wrote`] does for a store, said about a range the fill already carries rather than about a
+/// width worked out from a type. A fill writes a byte into every one of those bytes, so every one
+/// of them holds what was written, and a plane that went on saying otherwise is what made
+/// `struct S s = {0};` leave a zeroed object the monitor thought was never written.
+///
+/// The length and the instruction to go in after are handed over rather than worked out, because
+/// the type plane's write beside this one reads the same length and a second [`copied`] would make
+/// a second constant for it.
+fn scrubbed(func: &mut Func, fill: Inst, made: Inst, to: Value, length: Value) {
+    let span = func.span(fill);
+    let args = func.push_values(&[to, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInit) };
+    let written = func.create_inst(data, &[], span);
+    func.insert_after(written, made);
+}
+
+/// Puts a `meta_type` immediately after one fill, recording that the bytes it covered hold no type.
+///
+/// The type-plane operation `spec/safe-memory/06-instrumentation.md` section 6.3 asks a fill for,
+/// and the entry is the untyped one every time rather than whatever the front end named. A fill
+/// writes a byte over a range and a byte is not a value of any type, so C 6.5 leaves the bytes with
+/// no effective type at all and the plane's untyped entry is the one that says so.
+///
+/// What it is really for is taking away what was there before. Without it the plane goes on
+/// describing an object that has been filled over, so a program that stores a `float` through a
+/// piece of allocated storage, fills the whole thing and reads it back as an `int` is refused for
+/// reading bytes at a type they do not hold, which is over-reporting and is the direction
+/// `spec/safe-memory/09-type-init-and-races.md` section 9.1 says this design does not go in. The
+/// untyped entry is compatible with every access, so what it costs is a question that is not asked.
+fn untyped(func: &mut Func, plane: &Plane, fill: Inst, made: Inst, to: Value, length: Value) {
+    let span = func.span(fill);
+    let args = func.push_values(&[to, length]);
+    let extra = Extra::Node(plane.entry(None));
+    let data = InstData { args, extra, ..InstData::new(Opcode::MetaType) };
+    let judged = func.create_inst(data, &[], span);
+    func.insert_after(judged, made);
 }
 
 /// Puts a `meta_type` immediately after one store, recording what its bytes were stored through.
@@ -2433,6 +2548,117 @@ mod tests {
              meta_type_copy %0, %1, %2\n    \
              meta_init_copy %0, %1, %2\n    \
              cap_copy %0, %1, %2\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_fill_is_checked_over_the_bytes_it_covers_and_records_that_it_wrote_them() {
+        // Issue 1552. A fill went through this pass and came out with nothing at all in front of
+        // it or behind it, so a `struct S s = {0};` was a write nothing bounded and a zeroed
+        // object the init plane went on calling unwritten. The count is in the payload here, so
+        // the bounds check reads it there and the two plane writes read a constant made beside
+        // the fill.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("zero"),
+            Signature::new().with_params(&[Type::PTR, Type::int(8)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let byte = func.append_param(entry, Type::int(8));
+
+        let info = MemInfo {
+            size: 24,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, byte]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memset) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "zero.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 1, live: 1, wrote: 1, judged: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @zero(ptr, i8), linkage(external) {\n\
+             block0(%0: ptr, %1: i8):\n    \
+             %2 = cap_of %0\n    \
+             check_bounds %2, %0, size 24, align 4\n    \
+             check_live %2, %0\n    \
+             memset %0, %1, size 24, align 4\n    \
+             %3 = iconst.i64 24\n    \
+             meta_type %0, %3, tbaa !1\n    \
+             meta_init %0, %3\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_fill_of_a_length_the_program_works_out_is_checked_over_that_length() {
+        // The other form, and the reason the bounds check in front of a fill is not the one
+        // [`check`] puts in front of an access: there is no number in the payload to read, so the
+        // count travels as the third operand `check_bounds` has for a length nobody knew when the
+        // access was parsed, and the two plane writes read the fill's own operand.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("zero"),
+            Signature::new().with_params(&[Type::PTR, Type::int(8), Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let byte = func.append_param(entry, Type::int(8));
+        let length = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, byte, length]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memset) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "zero.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 1, live: 1, wrote: 1, judged: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @zero(ptr, i8, i64), linkage(external) {\n\
+             block0(%0: ptr, %1: i8, %2: i64):\n    \
+             %3 = cap_of %0\n    \
+             check_bounds %3, %0, %2, align 1\n    \
+             check_live %3, %0\n    \
+             memset %0, %1, %2, align 1\n    \
+             meta_type %0, %2, tbaa !1\n    \
+             meta_init %0, %2\n    \
              return\n\
              }\n"
         );

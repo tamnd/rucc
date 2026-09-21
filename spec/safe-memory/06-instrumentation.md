@@ -171,6 +171,10 @@ Insertion runs in `rucc-safety` on the IR produced by `rucc-lower`, before `rucc
 
 **`memcpy`, `memmove`, `memset` and the string builtins** get range checks on both operands and a type-plane operation: `memcpy` sets the destination's effective type to the source's, per C 6.5's `memcpy` rule, which is what makes document 03's `memcpy`-punning idiom work rather than fire.
 
+A fill's type-plane operation is the untyped entry over the range rather than anything the front end named, because a fill writes a byte and a byte is not a value of any type, so C 6.5 leaves the bytes it covered with no effective type at all. What that is really for is taking away what was there before: a plane that went on describing the object a fill has written over would refuse a program that stores a `float` through allocated storage, fills the whole thing and reads it back as an `int`, and that is over-reporting, which is the direction document 09 section 9.1 says this design does not go in. The untyped entry is compatible with every access, so what it costs is a question that is not asked.
+
+Both of a fill's range checks are over the same operand, since a fill reads no memory: the byte it writes is a value and not an address. Where the count comes from is the payload where the front end knew it and the third operand of `check_bounds` where the program works it out, which is the same operand section 7.4 put there for the check that stands for a loop. An object whose length the program computes is zeroed by a fill of a length the program computes, so the two are not a rare case and a common one.
+
 ### 6.3.1 The three bounds-check forms
 
 Document 05 chose base-and-extent so that the hot check is one unsigned compare:
