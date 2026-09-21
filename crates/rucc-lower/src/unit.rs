@@ -277,6 +277,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         module,
         diagnostics: Vec::new(),
         strings: HashMap::new(),
+        anonymous: 0,
         statics: HashMap::new(),
         labels: HashMap::new(),
         done: HashSet::new(),
@@ -323,6 +324,9 @@ pub(crate) struct Unit<'a> {
     /// The global each string literal was emitted as, so that two mentions of one literal are
     /// one object.
     strings: HashMap<StrId, Symbol>,
+    /// How many runs of bytes written under no label in an `asm` at file scope have been given a
+    /// name, which is what keeps the next one from being given the same one.
+    anonymous: usize,
     /// The name each object with no linkage was given.
     statics: HashMap<DeclId, Symbol>,
     /// The name each label an image holds the address of was given.
@@ -468,8 +472,20 @@ impl Unit<'_> {
     }
 
     /// One global an `asm` at file scope defined.
+    ///
+    /// The bytes a template writes before it writes any label are a global like the rest and a
+    /// global has to have a name, so one is minted here. Nothing refers to it, so the only thing
+    /// the name has to be is one nothing else takes, and the leading dot keeps it out of the
+    /// symbol table the way the name of a string literal does.
     fn piece(&mut self, piece: directives::Piece) {
-        let symbol = self.names.intern(&piece.name);
+        let symbol = match &piece.name {
+            Some(name) => self.names.intern(name),
+            None => {
+                let name = format!(".Lasm.{}", self.anonymous);
+                self.anonymous += 1;
+                self.names.intern(&name)
+            }
+        };
         let mut global = Global::new(symbol, piece.size, piece.align.max(1));
         global.linkage = piece.linkage;
         global.visibility = piece.visibility;

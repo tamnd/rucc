@@ -41,11 +41,19 @@
 //! offset every alignment inside it divides. That is arranged rather than hoped for: the first
 //! global of a section is given the largest alignment anything in that section asked for.
 //!
+//! Bytes written before any label are a run of their own and are given a name nothing else takes,
+//! because a global has to have a name and nothing outside the template can name these. They are
+//! still a global in the same section written before the label that follows them, so the label is
+//! where an assembler would have put it and the bytes are where a program reading backwards from
+//! it expects. A label written as a number is not one of these runs at all: it is local, it may be
+//! written again further down, and what it is for is the distance from somewhere else in the same
+//! block, so it is recorded as a position and leaves the run it stands inside alone.
+//!
 //! One difference from an assembler survives this and is deliberate. An alignment written after
-//! the last byte of a section pads the section out in `gas` and does nothing here, because the
-//! padding belongs to no label and a global has to have a name. Nothing can read those bytes: the
-//! section still records the alignment it asked for, so the linker puts whatever follows it at
-//! the same place either way, and every symbol in the file is at the same offset it would be.
+//! the last byte of a section pads the section out in `gas` and does nothing here, because nothing
+//! has been written for the padding to go in front of. Nothing can read those bytes: the section
+//! still records the alignment it asked for, so the linker puts whatever follows it at the same
+//! place either way, and every symbol in the file is at the same offset it would be.
 
 use std::collections::HashMap;
 
@@ -127,8 +135,13 @@ pub(crate) struct Assembled {
 /// One global a template defines, which is one label and everything written under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Piece {
-    /// The name the label gave it.
-    pub name: String,
+    /// The name the label gave it, and nothing for bytes written under no label.
+    ///
+    /// A template may write bytes before it writes any label, which is a thing with no name that
+    /// a global has to have one for, so the walk mints one that no C program can collide with.
+    /// The bytes are still part of the run the template is laying out, and they land where they
+    /// were written because the globals of one template are added to the module in order.
+    pub name: Option<String>,
     /// Which section it goes in.
     pub section: Section,
     /// What it has to be aligned to, which is what the last alignment directive in front of the
@@ -197,8 +210,8 @@ struct Where {
 /// The global being filled in, which is the last label and what has been written since.
 #[derive(Debug)]
 struct Open {
-    /// The label's name.
-    name: String,
+    /// The label's name, and nothing when the bytes were written under no label.
+    name: Option<String>,
     /// Which of [`Assembler::sections`] it is in.
     section: usize,
     /// What the label was aligned to.
@@ -248,6 +261,8 @@ struct Assembler<'a> {
     sections: Vec<Where>,
     /// Which of them is being written to.
     current: usize,
+    /// The sections a `.pushsection` left to come back to, the last one first.
+    stack: Vec<usize>,
     /// The globals finished so far.
     pieces: Vec<Piece>,
     /// The names a `.set` equated to another name, in the order they were written.
@@ -256,6 +271,9 @@ struct Assembler<'a> {
     open: Option<Open>,
     /// Where every label of this block is.
     labels: HashMap<String, Value>,
+    /// Where the last local label of each number is, which is what a reference ending in `b`
+    /// asks for.
+    locals: HashMap<i64, Value>,
     /// The names a directive exported, and how.
     linkage: HashMap<String, Linkage>,
     /// The names a directive said how far they reach.
@@ -274,10 +292,12 @@ impl<'a> Assembler<'a> {
         Assembler {
             sections: vec![Where { section: Section::Text, at: 0 }],
             current: 0,
+            stack: Vec::new(),
             pieces: Vec::new(),
             sets: Vec::new(),
             open: None,
             labels: HashMap::new(),
+            locals: HashMap::new(),
             linkage: HashMap::new(),
             visibility: HashMap::new(),
             sizes: HashMap::new(),
@@ -308,7 +328,24 @@ impl<'a> Assembler<'a> {
     }
 
     /// One label, which closes the global above it and opens the one under it.
+    ///
+    /// A label written as a number is a local one and does none of that. It is a name that may be
+    /// written again further down, so nothing outside the template can be given it and no symbol
+    /// is wanted for it: what it is for is the distance from it to somewhere else in the same
+    /// block, which is a number this reader works out. So it records where the position is and
+    /// leaves the global being filled in alone, which is what keeps the bytes either side of one
+    /// in the same global the way an assembler keeps them in the same section.
     fn label(&mut self, name: &str) -> Result<(), Failed> {
+        if let Ok(number) = name.parse::<i64>() {
+            // The padding an alignment asks for is written when the next byte is, so where this
+            // one stands is not settled yet and the distance from it would be the one before the
+            // padding. Refused rather than answered with the number that is to hand.
+            if self.pending > 1 {
+                return Err(unsupported(format!("an alignment in front of the label '{name}'")));
+            }
+            self.locals.insert(number, self.here());
+            return Ok(());
+        }
         if self.labels.contains_key(name) {
             return Err(unsupported(format!("the label '{name}' written twice")));
         }
@@ -321,7 +358,7 @@ impl<'a> Assembler<'a> {
             Value { section: Some(self.current), offset: i64::try_from(at).unwrap_or(0) },
         );
         self.open = Some(Open {
-            name: name.to_owned(),
+            name: Some(name.to_owned()),
             section: self.current,
             align,
             items: Vec::new(),
@@ -330,15 +367,30 @@ impl<'a> Assembler<'a> {
         Ok(())
     }
 
+    /// Where the position is, which is an offset into the section being written to.
+    fn here(&self) -> Value {
+        let at = self.sections[self.current].at;
+        Value { section: Some(self.current), offset: i64::try_from(at).unwrap_or(0) }
+    }
+
     /// One directive and the text after its name.
     fn directive(&mut self, name: &str, operands: &str) -> Result<(), Failed> {
         match name {
             ".text" => self.section(Section::Text),
             ".data" => self.section(Section::Data),
             ".bss" => self.section(Section::Bss),
-            ".section" => {
-                let named = split(operands).into_iter().next().unwrap_or_default();
-                self.section(section_named(named.trim_matches('"')));
+            ".section" => self.section(self.named(operands)),
+            // The same directive with a stack behind it, which is how a template writes something
+            // into another section without having to know which section it was standing in.
+            ".pushsection" => {
+                self.stack.push(self.current);
+                self.section(self.named(operands));
+            }
+            ".popsection" => {
+                let Some(back) = self.stack.pop() else {
+                    return Err(unsupported("a '.popsection' with nothing pushed".to_owned()));
+                };
+                self.move_to(back);
             }
             ".globl" | ".global" => self.says(operands, Said::Linkage(Linkage::External)),
             ".local" => self.says(operands, Said::Linkage(Linkage::Internal)),
@@ -366,17 +418,29 @@ impl<'a> Assembler<'a> {
         Ok(())
     }
 
+    /// Which section a directive's operands named, which is the first of them.
+    fn named(&self, operands: &str) -> Section {
+        let named = split(operands).into_iter().next().unwrap_or_default();
+        section_named(named.trim_matches('"'))
+    }
+
     /// Moves to a section, which closes whatever was being written to the last one.
     fn section(&mut self, section: Section) {
-        self.close();
-        self.pending = 1;
-        self.current = match self.sections.iter().position(|held| held.section == section) {
+        let index = match self.sections.iter().position(|held| held.section == section) {
             Some(index) => index,
             None => {
                 self.sections.push(Where { section, at: 0 });
                 self.sections.len() - 1
             }
         };
+        self.move_to(index);
+    }
+
+    /// The same, to a section this template has already been in.
+    fn move_to(&mut self, index: usize) {
+        self.close();
+        self.pending = 1;
+        self.current = index;
     }
 
     /// A directive that says one thing about each of the names it lists.
@@ -549,8 +613,21 @@ impl<'a> Assembler<'a> {
         if *section == Section::Bss && !matches!(item, Item::Zero(_)) {
             return Err(unsupported("data in a section that carries none".to_owned()));
         }
-        let Some(open) = self.open.as_mut() else {
-            return Err(unsupported("data at file scope under no label".to_owned()));
+        // Bytes under no label, which are bytes all the same. They become a global of their own
+        // with a name the walk mints, and they land in front of whatever label comes next because
+        // the globals of one template are added to the module in the order it wrote them.
+        let open = match self.open.as_mut() {
+            Some(open) => open,
+            // The alignment is one because whatever the last directive asked for has already been
+            // written as the padding in front of these bytes, which is what an alignment in front
+            // of data is here and is what it is in an assembler.
+            None => self.open.insert(Open {
+                name: None,
+                section: self.current,
+                align: 1,
+                items: Vec::new(),
+                size: 0,
+            }),
         };
         let size = item.size();
         open.size += size;
@@ -578,18 +655,26 @@ impl<'a> Assembler<'a> {
         self.close();
         // A name in the text section is a function, and what is under it here is nothing, since
         // anything that would have been is an instruction and was refused where it was written.
-        if let Some(piece) = self.pieces.iter().find(|piece| piece.section == Section::Text) {
-            return Err(unsupported(format!("the label '{}' in the text section", piece.name)));
+        // Only a label gets here, since bytes written into the text section were refused where
+        // they were written and a label is therefore the only thing that puts a piece in it.
+        if let Some(name) = self
+            .pieces
+            .iter()
+            .find(|piece| piece.section == Section::Text)
+            .and_then(|piece| piece.name.as_deref())
+        {
+            return Err(unsupported(format!("the label '{name}' in the text section")));
         }
         for piece in &mut self.pieces {
-            piece.linkage = self.linkage.get(&piece.name).copied().unwrap_or(Linkage::Internal);
-            piece.visibility =
-                self.visibility.get(&piece.name).copied().unwrap_or(Visibility::Default);
-            if let Some(&said) = self.sizes.get(&piece.name) {
+            // Bytes under no label have no name for a directive to have said anything about, so
+            // they stay internal and nothing can have claimed a size for them either.
+            let Some(name) = piece.name.as_deref() else { continue };
+            piece.linkage = self.linkage.get(name).copied().unwrap_or(Linkage::Internal);
+            piece.visibility = self.visibility.get(name).copied().unwrap_or(Visibility::Default);
+            if let Some(&said) = self.sizes.get(name) {
                 if u64::try_from(said) != Ok(piece.size) {
                     return Err(unsupported(format!(
-                        "a '.size' of '{}' that is not what was written under it",
-                        piece.name
+                        "a '.size' of '{name}' that is not what was written under it"
                     )));
                 }
             }
@@ -732,6 +817,21 @@ impl<'a> Assembler<'a> {
         }
     }
 
+    /// Where a local label of that number is, looking the way the letter behind it said.
+    ///
+    /// Backwards only. A reference to one below where it is written is a thing an assembler
+    /// answers by going round twice, and this reader goes round once, so it is refused by name
+    /// rather than answered with the last one above, which would be a different label.
+    fn local(&self, number: i64, which: char) -> Result<Value, Failed> {
+        if which == 'f' {
+            return Err(unsupported(format!("the local label '{number}f', which is below it")));
+        }
+        self.locals
+            .get(&number)
+            .copied()
+            .ok_or_else(|| unsupported(format!("the local label '{number}b', which has no label")))
+    }
+
     /// A number, a character, a label, the position, or a bracketed expression.
     fn atom(&self, text: &[char], at: &mut usize) -> Result<Value, Failed> {
         match text.get(*at) {
@@ -755,7 +855,20 @@ impl<'a> Assembler<'a> {
                 }
                 Ok(Value::number(i64::from(u32::from(c))))
             }
-            Some(c) if c.is_ascii_digit() => number(text, at),
+            Some(c) if c.is_ascii_digit() => {
+                let value = number(text, at)?;
+                // A number with a `b` or an `f` behind it is a reference to a local label rather
+                // than a number, and the letter says which way to look for it.
+                let behind = text.get(*at).copied();
+                let joined = text.get(*at + 1).copied().is_some_and(is_name);
+                match behind {
+                    Some(which @ ('b' | 'f')) if !joined => {
+                        *at += 1;
+                        self.local(value.offset, which)
+                    }
+                    _ => Ok(value),
+                }
+            }
             Some(c) if is_name(*c) => {
                 let start = *at;
                 while text.get(*at).is_some_and(|&c| is_name(c)) {
@@ -763,11 +876,7 @@ impl<'a> Assembler<'a> {
                 }
                 let name: String = text[start..*at].iter().collect();
                 if name == "." {
-                    let here = self.sections[self.current].at;
-                    return Ok(Value {
-                        section: Some(self.current),
-                        offset: i64::try_from(here).unwrap_or(0),
-                    });
+                    return Ok(self.here());
                 }
                 self.labels
                     .get(&name)
@@ -787,8 +896,8 @@ fn is_name(c: char) -> bool {
 /// Whether that text is one name and nothing else.
 ///
 /// A name that starts with a digit is a local label, which is a name that may be written again
-/// further down and is therefore not a name anything outside the template can be given. Those are
-/// not read here at all yet, and this is where one written in a `.set` is turned down.
+/// further down and is therefore not a name anything outside the template can be given. This is
+/// where one written in a `.set` is turned down, since the thing a `.set` names is a symbol.
 fn is_a_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(|c| is_name(c) && !c.is_ascii_digit()) && chars.all(is_name)
@@ -1024,6 +1133,11 @@ mod tests {
         assemble(template, &mut |_| Ok(held.clone())).map(|read| read.pieces)
     }
 
+    /// What each piece is called, with an empty name for the bytes written under no label.
+    fn named(pieces: &[Piece]) -> Vec<&str> {
+        pieces.iter().map(|piece| piece.name.as_deref().unwrap_or_default()).collect()
+    }
+
     /// The bytes a piece's image adds up to, with a zero run written out.
     fn image(piece: &Piece) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1071,7 +1185,7 @@ gSize:
 .text
 ";
         let pieces = with_file(template, &[7u8; 962]).expect("the template is read");
-        let names: Vec<&str> = pieces.iter().map(|piece| piece.name.as_str()).collect();
+        let names = named(&pieces);
         assert_eq!(names, ["gData", "gEnd", "gSize"]);
         assert!(pieces.iter().all(|piece| piece.section == Section::ReadOnly));
         assert!(pieces.iter().all(|piece| piece.linkage == Linkage::External));
@@ -1097,6 +1211,55 @@ gSize:
         assert_eq!(image(&pieces[0]), [1]);
         assert_eq!(pieces[1].align, 4, "the label took the alignment rather than the bytes");
         assert_eq!(pieces[0].align, 4, "and the first of the section carries the largest");
+    }
+
+    /// The bytes a template writes before it writes any label, which tcc's test file starts with.
+    ///
+    /// They are a run of their own with no name, in the same section as the label that follows
+    /// them and written before it, which is what makes the first byte under that label the one
+    /// written under it rather than the one written above.
+    #[test]
+    fn bytes_written_before_any_label_are_a_run_of_their_own_in_front_of_it() {
+        let pieces = read(".data\n.byte 41\nstuff:\n.byte 42\n").expect("the template is read");
+        assert_eq!(named(&pieces), ["", "stuff"]);
+        assert_eq!(image(&pieces[0]), [41]);
+        assert_eq!(image(&pieces[1]), [42]);
+        assert_eq!(pieces[0].section, Section::Data);
+        assert_eq!(pieces[0].linkage, Linkage::Internal, "nothing can have said otherwise");
+
+        // The same where a section directive is what closed the run above, since moving to a
+        // section finishes what was being written the way a label does.
+        let pieces = read(".data\nx:\n.byte 1\n.bss\n.zero 4\n").expect("read");
+        assert_eq!(named(&pieces), ["x", ""]);
+        assert_eq!(pieces[1].items, [Item::Zero(4)]);
+    }
+
+    /// A label written as a number, which is a position to measure from and not a symbol.
+    #[test]
+    fn a_local_label_is_a_place_the_bytes_around_it_can_measure_from() {
+        let template = ".data\nstuff:\n661:\n.byte 42\n662:\n.byte 662b - 661b\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(named(&pieces), ["stuff"], "a number defines nothing and closes nothing");
+        assert_eq!(image(&pieces[0]), [42, 1]);
+
+        // Written again further down, where what a reference means is the last one above it.
+        let template = ".data\nx:\n1:\n.byte 7\n.byte 1b - x\n1:\n.byte 1b - x\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(image(&pieces[0]), [7, 0, 2]);
+    }
+
+    /// `.pushsection` and `.popsection`, which is how a template writes into another section
+    /// without having to know which one it was standing in.
+    #[test]
+    fn a_pushed_section_is_gone_back_to_where_it_was_left_when_the_template_pops() {
+        let template = ".data\nx:\n.byte 1\n.pushsection .init_array\ny:\n.quad 0\n\
+                        .popsection\n.byte 2\n";
+        let pieces = read(template).expect("the template is read");
+        assert_eq!(named(&pieces), ["x", "y", ""]);
+        assert_eq!(pieces[0].section, Section::Data);
+        assert_eq!(pieces[1].section, Section::Named(".init_array".to_owned()));
+        assert_eq!(pieces[2].section, Section::Data, "which is where the pop went back to");
+        assert_eq!(image(&pieces[2]), [2]);
     }
 
     /// A name is internal unless something exported it, which is what an assembler does.
@@ -1236,13 +1399,16 @@ gSize:
     fn what_a_reader_of_directives_does_not_do_is_refused_rather_than_guessed_at() {
         let cases = [
             (".data\nx:\n.byte 1\n.byte 1\nx:\n", "the label 'x' written twice"),
-            (".data\n.byte 1\n", "data at file scope under no label"),
             (".text\nx:\n.byte 1\n", "data in the text section at file scope"),
             (".text\nx:\n", "the label 'x' in the text section"),
             (".bss\nx:\n.byte 1\n", "data in a section that carries none"),
             (".data\nx:\n.quad elsewhere\n", "the name 'elsewhere' in an expression"),
             (".data\nx:\n.cfi_startproc\n", "the '.cfi_startproc' directive at file scope"),
             (".data\n.balign 3\nx:\n.byte 1\n", "an alignment of 3"),
+            (".data\n.balign 4\n661:\n.byte 1\n", "an alignment in front of the label '661'"),
+            (".data\nx:\n.byte 661f\n", "the local label '661f', which is below it"),
+            (".data\nx:\n.byte 661b\n", "the local label '661b', which has no label"),
+            (".data\nx:\n.popsection\n", "a '.popsection' with nothing pushed"),
         ];
         for (template, want) in cases {
             let failed = read(template).expect_err(template);

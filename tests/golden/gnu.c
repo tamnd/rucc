@@ -324,6 +324,24 @@ static void the_default(void) { use(0); }
 
 __asm__(".weak an_override\n.set an_override, the_default");
 
+// Bytes written before any label, and a label written as a number. The bytes are a global like
+// the rest and are given a name here because a global has one, and they land in front of the
+// label under them so that `stuff[0]` is the byte written under `stuff`. A number is a local
+// label, which may be written again further down and is therefore nothing the object file holds a
+// name for: it is a place the template measures from, and the bytes either side of one stay in
+// the same global, which is what makes the last line below the distance between the two.
+__asm__(".data\n"
+        ".byte 41\n"
+        "stuff:\n"
+        "661:\n"
+        ".byte 42\n"
+        "662:\n"
+        ".byte 662b - 661b\n");
+
+extern unsigned char stuff[];
+
+int reads_the_stuff(int i) { return stuff[i]; }
+
 // `__attribute__((constructor))` and `__attribute__((destructor))`, which ask for a function to
 // run without anything calling it. Each one becomes an object holding the function's address, in
 // the section the startup code of the target walks, and the priority is what orders them: a lower
