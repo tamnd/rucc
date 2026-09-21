@@ -40,6 +40,9 @@
 //! that escaped can be called through, and a body that is only declared here has its callers
 //! somewhere else. Variadic is out because a position past the named parameters is not a parameter.
 //!
+//! That gate is [`ipa::closed`], which [`crate::ipasra`] asks of a function too and for the same
+//! reason: a rewrite either of them makes is only sound where this unit can see every call.
+//!
 //! # Why the walk goes the other way
 //!
 //! [`CallGraph::components`] gives the condensation callees first, because that is the order an
@@ -89,12 +92,11 @@
 //! of this and is worth having, and it wants the call sites rewritten rather than the body, which
 //! puts it with the half above.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use rucc_ir::{
-    Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Linkage, Module, Opcode, Type, Value,
-};
+use rucc_ir::{Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
+use crate::ipa::{self, Sites};
 use crate::uses::substitute;
 use crate::{CallGraph, Fuel, Stats, fold};
 
@@ -126,15 +128,15 @@ const SWEEPS: usize = 3;
 /// entry, because a module at a time transformation that reported on every function in the module
 /// would bury the ones it touched.
 pub fn propagate(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec<(FuncId, Stats)> {
-    let closed = closed(module, graph);
+    let closed = ipa::closed(module, graph);
     if closed.is_empty() {
         return Vec::new();
     }
-    let order = order(graph, &closed);
+    let order = ipa::order(graph, &closed);
     let mut stats: HashMap<FuncId, Stats> = HashMap::new();
     let mut touched: Vec<FuncId> = Vec::new();
     for _ in 0..SWEEPS {
-        let sites = sites(module, &closed);
+        let sites = ipa::sites(module, &closed);
         let known = settle(module, &closed, &order, &sites);
         let changed = rewrite(module, &closed, &sites, &known, fuel, &mut stats);
         if changed.is_empty() {
@@ -158,110 +160,6 @@ pub fn propagate(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec
     // In module order rather than in the order the sweeps found them, so that two builds of the
     // same module report in the same order, per spec 03.
     module.funcs().filter_map(|id| Some((id, stats.remove(&id)?))).collect()
-}
-
-/// The functions this unit can see every call to, with the parameters lined up.
-///
-/// Five things, and the first three are one thing said three ways. Internal linkage means no other
-/// object can name it. No address taken means nothing in this one can reach it except by naming it.
-/// A body this unit may read is [`CallGraph::trusted_body`], which is section 34.1's gate, and
-/// without it there is nothing to put a constant into. Then the signature has to have a fixed
-/// number of parameters, and the entry block has to have one value per parameter, which is what
-/// makes the position of an argument at a call the position of a parameter in the body.
-fn closed(module: &Module, graph: &CallGraph) -> Vec<FuncId> {
-    let mut closed = Vec::new();
-    for node in graph.nodes() {
-        if graph.address_taken(node) {
-            continue;
-        }
-        let Some(id) = graph.trusted_body(node) else { continue };
-        let func = &module[id];
-        if func.linkage != Linkage::Internal || func.signature().variadic {
-            continue;
-        }
-        let Some(entry) = func.entry() else { continue };
-        if func[entry].params.len() != func.signature().params.len() {
-            continue;
-        }
-        closed.push(id);
-    }
-    // Module order, for the reason the return above gives.
-    closed.sort_unstable_by_key(|id| id.raw());
-    closed
-}
-
-/// The components of the call graph with callers before callees, each holding only closed nodes.
-///
-/// [`CallGraph::components`] is callees first, so this is that read backwards. A component with no
-/// closed function in it is left out rather than walked over, since the round inside it would
-/// compute nothing.
-fn order(graph: &CallGraph, closed: &[FuncId]) -> Vec<Vec<FuncId>> {
-    let inside: HashSet<FuncId> = closed.iter().copied().collect();
-    let mut order = Vec::new();
-    for part in graph.components().iter().rev() {
-        let part: Vec<FuncId> = part
-            .iter()
-            .filter_map(|&node| graph.trusted_body(node))
-            .filter(|id| inside.contains(id))
-            .collect();
-        if !part.is_empty() {
-            order.push(part);
-        }
-    }
-    order
-}
-
-/// Every direct call in the module to one of the closed functions, by the function called.
-///
-/// Every call, not only the ones from closed functions. A call from anywhere is a call, and what
-/// the caller is only matters when the argument is the caller's own parameter, which is the one
-/// place below that asks.
-///
-/// A call whose argument count does not match what the callee takes is a prototype disagreeing with
-/// a definition, which a translation unit may contain. The positions would not line up, so the call
-/// is not read and the callee is struck out instead of being read from the rest of its calls, since
-/// what that one passes is exactly what is not known.
-fn sites(module: &Module, closed: &[FuncId]) -> HashMap<FuncId, Sites> {
-    let mut where_defined: HashMap<_, FuncId> = HashMap::new();
-    for &id in closed {
-        where_defined.insert(module[id].name, id);
-    }
-    let mut sites: HashMap<FuncId, Sites> = HashMap::new();
-    for id in module.funcs() {
-        let func = &module[id];
-        if func.is_declaration() {
-            continue;
-        }
-        for block in func.blocks() {
-            for inst in func.insts(block) {
-                if !matches!(func[inst].opcode, Opcode::Call | Opcode::TailCall) {
-                    continue;
-                }
-                let Extra::Call(at) = func[inst].extra else { continue };
-                let Some(callee) = func[at].callee else { continue };
-                let Some(&target) = where_defined.get(&callee) else { continue };
-                let entry = sites.entry(target).or_default();
-                if module[target].signature().params.len() != func[func[inst].args].len() {
-                    entry.ragged = true;
-                    continue;
-                }
-                entry.calls.push((id, inst));
-            }
-        }
-    }
-    sites
-}
-
-/// Where one function is called from.
-#[derive(Debug, Default)]
-struct Sites {
-    /// The caller and the instruction, for every call whose arguments line up.
-    calls: Vec<(FuncId, Inst)>,
-    /// Whether some call passed a number of arguments the function does not take.
-    ///
-    /// One of those and nothing is claimed about any parameter, because the call is real and what
-    /// it passed is what cannot be read.
-    ragged: bool,
 }
 
 /// What the propagation knows about one parameter.
@@ -433,7 +331,7 @@ fn rewrite(
         let Some(row) = known.get(&id) else { continue };
         let func = &mut module[id];
         let entry = func.entry().expect("a closed function has an entry block");
-        let read = operands(func);
+        let read = ipa::operands(func);
         let mut same: HashMap<Value, Value> = HashMap::new();
         for (index, &held) in row.iter().enumerate() {
             let Held::Number(imm, ty) = held else { continue };
@@ -461,20 +359,6 @@ fn rewrite(
     changed
 }
 
-/// Every value the body reads, as an operand or as an argument on an edge.
-fn operands(func: &Func) -> HashSet<Value> {
-    let mut read = HashSet::new();
-    for block in func.blocks() {
-        for inst in func.insts(block) {
-            read.extend(func[func[inst].args].iter().copied());
-            for edge in func.successors(inst) {
-                read.extend(func[edge.args].iter().copied());
-            }
-        }
-    }
-    read
-}
-
 /// Writes the constant at the top of the entry block and hands back its value.
 ///
 /// At the top because that is the one place in the function that every reader of the parameter is
@@ -495,7 +379,7 @@ fn constant(func: &mut Func, entry: Block, imm: Imm, ty: Type) -> Value {
 #[cfg(test)]
 mod tests {
     use rucc_base::{Interner, Symbol};
-    use rucc_ir::{Builder, Flags, Float, Pic, Signature};
+    use rucc_ir::{Builder, Flags, Float, Linkage, Pic, Signature};
     use rucc_target::{TargetInfo, Triple};
 
     use super::*;

@@ -122,6 +122,8 @@ pub mod header_copy;
 pub mod heap;
 pub mod hoist;
 pub mod image;
+pub mod ipa;
+pub mod ipasra;
 pub mod ipcp;
 pub mod ivopts;
 pub mod licm;
