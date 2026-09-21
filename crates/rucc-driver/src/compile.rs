@@ -1024,13 +1024,17 @@ fn describe(
                 line: at.line,
                 column: at.column,
             };
-            // Two rows at one address is one row, and the later of the two wins. It happens at the
-            // front of a function with no prologue to speak of, where the row the assembler writes
-            // for the declaration and the row for the first instruction of the body land on the
-            // same byte. The body's answer is the better one there, because there are no prologue
-            // bytes for the other one to be about.
-            match out.last_mut() {
-                Some(last) if last.at == place.at => *last = place,
+            // Two rows at one address is one row, and the first of the two wins. The only place it
+            // happens is the front of a function, where the row the assembler writes for the
+            // declaration and the row for the first instruction land on the same byte, which is
+            // what a function this compiler built no prologue for looks like: two instructions
+            // cannot start at one address, so nowhere else has the question. The declaration is the
+            // better answer there because it is the answer gcc gives, which it gives because gcc
+            // always builds a frame at -O0 and so always has a byte of prologue for the brace to be
+            // about. A breakpoint on a function wants the line of the function rather than the line
+            // of whatever its first statement happened to be.
+            match out.last() {
+                Some(last) if last.at == place.at => {}
                 _ => out.push(place),
             }
         }

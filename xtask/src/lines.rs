@@ -82,15 +82,15 @@ const CLAIMS: [Claim; 4] = [
     },
     Claim {
         what: "functions whose first byte is the same line both ways",
-        floor: 85,
+        floor: 99,
         over: 500,
-        why: "the first byte of a function is either its declaration or its first statement, and \
-              the two compilers differ there only where this one built no frame, so a fall means \
-              something that does have a prologue stopped saying what it is for",
+        why: "the first byte of a function is where a breakpoint on it goes, and both compilers \
+              name the line the opening brace is on there, so a fall means a function stopped \
+              saying what its front is for",
     },
     Claim {
         what: "lines the system compiler names that this one names too",
-        floor: 80,
+        floor: 93,
         over: 500,
         why: "a statement with no row is a statement no address resolves to, and a report that \
               lands in one comes back naming whichever line before it did get a row",

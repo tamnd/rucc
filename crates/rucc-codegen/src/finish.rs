@@ -69,6 +69,7 @@
 use std::collections::HashMap;
 
 use rucc_base::Interner;
+use rucc_diag::Span;
 use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
@@ -1050,6 +1051,18 @@ impl Writer<'_> {
             self.row(inst, CfiOp::RestoreState);
             self.row(inst, CfiOp::RememberState);
         }
+        // And where all of it came from, which is the closing brace. Nothing here has a span of its
+        // own: an epilogue is the frame going back the way it came and no expression in the source
+        // asked for any of it, so without this the bytes are covered by whatever the last statement
+        // of the body was. That is the hole the prologue used to have, at the other end, and gcc
+        // fills it the same way it fills the other one, with the brace. A function whose body this
+        // does not know is left alone and keeps covering those bytes with the last row before them.
+        let closing = ending(self.func.declared);
+        if !closing.is_dummy() {
+            for &inst in &out {
+                self.func.set_span(inst, closing);
+            }
+        }
         out
     }
 
@@ -1214,6 +1227,18 @@ fn offset(bytes: u32) -> i32 {
     i32::try_from(bytes).expect("a frame under two gigabytes")
 }
 
+/// The last character of a span, which for the span of a function body is its closing brace.
+///
+/// A span runs from the first byte to one past the last, so the brace is the byte before the end
+/// rather than the end. [`Span::DUMMY`] for a function that came from no C source, which is what
+/// the tests and the IR parser build, and for the empty span that cannot have a last character.
+fn ending(body: Span) -> Span {
+    if body.is_dummy() || body.hi <= body.lo {
+        return Span::DUMMY;
+    }
+    Span::new(body.hi - 1, body.hi)
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
@@ -1225,6 +1250,17 @@ mod tests {
 
     use super::*;
     use crate::frame::{Layout, Local};
+
+    /// The closing brace of a body is the last character of its span and not the end of it, since a
+    /// span runs to one past what it covers. A function that came from no source has no brace and
+    /// asks for no row, which is what keeps the epilogue of one the IR parser built covered by the
+    /// row before it rather than by a position in a file that is not there.
+    #[test]
+    fn the_end_of_a_body_is_its_closing_brace_and_not_one_past_it() {
+        assert_eq!(ending(Span::new(10, 40)), Span::new(39, 40));
+        assert_eq!(ending(Span::DUMMY), Span::DUMMY);
+        assert_eq!(ending(Span::new(7, 7)), Span::DUMMY);
+    }
 
     /// An environment offering that many of the convention's registers, with everything after
     /// them held back as scratch.
@@ -1342,6 +1378,28 @@ mod tests {
         // Two values and four registers, so nothing is spilled, nothing is saved and the stack
         // pointer never moves. A prologue of nothing is the right prologue for that.
         assert_eq!(added(&lines), ["x64.ret"]);
+    }
+
+    /// The bytes that give a frame back are filed under the closing brace, which is where a
+    /// debugger says a function ends and which nothing in an epilogue could say for itself.
+    #[test]
+    fn an_epilogue_is_filed_under_the_closing_brace_of_the_body() {
+        let (mut func, allocation, mut names) = pressure(&SYSV, 4, 2);
+        func.declared = Span::new(100, 140);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { red_zone: false, ..base };
+        written(&mut func, &allocation, &layout, &mut names);
+
+        // Everything from the first instruction of the epilogue to the return, and nothing above
+        // it: the body's own instructions keep the spans they arrived with, which here is none.
+        let ends: Vec<Span> = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .map(|inst| func.span(inst))
+            .filter(|span| !span.is_dummy())
+            .collect();
+        assert!(!ends.is_empty(), "an epilogue was written");
+        assert!(ends.iter().all(|&span| span == Span::new(139, 140)), "{ends:?}");
     }
 
     #[test]

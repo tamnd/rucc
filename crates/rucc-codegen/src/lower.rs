@@ -1166,8 +1166,14 @@ impl<'a> Lowering<'a> {
             args.push(abi::Passing { ty, reg, abi });
         }
         let block = self.at.expect("a block is being filled");
-        let what =
-            abi::Calling { callee, args: &args, returns: &returns, variadic, named: named.len() };
+        let what = abi::Calling {
+            callee,
+            args: &args,
+            returns: &returns,
+            variadic,
+            named: named.len(),
+            at: self.source.span(inst),
+        };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         let calls = &mut self.stack.calls;

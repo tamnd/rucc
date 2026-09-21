@@ -446,6 +446,17 @@ impl Func {
         self.inst_spans[inst.index()]
     }
 
+    /// Says where an instruction came from, after it was built.
+    ///
+    /// For the instructions nothing in the source asked for, which are built by the code that puts
+    /// a frame up and takes it down again and so have nowhere to get a span from at the time. The
+    /// one that wants it is the epilogue: a debugger names the closing brace over the bytes that
+    /// give a frame back, and the function knows where its brace is even though the builder of a
+    /// `pop` does not.
+    pub fn set_span(&mut self, inst: Inst, span: Span) {
+        self.inst_spans[inst.index()] = span;
+    }
+
     /// Starts an instruction at the end of that block.
     ///
     /// Nothing is added to the function until [`InstBuilder::finish`], so a builder that is
