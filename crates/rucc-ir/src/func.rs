@@ -371,6 +371,36 @@ impl Func {
         inst
     }
 
+    /// Takes the results in front of an instruction away, leaving the ones behind them.
+    ///
+    /// One caller, the interprocedural pass that stops a function handing a value back. The
+    /// results of an instruction are consecutive values with memory last, so dropping the ones in
+    /// front is moving the first one along and shortening the count, and the values that went stay
+    /// in the table with nothing referring to them, because nothing here ever takes a value out.
+    ///
+    /// The ones that stay are renumbered, so that a value still says which of its instruction's
+    /// results it is. A pass that asks that question of a call result is asking whether it is the
+    /// pointer an allocator handed back, and an answer left over from before the drop is an answer
+    /// about a result that is no longer there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction does not produce that many results.
+    pub fn drop_results(&mut self, inst: Inst, drop: u8) {
+        let data = &self.insts[inst.index()];
+        assert!(drop <= data.results, "the instruction does not produce that many results");
+        let left = data.results - drop;
+        let first = data.first_result.map_or(0, Idx::raw) + u32::from(drop);
+        let data = &mut self.insts[inst.index()];
+        data.results = left;
+        data.first_result = (left > 0).then(|| Value::new(first));
+        for offset in 0..u32::from(left) {
+            let index = u8::try_from(offset).expect("no more than the count it came from");
+            let value = Value::new(first + offset);
+            self.values[value.index()].def = Def::Result { inst, index };
+        }
+    }
+
     /// Puts an instruction at the end of a block.
     ///
     /// # Panics
@@ -1421,6 +1451,32 @@ mod tests {
         assert_eq!(opcodes(entry), ["iconst", "icmp", "br_if"]);
         assert_eq!(opcodes(header), ["iconst", "add", "add", "icmp", "br_if"]);
         assert_eq!(opcodes(exit), ["return"]);
+    }
+
+    #[test]
+    fn dropping_the_results_in_front_moves_the_first_one_along_and_renumbers_the_rest() {
+        // The last result of a call is the memory it produces, and the caller of this is the pass
+        // that stops a function handing a value back. What has to survive is that the memory is
+        // still the last result and still says which of the results it is, because a pass reading
+        // that index is asking whether it is looking at the value a call handed over.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let types = [Type::int(32), Type::int(64), Type::MEM];
+        let inst = func.create_inst(InstData::new(Opcode::Call), &types, Span::DUMMY);
+        let before: Vec<Value> = func[inst].results().collect();
+        func.drop_results(inst, 1);
+        assert_eq!(func[inst].results().collect::<Vec<_>>(), before[1..]);
+        assert_eq!(func[before[1]].def, Def::Result { inst, index: 0 });
+        assert_eq!(func[before[2]].def, Def::Result { inst, index: 1 });
+        assert_eq!(func.mem_out(inst), Some(before[2]));
+    }
+
+    #[test]
+    fn dropping_every_result_leaves_an_instruction_that_produces_nothing() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let inst = func.create_inst(InstData::new(Opcode::Call), &[Type::int(32)], Span::DUMMY);
+        func.drop_results(inst, 1);
+        assert_eq!(func[inst].results().count(), 0);
+        assert_eq!(func[inst].first_result, None);
     }
 
     #[test]
