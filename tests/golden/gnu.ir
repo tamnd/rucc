@@ -16,6 +16,8 @@ global @__rucc_ctor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkag
 global @__rucc_ctor.opens : bytes 8 = { addr.8 @opens }, align 8, linkage(internal), section ".init_array"
 global @__rucc_dtor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkage(internal), section ".fini_array"
 
+alias @an_override = @the_default, linkage(weak)
+
 func @use(i32) -> i32, linkage(external);
 
 func @a_temporary(i32) -> i32, linkage(external) {
@@ -412,6 +414,13 @@ block0(%0: i32):
     %8 = load.i32 %7, align 4, tbaa !1
     %9 = add.nsw %6, %8
     return %9
+}
+
+func @the_default(), linkage(internal) {
+block0:
+    %0 = iconst.i32 0
+    %1 = call @use(%0) : (i32) -> i32
+    return
 }
 
 func @opens(), linkage(internal) {
