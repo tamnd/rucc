@@ -65,6 +65,12 @@ memmap2 = "0.9.11"
 # are off because they turn on the readers for every format and the decompressors two of them can
 # want, and what is wanted here is the writing.
 object = { version = "0.40.0", default-features = false }
+# The DWARF writer, blessed by section 18.3 for `rucc-debug`. Default features are off for the same
+# reason the object writer's are: they turn on the reader, and what is wanted here is the writing.
+# The version is behind the newest on purpose. Everything from 0.32 on declares a minimum Rust of
+# 1.88 and this workspace's is 1.85, so taking the newest would move the compiler's own floor to
+# buy nothing: the line table writing this uses has not changed between the two.
+gimli = { version = "0.31.1", default-features = false }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

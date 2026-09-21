@@ -19,7 +19,7 @@ use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
 use rucc_cost::Goal;
-use rucc_diag::{Diagnostic, Severity, Span};
+use rucc_diag::{Diagnostic, Severity, SourceMap, Span};
 use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_lower::Protector as LowerProtector;
@@ -429,6 +429,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     lowerings: &mut lowerings,
                                 },
                                 &mut temps.assembly,
+                                Origin { map: &sess.sources, name },
                             ) {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
@@ -710,6 +711,19 @@ fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     }
 }
 
+/// Where the file being generated came from, which is what the debug information is about.
+///
+/// The two together rather than separately because neither is any use on its own here: a span
+/// without the map it points into is a pair of numbers, and a name without the spans is a file
+/// nothing in the object refers to.
+#[derive(Clone, Copy)]
+struct Origin<'a> {
+    /// Where every span in the module points.
+    map: &'a SourceMap,
+    /// What the command line called the file, which is what `DW_AT_name` says.
+    name: &'a str,
+}
+
 fn generate(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
@@ -717,6 +731,7 @@ fn generate(
     opts: &Options,
     recording: &mut Recording<'_>,
     assembly: &mut Option<String>,
+    origin: Origin<'_>,
 ) -> Result<Artifact, Vec<Diagnostic>> {
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
@@ -925,12 +940,24 @@ fn generate(
                 );
                 *assembly = Some(listing.map_err(refused)?);
             }
-            let text = rucc_asm::assemble(&funcs, names, target, unwind).map_err(refused)?;
+            let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)
+                .map_err(refused)?;
+            let text = assembled.text;
             let data = globals.image();
+            // The line table, from the spans the assembler kept beside the bytes. Empty when the
+            // build asked for no debug information, which is the case the rows above are not even
+            // recorded in.
+            let info = if opts.debug_info {
+                describe(&text, &assembled.lines, origin, opts, target)
+                    .map_err(|why| vec![internal(&why)])?
+            } else {
+                rucc_object::Info::default()
+            };
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            let bytes = rucc_object::write(&text, &data, &aliases, target, output(opts, target))
-                .map_err(wrote)?;
+            let bytes =
+                rucc_object::write(&text, &data, &aliases, target, output(opts, target), &info)
+                    .map_err(wrote)?;
             // Asked of the writer rather than worked out from the same three values here, so that
             // what the archive's index says and what is in the member cannot come apart. It is
             // wanted only by `--emit=archive` and is cheap enough that the other two kinds are not
@@ -940,6 +967,93 @@ fn generate(
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
+}
+
+/// The debug sections for what was just assembled, as bytes and relocations.
+///
+/// This is where a span becomes a file and a line, and it is here rather than anywhere further down
+/// because the source map is the driver's and because the paths in it are still paths at this point.
+/// [`rucc_session::PrefixMap::apply`] is run over every one of them, which is the whole of what
+/// `-fdebug-prefix-map=` and `-ffile-prefix-map=` asked for: a build is only reproducible if all of
+/// the paths in it are rewritten rather than most, so the file names, the name of the unit and the
+/// directory it was compiled in all go through it.
+///
+/// A row whose span is [`Span::DUMMY`] is dropped rather than written at line zero. Those are the
+/// instructions a pass invented, a prologue and a spill among them, and a debugger asking what a
+/// program counter is in the middle of is better told the line before than told a line that is not
+/// in the file. The row that follows covers those bytes, which is the same answer gcc gives.
+///
+/// # Errors
+///
+/// Whatever the DWARF writer refused, which is a bug here rather than a program this compiler is
+/// behind on.
+fn describe(
+    text: &rucc_object::Text,
+    lines: &[Vec<rucc_asm::Row>],
+    origin: Origin<'_>,
+    opts: &Options,
+    target: &TargetInfo,
+) -> Result<rucc_object::Info, String> {
+    let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
+    // The file table, built as the rows are walked rather than up front, because what belongs in it
+    // is the files the code came from and not the files the preprocessor opened. A header that
+    // contributed nothing but declarations is not one of them.
+    let mut files: Vec<String> = Vec::new();
+    let mut funcs = Vec::with_capacity(text.funcs.len());
+    for (extent, rows) in text.funcs.iter().zip(lines) {
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.span.is_dummy() {
+                continue;
+            }
+            let Some(at) = origin.map.presumed(row.span.lo) else {
+                continue;
+            };
+            let name = rewrite(at.name);
+            let found = files.iter().position(|have| *have == name);
+            let which = match found {
+                Some(which) => which,
+                None => {
+                    files.push(name);
+                    files.len() - 1
+                }
+            };
+            let place = rucc_debug::Row {
+                at: row.at as u64,
+                file: which,
+                line: at.line,
+                column: at.column,
+            };
+            out.push(place);
+        }
+        // The prologue, which is the pushes, the frame and the moves that put the arguments where
+        // the body expects them. No line of the source asked for any of that, so none of those
+        // instructions has a span and none of them survived the loop above, which leaves the front
+        // of every function as the one part of it no row covers. A program counter in there would
+        // get no answer at all rather than a slightly early one, and no answer is the worse of the
+        // two for anybody reading a backtrace. The first row is moved to the front of the function
+        // instead. gcc says the line the function was declared on over those bytes, which is a
+        // better answer and needs a span that does not reach this far down yet.
+        if let Some(first) = out.first_mut() {
+            first.at = 0;
+        }
+        funcs.push(rucc_debug::Function {
+            name: extent.name.clone(),
+            len: extent.len as u64,
+            rows: out,
+        });
+    }
+    let unit = rucc_debug::Unit {
+        name: rewrite(origin.name),
+        // A single dot when the process could not say where it was, which is a directory name every
+        // debugger understands and which leaves a relative file name meaning what it already meant.
+        dir: rewrite(opts.working_dir.as_deref().unwrap_or(".")),
+        producer: format!("rucc {}", crate::VERSION),
+        files,
+        funcs,
+        pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
+    };
+    rucc_debug::write(&unit).map_err(|why| why.to_string())
 }
 
 /// What the command line decided about the file being written, in the words the assembler and the

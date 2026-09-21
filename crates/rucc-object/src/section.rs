@@ -171,6 +171,39 @@ pub struct Unwind {
     pub labels: Vec<Marker>,
 }
 
+/// The debug information, as the bytes of the sections it goes in.
+///
+/// Bytes rather than anything shaped like DWARF, for the reason [`Unwind`] is bytes: what a record
+/// is is the format's answer and the layer that knows what the program was doing is the one that
+/// can say it, and what is left for the writer is where the sections go and what their relocations
+/// are. The difference between the two is only that there are more than two sections here and that
+/// their names are not the writer's to choose, so each one carries its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Info {
+    /// One entry per section that has anything in it, in the order they are to be written.
+    ///
+    /// The order matters because a relocation in one of them can name another, and a name is
+    /// resolved against the sections this file already has. Writing them in the order the producer
+    /// hands them over keeps that a property of the list rather than of the writer.
+    pub chunks: Vec<Chunk>,
+}
+
+/// One debug section, with the name it goes in the file under.
+///
+/// A relocation here names either a function this file defines or another section in the same
+/// list, and the two are told apart by looking the name up among the sections first. That is safe
+/// rather than lucky: every section name in DWARF begins with `.debug_`, which is not the spelling
+/// of any name a C program can define.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chunk {
+    /// What the section is called, which is the name DWARF gives it.
+    pub name: String,
+    /// Its contents.
+    pub bytes: Vec<u8>,
+    /// Every place in them that names something this file does not place itself.
+    pub relocs: Vec<Reloc>,
+}
+
 /// Where the room a patcher was promised at the top of a function ended up.
 ///
 /// What `-fpatchable-function-entry=` asks for, once it is bytes rather than instructions. Two

@@ -15,7 +15,10 @@ readme.workspace = true
 [lints]
 workspace = true
 
-# Nothing yet. The crates this one is expected to reach for once M8 lands are
-# `rucc-base`, `rucc-diag`, `rucc-target`, `rucc-object`, all of lower rank than 9. Dependencies are added when they
-# are used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+# `rucc-object` is here because what this crate hands back is the bytes of a section and the
+# relocations in them, which is the object writer's vocabulary rather than a second one. The rest
+# of the crates section 18.3 expects this one to reach for are added when they are used, not in
+# advance, so that the graph `cargo xtask layers` reads is the real one.
 [dependencies]
+rucc-object.workspace = true
+gimli = { workspace = true, features = ["write", "std"] }

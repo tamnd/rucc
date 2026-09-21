@@ -35,6 +35,7 @@
 //! between two functions is never executed, so there is nothing to be gained by it.
 
 use rucc_base::Interner;
+use rucc_diag::Span;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{PhysReg, TargetInfo};
@@ -56,11 +57,40 @@ const PREFIX: &str = "x64.";
 /// has been written over. See `assemble`.
 const NOP: u8 = 0x90;
 
+/// Where one machine instruction ended up, and where in the source it came from.
+///
+/// The span rather than a file and a line, because this layer has no source map and no business
+/// acquiring one. Turning a span into a place is the driver's, which is also where the paths a
+/// `-ffile-prefix-map` rewrites are still paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    /// How far into its own function the instruction begins.
+    pub at: usize,
+    /// What the machine IR said this instruction was for.
+    pub span: Span,
+}
+
+/// A text section and, when the build asked for it, where each instruction in it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assembled {
+    /// The instructions, and what the linker has to be told about them.
+    pub text: Text,
+    /// One list per function of [`Text::funcs`], in the same order, and empty throughout in a
+    /// build that asked for no debug information.
+    pub lines: Vec<Vec<Row>>,
+}
+
 /// Every function, as the bytes of a text section.
 ///
 /// `unwind` is whether a function is described to an unwinder, which is
 /// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
 /// this and the text writer cannot answer it differently for one function.
+///
+/// `lines` is whether to record where each instruction came from, which is
+/// `rucc_session::Options::debug_info` and is asked the same way and for the same reason. It is a
+/// question rather than something always answered because the rows are one per machine instruction
+/// and a build that is not writing debug information would carry them the length of the back end to
+/// throw them away.
 ///
 /// # Errors
 ///
@@ -76,11 +106,13 @@ pub fn assemble(
     names: &Interner,
     target: &TargetInfo,
     unwind: bool,
-) -> Result<Text, Error> {
+    lines: bool,
+) -> Result<Assembled, Error> {
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let mut text = Text::default();
+    let mut all = Vec::new();
     // Where each function's frame rules landed, kept beside the extents rather than written into
     // the section as they are found, because a record counts from the start of its function and the
     // function's own length is not known until its last instruction has been encoded.
@@ -123,12 +155,15 @@ pub fn assemble(
             blocks: Vec::new(),
             jumps: Vec::new(),
             rows: Vec::new(),
+            lines: Vec::new(),
+            wants: lines,
             start,
             room: None,
         };
         assembler.func()?;
         let room = assembler.room;
         rows.push(std::mem::take(&mut assembler.rows));
+        all.push(std::mem::take(&mut assembler.lines));
         let len = text.bytes.len() - start;
         // Where the record points is the front of the room, which is the half in front of the
         // label in a function that has one and the first instruction of the other half otherwise.
@@ -158,7 +193,7 @@ pub fn assemble(
             text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format)?;
         }
     }
-    Ok(text)
+    Ok(Assembled { text, lines: all })
 }
 
 /// A jump inside a function, waiting for the block it goes to to have a place.
@@ -187,6 +222,12 @@ struct Assembler<'a> {
     /// The frame rules, each with how far into this function the instruction that changed them
     /// ended.
     rows: Rows,
+    /// Where each machine instruction began and what it was for, in the order they were written.
+    ///
+    /// Empty in a build that asked for no debug information, which is what `wants` says.
+    lines: Vec<Row>,
+    /// Whether to fill `lines` in at all.
+    wants: bool,
     /// Where this function starts in the section, which is what those distances are counted from.
     start: usize,
     /// Where the room a patcher was promised after the label began, which is where the instruction
@@ -220,6 +261,14 @@ impl Assembler<'_> {
                 // top of the function.
                 if self.func.patch.is_some_and(|patch| patch.after == Some(inst)) {
                     self.room = Some(self.text.bytes.len());
+                }
+                // Where it begins rather than where it ends, which is the other way round from the
+                // frame rules below and for the same reason they are that way round: a debugger is
+                // asking what a program counter is in the middle of, and an unwinder is asking what
+                // the frame looked like at a return address.
+                if self.wants {
+                    let at = self.text.bytes.len() - self.start;
+                    self.lines.push(Row { at, span: self.func.span(inst) });
                 }
                 self.inst(block, inst)?;
                 if Some(inst) == end {
@@ -474,7 +523,9 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         build(&mut func, &mut names);
-        assemble(&[func], &names, &target(), true).expect("a function that was allocated")
+        assemble(&[func], &names, &target(), true, false)
+            .expect("a function that was allocated")
+            .text
     }
 
     /// Those bytes, as the hexadecimal a manual writes them in.
@@ -604,7 +655,7 @@ mod tests {
         func.build(second, jmp).finish();
         func.succs_mut(second).push(BlockCall::to(first));
 
-        let text = assemble(&[func], &names, &target(), true).expect("two blocks");
+        let text = assemble(&[func], &names, &target(), true, false).expect("two blocks").text;
         // Two bytes of addition, then a jump back over itself and over them, which is seven bytes
         // backwards because a jump counts from where it ends.
         assert_eq!(hex(&text.bytes), "01 c8 e9 f9 ff ff ff");
@@ -627,7 +678,7 @@ mod tests {
         func.succs_mut(first).push(BlockCall::to(second));
         func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
 
-        let text = assemble(&[func], &names, &target(), true).expect("two blocks");
+        let text = assemble(&[func], &names, &target(), true, false).expect("two blocks").text;
         // Seven bytes of address, two of jump, and then the block. The distance is two, because
         // the four bytes count from the end of the instruction that holds them and the jump is
         // what is in between.
@@ -644,7 +695,7 @@ mod tests {
         let callee = names.intern("puts");
         func.build(block, call).symbol(callee).finish();
 
-        let text = assemble(&[func], &names, &target(), true).expect("a call");
+        let text = assemble(&[func], &names, &target(), true, false).expect("a call").text;
         assert_eq!(hex(&text.bytes), "e8 00 00 00 00");
         assert_eq!(
             text.relocs,
@@ -670,7 +721,8 @@ mod tests {
             .mem(Mem::of(global).plus(8))
             .finish();
 
-        let text = assemble(&[func], &names, &target(), true).expect("a load of a global");
+        let text =
+            assemble(&[func], &names, &target(), true, false).expect("a load of a global").text;
         assert_eq!(hex(&text.bytes), "48 8b 05 08 00 00 00");
         // Four bytes back to where the instruction ends, and then the eight the address already
         // meant. A relocation counts from where its own bytes start and an instruction counts
@@ -703,7 +755,9 @@ mod tests {
         add(&mut func, &mut names);
         func.patch = Some(rucc_mir::Patch { before: 3, pad, after: Some(first) });
 
-        let text = assemble(&[func], &names, &target(), true).expect("a function with room in it");
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a function with room in it")
+            .text;
         assert_eq!(hex(&text.bytes), "90 90 90 90 90 01 c8");
         let [f] = &text.funcs[..] else { panic!("one function") };
         // The symbol is after the room in front of the label and its size counts none of it, which
@@ -731,7 +785,9 @@ mod tests {
         add(&mut func, &mut names);
         func.patch = Some(rucc_mir::Patch { before: 0, pad, after: Some(first) });
 
-        let text = assemble(&[func], &names, &target(), true).expect("a function with room in it");
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a function with room in it")
+            .text;
         assert_eq!(hex(&text.bytes), "f3 0f 1e fa 90 90 01 c8");
         let [f] = &text.funcs[..] else { panic!("one function") };
         assert_eq!(f.start, 0);
@@ -750,8 +806,9 @@ mod tests {
             .mem(Mem::got(away))
             .finish();
 
-        let text =
-            assemble(&[func], &names, &target(), true).expect("a load through the offset table");
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a load through the offset table")
+            .text;
         // A `mov` with a REX prefix, which the relocation requires by name: the linker is allowed
         // to turn it back into a `lea`, and it can only do that when it knows what it is looking
         // at down to the prefix.
@@ -794,7 +851,8 @@ mod tests {
         let mut second = Func::new(names.intern("g"));
         add(&mut second, &mut names);
 
-        let text = assemble(&[first, second], &names, &target(), true).expect("two functions");
+        let text =
+            assemble(&[first, second], &names, &target(), true, false).expect("two functions").text;
         assert_eq!(text.funcs[1].start, 16);
         assert_eq!(text.bytes.len(), 18);
         assert!(text.bytes[2..16].iter().all(|byte| *byte == NOP), "{:?}", text.bytes);
@@ -808,7 +866,8 @@ mod tests {
         let vreg = func.new_vreg(GPR);
         let neg = Opcode::new(names.intern("x64.neg_r_32"));
         func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
-        let error = assemble(&[func], &names, &target(), true).expect_err("a virtual register");
+        let error =
+            assemble(&[func], &names, &target(), true, false).expect_err("a virtual register");
         assert_eq!(
             error,
             Error::Virtual { func: "f".to_owned(), opcode: "x64.neg_r_32".to_owned() }
@@ -822,7 +881,8 @@ mod tests {
         let block = func.create_block();
         let made_up = Opcode::new(names.intern("x64.frobnicate"));
         func.build(block, made_up).finish();
-        let error = assemble(&[func], &names, &target(), true).expect_err("no such instruction");
+        let error =
+            assemble(&[func], &names, &target(), true, false).expect_err("no such instruction");
         assert_eq!(
             error,
             Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
@@ -830,10 +890,45 @@ mod tests {
     }
 
     #[test]
+    fn a_build_that_asked_for_debug_information_is_told_where_each_instruction_began() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        for at in 0..2u32 {
+            func.build(block, add)
+                .at(Span::new(at * 10, at * 10 + 3))
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .finish();
+        }
+
+        let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
+        assert_eq!(
+            out.lines,
+            vec![vec![
+                Row { at: 0, span: Span::new(0, 3) },
+                Row { at: 2, span: Span::new(10, 13) },
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_build_that_asked_for_none_carries_no_rows_at_all() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        add(&mut func, &mut names);
+
+        let out = assemble(&[func], &names, &target(), true, false).expect("one instruction");
+        assert_eq!(out.lines, vec![Vec::new()]);
+    }
+
+    #[test]
     fn a_machine_with_no_encoder_here_is_said_so_rather_than_encoded_as_x86_64() {
         let names = Interner::new();
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = assemble(&[], &names, &aarch64, true).expect_err("no encoder");
+        let error = assemble(&[], &names, &aarch64, true, false).expect_err("no encoder");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 }
