@@ -61,6 +61,13 @@
 //! many registers there are is the target's and is not here, so the answer is a count and the
 //! caller brings the register file.
 //!
+//! [`callgraph`] is who calls whom in the unit, which is section 34.1's precondition for every
+//! interprocedural analysis in document 34. Nodes are names rather than bodies, a body is only
+//! reachable through it when the link is going to keep the one in hand, and a call it cannot name a
+//! target for sets one bit rather than being left out. It hands back the condensation with the
+//! components in callee before caller order and a driver that settles each of them in turn, which is
+//! what stops the next analysis being a loop over the whole module until nothing moves.
+//!
 //! [`purity`] is the other question asked about a call, which is what it is allowed to do. Five
 //! answers rather than a boolean, because whether a call reads memory and whether it comes back are
 //! separate questions and GCC needs both, and the default is the one that permits everything, so a
@@ -90,6 +97,7 @@
 
 pub mod alias;
 pub mod analysis;
+pub mod callgraph;
 pub mod canon;
 pub mod cfg;
 pub mod coalesce;
@@ -154,6 +162,10 @@ pub mod uses;
 // to the wrong place.
 pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
 pub use analysis::{Analyses, Analysis, Preserved};
+// `callgraph::Node` stays behind its module, because a bare `Node` at the top of an optimizer says
+// nothing about which graph it is a node of, and this crate has several graphs. [`callgraph::CallGraph`]
+// is the thing a caller would mean and is worth having here.
+pub use callgraph::CallGraph;
 pub use cfg::Cfg;
 pub use dom::{Dominators, PostDominators};
 pub use frequency::Frequencies;
