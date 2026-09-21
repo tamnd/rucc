@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.73
+
 ### Fixed
 
 - A local whose length the program computes and which asks for more alignment than a call leaves the stack pointer on is compiled rather than refused. `int f(int n) { struct __attribute__((aligned(32))) S { int a[n]; } s; ... }` is a program gcc 16 builds and runs, and rucc turned it down with `this local wants more alignment than the stack pointer is left on, which needs a base register nothing here keeps`, as it did for `int a[n] __attribute__((aligned(32)));`, which is the same function written the other way. The bytes for one of these come off the stack pointer where the declaration stands, and rounding the stack pointer down again to force the alignment would put it somewhere no constant reaches the rest of the frame from, which is what the message was about. So the alignment is asked for in bytes instead: the array takes its own alignment in room above what it needs, and the address it hands out is the first multiple of the alignment inside that room, which is four instructions of arithmetic where the declaration stands and no change to the frame at all. The stack pointer stays where a call can be made from, the outgoing argument area stays where it was, and a function with one of these is an ordinary growing frame. A fixed local wanting more alignment than the stack pointer has in a function whose frame also grows is still refused, which is the other half of the same refusal and wants a second base register held for the whole function. Closes tamnd/rucc#1545.
