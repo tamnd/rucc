@@ -168,6 +168,35 @@ impl Summary {
         Self { outside: Effect::Writes, params: vec![Touch::everything(); arity].into() }
     }
 
+    /// A function that does this to what it was not handed and that to each of its parameters.
+    ///
+    /// The general one, for a caller that has worked the answer out rather than read it off an
+    /// attribute. The common shapes have their own names above and below this.
+    #[must_use]
+    pub fn doing(outside: Effect, params: &[Touch]) -> Self {
+        Self { outside, params: params.into() }
+    }
+
+    /// A function that reads whatever it likes and writes nothing, taking this many parameters.
+    ///
+    /// `readonly`, which is `__attribute__((pure))` written as an effect. The addresses are kept
+    /// rather than dropped: a function that does not write cannot have put one anywhere a later
+    /// call could find it, but it can hand one back, and returning it is not writing.
+    #[must_use]
+    pub fn reading(arity: usize) -> Self {
+        Self::doing(Effect::Reads, &vec![Touch { effect: Effect::Reads, escapes: true }; arity])
+    }
+
+    /// A function that does what it likes to what it was handed and nothing to anything else,
+    /// taking this many parameters.
+    ///
+    /// `argmemonly`. It says where and not what, so everything that can happen to an argument is
+    /// taken to have happened to every one of them.
+    #[must_use]
+    pub fn through_arguments(arity: usize) -> Self {
+        Self::doing(Effect::Nothing, &vec![Touch::everything(); arity])
+    }
+
     /// What it does to memory it was not handed: the globals, and anything reached through an
     /// address that did not arrive as an argument.
     #[must_use]
@@ -327,13 +356,11 @@ fn from_attributes(set: AttrSet, arity: usize) -> Option<Summary> {
     // addresses are left alone: a function that does not write cannot have put one anywhere a
     // later call could find it, but it can hand one back, and returning it is not writing.
     if set.contains(AttrSet::READONLY) {
-        let params = vec![Touch { effect: Effect::Reads, escapes: true }; arity];
-        return Some(Summary { outside: Effect::Reads, params: params.into() });
+        return Some(Summary::reading(arity));
     }
     // `argmemonly` says where, not what, so everything that can happen to an argument may have.
     if set.contains(AttrSet::ARGMEM_ONLY) {
-        let params = vec![Touch::everything(); arity];
-        return Some(Summary { outside: Effect::Nothing, params: params.into() });
+        return Some(Summary::through_arguments(arity));
     }
     None
 }
