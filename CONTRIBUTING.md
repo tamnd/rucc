@@ -72,6 +72,8 @@ The version is written in five places and every one of them has been the one tha
 4. `Cargo.lock`, with `cargo update --workspace`. The publish step passes `--locked`, so a stale lockfile does not warn, it refuses, and `cannot update the lock file because --locked was passed` is the whole of what it says.
 5. `PROVENANCE`, whose header carries the release. `cargo xtask provenance` rewrites it and the gate's provenance check fails if it was not.
 
+Expect `CHANGELOG.md` to conflict, and read the conflict rather than resolving it by reflex. Everything else on that list is a version number that two branches either agree on or do not, but the changelog is a file where the top of a section is where a new entry goes, so a branch that adds a bullet and a branch that adds another one both edit the same line and neither is wrong. What git offers in that case is two blocks in some order, and taking one side drops somebody's entry silently: the merge is clean, the gate is green, and the release goes out without a change that was written down. Keep both blocks and put them in the order the sections want, newest first, with a blank line between every bullet.
+
 Then the gate, then the pull request, then the merge, then `git tag -a v<version>` on the merge commit and push the tag. The release workflow starts from the tag and checks it against the workspace manifest before it builds anything, so a tag that does not match what was merged fails at the first job rather than publishing something wrong.
 
 ## Reporting a miscompilation
