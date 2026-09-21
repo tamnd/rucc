@@ -6,9 +6,12 @@
 //! anybody can read, and every check that is not needed is meant to be taken out here instead.
 //! This pass takes them out, and it does the case document 07 expects to be worth the most and to
 //! be the easiest to get right, which is a second access to bytes an earlier access already had
-//! checked. All three kinds `rucc-safety` emits are the pass's business, the bounds check and the
-//! lifetime check in front of an access and the derivation check after a walk, because they are
-//! emitted together and taking out one of three is a third of a saving.
+//! checked. Four kinds are the pass's business, the bounds check and the lifetime check and the
+//! initialization check in front of an access and the derivation check after a walk, because they
+//! are emitted together and taking out one of four is a quarter of a saving.
+//!
+//! The type check is the one that is not here. It is emitted at every access beside the
+//! initialization check, it costs the same, and tamnd/rucc#1617 is where it is tracked.
 //!
 //! # The two halves
 //!
@@ -364,6 +367,26 @@ const REMOVED_LIVE_RANGE: &str = "lifetime check removed, every address the walk
 /// The same as [`REMOVED_MIDWAY`], for a lifetime check.
 const REMOVED_MIDWAY_LIVE: &str = "lifetime check removed, its walk was carried on to the pointer \
                                    its capability names and every address it can reach is alive";
+
+/// Recorded once for each init check taken out because one in front of it said the same bytes had
+/// been written.
+const REMOVED_INIT: &str = "initialization check removed, a dominating check covers the same bytes";
+
+/// Recorded for an init check that would have gone if there had been fuel for it.
+const NO_FUEL_INIT: &str = "initialization check kept, the pass ran out of fuel";
+
+/// Recorded once for each init check a dominating one answered before something that could hand
+/// the storage back out ran in between.
+const PAST_A_CALL_INIT: &str = "initialization check kept, a dominating check covers its bytes and \
+                                something that could end the storage ran in between";
+
+/// Recorded for an init check whose pointer this pass cannot read as a base and a constant.
+const UNKNOWN_SHAPE_INIT: &str =
+    "initialization check left alone, its pointer is not a base and a constant";
+
+/// Recorded for an init check nothing in front of it had anything to say about.
+const NOTHING_WROTE_IT: &str =
+    "initialization check kept, nothing dominating it says those bytes have been written";
 
 /// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
@@ -1000,6 +1023,36 @@ impl Pass for Discharge {
                         }
                         going.push((inst, why));
                     }
+                    Opcode::CheckInit => {
+                        let Some(asked) = about(func, inst) else {
+                            stats.missed(UNKNOWN_SHAPE_INIT);
+                            continue;
+                        };
+                        if !(self.sources.dominance && scope.written.covers(&asked)) {
+                            stats.missed(if scope.written.covered_before(&asked) {
+                                PAST_A_CALL_INIT
+                            } else {
+                                NOTHING_WROTE_IT
+                            });
+                            scope.written.held.push(asked);
+                            continue;
+                        }
+                        if !fuel.take() {
+                            stats.missed(NO_FUEL_INIT);
+                            scope.written.held.push(asked);
+                            continue;
+                        }
+                        going.push((inst, REMOVED_INIT));
+                    }
+                    // The two ways bytes that were written stop counting as written without a call
+                    // being involved. A `meta_begin` is a lifetime starting, which is the storage
+                    // becoming fresh again, and a `meta_init_copy` carries whatever the source said
+                    // about its own bytes, which for an uninitialized source is that the
+                    // destination is uninitialized too. Neither says anything about bounds or about
+                    // lifetime, so neither goes through `opaque`.
+                    Opcode::MetaBegin | Opcode::MetaInitCopy => {
+                        scope.written.forget();
+                    }
                     _ => continue,
                 }
             }
@@ -1166,6 +1219,12 @@ struct Scope {
     bounds: Known,
     /// Ranges a `check_live` established are in an instance that is alive.
     alive: Known,
+    /// Ranges a `check_init` established have had every byte written.
+    ///
+    /// Kept apart from the other two for the reason those two are kept apart from each other. A
+    /// range being inside one instance, that instance being alive, and the bytes in it having been
+    /// written are three claims, and a check that passes establishes exactly one of them.
+    written: Known,
     /// What a `check_bounds` that ran proved about where the address it was about starts.
     ///
     /// Nothing here is ever given up, and that is the difference between this and the other two.
@@ -1183,6 +1242,7 @@ impl Scope {
     fn forget(&mut self) {
         self.bounds.forget();
         self.alive.forget();
+        self.written.forget();
     }
 
     /// Records what a `check_bounds` that is staying proves about where its address starts.
@@ -1204,10 +1264,20 @@ impl Scope {
         }
     }
 
-    /// Gives up the lifetime facts and keeps the bounds ones, marked as a call having run over them.
+    /// Gives up the lifetime facts and the initialization ones and keeps the bounds ones, marked
+    /// as a call having run over them.
+    ///
+    /// The initialization facts go with the lifetime ones rather than with the bounds. There is a
+    /// version of the bounds argument that would keep them, since storage handed back out and
+    /// handed over again comes with a capability whose version no longer matches and the lifetime
+    /// check beside the access is what notices, but it rests on that check still being there, which
+    /// is true only because this pass gives up the lifetime facts at the same point. Resting one
+    /// rule on another rule's conservatism is worth a measurement before it is worth writing.
+    /// tamnd/rucc#1617.
     fn called(&mut self) {
         self.bounds.crossed();
         self.alive.forget();
+        self.written.forget();
     }
 }
 
@@ -2306,6 +2376,35 @@ mod tests {
         live(build, pointer);
     }
 
+    /// Puts `cap_of` and a `check_init` over `size` bytes at `pointer` into a block.
+    ///
+    /// The shape `rucc_safety::began` writes in front of a read. It carries a `MemInfo` for the
+    /// same reason the bounds check does, since how many bytes the access takes is the whole of
+    /// what the check is about.
+    fn began(build: &mut Builder<'_>, pointer: Value, size: u64) {
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let info = MemInfo {
+            size,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckInit) }, &[]);
+    }
+
+    /// How many init checks are left in a function.
+    fn inits(func: &Func) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .filter(|&inst| func[inst].opcode == Opcode::CheckInit)
+            .count()
+    }
+
     /// A pointer `bytes` past another one.
     fn past(build: &mut Builder<'_>, pointer: Value, bytes: i128) -> Value {
         let offset = build.iconst(Type::int(64), bytes);
@@ -2465,6 +2564,90 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+    }
+
+    #[test]
+    fn a_second_init_check_inside_the_bytes_the_first_covered_goes() {
+        // The same question the bounds arm's first test asks, about the other plane. Sixteen bytes
+        // were read and passed on, and four of them being read again asks nothing new: bytes that
+        // have been written stay written.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        began(&mut build, pointer, 16);
+        let inside = past(&mut build, pointer, 8);
+        began(&mut build, inside, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 1);
+    }
+
+    #[test]
+    fn an_init_check_past_what_the_first_covered_stays() {
+        // Four bytes were read and the four after them were not, and nothing about the first four
+        // says anything about the second four.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        began(&mut build, pointer, 4);
+        let after = past(&mut build, pointer, 4);
+        began(&mut build, after, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::NOTHING_WROTE_IT), 2);
+    }
+
+    #[test]
+    fn an_init_check_a_call_stands_between_stays_and_is_counted() {
+        // The bounds facts cross a call and these do not, which the `called` comment argues for.
+        // The row is here so that what the conservatism costs is a number rather than a paragraph.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        began(&mut build, pointer, 8);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_INIT), 1);
+    }
+
+    #[test]
+    fn an_init_check_a_lifetime_starting_stands_between_stays() {
+        // A `meta_begin` is storage becoming fresh, and fresh storage holds nothing anybody wrote,
+        // so a read that was passed on in front of one says nothing behind it.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        began(&mut build, pointer, 8);
+        let size = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[pointer, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaBegin) }, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 0);
+    }
+
+    #[test]
+    fn an_init_check_a_copy_stands_between_stays() {
+        // A `meta_init_copy` gives the destination whatever the source said about itself, and an
+        // uninitialized source says the destination is uninitialized too. It is the one plane
+        // write that can take initialization away.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        began(&mut build, pointer, 8);
+        let from = past(&mut build, pointer, 64);
+        let size = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[pointer, from, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInitCopy) }, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 0);
     }
 
     /// The same check over an access that assumes something about where it starts.
