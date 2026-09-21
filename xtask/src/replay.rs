@@ -44,6 +44,12 @@
 //! What each row does keep is the day its zip was taken and how many inputs it had, because the
 //! bucket is live, and two runs over two different corpora are two measurements rather than one.
 //!
+//! An input is a file in the directory the variable points at, and that is the whole rule. Some of
+//! these zips carry a subdirectory beside the inputs, the lua one having a `regressions` directory
+//! of testcases that once crashed something, and neither the count a row is pinned at nor the walk
+//! the driver does goes into it. The reason to say so rather than to quietly include it is that a
+//! pin is only worth writing down if two people unpacking the same zip arrive at the same number.
+//!
 //! # One level, and here rather than in a container
 //!
 //! `-O0`, because a replay is about the inputs and not about the optimizer, and because `-O0` is
@@ -107,6 +113,22 @@ const TARGETS: &[Target] = &[
         upstream: "zlib_uncompress_fuzzer",
         corpus: "https://storage.googleapis.com/zlib-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zlib_uncompress_fuzzer/public.zip",
         pinned: ("2026-09-21", 1551),
+    },
+    Target {
+        project: "sqlite",
+        harness: "sqlite",
+        variable: "RUCC_SQLITE_CORPUS",
+        upstream: "ossfuzz",
+        corpus: "https://storage.googleapis.com/sqlite3-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/sqlite3_ossfuzz/public.zip",
+        pinned: ("2026-09-21", 22578),
+    },
+    Target {
+        project: "lua",
+        harness: "lua",
+        variable: "RUCC_LUA_CORPUS",
+        upstream: "fuzz_lua",
+        corpus: "https://storage.googleapis.com/lua-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/lua_fuzz_lua/public.zip",
+        pinned: ("2026-09-21", 18693),
     },
 ];
 
