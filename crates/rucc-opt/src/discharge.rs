@@ -6,12 +6,15 @@
 //! anybody can read, and every check that is not needed is meant to be taken out here instead.
 //! This pass takes them out, and it does the case document 07 expects to be worth the most and to
 //! be the easiest to get right, which is a second access to bytes an earlier access already had
-//! checked. Four kinds are the pass's business, the bounds check and the lifetime check and the
-//! initialization check in front of an access and the derivation check after a walk, because they
-//! are emitted together and taking out one of four is a quarter of a saving.
+//! checked. Five kinds are the pass's business, the bounds check and the lifetime check and the
+//! initialization check and the type check in front of an access and the derivation check after a
+//! walk, because they are emitted together and taking out one of five is a fifth of a saving.
 //!
-//! The type check is the one that is not here. It is emitted at every access beside the
-//! initialization check, it costs the same, and tamnd/rucc#1617 is where it is tracked.
+//! The four in front of an access are four different claims and they get four fact sets. Which
+//! bytes are inside one storage instance, which of them are in an instance that is alive, which of
+//! them have been written, and which of them agree with a type. A check that passes establishes
+//! exactly one of the four, they are killed by different things, and reporting them as one number
+//! would hide which of the four a kept check is still being paid for.
 //!
 //! # The two halves
 //!
@@ -311,7 +314,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Meta, Opcode, Type, Value};
 
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
@@ -387,6 +390,28 @@ const UNKNOWN_SHAPE_INIT: &str =
 /// Recorded for an init check nothing in front of it had anything to say about.
 const NOTHING_WROTE_IT: &str =
     "initialization check kept, nothing dominating it says those bytes have been written";
+
+/// Recorded once for each type check taken out because one in front of it asked the same question
+/// of the same bytes.
+const REMOVED_TYPE: &str =
+    "type check removed, a dominating check covers the same bytes at the same type";
+
+/// Recorded for a type check that would have gone if there had been fuel for it.
+const NO_FUEL_TYPE: &str = "type check kept, the pass ran out of fuel";
+
+/// Recorded once for each type check a dominating one answered before something that could hand the
+/// storage back out ran in between.
+const PAST_A_CALL_TYPE: &str = "type check kept, a dominating check covers its bytes at its type \
+                                and something that could end the storage ran in between";
+
+/// Recorded for a type check whose pointer this pass cannot read as a base and a constant, or whose
+/// payload names no plane entry to ask about.
+const UNKNOWN_SHAPE_TYPE: &str =
+    "type check left alone, its pointer is not a base and a constant or it names no type";
+
+/// Recorded for a type check nothing in front of it had anything to say about.
+const NOTHING_TYPED_IT: &str =
+    "type check kept, nothing dominating it says those bytes agree with that type";
 
 /// Recorded for a bounds check that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
@@ -1044,6 +1069,28 @@ impl Pass for Discharge {
                         }
                         going.push((inst, REMOVED_INIT));
                     }
+                    Opcode::CheckType => {
+                        let Some((node, asked)) = holding(func, inst) else {
+                            stats.missed(UNKNOWN_SHAPE_TYPE);
+                            continue;
+                        };
+                        let held = scope.typed.entry(node).or_default();
+                        if !(self.sources.dominance && held.covers(&asked)) {
+                            stats.missed(if held.covered_before(&asked) {
+                                PAST_A_CALL_TYPE
+                            } else {
+                                NOTHING_TYPED_IT
+                            });
+                            held.held.push(asked);
+                            continue;
+                        }
+                        if !fuel.take() {
+                            stats.missed(NO_FUEL_TYPE);
+                            held.held.push(asked);
+                            continue;
+                        }
+                        going.push((inst, REMOVED_TYPE));
+                    }
                     // The two ways bytes that were written stop counting as written without a call
                     // being involved. A `meta_begin` is a lifetime starting, which is the storage
                     // becoming fresh again, and a `meta_init_copy` carries whatever the source said
@@ -1052,6 +1099,26 @@ impl Pass for Discharge {
                     // lifetime, so neither goes through `opaque`.
                     Opcode::MetaBegin | Opcode::MetaInitCopy => {
                         scope.written.forget();
+                        // Only the first of the two touches the type plane. A lifetime starting is
+                        // storage nobody has stored through yet, which holds no type, and a copy of
+                        // the init plane moves init entries and nothing else.
+                        if func[inst].opcode == Opcode::MetaBegin {
+                            scope.retyped(None);
+                        }
+                    }
+                    // The type plane's copy, which carries whatever the source said and this pass
+                    // has no idea what that was. It says nothing about any other plane.
+                    Opcode::MetaTypeCopy => {
+                        scope.retyped(None);
+                    }
+                    // A store's judgement, which is the one plane write that names a type.
+                    // `Scope::retyped` is the argument for keeping its own entry's facts.
+                    Opcode::MetaType => {
+                        let node = match func[inst].extra {
+                            Extra::Node(node) => Some(node),
+                            _ => None,
+                        };
+                        scope.retyped(node);
                     }
                     _ => continue,
                 }
@@ -1225,6 +1292,15 @@ struct Scope {
     /// range being inside one instance, that instance being alive, and the bytes in it having been
     /// written are three claims, and a check that passes establishes exactly one of them.
     written: Known,
+    /// Ranges a `check_type` established agree with a type, one set of ranges per plane entry.
+    ///
+    /// A fact here is not quite what the check is named after. What a `check_type` that passes
+    /// establishes is that the plane over those bytes is compatible with the entry it asked with,
+    /// which is the plane holding that entry or the plane holding the untyped one, and this pass
+    /// cannot tell which. That is enough to answer a later check asking with the same entry and it
+    /// is not enough to answer one asking with any other, so the entry is the key rather than a
+    /// field, and a lookup that misses is the honest answer for every other type.
+    typed: HashMap<Meta, Known>,
     /// What a `check_bounds` that ran proved about where the address it was about starts.
     ///
     /// Nothing here is ever given up, and that is the difference between this and the other two.
@@ -1243,6 +1319,23 @@ impl Scope {
         self.bounds.forget();
         self.alive.forget();
         self.written.forget();
+        self.retyped(None);
+    }
+
+    /// Gives up the type facts that a plane write over an unknown range has made unsafe to keep.
+    ///
+    /// A `meta_type` naming entry `E` puts `E` over the bytes it covers and leaves every other byte
+    /// where it was, so a range this pass recorded as agreeing with `E` agrees with `E` still,
+    /// wherever the write landed. No such argument holds for any other entry, and where the write
+    /// landed is the thing this pass does not know, so every other entry's facts go. A caller with
+    /// no entry to spare, which is a copy or a lifetime starting or anything opaque, passes `None`
+    /// and loses the lot.
+    fn retyped(&mut self, kept: Option<Meta>) {
+        for (&node, facts) in &mut self.typed {
+            if Some(node) != kept {
+                facts.forget();
+            }
+        }
     }
 
     /// Records what a `check_bounds` that is staying proves about where its address starts.
@@ -1264,20 +1357,21 @@ impl Scope {
         }
     }
 
-    /// Gives up the lifetime facts and the initialization ones and keeps the bounds ones, marked
-    /// as a call having run over them.
+    /// Gives up the lifetime facts and the initialization ones and the type ones, and keeps the
+    /// bounds ones, marked as a call having run over them.
     ///
-    /// The initialization facts go with the lifetime ones rather than with the bounds. There is a
-    /// version of the bounds argument that would keep them, since storage handed back out and
-    /// handed over again comes with a capability whose version no longer matches and the lifetime
-    /// check beside the access is what notices, but it rests on that check still being there, which
-    /// is true only because this pass gives up the lifetime facts at the same point. Resting one
-    /// rule on another rule's conservatism is worth a measurement before it is worth writing.
-    /// tamnd/rucc#1617.
+    /// The initialization facts and the type facts go with the lifetime ones rather than with the
+    /// bounds. There is a version of the bounds argument that would keep them, since storage handed
+    /// back out and handed over again comes with a capability whose version no longer matches and
+    /// the lifetime check beside the access is what notices, but it rests on that check still being
+    /// there, which is true only because this pass gives up the lifetime facts at the same point.
+    /// Resting one rule on another rule's conservatism is worth a measurement before it is worth
+    /// writing. tamnd/rucc#1617.
     fn called(&mut self) {
         self.bounds.crossed();
         self.alive.forget();
         self.written.forget();
+        self.retyped(None);
     }
 }
 
@@ -1321,6 +1415,19 @@ pub(crate) fn about(func: &Func, check: Inst) -> Option<Fact> {
     let (base, offset, whole) = addressed(func, check)?;
     let Extra::Mem(info) = func[check].extra else { return None };
     hull(base, offset, i128::from(func[info].size), whole)
+}
+
+/// What a `check_type` is about, when it is one this pass can read: which plane entry it asks with
+/// and which bytes it asks about.
+///
+/// The entry comes out of the access payload's `tbaa` field, where `rucc_safety::ask` puts it after
+/// translating the aliasing node the front end named into the plane's vocabulary. So it is a plane
+/// entry rather than a node in the aliasing tree, and two checks carrying the same one are asking
+/// the same question.
+fn holding(func: &Func, check: Inst) -> Option<(Meta, Fact)> {
+    let Extra::Mem(info) = func[check].extra else { return None };
+    let node = func[info].tbaa?;
+    Some((node, about(func, check)?))
 }
 
 /// What a `check_live` is about, when it is one this pass can read.
@@ -2312,7 +2419,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
         AsmInfo, Block, BlockCallList, Builder, Extra, Facts, Flags, Func, Inst, InstData, IntPred,
-        MemInfo, MemOrder, Opcode, Restrict, Signature, Type, Value,
+        MemInfo, MemOrder, Meta, Opcode, Restrict, Signature, Type, Value,
     };
 
     use super::{DISCHARGE, Fact};
@@ -2402,6 +2509,44 @@ mod tests {
         func.blocks()
             .flat_map(|block| func.insts(block).collect::<Vec<_>>())
             .filter(|&inst| func[inst].opcode == Opcode::CheckInit)
+            .count()
+    }
+
+    /// Puts `cap_of` and a `check_type` over `size` bytes at `pointer` into a block, asking with
+    /// plane entry `node`.
+    ///
+    /// The shape `rucc_safety::ask` writes in front of a read. The entry is a bare index because
+    /// that is all this pass ever does with one: it compares two of them and it never looks the
+    /// node up, so a number nothing in the module table answers is the same question to it.
+    fn asked(build: &mut Builder<'_>, pointer: Value, size: u64, node: Meta) {
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let info = MemInfo {
+            size,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(node),
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckType) }, &[]);
+    }
+
+    /// Puts a `meta_type` over `size` bytes at `pointer` into a block, naming entry `node`.
+    fn judged(build: &mut Builder<'_>, pointer: Value, size: i128, node: Meta) {
+        let length = build.iconst(Type::int(64), size);
+        let args = build.func().push_values(&[pointer, length]);
+        let extra = Extra::Node(node);
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::MetaType) }, &[]);
+    }
+
+    /// How many type checks are left in a function.
+    fn types(func: &Func) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .filter(|&inst| func[inst].opcode == Opcode::CheckType)
             .count()
     }
 
@@ -2648,6 +2793,103 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(inits(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 0);
+    }
+
+    #[test]
+    fn a_second_type_check_inside_the_bytes_the_first_covered_goes() {
+        // Sixteen bytes were read at one type and four of them are read again at the same type.
+        // The plane was not written in between, so the second question has the first one's answer.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 16, Meta::new(3));
+        let inside = past(&mut build, pointer, 8);
+        asked(&mut build, inside, 4, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 1);
+    }
+
+    #[test]
+    fn a_second_type_check_at_another_type_stays() {
+        // The same bytes and a different entry, which is a different question. Bytes that agree
+        // with one type are exactly the bytes a read at another type is refused for.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        asked(&mut build, pointer, 8, Meta::new(4));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::NOTHING_TYPED_IT), 2);
+    }
+
+    #[test]
+    fn a_type_check_a_store_through_the_same_type_stands_between_goes() {
+        // The judgement a store writes puts its own entry over the bytes it covered and leaves
+        // every other byte where it was, so a range that agreed with that entry agrees with it
+        // still, wherever the store landed. `Scope::retyped` is the argument.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        judged(&mut build, pointer, 8, Meta::new(3));
+        asked(&mut build, pointer, 8, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 1);
+    }
+
+    #[test]
+    fn a_type_check_a_store_through_another_type_stands_between_stays() {
+        // The union member store and the untyped store section 7.4 names, which arrive here as the
+        // same instruction with a different entry on it. Where it landed is what this pass does not
+        // know, so every range it might have covered stops agreeing with anything.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        let far = past(&mut build, pointer, 64);
+        judged(&mut build, far, 8, Meta::new(4));
+        asked(&mut build, pointer, 8, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 0);
+    }
+
+    #[test]
+    fn a_type_check_a_copy_stands_between_stays() {
+        // The `memcpy` case. A `meta_type_copy` gives the destination whatever the source said, and
+        // what the source said is not something this pass has any way to find out.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        let from = past(&mut build, pointer, 64);
+        let size = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[pointer, from, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaTypeCopy) }, &[]);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 0);
+    }
+
+    #[test]
+    fn a_type_check_a_call_stands_between_stays_and_is_counted() {
+        // Type facts go at a call for the reason the init ones do, and the row is here so that what
+        // that costs is a number.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_TYPE), 1);
     }
 
     /// The same check over an access that assumes something about where it starts.
