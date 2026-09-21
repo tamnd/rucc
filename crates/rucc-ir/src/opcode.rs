@@ -149,11 +149,11 @@ pub enum Opcode {
     Store,
     /// Address arithmetic: an address and a byte offset.
     PtrAdd,
-    /// A copy of a known size between addresses that do not overlap.
+    /// A copy between addresses that do not overlap, of the payload's size or of a third operand.
     Memcpy,
-    /// A copy of a known size between addresses that may overlap.
+    /// A copy between addresses that may overlap, of the payload's size or of a third operand.
     Memmove,
-    /// A fill of a known size with one byte.
+    /// A fill with one byte, of the payload's size or of a third operand.
     Memset,
     /// An atomic read.
     AtomicLoad,

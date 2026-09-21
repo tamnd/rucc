@@ -214,6 +214,24 @@ pub struct ValueData {
     pub def: Def,
 }
 
+/// The three parts of a bulk memory operation, taken apart so that nothing has to know the order.
+///
+/// It exists because the length is a number on almost every one of these and a value on a few, and
+/// a reader that takes the operands apart itself is a reader that can get the number from the
+/// payload without noticing that this one has an operand instead. Asking for this hands back the
+/// length either way and there is no shape of it that reads as a length when it is not one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bulk {
+    /// Where it writes.
+    pub to: Value,
+    /// What it puts there: the address it reads for a copy, the byte for a fill.
+    pub with: Value,
+    /// How many bytes, where the program works the count out rather than the compiler.
+    ///
+    /// `None` is the ordinary one, where the count is [`MemInfo::size`].
+    pub length: Option<Value>,
+}
+
 /// What an access does beyond naming an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemInfo {
@@ -221,6 +239,11 @@ pub struct MemInfo {
     ///
     /// A `load` takes its size from the type it produces. An `alloca` and a `memset` do not,
     /// and this is where theirs is.
+    ///
+    /// Zero on a bulk operation that carries its length as an operand, which is the one shape
+    /// where this is not the count. [`Bulk`] is how those are read, and the verifier refuses a
+    /// zero here on one that has no operand, so a reader that goes through it cannot mistake the
+    /// one for the other.
     pub size: u64,
     /// The alignment the access is known to have, in bytes.
     pub align: u32,

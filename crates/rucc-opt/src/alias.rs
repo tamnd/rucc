@@ -532,7 +532,9 @@ impl<'a> Alias<'a> {
         let (pointer, size) = match data.opcode {
             Opcode::Load | Opcode::AtomicLoad => (args[0], self.width(self.result_type(inst)?)),
             // A copy reads its source, which is its second operand, for the size on the access.
-            Opcode::Memcpy | Opcode::Memmove => (args[1], Some(info?.size)),
+            // The size is not known where the program works the length out, and an access of no
+            // known size is one every other access here may touch, which is the honest answer.
+            Opcode::Memcpy | Opcode::Memmove => (args[1], self.bytes(inst, info?)),
             // A read-modify-write reads and writes the same bytes, and the width is the width
             // of what it operates with.
             Opcode::AtomicRmw => (args[0], self.width(self.func[args[1]].ty)),
@@ -543,6 +545,19 @@ impl<'a> Alias<'a> {
         Some(self.access(pointer, size, info, data.flags))
     }
 
+    /// How many bytes a bulk operation covers, where that is a number at all.
+    ///
+    /// One whose length the program works out has no number here, and `None` is what an access of
+    /// unknown size is written as everywhere else in this file. It matters that this is not the
+    /// payload's zero: a zero byte access is one nothing overlaps, so reading the payload on this
+    /// shape would say a copy touches nothing rather than that it may touch anything.
+    fn bytes(&self, inst: Inst, info: MemInfo) -> Option<u64> {
+        match self.func.bulk(inst) {
+            Some(bulk) if bulk.length.is_some() => None,
+            _ => Some(info.size),
+        }
+    }
+
     /// The bytes this instruction writes, if it writes any.
     #[must_use]
     pub fn writes(&self, inst: Inst) -> Option<Access> {
@@ -551,7 +566,7 @@ impl<'a> Alias<'a> {
         let info = self.mem(inst);
         let (pointer, size) = match data.opcode {
             Opcode::Store | Opcode::AtomicStore => (args[1], self.width(self.func[args[0]].ty)),
-            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => (args[0], Some(info?.size)),
+            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => (args[0], self.bytes(inst, info?)),
             Opcode::AtomicRmw | Opcode::Cmpxchg => (args[0], self.width(self.func[args[1]].ty)),
             _ => return None,
         };
@@ -1542,6 +1557,29 @@ mod tests {
         assert_eq!(read.size, Some(16));
         assert_eq!(written.size, Some(16));
         assert_ne!(read.origin, written.origin);
+    }
+
+    #[test]
+    fn a_copy_of_a_length_the_program_works_out_is_an_access_of_no_known_size() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::int(64)]);
+        let length = param(&f, 0);
+        let mut build = builder(&mut f);
+        let to = local(&mut build, 16);
+        let from = local(&mut build, 16);
+        let mem = build.func().add_mem(sized(0, 8));
+        let args = build.func().push_values(&[to, from, length]);
+        build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let alias = Alias::new(&f, &outside);
+        let copy = first(&f, Opcode::Memcpy);
+        // Not `Some(0)`, which is what the payload says and which would make this a copy that
+        // touches nothing rather than one that may touch anything.
+        assert_eq!(alias.reads(copy).expect("a copy reads").size, None);
+        assert_eq!(alias.writes(copy).expect("a copy writes").size, None);
     }
 
     /// A call to a function declared with those attributes.

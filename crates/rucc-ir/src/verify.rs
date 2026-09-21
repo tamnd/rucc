@@ -731,7 +731,13 @@ impl<'a> Verifier<'a> {
         if !ok {
             self.error(format!("{} cannot be asked for {}", opcode.name(), info.order));
         }
-        if matches!(opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset) && info.size == 0 {
+        // A bulk operation that carries its length as an operand says zero here, because a number
+        // beside an operand saying the same thing is two answers that can disagree. So zero is the
+        // mistake on the one that has no operand and the shape on the one that has.
+        if matches!(opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset)
+            && info.size == 0
+            && func.bulk(inst).is_none_or(|bulk| bulk.length.is_none())
+        {
             self.error(format!("{} moves no bytes", opcode.name()));
         }
     }
@@ -1276,16 +1282,26 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+            // Two operands where the payload says how many bytes, three where the program works
+            // the count out and the third is it. The count is an integer of any width here: how
+            // wide `size_t` is on the target is the front end's to know, and an IR the verifier
+            // reads may have come from a file rather than from it.
             Opcode::Memcpy | Opcode::Memmove => {
-                if self.takes(opcode, arity, 2) {
+                if self.takes_either(opcode, arity, 2, 3) {
                     self.pointer(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
                 }
             }
             Opcode::Memset => {
-                if self.takes(opcode, arity, 2) {
+                if self.takes_either(opcode, arity, 2, 3) {
                     self.pointer(opcode, arg(0), 0);
                     self.integer(opcode, arg(1), 1);
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
                 }
             }
             Opcode::AtomicRmw => {
@@ -2374,6 +2390,53 @@ block2:
 ",
         );
         assert_eq!(only(&text), "@f block1 mem_entry: mem_entry belongs in the entry block");
+    }
+
+    #[test]
+    fn a_bulk_operation_whose_length_is_an_operand_is_one_the_compiler_may_believe() {
+        let text = wrap(
+            "(ptr, ptr, i64) -> i32",
+            "block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = mem_entry
+    %4 = memcpy %0, %1, %2, align 4 [mem %3]
+    %5 = iconst.i8 0
+    %6 = memset %1, %5, %2, align 1 [mem %4]
+    %7 = iconst.i32 0
+    return %7
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_bulk_operation_of_no_bytes_and_no_length_operand_is_reported() {
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = mem_entry
+    %3 = memcpy %0, %1, align 4 [mem %2]
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(only(&text), "@f block0 memcpy: memcpy moves no bytes");
+    }
+
+    #[test]
+    fn a_bulk_length_that_is_not_an_integer_is_reported() {
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = mem_entry
+    %3 = memcpy %0, %1, %1, align 4 [mem %2]
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 memcpy: operand 3 of memcpy is an integer and this one is ptr"
+        );
     }
 
     #[test]

@@ -1,0 +1,93 @@
+; ModuleID = 'tests/golden/bulk-of-no-fixed-length.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @use(ptr) -> i32, linkage(external);
+
+func @an_empty_initializer_on_an_array(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 1
+    %3 = mul.nsw %1, %2
+    %4 = stacksave.ptr
+    %5 = alloca %3, align 1
+    %6 = sext.i64 %0
+    %7 = iconst.i64 1
+    %8 = mul.nsw %6, %7
+    %9 = iconst.i8 0
+    memset %5, %9, %8, align 1
+    %10 = call @use(%5) : (ptr) -> i32
+    %11 = sext.i64 %10
+    return %11
+}
+
+func @an_empty_initializer_on_a_record(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = stacksave.ptr
+    %7 = alloca %5, align 4
+    %8 = sext.i64 %0
+    %9 = iconst.i64 4
+    %10 = mul.nsw %8, %9
+    %11 = iconst.i64 4
+    %12 = add.nuw %10, %11
+    %13 = iconst.i8 0
+    memset %7, %13, %12, align 4
+    %14 = call @use(%7) : (ptr) -> i32
+    %15 = sext.i64 %14
+    return %15
+}
+
+func @a_whole_record_assigned(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = sext.i64 %0
+    %2 = iconst.i64 4
+    %3 = mul.nsw %1, %2
+    %4 = iconst.i64 4
+    %5 = add.nuw %3, %4
+    %6 = stacksave.ptr
+    %7 = alloca %5, align 4
+    %8 = sext.i64 %0
+    %9 = iconst.i64 4
+    %10 = mul.nsw %8, %9
+    %11 = iconst.i64 4
+    %12 = add.nuw %10, %11
+    %13 = alloca %12, align 4
+    %14 = sext.i64 %0
+    %15 = iconst.i64 4
+    %16 = mul.nsw %14, %15
+    %17 = ptr_add %7, %16
+    %18 = iconst.i32 1
+    store %18 -> %17, align 4, tbaa !1
+    %19 = sext.i64 %0
+    %20 = iconst.i64 4
+    %21 = mul.nsw %19, %20
+    %22 = iconst.i64 4
+    %23 = add.nuw %21, %22
+    memcpy %13, %7, %23, align 4
+    %24 = call @use(%7) : (ptr) -> i32
+    %25 = call @use(%13) : (ptr) -> i32
+    %26 = add.nsw %24, %25
+    %27 = sext.i64 %26
+    return %27
+}
+
+func @a_fixed_record_is_unchanged() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 4
+    %1 = iconst.i8 0
+    memset %0, %1, size 8, align 4
+    %2 = iconst.i32 1
+    store %2 -> %0, align 4, tbaa !1
+    %3 = call @use(%0) : (ptr) -> i32
+    %4 = sext.i64 %3
+    return %4
+}
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0

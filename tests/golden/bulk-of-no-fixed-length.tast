@@ -1,0 +1,82 @@
+decl #1 use : int(void *) function external declared
+decl #3 an_empty_initializer_on_an_array : long(int) function external defined
+  params
+    decl #2 n : int object automatic defined
+  body
+    block
+      decls
+        decl #4 b : char[*] object automatic defined
+          init
+      return
+        convert arithmetic : long
+          call : int
+            convert function-decay : int (*)(void *)
+              decl #1 use : int(void *) function
+            convert pointer : void *
+              convert array-decay : char *
+                decl #4 b : char[*] lvalue
+decl #6 an_empty_initializer_on_a_record : long(int) function external defined
+  params
+    decl #5 n : int object automatic defined
+  body
+    block
+      decls
+        decl #7 s : struct S object automatic defined
+          init
+      return
+        convert arithmetic : long
+          call : int
+            convert function-decay : int (*)(void *)
+              decl #1 use : int(void *) function
+            convert pointer : void *
+              unary & : struct S *
+                decl #7 s : struct S lvalue
+decl #9 a_whole_record_assigned : long(int) function external defined
+  params
+    decl #8 n : int object automatic defined
+  body
+    block
+      decls
+        decl #10 x : struct S object automatic defined
+        decl #11 y : struct S object automatic defined
+      expr
+        assign = : int
+          member #1 t : int lvalue
+            decl #10 x : struct S lvalue
+          const 1 : int
+      expr
+        assign = : struct S
+          decl #11 y : struct S lvalue
+          convert lvalue : struct S
+            decl #10 x : struct S lvalue
+      return
+        convert arithmetic : long
+          binary + : int
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #10 x : struct S lvalue
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #11 y : struct S lvalue
+decl #12 a_fixed_record_is_unchanged : long(void) function external defined
+  body
+    block
+      decls
+        decl #13 f : struct F object automatic defined
+          init
+            +0
+              const 1 : int
+      return
+        convert arithmetic : long
+          call : int
+            convert function-decay : int (*)(void *)
+              decl #1 use : int(void *) function
+            convert pointer : void *
+              unary & : struct F *
+                decl #13 f : struct F lvalue
