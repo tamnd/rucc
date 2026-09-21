@@ -853,6 +853,40 @@ block3(%5: i32):
     }
 
     #[test]
+    fn the_plane_writes_a_copy_leaves_behind_do_not_stop_the_walk() {
+        // The same shape as the test above with what `-fsafety=detect` puts after a copy in it,
+        // which is what the compiler actually optimizes, since the safety opcodes are still
+        // opcodes when this pass runs and are lowered to calls afterwards.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = alloca, size 16, align 8
+    %2 = iconst.i64 12
+    %3 = ptr_add %0, %2
+    %4 = iconst.i32 7
+    store %4 -> %3, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %0, %5
+    memcpy %1, %6, size 8, align 8
+    %7 = iconst.i64 8
+    meta_type_copy %1, %6, %7
+    meta_init_copy %1, %6, %7
+    cap_copy %1, %6, %7
+    %8 = iconst.i64 4
+    %9 = ptr_add %1, %8
+    %10 = load.i32 %9, align 4
+    return %10
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+    }
+
+    #[test]
     fn what_the_copy_moved_is_what_the_source_held_when_it_ran() {
         // The store after the copy is not the answer, and it is the one that would come back if
         // the walk carried on from the load rather than from the copy.
