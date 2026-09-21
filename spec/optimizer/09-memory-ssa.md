@@ -53,6 +53,42 @@ the callback is reaching anything on a given build at all rather than on the bui
 looked at. rucc has one and it earns its keep in both directions: it is how libwebp's 9309 rewrites
 at `-O2` were found, and it is how the zero on the same amalgamation at `-fsafety=detect` was.
 
+**Phi translation, which is the other rewrite and is not in rucc.** At a memory phi the walk carries
+on into every predecessor and it takes the reference with it, and if the address that reference is
+built on is a parameter of the block the phi is in then the reference means nothing over there. The
+parameter is not defined in the predecessor, and the address it is going to hold is whatever that
+edge passes. Substituting the argument for the parameter and adding the offsets is what GCC's
+`phi_translate` does in `gcc/tree-ssa-pre.cc`, and on paper it is what makes a load through a
+pointer a loop carries answerable at all. rucc built it, measured it, and took it out again, and
+what follows is what the measurement said, because everything up to the measurement is sound and
+somebody will think of it again.
+
+Taken without restriction it is expensive and it does not terminate on its own. A loop that steps a
+pointer along passes a different address every time round, so every trip translates to a reference a
+few bytes further on, no reference ever comes back, and the visited set that ends every other cycle
+has nothing to bite on. Only the budget ends those walks. Over seven builds of four libraries at
+`-O2`, with and without `-fsafety=detect`, it put the steps up between two and eleven times, took
+the SQLite amalgamation from 54070 steps to 612677, and took the walks that end by running out of
+budget from none to 558 out of 24703, which is 2.3% and over the line 9.3 draws.
+
+Restricted to the substitutions that land on an object the function can name, it is free and it is
+just as pointless. That restriction is the right one on its own terms: trading an address the walk
+cannot follow for another one is not a sharper question, and an object origin can never be a
+parameter, so a translated reference never translates again and the divergence goes away rather than
+being budgeted around. It also costs nothing, because there are sixteen such translations in the
+whole amalgamation, twelve on the instrumented build of it, eleven in libwebp, nine on the
+instrumented build of that, and none at all in zlib or brotli.
+
+In both forms the assembly is identical. Seven targets, byte for byte, not one load forwarded that
+was not forwarded before, and the count of loads kept because something unidentifiable may have
+written them moves by at most 27 out of 5389. The shape it is for, a load whose address is a
+parameter of the very block the memory phi is in, is one that C in this corpus does not produce
+often enough to matter: a pointer a loop carries is usually walked along rather than read at a fixed
+offset, and a pointer read at a fixed offset is usually a function parameter, which is a parameter
+of no block that has a memory phi in it and so needs no translating. So this is written down instead
+of built. If some pass that is not redundant load elimination ever wants the walk to see past a
+join, this is the thing to build, the restriction to build it with, and zero is the number to beat.
+
 **`limit`.** The walk is budgeted, and the budget is a parameter: `sccvn-max-alias-queries-per-
 access`, default 1000 (`gcc/params.opt:1020`). Exceeding it returns "unknown", not a wrong answer.
 
