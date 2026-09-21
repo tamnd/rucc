@@ -286,6 +286,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         sets: Vec::new(),
         aliased: HashSet::new(),
         starts: Vec::new(),
+        renamed: HashMap::new(),
         reachable: reach::reachable(tast),
     };
     unit.run();
@@ -367,6 +368,15 @@ pub(crate) struct Unit<'a> {
     /// priorities put them and a function written at the top of the file may have asked to run
     /// last. Only the whole file settles that order.
     starts: Vec<Start>,
+    /// The assembler name the file gave to a name with linkage, kept by the name that was
+    /// written rather than by the declaration that wrote it.
+    ///
+    /// For [`Unit::library_name`], which knows what the C library calls a function and not what
+    /// this file has said about it. The declaration that renames `memcpy` is a different
+    /// declaration from the implicit one the checker made for `__builtin_memcpy`, so the label
+    /// on the first is never reached from the second, and a program that renames a function and
+    /// then calls the builtin means the call to go to the new name.
+    renamed: HashMap<Symbol, Symbol>,
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: HashSet<DeclId>,
@@ -411,6 +421,7 @@ impl Unit<'_> {
     fn run(&mut self) {
         self.file_asms();
         self.find_aliased();
+        self.find_renamed();
         for index in 0..self.tast.top_level().len() {
             let decl = self.tast.top_level()[index];
             if !self.done.insert(decl) {
@@ -553,6 +564,26 @@ impl Unit<'_> {
             let spelling = self.spelled(target);
             let symbol = self.names.intern(&spelling);
             self.aliased.insert(symbol);
+        }
+    }
+
+    /// Which names the file gave an assembler name of their own, before anything is emitted.
+    ///
+    /// Ahead of the walk for the reason [`Unit::find_aliased`] is: the call to
+    /// `__builtin_memcpy` may be written above the declaration of `memcpy` that renames it, and
+    /// the two spellings are one function.
+    fn find_renamed(&mut self) {
+        for index in 0..self.tast.top_level().len() {
+            let decl = self.tast.top_level()[index];
+            let node = &self.tast[decl];
+            let (linkage, name, label) = (node.linkage, node.name, node.asm_label);
+            if linkage == Linkage::None {
+                continue;
+            }
+            let (Some(name), Some(label)) = (name, label) else { continue };
+            let spelling = self.spelled(label);
+            let symbol = self.names.intern(&spelling);
+            self.renamed.insert(name, symbol);
         }
     }
 
@@ -1432,7 +1463,12 @@ impl Unit<'_> {
     /// answer the front end declared them out of.
     fn library_name(&mut self, name: Symbol) -> Option<Symbol> {
         let library = rucc_sema::library_name(self.names.resolve(name))?;
-        Some(self.names.intern(library))
+        let symbol = self.names.intern(library);
+        // And then whatever the file said that name is called in the object file. A program is
+        // allowed to declare `memcpy` with an assembler name of its own and go on calling
+        // `__builtin_memcpy`, and what it means by that is the renamed one: the prefix picks the
+        // function out of the library, it does not ask for a symbol the file has renamed away.
+        Some(self.renamed.get(&symbol).copied().unwrap_or(symbol))
     }
 
     /// The name an object or a function is known by in the object file.
