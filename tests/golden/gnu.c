@@ -174,6 +174,25 @@ int in_memory(int x) {
   return slot;
 }
 
+// A structure as wide as a register, which travels in one as the integer its bytes spell. The
+// object is read where it is and the output is written back into it, and neither access goes
+// through the type of anything inside it, because what the assembly was handed is the bits.
+struct word {
+  unsigned long addr;
+};
+
+unsigned long in_a_register(struct word w) {
+  unsigned long r;
+  __asm__("" : "=r"(r) : "0"(w));
+  return r;
+}
+
+struct word out_of_a_register(void) {
+  struct word w;
+  __asm__("" : "=r"(w));
+  return w;
+}
+
 // Named operands, which are the same operands with the numbers written out for the reader, and
 // are resolved back to numbers before the template reaches the assembler.
 int named(int x) {

@@ -114,3 +114,60 @@ pub fn in_a_register(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
     let Ok(shape) = layout(types, ty, target) else { return false };
     shape.size.is_power_of_two() && shape.size * 8 <= u64::from(target.pointer_width)
 }
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_target::Triple;
+    use rucc_types::{
+        ArrayLen, FieldDecl, IntKind, RecordKind, RecordOptions, layout_record, spell,
+    };
+
+    use super::*;
+
+    /// A `struct` of the given members, and the type of it.
+    fn record(types: &mut Types, target: &TargetInfo, fields: &[FieldDecl]) -> TypeId {
+        let id = types.declare_record(RecordKind::Struct, None);
+        let ty = types.record(id);
+        let laid_out =
+            layout_record(types, RecordKind::Struct, fields, &RecordOptions::default(), target)
+                .expect("a layout");
+        types.complete_record(id, laid_out);
+        ty
+    }
+
+    #[test]
+    fn a_structure_travels_in_a_register_when_the_whole_of_it_fits_in_one() {
+        let mut names = Interner::new();
+        let target =
+            TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
+        let mut types = Types::new();
+        let a = names.intern("a");
+        let b = names.intern("b");
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+
+        // One word, which is the shape an interpreter keeps a tagged pointer in, and the widths
+        // below it, which are registers as well.
+        let word = record(&mut types, &target, &[FieldDecl::new(Some(a), long)]);
+        let half = record(&mut types, &target, &[FieldDecl::new(Some(a), int)]);
+        let byte = record(&mut types, &target, &[FieldDecl::new(Some(a), char_)]);
+        for ty in [word, half, byte] {
+            assert!(in_a_register(&types, &target, ty), "{}", spell(&types, &names, ty));
+        }
+
+        // Two words, which is two registers, and three bytes, which is a size no register has.
+        let two = [FieldDecl::new(Some(a), long), FieldDecl::new(Some(b), long)];
+        let pair = record(&mut types, &target, &two);
+        let three = types.array(char_, ArrayLen::Fixed(3));
+        let odd = record(&mut types, &target, &[FieldDecl::new(Some(a), three)]);
+        for ty in [pair, odd] {
+            assert!(!in_a_register(&types, &target, ty), "{}", spell(&types, &names, ty));
+        }
+
+        // Nothing that is not a record is one of these, whatever its size, since everything else
+        // already has a value of its own and travels as that.
+        assert!(!in_a_register(&types, &target, long));
+    }
+}
