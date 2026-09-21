@@ -492,13 +492,16 @@ impl<'a> Checker<'a> {
     /// Whether a type's size is worked out where it is reached rather than here.
     ///
     /// True for an array whose length is an expression, however deep it is: `int a[n][3]` is one
-    /// and so is `int a[3][n]`. Shared between the operator that measures a type and the
-    /// declaration that has to decide whether the object can live anywhere but the stack.
+    /// and so is `int a[3][n]`. True as well for a record with one of those among its members,
+    /// which is a structure declared inside a function and is as long as its members make it.
+    /// Shared between the operator that measures a type and the declaration that has to decide
+    /// whether the object can live anywhere but the stack.
     pub(crate) fn is_variable_length(&self, ty: TypeId) -> bool {
         match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Array { elem, len } => {
                 matches!(len, ArrayLen::Variable(_)) || self.is_variable_length(elem)
             }
+            TypeKind::Record(record) => self.types.record_info(record).variable.is_some(),
             _ => false,
         }
     }
@@ -516,6 +519,7 @@ impl<'a> Checker<'a> {
                 matches!(len, ArrayLen::Variable(_)) || self.is_variably_modified(elem)
             }
             TypeKind::Pointer(pointee) => self.is_variably_modified(pointee),
+            TypeKind::Record(record) => self.types.record_info(record).variable.is_some(),
             _ => false,
         }
     }

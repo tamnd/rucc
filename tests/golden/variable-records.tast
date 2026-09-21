@@ -1,0 +1,355 @@
+decl #1 use : int(void *) function external declared
+decl #3 a_member_and_one_after_it : long(int) function external defined
+  params
+    decl #2 n : int object automatic defined
+  body
+    block
+      decls
+        decl #4 s : struct S object automatic defined
+      expr
+        assign = : int
+          member #1 j : int lvalue
+            decl #4 s : struct S lvalue
+          const 1 : int
+      return
+        binary + : long
+          cast : long
+            binary + : unsigned long
+              binary * : unsigned long
+                convert arithmetic : unsigned long
+                  convert lvalue : int
+                    decl #2 n : int lvalue
+                const 4 : unsigned long
+              const 4 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #4 s : struct S lvalue
+decl #6 members_on_both_sides : long(int) function external defined
+  params
+    decl #5 n : int object automatic defined
+  body
+    block
+      decls
+        decl #7 s : struct S object automatic defined
+      expr
+        assign = : char
+          member #0 c : char lvalue
+            decl #7 s : struct S lvalue
+          convert arithmetic : char
+            const 1 : int
+      expr
+        assign = : double
+          member #2 d : double lvalue
+            decl #7 s : struct S lvalue
+          convert arithmetic : double
+            const 2 : int
+      return
+        binary + : long
+          cast : long
+            binary + : unsigned long
+              binary & : unsigned long
+                binary + : unsigned long
+                  binary + : unsigned long
+                    binary * : unsigned long
+                      convert arithmetic : unsigned long
+                        convert lvalue : int
+                          decl #5 n : int lvalue
+                      const 4 : unsigned long
+                    const 4 : unsigned long
+                  const 7 : unsigned long
+                const -8 : unsigned long
+              const 8 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #7 s : struct S lvalue
+decl #9 two_variable_members : long(int) function external defined
+  params
+    decl #8 n : int object automatic defined
+  body
+    block
+      decls
+        decl #10 s : struct S object automatic defined
+      expr
+        assign = : short
+          member #1 h : short lvalue
+            decl #10 s : struct S lvalue
+          convert arithmetic : short
+            const 1 : int
+      expr
+        assign = : int
+          member #3 j : int lvalue
+            decl #10 s : struct S lvalue
+          const 2 : int
+      return
+        binary + : long
+          cast : long
+            binary + : unsigned long
+              binary & : unsigned long
+                binary + : unsigned long
+                  binary + : unsigned long
+                    binary + : unsigned long
+                      binary & : unsigned long
+                        binary + : unsigned long
+                          binary * : unsigned long
+                            convert arithmetic : unsigned long
+                              convert lvalue : int
+                                decl #8 n : int lvalue
+                            const 1 : unsigned long
+                          const 1 : unsigned long
+                        const -2 : unsigned long
+                      binary * : unsigned long
+                        convert arithmetic : unsigned long
+                          convert lvalue : int
+                            decl #8 n : int lvalue
+                        const 1 : unsigned long
+                    const 2 : unsigned long
+                  const 3 : unsigned long
+                const -4 : unsigned long
+              const 4 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #10 s : struct S lvalue
+decl #12 a_union : long(int) function external defined
+  params
+    decl #11 n : int object automatic defined
+  body
+    block
+      decls
+        decl #13 u : union U object automatic defined
+      expr
+        assign = : double
+          member #1 d : double lvalue
+            decl #13 u : union U lvalue
+          convert arithmetic : double
+            const 1 : int
+      return
+        binary + : long
+          cast : long
+            binary & : unsigned long
+              binary + : unsigned long
+                cond : unsigned long
+                  binary > : int
+                    binary * : unsigned long
+                      convert arithmetic : unsigned long
+                        convert lvalue : int
+                          decl #11 n : int lvalue
+                      const 4 : unsigned long
+                    const 8 : unsigned long
+                  binary * : unsigned long
+                    convert arithmetic : unsigned long
+                      convert lvalue : int
+                        decl #11 n : int lvalue
+                    const 4 : unsigned long
+                  const 8 : unsigned long
+                const 7 : unsigned long
+              const -8 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : union U *
+                  decl #13 u : union U lvalue
+decl #15 packed : long(int) function external defined
+  params
+    decl #14 n : int object automatic defined
+  body
+    block
+      decls
+        decl #16 s : struct S object automatic defined
+      expr
+        assign = : int
+          member #2 j : int lvalue
+            decl #16 s : struct S lvalue
+          const 1 : int
+      return
+        binary + : long
+          cast : long
+            binary + : unsigned long
+              binary * : unsigned long
+                convert arithmetic : unsigned long
+                  convert lvalue : int
+                    decl #14 n : int lvalue
+                const 4 : unsigned long
+              const 5 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #16 s : struct S lvalue
+decl #18 an_aligned_member : long(int) function external defined
+  params
+    decl #17 n : int object automatic defined
+  body
+    block
+      decls
+        decl #19 s : struct S object automatic defined
+      expr
+        assign = : int
+          member #2 j : int lvalue
+            decl #19 s : struct S lvalue
+          const 1 : int
+      return
+        binary + : long
+          cast : long
+            binary & : unsigned long
+              binary + : unsigned long
+                binary + : unsigned long
+                  binary & : unsigned long
+                    binary + : unsigned long
+                      binary + : unsigned long
+                        binary * : unsigned long
+                          convert arithmetic : unsigned long
+                            convert lvalue : int
+                              decl #17 n : int lvalue
+                          const 4 : unsigned long
+                        const 4 : unsigned long
+                      const 15 : unsigned long
+                    const -16 : unsigned long
+                  const 4 : unsigned long
+                const 15 : unsigned long
+              const -16 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct S *
+                  decl #19 s : struct S lvalue
+decl #21 nested : long(int) function external defined
+  params
+    decl #20 n : int object automatic defined
+  body
+    block
+      decls
+        decl #22 : struct In type declared
+      decls
+        decl #23 o : struct Out object automatic defined
+      expr
+        assign = : int
+          member #1 x : int lvalue
+            member #1 in : struct In lvalue
+              decl #23 o : struct Out lvalue
+          const 1 : int
+      expr
+        assign = : int
+          member #2 y : int lvalue
+            decl #23 o : struct Out lvalue
+          const 2 : int
+      return
+        binary + : long
+          cast : long
+            binary + : unsigned long
+              binary + : unsigned long
+                binary * : unsigned long
+                  convert arithmetic : unsigned long
+                    convert lvalue : int
+                      decl #20 n : int lvalue
+                  const 4 : unsigned long
+                const 4 : unsigned long
+              const 8 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                unary & : struct Out *
+                  decl #23 o : struct Out lvalue
+decl #25 an_array_of_them : long(int) function external defined
+  params
+    decl #24 n : int object automatic defined
+  body
+    block
+      decls
+        decl #26 a : struct S[2] object automatic defined
+      expr
+        assign = : int
+          member #1 j : int lvalue
+            subscript : struct S lvalue
+              convert array-decay : struct S *
+                decl #26 a : struct S[2] lvalue
+              const 1 : int
+          const 1 : int
+      return
+        binary + : long
+          cast : long
+            binary * : unsigned long
+              const 2 : unsigned long
+              binary + : unsigned long
+                binary * : unsigned long
+                  convert arithmetic : unsigned long
+                    convert lvalue : int
+                      decl #24 n : int lvalue
+                  const 4 : unsigned long
+                const 4 : unsigned long
+          convert arithmetic : long
+            call : int
+              convert function-decay : int (*)(void *)
+                decl #1 use : int(void *) function
+              convert pointer : void *
+                convert array-decay : struct S *
+                  decl #26 a : struct S[2] lvalue
+decl #28 measured_at_the_definition : long(int) function external defined
+  params
+    decl #27 n : int object automatic defined
+  body
+    block
+      decls
+        decl #29 : struct S type declared
+      expr
+        assign = : int
+          decl #27 n : int lvalue
+          const 0 : int
+      return
+        cast : long
+          binary * : unsigned long
+            convert arithmetic : unsigned long
+              convert lvalue : int
+                decl #27 n : int lvalue
+            const 4 : unsigned long
+decl #32 offsets : long(int, int) function external defined
+  params
+    decl #30 n : int object automatic defined
+    decl #31 i : int object automatic defined
+  body
+    block
+      decls
+        decl #33 : struct S type declared
+      decls
+        decl #34 T : int[*] type declared
+      decls
+        decl #35 : struct R type declared
+      return
+        binary + : long
+          cast : long
+            binary * : unsigned long
+              convert arithmetic : unsigned long
+                convert lvalue : int
+                  decl #30 n : int lvalue
+              const 4 : unsigned long
+          cast : long
+            binary + : unsigned long
+              const 4 : unsigned long
+              binary * : unsigned long
+                convert arithmetic : unsigned long
+                  convert lvalue : int
+                    decl #31 i : int lvalue
+                binary * : unsigned long
+                  convert arithmetic : unsigned long
+                    convert lvalue : int
+                      decl #30 n : int lvalue
+                  const 4 : unsigned long

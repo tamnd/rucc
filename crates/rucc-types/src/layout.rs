@@ -58,6 +58,13 @@ pub enum LayoutError {
     /// The type is a function type, which has no size at all. GNU C gives it the value one for
     /// the same reason it does for `void`.
     Function,
+    /// The type is complete and how large it is depends on something the program computes, which
+    /// is a variable length array or a record with one among its members.
+    ///
+    /// Not a diagnostic on its own. Every one of these has a size, worked out where the
+    /// declaration carrying it was reached, and this is what tells a caller to go and ask for it
+    /// rather than to report that there is none. [`align`] still answers for one.
+    Variable,
     /// The type is complete and describes an object larger than one may be, which an array
     /// declaration can ask for by multiplying two innocent looking numbers.
     ///
@@ -73,6 +80,7 @@ impl std::fmt::Display for LayoutError {
         let text = match self {
             LayoutError::Incomplete => "the type is incomplete",
             LayoutError::Function => "a function type has no size",
+            LayoutError::Variable => "the size of the type is not known until the program runs",
             LayoutError::TooLarge => "the type is larger than an object may be",
         };
         f.write_str(text)
@@ -100,6 +108,46 @@ pub fn layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<Layout, 
     match asked {
         Some(align) => plain.map(|layout| Layout::new(layout.size, u64::from(align.get()))),
         None => plain,
+    }
+}
+
+/// What an object of `id` has to be aligned to, whether or not it has a size here.
+///
+/// The number [`layout`] answers with wherever there is one. Where there is not, which is a
+/// variable length array or a record with one among its members, there is still an alignment,
+/// because an alignment never depends on a length: an array is as aligned as its element however
+/// long it turns out to be, and a record's alignment is decided by its members rather than by
+/// where they land.
+///
+/// # Errors
+///
+/// [`LayoutError`] when the type has no alignment either, which is every reason [`layout`] has
+/// for having no size but the one this is here for.
+pub fn align(types: &Types, id: TypeId, target: &TargetInfo) -> Result<u64, LayoutError> {
+    let natural = match layout(types, id, target) {
+        Ok(laid_out) => return Ok(laid_out.align),
+        Err(LayoutError::Variable) => variable_align(types, id, target)?,
+        Err(error) => return Err(error),
+    };
+    // A typedef that asked for an alignment replaces the one the type has, the same way it does
+    // in [`layout`], and it is asked here as well because a `typedef int T[n]` may carry one.
+    match types.align_override(id) {
+        Some(asked) => Ok(u64::from(asked.get())),
+        None => Ok(natural),
+    }
+}
+
+/// The alignment of a type whose size is not known here.
+fn variable_align(types: &Types, id: TypeId, target: &TargetInfo) -> Result<u64, LayoutError> {
+    match types.kind(types.canonical(id)) {
+        TypeKind::Array { elem, .. } => align(types, elem, target),
+        // The alignment is in the layout beside the recipe, where the size is zero and this is
+        // the part of it that means something.
+        TypeKind::Record(record) => {
+            let info = types.record_info(record);
+            Ok(info.layout.ok_or(LayoutError::Incomplete)?.align)
+        }
+        _ => Err(LayoutError::Variable),
     }
 }
 
@@ -131,6 +179,12 @@ fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<La
         }
         TypeKind::Array { elem, len } => {
             let ArrayLen::Fixed(count) = len else {
+                // A length the program computes is a size that exists and is not a number here.
+                // A length left out and a `[*]` in a prototype are neither, so those two stay
+                // what they have always been, which is incomplete.
+                if matches!(len, ArrayLen::Variable(_)) {
+                    return Err(LayoutError::Variable);
+                }
                 return Err(LayoutError::Incomplete);
             };
             let elem = layout(types, elem, target)?;
@@ -145,7 +199,13 @@ fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<La
             let raw = elem.size.checked_mul(u64::from(len)).ok_or(LayoutError::TooLarge)?;
             Ok(vector_layout(raw))
         }
-        TypeKind::Record(record) => types.record_info(record).layout.ok_or(LayoutError::Incomplete),
+        TypeKind::Record(record) => {
+            let info = types.record_info(record);
+            if info.variable.is_some() {
+                return Err(LayoutError::Variable);
+            }
+            info.layout.ok_or(LayoutError::Incomplete)
+        }
         TypeKind::Enum(id) => {
             let underlying = types.enum_info(id).underlying.ok_or(LayoutError::Incomplete)?;
             layout(types, underlying, target)
