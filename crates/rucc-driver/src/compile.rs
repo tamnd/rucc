@@ -3665,6 +3665,59 @@ decl #0 x : int object external static defined
         assert!(asm(own).contains("\tcall"), "a name the program took back is a call");
     }
 
+    /// A name nothing declared that the implementation knows the type of is declared with that
+    /// type rather than with the `extern int f()` C89 6.3.2.2 writes down.
+    ///
+    /// That is gcc's rule and it is measurable: gcc 16.2.0 compiles an undeclared `alloca` with
+    /// no call in it at all, and says `incompatible implicit declaration of built-in function`
+    /// beside the implicit declaration warning. A C89 declaration would have made the call return
+    /// an `int` and reach a function no C library defines, since every header that offers
+    /// `alloca` offers it as a macro for the builtin. Four torture programs turn on it,
+    /// `execute/20020314-1.c`, `20040223-1.c`, `941202-1.c` and `pr22061-1.c`, each of which
+    /// calls `alloca` with nothing above it.
+    ///
+    /// The rule is the builtin table's rather than this one name's, so an undeclared `strlen` is
+    /// the builtin too. What it is not is a declaration the program wrote that disagrees with the
+    /// builtin's type, which gcc keeps and calls, and that was measured as well.
+    #[test]
+    fn a_builtin_the_program_never_declared_is_the_builtin_rather_than_the_one_c89_wrote_down() {
+        // `-fpermissive`, because the implicit declaration itself is an error in every dialect
+        // after C89 and the program would never get as far as a type without it. Each of the four
+        // torture programs asks for either that or `-std=gnu89` on its own options line.
+        let mut opts = options();
+        opts.permissive = true;
+        let undeclared = "void use(void *p);
+void f(unsigned long n) { use(alloca(n)); }
+";
+        assert_eq!(
+            run(&opts, undeclared).messages,
+            [
+                "/main.c:2:31: warning: implicit declaration of function 'alloca' [E0521]",
+                "/main.c:2:31: warning: incompatible implicit declaration of built-in function \
+                 'alloca' [E0713]",
+            ]
+        );
+
+        opts.emit = EmitKind::Asm;
+        let text = run(&opts, undeclared).text().to_owned();
+        assert!(text.contains("subq\t%rdi, %rsp"), "the bytes come off the stack: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "the only call is the one written: {text}");
+
+        // The table's rule and not this one name's, so a name whose whole answer is the library
+        // function of the same name gets that function's type and still reaches it.
+        let string = "unsigned long f(void) { return strlen(\"abc\"); }\n";
+        let text = run(&opts, string).text().to_owned();
+        assert!(text.contains("call\tstrlen"), "strlen is still a call: {text}");
+
+        // A declaration the program wrote is the program's, whatever the table says. gcc keeps
+        // this one and writes the call, which is what makes the type worth looking at.
+        let own = concat!(
+            "static void *alloca(unsigned long n) { return 0; }\n",
+            "void *f(unsigned long n) { return alloca(n); }\n",
+        );
+        assert!(asm(own).contains("\tcall"), "a name the program took back is a call");
+    }
+
     /// The bytes an alloca took live until the function returns and not until the end of the block
     /// the call was written in.
     ///
