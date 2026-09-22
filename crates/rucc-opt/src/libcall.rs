@@ -566,7 +566,8 @@ impl Site<'_> {
     /// object does not have that many bytes for, since a call that reads past the end of what the
     /// compiler can see is a call whose answer the compiler does not know.
     fn memchr(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
-        if args.len() != 3 || self.func[args[0]].ty != Type::PTR || !self.places(data) {
+        (args.len() == 3).then_some(())?; // not a threshold: `memchr` takes three arguments.
+        if self.func[args[0]].ty != Type::PTR || !self.places(data) {
             return None;
         }
         let wanted = self.character(args[1])?;
@@ -619,7 +620,7 @@ impl Site<'_> {
 
     /// The same over a count the call was given, which has to be a constant.
     fn strncmp(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
-        (args.len() == 3).then_some(())?;
+        (args.len() == 3).then_some(())?; // not a threshold: `strncmp` takes three arguments.
         let count = self.count(args[2])?;
         self.compared(data, args, count)
     }
