@@ -443,6 +443,14 @@ fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
             }
         }
     }
+    // And the names, which go where the readers went, for the same reason `crate::uses::substitute`
+    // moves them. A call is an instruction that carries memory and `int x = f();` names what one
+    // produced, so a value rewritten here can be a value a declaration is spelled by.
+    let mut moving: Vec<Value> = forward.keys().copied().collect();
+    moving.sort_unstable();
+    for from in moving {
+        func.rename_value(from, with(from));
+    }
 }
 
 /// Passes the version of memory each block ends with to the joins it branches to.

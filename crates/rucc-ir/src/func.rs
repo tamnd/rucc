@@ -99,6 +99,7 @@ pub struct Func {
     facts: Vec<(Value, Facts)>,
     labels: Vec<(Block, Symbol)>,
     mem_decls: Vec<(Idx<MemInfo>, u32)>,
+    value_decls: Vec<(Value, u32)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -140,6 +141,7 @@ impl Func {
             facts: Vec::new(),
             labels: Vec::new(),
             mem_decls: Vec::new(),
+            value_decls: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -844,6 +846,64 @@ impl Func {
         match self.mem_decls.binary_search_by_key(&mem.raw(), |&(at, _)| at.raw()) {
             Ok(at) => Some(self.mem_decls[at].1),
             Err(_) => None,
+        }
+    }
+
+    /// Says which declaration in the source a value is a value of, which is the other half of
+    /// [`Func::declare_mem`].
+    ///
+    /// A local whose address is never taken has no memory to put the number on, because nothing
+    /// asked for any, and what holds it is a value the SSA construction worked out.
+    ///
+    /// One declaration is many values. Every assignment to it makes one, and so does every block
+    /// parameter that collects two of them where control joins. One value can be more than one
+    /// declaration as well, because a pass that finds two values equal points the readers of one at
+    /// the other, and both names then mean the one that is left. Neither of those is a mistake to
+    /// be ruled out here, so this is a list of pairs rather than a map in either direction.
+    ///
+    /// What the pairs do not say is which of a declaration's values it holds at a given address,
+    /// and nothing in this crate can say it. That is a question about where the definitions ended
+    /// up in the code that came out and how long each of them survived there, which the back end
+    /// knows and the IR does not.
+    pub fn declare_value(&mut self, value: Value, decl: u32) {
+        let key = (value.raw(), decl);
+        let found = self.value_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        if let Err(at) = found {
+            self.value_decls.insert(at, (value, decl));
+        }
+    }
+
+    /// Every declaration a value is a value of, in the order the front end numbered them.
+    ///
+    /// Empty for a value no declaration in the source is behind, which is most of them: every
+    /// temporary an expression needed, every address computed on the way to a member, and every
+    /// result of a rule the peephole applied.
+    pub fn value_decls(&self, value: Value) -> impl Iterator<Item = u32> + '_ {
+        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.value_decls[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == value)
+            .map(|&(_, decl)| decl)
+    }
+
+    /// Moves every declaration one value is a value of onto another value.
+    ///
+    /// What a pass that found two values equal does about the names. It points the readers of one
+    /// at the other and the one it pointed away from is about to be nobody's, so the names go with
+    /// the readers: the declaration still holds the value it held, and the value is now spelled the
+    /// other way. A pass that deletes a value without giving its readers somewhere else to look is
+    /// a pass that deleted something nothing reads, and a declaration whose value went that way is
+    /// one the back end will have nothing to say about over those addresses, which is the right
+    /// answer rather than a lost one.
+    pub fn rename_value(&mut self, from: Value, to: Value) {
+        if from == to {
+            return;
+        }
+        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end = at + self.value_decls[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<u32> = self.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+        for decl in moving {
+            self.declare_value(to, decl);
         }
     }
 
@@ -1773,6 +1833,42 @@ mod tests {
         assert_eq!(func.mem_decl(third), Some(7));
         // Memory no declaration asked for, which is what every temporary is.
         assert_eq!(func.mem_decl(second), None);
+    }
+
+    /// A value says which declarations it is the value of, and a rename carries them over.
+    ///
+    /// Both directions are many, which is why this is a list rather than a map: a declaration
+    /// assigned twice has a value for each assignment, and two values a pass found equal end up
+    /// as one value that two declarations are both spelled by.
+    #[test]
+    fn a_value_says_which_declarations_it_is_and_a_rename_carries_them_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::int(32));
+        let second = func.append_param(block, Type::int(32));
+        let third = func.append_param(block, Type::int(32));
+
+        // Out of order, because a value is named where the walk reaches the assignment that made
+        // it and the table is kept sorted so that reading it back is a search rather than a scan.
+        func.declare_value(third, 7);
+        func.declare_value(first, 2);
+        // The same ask twice, which a read that memoises what it found makes, and it is one pair.
+        func.declare_value(first, 2);
+
+        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2]);
+        assert_eq!(func.value_decls(third).collect::<Vec<u32>>(), vec![7]);
+        // A value no declaration is behind, which is what every temporary is.
+        assert_eq!(func.value_decls(second).count(), 0);
+
+        // A pass finds two values equal and points the readers of one at the other. The names go
+        // with the readers, and the value that is left is both of them.
+        func.rename_value(third, first);
+        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2, 7]);
+        assert_eq!(func.value_decls(third).count(), 0);
+
+        // And renaming a value nothing named moves nothing rather than inventing a pair.
+        func.rename_value(second, third);
+        assert_eq!(func.value_decls(third).count(), 0);
     }
 
     #[test]
