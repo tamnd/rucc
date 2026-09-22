@@ -577,6 +577,18 @@ pub enum Opcode {
     /// no frame to have kept: the machine holds the address in a place of its own, so this is one
     /// instruction on every target that has the builtin at all.
     ThreadPointer,
+    /// What is in a machine register, for `register long x asm ("rbx");`.
+    ///
+    /// The GNU extension that puts an object in a named register rather than in the frame. The
+    /// name of the register is the payload and the result is whatever that register holds where
+    /// this stands, which is the value the object starts with. A garbage collector written in C
+    /// reads the callee saved registers this way, because a root that is only in one of those is
+    /// a root no walk of the stack finds.
+    ///
+    /// It is not pure. Two of these on the same register in one function are two different
+    /// answers, since anything in between may have written the register, so neither may be moved
+    /// to where the other is and neither may be dropped for the other.
+    RegisterValue,
     /// The start of a variable argument list.
     VaStart,
     /// One argument off a variable argument list, which moves the list on as it reads it. Two
@@ -747,6 +759,7 @@ impl Opcode {
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
+            Self::RegisterValue => "register_value",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
             Self::VaObject => "va_object",
@@ -1193,7 +1206,7 @@ impl Opcode {
     pub const fn extra_kind(self) -> ExtraKind {
         match self {
             Self::IConst | Self::FConst | Self::Splat => ExtraKind::Imm,
-            Self::GlobalAddr | Self::TargetIntrinsic => ExtraKind::Symbol,
+            Self::GlobalAddr | Self::TargetIntrinsic | Self::RegisterValue => ExtraKind::Symbol,
             Self::ICmp => ExtraKind::IntPred,
             Self::FCmp => ExtraKind::FloatPred,
             Self::Alloca
@@ -1448,6 +1461,7 @@ static ALL: &[Opcode] = &[
     Opcode::FrameAddress,
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
+    Opcode::RegisterValue,
     Opcode::VaStart,
     Opcode::VaArg,
     Opcode::VaObject,

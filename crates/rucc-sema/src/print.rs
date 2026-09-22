@@ -140,6 +140,9 @@ impl<'a> Printer<'a> {
         if let Some(label) = node.asm_label {
             head.push_str(&format!(" asm {}", self.tast[label].spell()));
         }
+        if let Some(register) = node.register {
+            head.push_str(&format!(" register {}", self.tast[register].spell()));
+        }
         if let Some(target) = node.alias {
             head.push_str(&format!(" alias {}", self.tast[target].spell()));
         }
@@ -907,6 +910,7 @@ decl #0 : int[2] object automatic defined
             alignment: None,
             flags: DeclFlags::NONE,
             asm_label: None,
+            register: None,
             alias: None,
             inline: Emission::Silent,
             effects: Effects::Any,

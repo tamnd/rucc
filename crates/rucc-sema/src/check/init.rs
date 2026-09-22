@@ -378,6 +378,7 @@ impl<'a> Checker<'a> {
                 alignment: None,
                 flags: DeclFlags::NONE,
                 asm_label: None,
+                register: None,
                 alias: None,
                 inline: Emission::Silent,
                 effects: Effects::Any,

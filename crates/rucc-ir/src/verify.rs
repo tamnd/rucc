@@ -1039,6 +1039,21 @@ impl<'a> Verifier<'a> {
                     ));
                 }
             }
+            // What a named machine register holds, which takes nothing and answers a value of
+            // whatever type the object was declared with. A register is a run of bits and the
+            // program says what to read them as, so an integer and an address are both here.
+            // Whether the register is wide enough for the type is the target's question and is
+            // asked where the register is looked up, since this crate has no targets in it.
+            Opcode::RegisterValue => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    let ty = res(0);
+                    if !(ty.is_ptr() || (ty.is_scalar() && ty.is_int())) {
+                        self.error(format!(
+                            "register_value produces an integer or an address and this one produces {ty}"
+                        ));
+                    }
+                }
+            }
             // The two that walk the frames, which answer a pointer like the three above and take
             // nothing, since how far up to walk is the depth beside the instruction rather than
             // anything computed.
