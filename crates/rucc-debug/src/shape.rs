@@ -216,6 +216,13 @@ pub struct Param {
     pub name: Option<String>,
     /// Which of the unit's [`types`](crate::Unit::types) it is.
     pub ty: usize,
+    /// How far below the function's frame base the parameter is, for a parameter lowering gave a
+    /// frame slot, and [`None`] for one held in a value and for every function type.
+    ///
+    /// A parameter is a local that happened to arrive in a register, so where it ends up is decided
+    /// the same way every other local's place is. One that has a slot is one `DW_OP_fbreg` away for
+    /// the whole of the function. See [`Local`].
+    pub at: Option<i64>,
 }
 
 /// One variable the unit defines at file scope.
@@ -244,6 +251,32 @@ pub struct Global {
     pub decl: Option<Place>,
     /// Whether anything outside this unit can see it, which is the opposite of `static`.
     pub external: bool,
+}
+
+/// One local the program declared that lowering gave a frame slot.
+///
+/// Not every local. A scalar whose address is never taken is put in an SSA value rather than a
+/// slot, at every optimization level, so where it is depends on what the register allocator did and
+/// changes from one program counter to the next. Those need a location list and are the rest of
+/// tamnd/rucc#1645. The ones here are the ones with a fixed place: every aggregate, every local
+/// whose address is taken, every `volatile` and `_Atomic` one, and all of them in a function that
+/// saves a place with `__builtin_setjmp`.
+///
+/// A parameter is not here even when it has a slot. It is already a child of the subprogram, from
+/// the signature, and a second entry for it would be a second variable of the same name. What it
+/// gets instead is [`Param::at`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    /// Its name, as the C program spelled it.
+    pub name: String,
+    /// Which of the unit's [`types`](crate::Unit::types) it is, and [`None`] when this compiler
+    /// cannot yet say, which is the case [`Global::ty`] explains.
+    pub ty: Option<usize>,
+    /// Where it was declared, and nothing when that is not known.
+    pub decl: Option<Place>,
+    /// How far below the function's frame base it is, which is a negative number, since the frame
+    /// base is the stack pointer the caller had and a frame is below that.
+    pub at: i64,
 }
 
 /// Where in the source something was declared.

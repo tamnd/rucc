@@ -77,6 +77,17 @@ pub(crate) struct Meaning {
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
     pub objects: HashMap<String, Held>,
+    /// What is known about each local the program declared, by the number the declaration has.
+    ///
+    /// Keyed by the number rather than by a name, because a name is not unique in a unit and is not
+    /// unique in a function either: two blocks may each declare an `i` and they are two variables.
+    /// The number is the one the lowering wrote onto the memory the local's slot came from, so the
+    /// join with what the back end hands back is exact rather than a guess.
+    ///
+    /// Every declaration in the unit, whether or not the local it names ended up with a slot and
+    /// whether or not the function it is in was emitted. Which of them get an entry is decided by
+    /// the back end handing over the ones the frame placed, and the rest are never asked for.
+    pub locals: HashMap<u32, Named>,
 }
 
 /// What is known about one function.
@@ -96,8 +107,32 @@ pub(crate) struct Known {
     pub line: u32,
     /// What it takes and gives back, and [`None`] when something in it cannot be described.
     pub sig: Option<Sig>,
+    /// Which declaration each of [`Sig::params`] is, in the same order, and [`None`] for a position
+    /// the definition's own parameter list did not reach.
+    ///
+    /// Carried so that a parameter the back end says has a frame slot can be matched to the entry
+    /// the signature already wrote for it, rather than given a second entry of its own. The list is
+    /// empty for a function whose signature could not be described, since there are no parameters
+    /// to line it up against.
+    pub params: Vec<Option<u32>>,
     /// Whether anything outside the unit can see it.
     pub external: bool,
+}
+
+/// What is known about one local the program declared.
+#[derive(Debug, Clone)]
+pub(crate) struct Named {
+    /// The name it was declared with, as the program spelled it.
+    pub name: String,
+    /// The file it was declared in, as the source map spells it, for the reason [`Known::file`] is
+    /// a name.
+    pub file: String,
+    /// The line it is declared on, counting from one.
+    pub line: u32,
+    /// Which entry in [`Meaning::types`] it is, and [`None`] when it cannot be described.
+    ///
+    /// A local with nothing here still gets an entry, for the reason [`Held::ty`] gives.
+    pub ty: Option<usize>,
 }
 
 /// What is known about one file-scope variable.
@@ -139,10 +174,12 @@ pub(crate) fn collect(
             // A definition rather than a declaration, since what is being described is the code in
             // this object. `int f(int);` on its own defines nothing for an address to be inside of.
             DeclKind::Function if decl.body.is_some() => {
+                let described = walk.signature(tast, id);
                 let known = Known {
                     file: at.name.to_owned(),
                     line: at.line,
-                    sig: walk.signature(tast, id),
+                    sig: described.as_ref().map(|(sig, _)| sig.clone()),
+                    params: described.map(|(_, params)| params).unwrap_or_default(),
                     external,
                 };
                 funcs.insert(symbol, known);
@@ -165,6 +202,35 @@ pub(crate) fn collect(
             _ => {}
         }
     }
+    // The locals, which are every declaration in the tree with automatic storage duration and a
+    // name. The top level above is no use for them: a local is declared inside a body and the top
+    // level holds the function. So this is a walk over the declarations rather than over the tree,
+    // which reaches one in a nested block the same way it reaches one at the top of a body, and
+    // asks nothing about where it was written, since where it was written is a question the tree
+    // answers and the number is what the join needs.
+    //
+    // Parameters are among them, because a parameter is an object of automatic duration and a
+    // parameter that has a slot wants an offset like any other local. Which of the two an entry
+    // turns out to be is decided where the back end's list is read, against the parameter numbers
+    // the function carries.
+    //
+    // Every declaration, including ones in a function the back end never emitted. A type walked
+    // for one of those is an entry in the table nothing points at, which costs its bytes and is
+    // read by nothing, and the alternative is to know here which functions survive, which is not
+    // decided until code generation has run.
+    let mut locals = HashMap::new();
+    for raw in 0..u32::try_from(tast.counts().decls).unwrap_or(u32::MAX) {
+        let id = DeclId::new(raw);
+        let decl = &tast[id];
+        if decl.kind != DeclKind::Object || decl.duration != StorageDuration::Automatic {
+            continue;
+        }
+        let Some(name) = decl.name else { continue };
+        let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
+        let ty = walk.told(decl.ty);
+        let name = walk.spelled(name);
+        locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty });
+    }
     // The typedef names last, so that nothing else waits behind a name that may turn out to stand
     // for a type nothing else mentions. A name whose type cannot be described is left out rather
     // than written with no `DW_AT_type`, since that is how DWARF spells a name for `void` and a
@@ -174,7 +240,7 @@ pub(crate) fn collect(
         let name = walk.spelled(alias.name);
         walk.out.push(Shape::Alias { name, of });
     }
-    Meaning { types: walk.out, funcs, objects }
+    Meaning { types: walk.out, funcs, objects, locals }
 }
 
 /// The name a declaration will have in the object file.
@@ -218,8 +284,12 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// What one function definition takes and gives back.
-    fn signature(&mut self, tast: &Tast, id: DeclId) -> Option<Sig> {
+    /// What one function definition takes and gives back, and which declaration each parameter is.
+    ///
+    /// The numbers come back beside the signature rather than inside it because the signature is
+    /// what the DWARF writer is handed and a declaration's number means nothing there. What wants
+    /// them is the join with the locals the back end placed, which happens in this crate.
+    fn signature(&mut self, tast: &Tast, id: DeclId) -> Option<(Sig, Vec<Option<u32>>)> {
         let declared = tast[id].ty;
         let TypeKind::Function(which) = self.types.kind(self.types.canonical(declared)) else {
             return None;
@@ -232,17 +302,20 @@ impl Walk<'_> {
         // the program left a parameter unnamed, which C23 allows.
         let written = tast[tast[id].params].to_vec();
         let mut params = Vec::with_capacity(signature.params.len());
+        let mut declared = Vec::with_capacity(signature.params.len());
         for (index, &ty) in signature.params.iter().enumerate() {
             let ty = self.told(ty)?;
             let name = written.get(index).and_then(|&param| tast[param].name);
-            params.push(Param { name: name.map(|name| self.spelled(name)), ty });
+            params.push(Param { name: name.map(|name| self.spelled(name)), ty, at: None });
+            declared.push(written.get(index).map(|param| param.raw()));
         }
-        Some(Sig {
+        let sig = Sig {
             returns,
             params,
             variadic: signature.variadic,
             prototyped: signature.prototyped,
-        })
+        };
+        Some((sig, declared))
     }
 
     /// A type, where `void` is an answer rather than a failure.
@@ -377,7 +450,9 @@ impl Walk<'_> {
                 let returns = self.told_or_void(signature.ret)?;
                 let mut params = Vec::with_capacity(signature.params.len());
                 for &ty in &signature.params {
-                    params.push(Param { name: None, ty: self.told(ty)? });
+                    // No place, because this is a function type rather than a function: nothing
+                    // here is code and there is no frame for a parameter of it to be in.
+                    params.push(Param { name: None, ty: self.told(ty)?, at: None });
                 }
                 Some(Shape::Subroutine(Sig {
                     returns,

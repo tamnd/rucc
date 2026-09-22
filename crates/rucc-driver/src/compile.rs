@@ -967,7 +967,7 @@ fn generate(
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
             let info = if opts.debug_info {
-                describe(&text, &data, &assembled.lines, origin, opts, target)
+                describe(&text, &data, &assembled.lines, &funcs, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
@@ -1010,6 +1010,7 @@ fn describe(
     text: &rucc_object::Text,
     data: &rucc_object::Data,
     lines: &[Vec<rucc_asm::Row>],
+    machine: &[rucc_mir::Func],
     origin: Origin<'_>,
     opts: &Options,
     target: &TargetInfo,
@@ -1021,7 +1022,7 @@ fn describe(
     // in it twice over: once for the rows and once for the line the definition is declared on.
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(text.funcs.len());
-    for (extent, rows) in text.funcs.iter().zip(lines) {
+    for ((extent, rows), built) in text.funcs.iter().zip(lines).zip(machine) {
         let mut out: Vec<rucc_debug::Row> = Vec::with_capacity(rows.len());
         for row in rows {
             if row.span.is_dummy() {
@@ -1070,13 +1071,47 @@ fn describe(
             file: interned(&mut files, rewrite(&known.file)),
             line: known.line,
         });
+        // And where each of its locals is, for the ones the frame gave a slot. The back end hands
+        // back the declaration each of them is and how far below the frame base it ended up, and
+        // this is where a number turns back into a name, a type and a line, because this is the
+        // last place the checker's declarations are still in hand.
+        //
+        // A parameter goes on the entry the signature already wrote for it rather than getting one
+        // of its own, which is what the parameter numbers on the function are for. Two entries of
+        // one name in one scope is a debugger's problem rather than a reader's.
+        let mut sig = known.and_then(|known| known.sig.clone());
+        let mut placed: Vec<(u32, i32)> = built.locals.clone();
+        if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
+            for (param, decl) in sig.params.iter_mut().zip(&known.params) {
+                let Some(decl) = *decl else { continue };
+                let Some(which) = placed.iter().position(|&(at, _)| at == decl) else { continue };
+                param.at = Some(i64::from(placed.remove(which).1));
+            }
+        }
+        // Whatever is left, which is the locals that are not parameters, in the order the slots
+        // were asked for. A number with nothing to look up is one whose declaration had no name,
+        // which is a compound literal rather than anything the program can ask the value of.
+        let mut locals = Vec::with_capacity(placed.len());
+        for (decl, at) in placed {
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+            locals.push(rucc_debug::Local {
+                name: named.name.clone(),
+                ty: named.ty,
+                decl: Some(rucc_debug::Place {
+                    file: interned(&mut files, rewrite(&named.file)),
+                    line: named.line,
+                }),
+                at: i64::from(at),
+            });
+        }
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
             len: extent.len as u64,
             rows: out,
             decl,
-            sig: known.and_then(|known| known.sig.clone()),
+            sig,
             external: known.is_some_and(|known| known.external),
+            locals,
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
