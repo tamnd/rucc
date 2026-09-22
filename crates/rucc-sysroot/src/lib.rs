@@ -70,6 +70,14 @@
 //! tree, no artifact a release can pin, and a message that names the licence and the lawful ways to
 //! get one instead of a message about a tree that has not been built yet.
 //!
+//! [`msvc`] is the one lawful download either wall has behind it. Microsoft publishes an installer
+//! manifest naming every file the Visual Studio installer would fetch, and a licence that lets a
+//! person who accepts it fetch them, which is what section 13.4 says we copy. That module reads the
+//! two documents and says which of the nineteen thousand packages in them a compiler needs, which
+//! for the three architectures we target is fourteen files: the CRT headers, one CRT library
+//! package per architecture, and ten of the Windows SDK's header and library installers. It
+//! fetches nothing, the same as everything else in here.
+//!
 //! # What is not in here
 //!
 //! Nothing fetches. Downloading musl, verifying it and unpacking it is
@@ -115,9 +123,11 @@
 pub mod argv;
 pub mod artifact;
 pub mod distribution;
+mod json;
 pub mod layout;
 pub mod link;
 pub mod manifest;
+pub mod msvc;
 pub mod search;
 pub mod sha256;
 pub mod wall;
@@ -128,6 +138,7 @@ pub use distribution::Arrival;
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
 pub use manifest::{Input, Licence, Manifest, ManifestError, Provenance};
+pub use msvc::{Channel, Chip, MsvcError, Payload, Selection, Wanted};
 pub use search::{Entry, Options, Origin, include_paths};
 pub use wall::Wall;
 
