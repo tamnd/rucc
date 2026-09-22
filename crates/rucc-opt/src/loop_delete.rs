@@ -528,7 +528,11 @@ fn write(func: &mut Func, before: Inst, ty: Type, end: Invariant) -> Value {
 /// branch because the whole of this has to be straight line code in a preheader, and nothing on any
 /// of it promises anything about overflow, since the count came out of a subtraction the analysis
 /// already reasoned about rather than out of anything written here.
-fn clamped(func: &mut Func, before: Inst, count: Plain, reading: Reading) -> Value {
+///
+/// [`crate::ivopts`] writes the same clamp in front of the same kind of loop, because it is
+/// discharging the same assumption in the same place, and two of these would be two things to keep
+/// in step. It lives here because this is where it was written and where the argument for it is.
+pub(crate) fn clamped(func: &mut Func, before: Inst, count: Plain, reading: Reading) -> Value {
     let word = Type::int(64);
     let on = count.value.expect("a count that is an expression is built on a value");
     let mut wide = on;
@@ -612,7 +616,7 @@ fn cast(func: &mut Func, before: Inst, opcode: Opcode, arg: Value, ty: Type) -> 
 /// what the loop did is the same arithmetic modulo two to the width as many times as it ran, and
 /// `base + step * count` worked out the same way is the same number. A flag the loop's own
 /// increment carried is a fact about that sequence, and putting it here would be inventing one.
-fn arith(
+pub(crate) fn arith(
     func: &mut Func,
     before: Inst,
     opcode: Opcode,

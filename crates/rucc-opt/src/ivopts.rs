@@ -63,11 +63,26 @@
 //! past that turn. It cannot when the block holding the test dominates every latch, because then
 //! every way round goes through it. That is the condition, and the loop is left alone without it.
 //!
-//! How many turns has to be a number rather than an expression, which is the narrow part of all
-//! this: `for (i = 0; i < n; i++)` gets a symbolic count and is left alone. The arithmetic for a
-//! symbolic limit is one multiply in the preheader and is not the difficulty. The difficulty is
-//! that the argument above rests on a walk that fits in a signed sixty four bit number, and there
-//! is no such number to check when the count is an expression. That is #753.
+//! How many turns does not have to be a number. `for (i = 0; i < n; i++)` gets a count that is an
+//! expression, and the limit for one of those is that expression worked out in the preheader,
+//! clamped at zero and multiplied by the step. The clamp is [`crate::scev::Assumption::Entered`]
+//! paid for rather than leaned on, the same trade [`crate::loop_delete`] makes and with the same
+//! `select`: a count taken from a distance that came out negative is a loop that runs no times,
+//! and a limit equal to where the pointer starts is a test that refuses the first time it is
+//! asked, which is that loop.
+//!
+//! What is checked instead of the number is a bound on it. The argument above wants the whole walk
+//! to fit in a signed sixty four bit number, and with no number there is still a width: a count
+//! built on a value of `b` bits is at most two to the `b`, whichever way the exit test read it, so
+//! the walk is at most that times the count's own scale plus its offset, times the step. Worked
+//! out in a hundred and twenty eight bit number and refused unless it fits in sixty four, which is
+//! the same check made of a bound rather than of a number. `for (int i = 0; i < n; i++)` walking
+//! four byte elements needs thirty four bits and passes with room to spare, which is most of the
+//! loops in a C program. A counter as wide as a pointer has no width to argue from and is refused,
+//! where GCC 16 rewrites it anyway on the strength of the program already having formed those
+//! addresses. That argument is a real one and it is not made here, because it rests on the program
+//! being free of undefined behaviour rather than on anything in the IR, and the measurement that
+//! would say what it is worth has not been made. #753 is where both are written down.
 //!
 //! What is still not rewritten is a group whose best server is some other candidate: the search
 //! says so and this reports it, and expressing one sequence in terms of another is a multiply and
@@ -113,7 +128,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
-use crate::scev::{Anchor, Chrec, Count, Evolution, Invariant, Plain, Scev};
+use crate::scev::{Anchor, Chrec, Count, Evolution, Invariant, Plain, Reading, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const NO_TARGET: &str =
@@ -149,8 +164,9 @@ const NOT_EVERY_TURN: &str =
     "exit test left alone, there is a way round the loop that does not ask it";
 const NOT_A_TEST: &str =
     "exit test left alone, the loop does not leave on a comparison of one moving value";
-const NOT_A_COUNT: &str =
-    "exit test left alone, how many turns the loop takes is not a number known here";
+const NOT_A_COUNT: &str = "exit test left alone, how many turns the loop takes is not settled here";
+const COUNT_NOT_WRITABLE: &str =
+    "exit test left alone, how many turns the loop takes is not a thing to work out in front of it";
 
 /// The selection section 28.3 asks for.
 #[derive(Debug)]
@@ -358,7 +374,9 @@ struct Aim {
     /// The branch reading it, which is the one operand this rewrite repoints.
     branch: Inst,
     /// How many turns the loop takes before that comparison first refuses.
-    count: u128,
+    count: Count,
+    /// How the exit test read the count, which is how a symbolic one is widened to work with.
+    reading: Reading,
     /// Whether the loop keeps going when the comparison holds.
     stays: bool,
 }
@@ -577,14 +595,29 @@ fn aim(
         return Err(NOT_A_TEST);
     }
 
-    // A number rather than an expression, because the limit is the count multiplied by the step
-    // and this has nowhere to emit a multiply. `under_undefined_overflow` rather than `proven`
-    // for the reason `candidates` gives.
+    // `comes_back` rather than `under_undefined_overflow`, because the one assumption between
+    // them is [`crate::scev::Assumption::Entered`] and the clamp in `retarget` is what pays for
+    // it. `proven` is neither, for the reason `candidates` gives. What is still refused here is a
+    // loop that may not come back at all, since a limit worked out for a walk that never arrives
+    // is a test that never refuses.
     let Some(bound) = scev.bound(id) else { return Err(NOT_A_COUNT) };
-    let Some(Count::Exact(count)) = bound.under_undefined_overflow() else {
-        return Err(NOT_A_COUNT);
-    };
-    Ok(Aim { at: inst, branch, count, stays })
+    let reading = bound.reading();
+    let Some(count) = bound.comes_back() else { return Err(NOT_A_COUNT) };
+    if let Count::Symbolic(count) = count {
+        // The same three things `crate::loop_delete` asks of a count before it writes one down. A
+        // count read through a widening of its own carries a second one, and which of that and the
+        // exit test's should be spent is not a question with an answer here. A count that is a
+        // constant with no value under it has no walk to bound. A count wider than the arithmetic
+        // the clamp happens in has nowhere to be negative.
+        let plain = count.plain().ok_or(COUNT_NOT_WRITABLE)?;
+        if plain.read.is_some() {
+            return Err(COUNT_NOT_WRITABLE);
+        }
+        if plain.value.filter(|_| plain.scale != 0).is_none_or(|on| func[on].ty.bits() > 64) {
+            return Err(COUNT_NOT_WRITABLE);
+        }
+    }
+    Ok(Aim { at: inst, branch, count, reading, stays })
 }
 
 /// Whether the value this instruction computes moves by a fixed step around the loop.
@@ -1196,11 +1229,7 @@ struct Walk {
 /// one and the branch is repointed at it, so anybody else reading the old comparison still reads
 /// what they read before and `crate::dce` is what takes it away when nobody does.
 fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mut Stats) {
-    // The whole walk, which has to be a number an address addition can take. It also has to fit
-    // in a signed sixty four bit number for the reason the module documentation gives: that is
-    // what makes the addresses along the way all different, and `!=` needs them to be.
-    let far = i128::try_from(aim.count).ok().and_then(|count| count.checked_mul(walk.step));
-    let Some(far) = far.filter(|&far| i64::try_from(far).is_ok()) else {
+    let Some(reach) = reach(func, walk, aim) else {
         stats.missed(LIMIT_TOO_FAR);
         return;
     };
@@ -1210,7 +1239,13 @@ fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mu
     }
 
     let term = func.terminator(walk.pre).expect("a preheader ends in a jump to the header");
-    let limit = past(func, term, walk.start, far);
+    let limit = match reach {
+        Reach::Fixed(far) => past(func, term, walk.start, far),
+        Reach::Worked(count) => {
+            let times = crate::loop_delete::clamped(func, term, count, aim.reading);
+            walked(func, term, walk.start, times, walk.step)
+        }
+    };
 
     // Not an ordering, so there is no signedness to change and nothing to get wrong at the ends,
     // which is two of section 28.7's five in one choice of predicate.
@@ -1224,6 +1259,74 @@ fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mu
     let cond = func[inst].first_result.expect("one result was asked for");
     set_arg(func, aim.branch, 0, cond);
     stats.optimized(RETARGETED);
+}
+
+/// How far past its start the pointer is when the loop leaves.
+///
+/// Either a number of bytes or an expression to work out in the preheader, and which of the two it
+/// is only ever follows from which the count was.
+#[derive(Clone, Copy, Debug)]
+enum Reach {
+    /// This many bytes, from a count that was a number multiplied by the step.
+    Fixed(i128),
+    /// The count, to be clamped at zero and multiplied by the step where the loop starts.
+    Worked(Plain),
+}
+
+/// The walk the rewrite would make, or nothing when it is longer than the argument allows.
+///
+/// The whole walk has to fit in a signed sixty four bit number, for the reason the module
+/// documentation gives: that is what makes every address along the way different from every other,
+/// and `!=` needs them to be. It is also what makes the arithmetic put in the preheader, which
+/// happens in sixty four bits, the number it is meant to be rather than that number modulo the
+/// width.
+///
+/// With a count that is a number the check is on the number. With one that is an expression there
+/// is no number, so the check is on the largest the expression can be: a count read out of a value
+/// of `b` bits is at most two to the `b` whichever way the exit test read it, and the scale, the
+/// offset and the step are all numbers. Every step of it is worked out in a hundred and twenty
+/// eight bit number, so the check cannot itself be the thing that wraps.
+///
+/// `crate::range` would answer this more tightly, since a length checked before it is walked is
+/// bounded by the check, and the width is what is left when nothing checked it. Asking it is a
+/// second measurement rather than a second line, so the width is what this asks.
+fn reach(func: &Func, walk: &Walk, aim: &Aim) -> Option<Reach> {
+    let fits = |far: i128| i64::try_from(far).is_ok().then_some(far);
+    match aim.count {
+        Count::Exact(count) => {
+            let far = i128::try_from(count).ok()?.checked_mul(walk.step)?;
+            Some(Reach::Fixed(fits(far)?))
+        }
+        Count::Symbolic(count) => {
+            let plain = count.plain()?;
+            let on = plain.value.filter(|_| plain.scale != 0)?;
+            let bits = func[on].ty.bits();
+            let most = 1i128.checked_shl(bits)?;
+            let most = most.checked_mul(plain.scale.checked_abs()?)?;
+            let most = fits(most.checked_add(plain.offset.checked_abs()?)?)?;
+            fits(most.checked_mul(walk.step.checked_abs()?)?)?;
+            Some(Reach::Worked(plain))
+        }
+    }
+}
+
+/// The address a number of steps past another one, worked out in front of an instruction.
+///
+/// The multiply is left out for a step of one byte, which is every walk over a `char` array, since
+/// nothing after this pass folds a multiply by one.
+fn walked(func: &mut Func, before: Inst, from: Value, times: Value, step: i128) -> Value {
+    let word = Type::int(64);
+    let mut by = times;
+    if step != 1 {
+        let scale = number(func, before, word, step);
+        by = crate::loop_delete::arith(func, before, Opcode::Mul, by, scale, word);
+    }
+    let span = func.span(before);
+    let args = func.push_values(&[from, by]);
+    let data = InstData { args, ..InstData::new(Opcode::PtrAdd) };
+    let inst = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
 }
 
 /// The address this many bytes past that one, computed in front of an instruction.
@@ -1394,6 +1497,58 @@ mod tests {
         (func, entry, base)
     }
 
+    /// A function taking a pointer and a limit, with an entry block for a loop to go in.
+    fn shell_given(names: &mut Interner) -> (Func, Block, Value, Value) {
+        let signature = Signature::new().with_params(&[Type::PTR, Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let base = func.append_param(entry, Type::PTR);
+        let limit = func.append_param(entry, Type::int(32));
+        (func, entry, base, limit)
+    }
+
+    /// A loop counting in `int` up to a limit handed in, which is a count that is an expression.
+    ///
+    /// ```text
+    /// into:      jump head(0)
+    /// head(i):   t = i < n; br t -> body(i), out
+    /// ```
+    ///
+    /// `for (int i = 0; i < n; i++)`, and the shape section 28.4's rewrite could not be made
+    /// against for as long as the count had to be a number. The counter is thirty two bits, which
+    /// is not incidental: it is the width the limit on the walk is argued from.
+    fn given(func: &mut Func, into: Block, limit: Value) -> Counted {
+        let head = func.create_block();
+        let body = func.create_block();
+        let out = func.create_block();
+        let i = func.append_param(head, Type::int(32));
+        let carried = func.append_param(body, Type::int(32));
+
+        let mut build = Builder::new(func, into);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(head, &[zero]);
+
+        let mut build = Builder::new(func, head);
+        let test = build.icmp(IntPred::Slt, i, limit);
+        build.br_if(test, body, &[i], out, &[]);
+
+        Counted { head, body, out, counter: carried }
+    }
+
+    /// Closes a loop whose counter is narrower than a pointer.
+    fn close_narrow(func: &mut Func, it: &Counted, at: Block) {
+        let mut build = Builder::new(func, at);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, it.counter, one, Flags::NSW);
+        build.jump(it.head, &[next]);
+    }
+
+    /// The address of `base[i]` where the counter is narrower than a pointer.
+    fn wide_element(build: &mut Builder<'_>, base: Value, counter: Value) -> Value {
+        let wide = build.unary(Opcode::SExt, counter, Type::int(64));
+        strided(build, base, wide, 0, STRIDE)
+    }
+
     /// A counted loop that leaves when its test holds rather than when it fails.
     ///
     /// ```text
@@ -1465,10 +1620,19 @@ mod tests {
     /// anything else, the same as `crate::short_circuit`'s does. A load answers zero, because
     /// nothing here writes anywhere it read.
     fn stores(func: &Func) -> Vec<i128> {
+        stores_given(func, &[])
+    }
+
+    /// The same, with the function's own parameters given values rather than left at zero.
+    ///
+    /// A loop counting to a limit handed in is a loop whose behaviour is the limit's, so the
+    /// number has to come from somewhere, and a parameter past the end of what is given keeps the
+    /// zero the other loops here rely on.
+    fn stores_given(func: &Func, given: &[i128]) -> Vec<i128> {
         let mut values: HashMap<Value, i128> = HashMap::new();
         let mut block = func.entry().expect("a function with blocks in it");
-        for &param in &func[block].params {
-            values.insert(param, 0);
+        for (nth, &param) in func[block].params.iter().enumerate() {
+            values.insert(param, given.get(nth).copied().unwrap_or(0));
         }
         let mut wrote = Vec::new();
         for _ in 0..10_000 {
@@ -1498,6 +1662,7 @@ mod tests {
                         i128::from(match pred {
                             IntPred::Slt => args[0] < args[1],
                             IntPred::Sge => args[0] >= args[1],
+                            IntPred::Sgt => args[0] > args[1],
                             IntPred::Ne => args[0] != args[1],
                             IntPred::Eq => args[0] == args[1],
                             other => panic!("nothing here compares with {other:?}"),
@@ -1505,6 +1670,16 @@ mod tests {
                     }
                     Opcode::Add | Opcode::PtrAdd => args[0] + args[1],
                     Opcode::Mul => args[0] * args[1],
+                    Opcode::Select => {
+                        if args[0] == 0 {
+                            args[2]
+                        } else {
+                            args[1]
+                        }
+                    }
+                    // Nothing here is narrower than the number this carries, which is what makes
+                    // a sign extension the value it was handed.
+                    Opcode::SExt => args[0],
                     Opcode::Load => 0,
                     other => panic!("nothing here writes a {other:?}"),
                 };
@@ -1992,6 +2167,69 @@ mod tests {
         );
         assert_eq!(stores(&func), before, "the same hundred addresses, in the same order");
         assert_eq!(before.len(), 100, "and the loop under test really did run a hundred times");
+        sound(&func, &mut names);
+    }
+
+    /// The same rewrite on a loop counting to a limit nothing here knows, which is #753.
+    ///
+    /// The limit for one of these is the count worked out in the preheader, clamped at zero and
+    /// multiplied by the step. The loop is run at a limit of seven before and after and writes the
+    /// same seven addresses both times, which is the whole claim: `i < n` and `p != start + n *
+    /// step` refuse on the same turn.
+    #[test]
+    fn a_loop_walking_up_to_a_limit_handed_in_tests_the_pointer_too() {
+        let mut names = Interner::new();
+        let (mut func, entry, base, limit) = shell_given(&mut names);
+        let it = given(&mut func, entry, limit);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = wide_element(&mut build, base, it.counter);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close_narrow(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores_given(&func, &[0, 7]);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(
+            leaves_on(&func, it.head),
+            IntPred::Ne,
+            "the loop keeps going while the pointer has not landed on the limit"
+        );
+        let want: Vec<i128> = (0..7).map(|turn| turn * STRIDE).collect();
+        assert_eq!(before, want, "the loop under test really did walk seven elements");
+        assert_eq!(stores_given(&func, &[0, 7]), want, "and walks the same seven now");
+        sound(&func, &mut names);
+    }
+
+    /// The clamp, on the limit that says the loop was never entered.
+    ///
+    /// `for (int i = 0; i < n; i++)` with an `n` of minus one runs no times, and the count taken
+    /// from the distance is minus one rather than nothing, which is what
+    /// [`crate::scev::Assumption::Entered`] is about. Clamped at zero the limit is where the
+    /// pointer starts, so the new test refuses the first time it is asked. Without the clamp the
+    /// limit would be one element behind the start and the loop would walk until the pointer came
+    /// round to it.
+    #[test]
+    fn a_loop_handed_a_limit_it_starts_past_is_left_where_it_started() {
+        let mut names = Interner::new();
+        let (mut func, entry, base, limit) = shell_given(&mut names);
+        let it = given(&mut func, entry, limit);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = wide_element(&mut build, base, it.counter);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close_narrow(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        assert_eq!(stores_given(&func, &[0, -1]), Vec::new(), "it ran no times to begin with");
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(stores_given(&func, &[0, -1]), Vec::new(), "and runs no times now");
+        assert_eq!(stores_given(&func, &[0, 0]), Vec::new(), "nor at the limit either side of it");
         sound(&func, &mut names);
     }
 
