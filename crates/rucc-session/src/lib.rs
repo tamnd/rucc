@@ -1428,19 +1428,38 @@ impl Std {
 /// Design: `spec/04-driver-and-cli.md` section 4.5, which makes this a knob rather than a
 /// constant and says to start conservative and raise it as the matrix in `rucc-gnu` fills in.
 ///
-/// The default is seven, which is the lowest claim that gets a modern glibc. glibc gates most
-/// of what it hands a caller on `__GNUC_PREREQ`, so the claim decides which half of
-/// `sys/cdefs.h` we get, and below seven `bits/floatn-common.h` writes `typedef float _Float32;`
-/// over a keyword this compiler already has. Every header that reaches it stops there, which
-/// was most of them: on Ubuntu 24.04's glibc 2.39 the claim of 4.2.1 that stood here before got
-/// 180 of 214 headers through and seven gets 202, and the amalgamated sqlite goes from four
-/// errors to none.
+/// The default is sixteen, which is the release this compiler is written against. glibc gates
+/// most of what it hands a caller on `__GNUC_PREREQ`, so the claim decides which half of
+/// `sys/cdefs.h` we get, and a project does the same thing to itself: it asks what compiler this
+/// is and writes different code depending on the answer. The claim is therefore not a boast, it
+/// is the sentence that selects which of a program's own branches gets compiled, and claiming an
+/// old release means compiling the code that release needed rather than the code this compiler
+/// wants.
 ///
-/// It is still deliberately low. Claiming a version whose promises have not been kept means
-/// being handed syntax the compiler cannot parse, so this moves when there is a measurement
-/// saying it can. Thirteen and sixteen were measured alongside seven and came out identical on
-/// glibc, on the macOS SDK and on sqlite, so the next move up is cheap; it is a separate one
-/// because nothing yet needs it.
+/// It stood at seven for a long time, and seven was the right number then. Below seven
+/// `bits/floatn-common.h` writes `typedef float _Float32;` over a keyword this compiler already
+/// has and every header that reaches it stops there, so moving from 4.2.1 to seven took Ubuntu
+/// 24.04's glibc 2.39 from 180 of 214 headers to 202 and took the amalgamated sqlite from four
+/// errors to none. What kept it at seven after that was that nothing needed more, and claiming a
+/// version whose promises have not been kept means being handed syntax the compiler cannot parse.
+///
+/// What needed more was micropython. Its `py/nlrx64.c` asks for `__GNUC__ >= 8` before it writes
+/// `__attribute__((naked))`, and at seven it took the gcc 7 path instead and handed this compiler
+/// an ordinary function ending in a bare `jmp`, which is refused and ought to be. The naked
+/// function it writes at eight and above compiles here, byte for byte what gcc 16 emits, and had
+/// compiled for a week without micropython ever reaching it.
+///
+/// The measurement that moved it is the real corpus at the rung the claim could break: fifty six
+/// projects across rungs zero through three, built at `-O2` with the claim at seven and again at
+/// sixteen, on gcc 16.0.1 and glibc. Fifty of fifty six passed both times, and it was the same
+/// fifty both times, with the same four not passing for the same four reasons. Nothing regressed
+/// and nothing started working by accident. Thirteen and sixteen had already been measured
+/// identical to seven on glibc, on the macOS SDK and on sqlite when seven was chosen, so this
+/// confirms on real builds what the header sweep said.
+///
+/// Sixteen point zero rather than the point release on any particular machine, because
+/// `__GNUC_PREREQ(16, 1)` is a promise about a specific release and the honest claim is the
+/// earliest one in the series whose promises this compiler means to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GnucVersion {
     /// `__GNUC__`.
@@ -1453,7 +1472,7 @@ pub struct GnucVersion {
 
 impl Default for GnucVersion {
     fn default() -> GnucVersion {
-        GnucVersion { major: 7, minor: 0, patch: 0 }
+        GnucVersion { major: 16, minor: 0, patch: 0 }
     }
 }
 
