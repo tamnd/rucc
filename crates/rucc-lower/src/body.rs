@@ -955,6 +955,11 @@ impl<'u> Body<'_, 'u> {
             && value.is_some()
         {
             let var = self.temp();
+            // Which declaration this variable is, so that a build asked for debugging information
+            // can say a name and a type about the values it turns into. The same thing the slot
+            // below is told, arrived at from the other side: a local with a slot has memory to put
+            // the number on and this one has none, because nothing asked for any.
+            self.ssa.stands_for(var, decl.raw());
             self.vars.insert(decl, Local::Value(var));
             return;
         }

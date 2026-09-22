@@ -105,6 +105,10 @@ pub struct Ssa {
     subst: HashMap<Value, Value>,
     /// The value a read of something never written gives back, one per type.
     zero: Vec<(Type, Value)>,
+    /// Which declaration each variable the caller named is, for the ones it named.
+    named: HashMap<Var, u32>,
+    /// Every value a named variable was given, in the order they were recorded.
+    holds: Vec<(Value, u32)>,
 }
 
 impl Ssa {
@@ -126,11 +130,26 @@ impl Ssa {
             users: HashMap::new(),
             subst: HashMap::new(),
             zero: Vec::new(),
+            named: HashMap::new(),
+            holds: Vec::new(),
         }
+    }
+
+    /// Says that a variable is a declaration the program wrote, so that the values it turns into
+    /// come out of here knowing which one.
+    ///
+    /// The number is whatever the caller counts declarations by and means nothing here, which is
+    /// the same arrangement [`rucc_ir::Func::declare_mem`] makes for a local that got a slot
+    /// instead. A variable nothing said this about is a temporary, and its values are nobody's.
+    pub fn stands_for(&mut self, var: Var, decl: u32) {
+        self.named.insert(var, decl);
     }
 
     /// Records that a variable holds a value from here to the end of the block.
     pub fn write(&mut self, var: Var, block: Block, value: Value) {
+        if let Some(&decl) = self.named.get(&var) {
+            self.holds.push((value, decl));
+        }
         self.defs.insert((var, block), value);
     }
 
@@ -240,6 +259,7 @@ impl Ssa {
     /// of every instruction and every argument of every branch once, and then takes the
     /// parameters out along with the arguments that fed them.
     pub fn finish(mut self, func: &mut Func) {
+        self.names(func);
         if self.subst.is_empty() {
             return;
         }
@@ -295,6 +315,19 @@ impl Ssa {
             if !dropped[block.index()].is_empty() {
                 func.retain_params(block, |param| !self.subst.contains_key(&param));
             }
+        }
+    }
+
+    /// Hands the function which declaration each of its values is the value of.
+    ///
+    /// Resolved on the way out rather than as it was recorded, because a parameter that stands for
+    /// one value is not known to until the blocks that feed it have been walked, and a name put on
+    /// one before then would be a name on a value the function is about to lose. What is left after
+    /// resolving is a value that is still there, which is the only kind worth naming.
+    fn names(&mut self, func: &mut Func) {
+        for (value, decl) in std::mem::take(&mut self.holds) {
+            let value = self.resolve(value);
+            func.declare_value(value, decl);
         }
     }
 
@@ -584,6 +617,109 @@ mod tests {
 
         assert!(func[join].params.is_empty(), "the parameter was taken out again");
         assert_eq!(checked(func, &mut names), AGREED);
+    }
+
+    /// Every value in the function a declaration is behind, by its number, and what is behind it.
+    fn named(func: &Func) -> Vec<(usize, Vec<u32>)> {
+        (0..func.counts().values)
+            .map(|at| (at, func.value_decls(Idx::from_usize(at)).collect::<Vec<u32>>()))
+            .filter(|(_, decls)| !decls.is_empty())
+            .collect()
+    }
+
+    /// A variable the caller named leaves every value it turned into knowing which declaration it
+    /// is, the parameter that collects two of them included.
+    ///
+    /// Three values for one variable is the point. A debugger asking where the variable is at an
+    /// address has to be told which of the three was the one in hand there, and that is a question
+    /// about the code that came out rather than about this.
+    #[test]
+    fn a_named_variable_leaves_every_value_it_turned_into_knowing_which_it_is() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, cond) = start(&mut names);
+        let x = Var::new(0);
+        ssa.stands_for(x, 41);
+
+        let then = func.create_block();
+        let otherwise = func.create_block();
+        let join = func.create_block();
+
+        let branch = Builder::new(&mut func, entry).br_if(cond, then, &[], otherwise, &[]);
+        ssa.branch(&func, branch);
+        ssa.seal(&mut func, then);
+        ssa.seal(&mut func, otherwise);
+
+        let one = Builder::new(&mut func, then).iconst(I32, 1);
+        ssa.write(x, then, one);
+        let jump = Builder::new(&mut func, then).jump(join, &[]);
+        ssa.branch(&func, jump);
+
+        let two = Builder::new(&mut func, otherwise).iconst(I32, 2);
+        ssa.write(x, otherwise, two);
+        let jump = Builder::new(&mut func, otherwise).jump(join, &[]);
+        ssa.branch(&func, jump);
+
+        ssa.seal(&mut func, join);
+        let read = ssa.read(&mut func, x, join, I32);
+        Builder::new(&mut func, join).ret(&[read]);
+        ssa.finish(&mut func);
+
+        let held = vec![(one.index(), vec![41]), (two.index(), vec![41]), (read.index(), vec![41])];
+        assert_eq!(named(&func), held);
+    }
+
+    /// A parameter that turned out to stand for one value takes no name with it when it goes.
+    ///
+    /// The name was recorded against the parameter while the arms were being walked, because
+    /// nothing knew yet that both of them would agree. What comes out is a name on the value the
+    /// parameter stood for, and nothing on a value the function no longer has.
+    #[test]
+    fn a_name_recorded_against_a_parameter_follows_it_to_what_it_stood_for() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, cond) = start(&mut names);
+        let x = Var::new(0);
+        ssa.stands_for(x, 41);
+
+        let one = Builder::new(&mut func, entry).iconst(I32, 1);
+        ssa.write(x, entry, one);
+
+        let then = func.create_block();
+        let otherwise = func.create_block();
+        let join = func.create_block();
+
+        let branch = Builder::new(&mut func, entry).br_if(cond, then, &[], otherwise, &[]);
+        ssa.branch(&func, branch);
+        ssa.seal(&mut func, then);
+        ssa.seal(&mut func, otherwise);
+
+        for block in [then, otherwise] {
+            let jump = Builder::new(&mut func, block).jump(join, &[]);
+            ssa.branch(&func, jump);
+        }
+
+        ssa.seal(&mut func, join);
+        let read = ssa.read(&mut func, x, join, I32);
+        Builder::new(&mut func, join).ret(&[read]);
+        ssa.finish(&mut func);
+
+        assert_eq!(named(&func), vec![(one.index(), vec![41])]);
+    }
+
+    /// A variable nothing named leaves nothing behind, which is every temporary an expression
+    /// needed somewhere to put.
+    #[test]
+    fn a_variable_nothing_named_leaves_no_names_at_all() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, _) = start(&mut names);
+        let x = Var::new(0);
+
+        let one = Builder::new(&mut func, entry).iconst(I32, 1);
+        ssa.write(x, entry, one);
+        let read = ssa.read(&mut func, x, entry, I32);
+        Builder::new(&mut func, entry).ret(&[read]);
+        ssa.finish(&mut func);
+
+        assert!(named(&func).is_empty());
     }
 
     #[test]
