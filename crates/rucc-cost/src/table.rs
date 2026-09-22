@@ -350,6 +350,22 @@ cost_table! {
     /// speed and size tables agree about capability reads.
     addr: [Cycles; 5],
 
+    /// What testing a value against another register costs, on top of the branch that reads it.
+    ///
+    /// Section 28.4's countdown turns on this number and the one below it, which is why the two
+    /// are here rather than folded into `branch_cost`. A comparison is an instruction on x86-64
+    /// and on AArch64 and is folded into the branch on RISC-V64, and which of those a machine is
+    /// is exactly the kind of fact a target has to say rather than a pass assume.
+    compare_reg: Cycles,
+
+    /// The same against zero, where the value tested came from the loop's own arithmetic.
+    ///
+    /// Not the cost of a comparison against an immediate zero, which on most machines is the same
+    /// instruction as any other comparison. It is what the test costs when the instruction in
+    /// front of it has already answered it, which is nothing on a machine whose decrement sets the
+    /// flags the branch reads, and that is the whole of what a loop counting down to zero buys.
+    compare_zero: Cycles,
+
     /// What an unpredictable branch costs when optimizing for speed, per section 40.5.
     ///
     /// Only the unpredictable case is a target number. `BRANCH_COST` at
@@ -483,6 +499,8 @@ mod tests {
             .move_fp_to_int(one)
             .move_int_to_fp(one)
             .addr([one; 5])
+            .compare_reg(one)
+            .compare_zero(one)
             .branch_cost(one)
             .mispredict_penalty(one)
             .move_ratio(8)

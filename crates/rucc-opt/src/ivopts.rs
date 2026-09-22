@@ -773,7 +773,15 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
     // comparison it already was, which is nothing this set has to pay for, and the variable it
     // happens to name today is no reason to keep that variable.
     if group.exit && cand.chrec.step.as_number().is_some_and(|step| step != 0) {
-        return Cost::ZERO;
+        // What is left is the comparison itself, and the two shapes of it are not the same price.
+        // [`countdown`] starts its variable at the trip count and steps it down by one, so the
+        // limit is the number zero by construction, and a machine whose decrement sets the flags
+        // the branch reads makes that test no instruction at all. Every other candidate is tested
+        // against a limit worked out in front of the loop and held in a register.
+        return Cost::cycles(match cand.origin {
+            Origin::Countdown => table.compare_zero,
+            Origin::Original | Origin::Derived => table.compare_reg,
+        });
     }
     // Two sequences in different types mean different things to the two kinds of use, so the
     // question is asked once and answered twice.
@@ -1032,6 +1040,13 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
     let Some(mut best) = total(table, groups, cands, &set, room) else { return set };
     loop {
         let mut moved = None;
+        let mut take = |tried: Vec<usize>| {
+            let Some(cost) = total(table, groups, cands, &tried, room) else { return };
+            if cost < best {
+                best = cost;
+                moved = Some(tried);
+            }
+        };
         for at in 0..cands.len() {
             let mut tried = set.clone();
             match tried.iter().position(|&had| had == at) {
@@ -1040,10 +1055,21 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
                 }
                 None => tried.push(at),
             }
-            let Some(cost) = total(table, groups, cands, &tried, room) else { continue };
-            if cost < best {
-                best = cost;
-                moved = Some(tried);
+            take(tried);
+
+            // And the exchange, which is the reason this is not the loop above run twice. Section
+            // 28.4's countdown is the case it was written for: put next to the counter it would
+            // replace, it buys the comparison and pays for the decrement, which is a wash, and
+            // taking the counter away on its own leaves a set that serves no use at all. Neither
+            // half is an improvement, so a search moving one candidate at a time never arrives at
+            // the set where both have happened, however much cheaper that set is.
+            if set.contains(&at) {
+                continue;
+            }
+            for there in 0..set.len() {
+                let mut tried = set.clone();
+                tried[there] = at;
+                take(tried);
             }
         }
         match moved {
@@ -1408,8 +1434,8 @@ mod tests {
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
         GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_A_WALK,
         NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, PRICED, Plain, RETARGETED, REWRITTEN,
-        USE_ADDRESS, USE_COMPARE, USE_GENERIC, Width, address_cost, heuristics, serve, upkeep,
-        value_cost, width,
+        USE_ADDRESS, USE_COMPARE, USE_GENERIC, Use, Width, address_cost, heuristics, select, serve,
+        total, upkeep, value_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1884,6 +1910,44 @@ mod tests {
             upkeep(table, &counting(Origin::Countdown)),
             upkeep(table, &counting(Origin::Derived))
         );
+    }
+
+    #[test]
+    fn a_countdown_replaces_the_counter_in_one_move_because_neither_half_is_one() {
+        // Section 28.4's shape, and the reason [`select`] considers an exchange rather than only
+        // an addition and a removal. The loop here has one group, the test it leaves on, with
+        // four uses in it. Counting up, each of those uses is a comparison against a register and
+        // the counter is an increment a turn, which is five. Counting down, the comparisons cost
+        // nothing because the decrement in front of them already set the flags, and the made up
+        // variable costs its own step and the bias, which is four.
+        //
+        // What the two lines below say is that neither half of getting from the first to the
+        // second is an improvement on its own. Putting the countdown next to the counter buys the
+        // comparisons and pays for both variables, which is five again, and taking the counter
+        // away first leaves a set that serves no use at all. So a search moving one candidate at
+        // a time stops on the set it started with, however much cheaper the other one is.
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let moving = |step| Chrec {
+            base: Invariant::number(0),
+            step: Invariant::number(step),
+            ty: Type::int(64),
+            flags: Flags::NONE,
+        };
+        let at = |n| rucc_ir::Inst::new(n);
+        let uses = (0..4u32).map(|n| Use { at: at(n), position: 0, offset: 0 }).collect();
+        let groups = [Group { kind: super::Kind::Compare, chrec: moving(1), uses, exit: true }];
+        let cands = [
+            Cand { chrec: moving(1), origin: Origin::Original },
+            Cand { chrec: moving(-1), origin: Origin::Countdown },
+        ];
+        let room = 8;
+        let cost = |set: &[usize]| total(table, &groups, &cands, set, room).unwrap();
+
+        assert_eq!(cost(&[0, 1]), cost(&[0]), "adding it next to the counter is a wash");
+        assert_eq!(total(table, &groups, &cands, &[], room), None, "and nothing serves nothing");
+        assert!(cost(&[1]) < cost(&[0]), "yet the exchange itself is worth making");
+        assert_eq!(select(table, &groups, &cands, room), vec![1]);
     }
 
     #[test]
