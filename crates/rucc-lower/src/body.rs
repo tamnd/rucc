@@ -100,6 +100,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         saves: false,
         aligned: HashMap::new(),
         restrict: Scopes::default(),
+        brace: brace(tast, root, span),
     };
     body.ssa.seal(body.func, entry);
 
@@ -165,7 +166,8 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     }
     for (index, &param) in params.iter().enumerate() {
         let Some(travel) = plan.args.get(index) else { continue };
-        body.parameter(entry, param, travel, span);
+        let at = body.brace;
+        body.parameter(entry, param, travel, at);
     }
 
     // A parameter can be declared with a variably modified type, `void f(int n, int a[][n])`,
@@ -214,6 +216,20 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     let Body { ssa, .. } = body;
     ssa.finish(func);
     prune(func);
+}
+
+/// Where the opening brace of a body is, which is the line the frame is put up on.
+///
+/// The span of a compound statement starts at its opening brace, so the first byte of the body's
+/// span is the brace itself. `declared` on the function is the same span and is what the assembler
+/// opens a function's rows with, so a slot and a store filed under this land on the line the front
+/// of the function is already on rather than on a line of their own.
+///
+/// The declaration's own span for a body that has no span, which is what the tests and anything
+/// built by hand look like. That is the answer this used to give everywhere.
+fn brace(tast: &Tast, body: StmtId, declared: Span) -> Span {
+    let span = tast.stmt_span(body);
+    if span.is_dummy() { declared } else { span }
 }
 
 /// How many bytes of array make a buffer worth protecting, which is gcc's `ssp-buffer-size` and
@@ -612,6 +628,18 @@ struct Body<'a, 'u> {
     /// The `restrict` pointers the function declares, which is what an access carries a clique
     /// and a base from. Empty for a function that declares none, which is nearly all of them.
     restrict: Scopes,
+    /// Where the body's opening brace is, which is what everything the frame is made of is filed
+    /// under.
+    ///
+    /// The slots and the stores that put the incoming arguments in them are all in the entry
+    /// block, above anything the program wrote, and none of them is anything the program asked
+    /// for: a slot exists because the address of something was taken and a store exists because
+    /// the call left the value somewhere else. The line each of them would otherwise carry is the
+    /// line the declaration is written on, which for a parameter is often in a prototype in
+    /// another part of the file, so the front of a function ended up naming a line hundreds of
+    /// lines away from itself. gcc covers all of it with the opening brace, the same line it
+    /// covers the prologue with, and so does this.
+    brace: Span,
 }
 
 /// One open scope, and the stack pointer as it was before anything in it grew the stack.
@@ -923,7 +951,7 @@ impl<'u> Body<'_, 'u> {
             self.vars.insert(decl, Local::Value(var));
             return;
         }
-        let span = tast.decl_span(decl);
+        let span = self.brace;
         let size = repr::size_of(self.types(), self.target(), ty);
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));

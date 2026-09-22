@@ -74,11 +74,11 @@ const CLAIMS: [Claim; 4] = [
     },
     Claim {
         what: "lines named inside the function they were named for",
-        floor: 99,
+        floor: 100,
         over: 500,
         why: "a line outside the function is a line from somewhere else in the file, which is \
-              what an expression that came out of a macro looks like when the span kept is the \
-              macro's body rather than the place it was written",
+              what a declaration written apart from the code it belongs to looks like when the \
+              span kept is the declaration's rather than the function's",
     },
     Claim {
         what: "functions whose first byte is the same line both ways",

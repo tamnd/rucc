@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The front of a function names the function rather than a prototype in another part of the file. A stack slot exists because the address of something was taken and the store into one exists because the call left the incoming value somewhere else, so neither is anything the program asked for, but both had a declaration to take a line from, and for a parameter that declaration is often a prototype hundreds of lines above the definition. So the first few instructions of a function were filed under a line in another function's neighbourhood, which an address resolved that way then names, and a parameter list written down the page did a smaller version of the same thing. Every slot of a known size is built at the top of the entry block above anything the program wrote, and gcc covers all of that with the opening brace, the same line it covers the prologue with, so that is what it gets here too. A slot whose size is not known until the declaration is reached keeps the declaration's line, because it is built where the declaration is and there really is code on that line. This was the last of the four shapes `cargo xtask lines` found: over the SQLite amalgamation, 17 functions named a line outside themselves before it and none do after, so all 2609 of them now name only their own lines and the floor under that share went to 100 percent. The diagnosis on the issue had this down as macro expansion, which it is not, and there is no macro shape left to fix. Closes tamnd/rucc#1613.
+
 ## 0.10.74
 
 ### Added
