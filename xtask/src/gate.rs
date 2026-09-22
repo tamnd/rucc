@@ -311,6 +311,7 @@ fn programs() -> Result<Vec<Step>> {
     [
         "repeatable",
         "unwind",
+        "debugger",
         "quad",
         "wide",
         "fuzz",
