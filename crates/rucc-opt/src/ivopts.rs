@@ -138,6 +138,7 @@ const USE_ADDRESS: &str = "address of a read or a write that moves by a fixed st
 const USE_COMPARE: &str = "comparison against something that moves by a fixed step";
 const USE_GENERIC: &str = "other use of something that moves by a fixed step";
 const GROUPED: &str = "address uses sharing one variable, apart in a constant offset";
+const PRICED: &str = "group of uses every candidate for the loop is priced against";
 const CANDIDATE: &str = "induction variable considered for the loop to keep";
 const CHOSEN: &str = "induction variable chosen for the loop to keep";
 const KEPT: &str = "loop whose own induction variables are the ones worth keeping";
@@ -429,6 +430,7 @@ fn consider(
     }
     let groups = groups;
     for one in &groups {
+        stats.note(PRICED);
         if one.uses.len() > 1 {
             stats.note(GROUPED);
         }
@@ -1405,9 +1407,9 @@ mod tests {
     use super::{
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
         GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_A_WALK,
-        NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, Plain, RETARGETED, REWRITTEN, USE_ADDRESS,
-        USE_COMPARE, USE_GENERIC, Width, address_cost, heuristics, serve, upkeep, value_cost,
-        width,
+        NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, PRICED, Plain, RETARGETED, REWRITTEN,
+        USE_ADDRESS, USE_COMPARE, USE_GENERIC, Width, address_cost, heuristics, serve, upkeep,
+        value_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -2018,6 +2020,7 @@ mod tests {
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 3);
         assert_eq!(stats.count(Kind::Note, GROUPED), 1, "one group, not three");
+        assert_eq!(stats.count(Kind::Note, PRICED), 2, "that one and the exit test");
         // The whole of what the loop wants is one variable: a pointer the three writes all reach
         // off, with the exit test asked of it as well. The counter is not one of them, because
         // the only thing left wanting it was the test and section 28.4 moves the test.

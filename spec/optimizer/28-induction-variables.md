@@ -77,6 +77,11 @@ analysis half: for each value in the loop, is it of the form `base + i*step`, an
 *Use collection.* Addresses, comparisons, and other uses, grouped by base modulo a constant offset,
 exactly as GCC does. The grouping is the cheapest large win in the pass.
 
+That last sentence is worth holding against the measurement in 28.8, which says the grouping is
+smaller than it sounds. On the corpus it takes 2455 uses down to 2123 groups, so about one use in
+seven is merged away, and GCC's own grouping over the same sources takes 1947 down to 1909. It is
+worth having, since the cost table has a row per group, and it is not where the pass is won.
+
 *Candidate generation.* The existing induction variables, plus one candidate per distinct
 (base, step) among the address uses, plus the "final value" candidate for the loop's exit comparison.
 
@@ -232,6 +237,32 @@ The measurement in document 42, and there are three worth having:
 - How often the greedy selection differs from the original variable set, which tells whether the pass
   is doing anything.
 - The straight-line strength reduction check from 28.5, testing the document 12 thesis directly.
+
+The second of those is taken by `spec/optimizer/tools/ivopts-survey.py`, which reads GCC's
+`-fdump-tree-ivopts-details` and rucc's `-fopt-info-all` over the same sources and prints the same
+tables for both. Over the 2663 sources of the corpus, GCC's ivopts processes 786 loops and rucc's
+770, which is close enough to say the two passes are looking at the same programs.
+
+**Not one of the three bounds binds anywhere.** The largest group count is 16 for GCC and 35 for
+rucc against a bound of 250, the largest candidate count is 23 for GCC and 19 for rucc against a
+bound of 40, and the largest set either compiler keeps is 3 against a prune threshold of 10. So the
+bounds are in for the reason GCC has them, which is that a pathological function exists somewhere
+and the pass should degrade rather than hang, and not because they shape the answer on anything
+measured here. rucc's use bound is counted against raw uses where GCC's is against groups, which
+makes rucc's the stricter of the two, and neither is close enough to the limit for the difference to
+matter.
+
+**The two searches are not the same size.** GCC considers 8 candidates per loop on average and rucc
+4. The list in 28.3 is where that comes from: GCC adds position variants of each candidate, before
+the loop and at the exit, and zero-based and one-based forms of each basic induction variable, where
+rucc generates one candidate per distinct base and step. The answers nonetheless agree on the thing
+that matters, which is how many variables the loop ends up with: 86 per cent of GCC's loops keep one
+and 89 per cent of rucc's do, and neither keeps more than three. A wider candidate list is therefore
+not obviously worth buying, and the measurement to make before buying one is what the extra
+candidates would cost rather than how many there are.
+
+**The selection does something.** rucc keeps the variables the loop came with in 508 of its 770
+loops and changes the set in 262, which is the answer to the second measurement above.
 
 ## 28.9 Final value replacement
 
