@@ -458,6 +458,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 }
                 "attrs" => func.attrs = self.attrs()?,
                 "section" => func.section = Some(self.symbol_from_string()?),
+                "spelled" => func.spelled = Some(self.symbol_from_string()?),
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2012,6 +2013,17 @@ labels:
     block2 = @.Llbl.1
 }}
 "
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_name_the_source_spelled_comes_back_byte_for_byte() {
+        // A declaration renamed by an assembler name has two names, and a later pass needs both:
+        // the symbol is what a call names and what the linker resolves, and the spelling is what
+        // says this is the function the standard describes.
+        let text = format!(
+            "{HEADER}\nfunc @my_strstr(ptr, ptr) -> ptr, linkage(external), spelled \"strstr\";\n"
         );
         assert_eq!(round_trip(&text), text);
     }

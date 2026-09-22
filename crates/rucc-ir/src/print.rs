@@ -288,6 +288,10 @@ impl<'a> Printer<'a> {
             let _ = write!(self.out, ", {}", func.attrs);
         }
         self.section(func.section);
+        if let Some(spelled) = func.spelled {
+            self.out.push_str(", spelled ");
+            self.string(self.names.resolve(spelled).as_bytes());
+        }
         if func.is_declaration() {
             self.out.push_str(";\n");
             return;

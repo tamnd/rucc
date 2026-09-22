@@ -671,6 +671,12 @@ impl Unit<'_> {
         let Some(plan) = self.plan(ty, &[], span) else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
+        // The name the source spelled, where an assembler name says the symbol is not it. A
+        // declaration of `strstr` renamed to `my_strstr` is a declaration of `strstr` still, and
+        // once the symbol is the only name left there is nothing to find that out again from.
+        if node.asm_label.is_some() {
+            func.spelled = node.name.filter(|&spelled| spelled != name);
+        }
         // Where the body begins, which is the line a debugger names over the prologue. gcc says the
         // line the opening brace is on rather than the line the declarator is on, and the two
         // differ in the style that puts the brace underneath. No instruction in a prologue has a
