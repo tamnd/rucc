@@ -34,8 +34,9 @@
 //! deflate and a cabinet's ordinary method is MSZIP, which is deflate with two bytes in front of
 //! each block. [`zip`] reads the container a vsix is and [`cab`] the one an MSI keeps its bytes in.
 //! [`cfb`] reads the compound file an MSI is, which is to say it gets the streams out of one by
-//! name. The table reader over those streams, which is what turns them into the names the cabinets
-//! hold their bytes under, is the next piece of work and is not here yet.
+//! name, and [`msi`] reads the tables in those streams, which is what says which cabinet holds
+//! which header and what the cabinet calls it. All four readers are here. What is not here is the
+//! driver that puts the four together and lays a sysroot out, which is not this crate's business.
 //!
 //! Reading only. Nothing in this compiler writes a zip or a cabinet, and if something ever does it
 //! will not be this crate's business, the same way `rucc-archive` writes the one container a linker
@@ -48,6 +49,7 @@
 pub mod cab;
 pub mod cfb;
 pub mod inflate;
+pub mod msi;
 pub mod zip;
 
 use std::path::{Component, Path, PathBuf};
@@ -55,6 +57,7 @@ use std::path::{Component, Path, PathBuf};
 pub use cab::{Cab, CabError};
 pub use cfb::{Cfb, CfbError};
 pub use inflate::{InflateError, inflate, inflate_into};
+pub use msi::{Msi, MsiError, Payload, Table};
 pub use zip::{Member, Zip, ZipError};
 
 /// Where a name out of an archive is allowed to be written, under `root`.
