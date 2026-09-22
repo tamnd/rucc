@@ -33,8 +33,9 @@
 //! [`inflate`] is the decompressor, and both containers are built on it: a zip's ordinary method is
 //! deflate and a cabinet's ordinary method is MSZIP, which is deflate with two bytes in front of
 //! each block. [`zip`] reads the container a vsix is and [`cab`] the one an MSI keeps its bytes in.
-//! The compound file reader and the table reader that turn an MSI into the names those bytes go
-//! under are the next piece of work and are not here yet.
+//! [`cfb`] reads the compound file an MSI is, which is to say it gets the streams out of one by
+//! name. The table reader over those streams, which is what turns them into the names the cabinets
+//! hold their bytes under, is the next piece of work and is not here yet.
 //!
 //! Reading only. Nothing in this compiler writes a zip or a cabinet, and if something ever does it
 //! will not be this crate's business, the same way `rucc-archive` writes the one container a linker
@@ -45,12 +46,14 @@
 #![doc(html_root_url = "https://docs.rs/rucc-unpack/0.10.77")]
 
 pub mod cab;
+pub mod cfb;
 pub mod inflate;
 pub mod zip;
 
 use std::path::{Component, Path, PathBuf};
 
 pub use cab::{Cab, CabError};
+pub use cfb::{Cfb, CfbError};
 pub use inflate::{InflateError, inflate, inflate_into};
 pub use zip::{Member, Zip, ZipError};
 
