@@ -500,6 +500,43 @@ pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descri
     }
 }
 
+/// Both questions a read asks of the planes, in one call: do these bytes agree with this type and
+/// has every one of them been written.
+///
+/// [`typed`] and [`filled`] answer the two separately and are the same function up to which plane
+/// they end at. Both take the address, both take the width, both find the region the address is in,
+/// and both clip the range to it, and a read that asks one asks the other in the very next
+/// instruction. So a read that still needs both pays for the region twice, and the region is the
+/// expensive half: [`alloc::covering`] walks the published regions and builds all four planes over
+/// the one it finds, where each plane query that follows is a handful of shifts and a load.
+///
+/// The type plane is asked first, which is the order the two calls were emitted in, so a read that
+/// disagrees with both reports the same refusal it reported when they were two calls.
+///
+/// `rucc_safety::lower` is what puts them together, and only when the pair is one read's: same
+/// address, same width, nothing between them that writes memory. When `crate::discharge` has taken
+/// one of the two out, the other lowers on its own and this is not reached.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`]. `ty` is a plane vocabulary entry and is not an address.
+pub unsafe fn allowed(addr: *const c_void, size: usize, ty: TypeId, descriptor: *const Descriptor) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let size = clipped(&region, addr, size);
+    // SAFETY: the range is clipped to the region, whose type plane covers every granule of it and
+    // whose init plane covers every byte of it.
+    let held = unsafe { region.types.allows(addr, size, ty) && region.init.allows(addr, size) };
+    if !held {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
 /// The judgement a store makes: the bytes it wrote hold what it wrote.
 ///
 /// Not a check, the same way [`judge`] is not. Which range a store that writes a whole object names
@@ -1258,6 +1295,20 @@ pub mod exports {
     ) {
         // SAFETY: this wrapper's contract is the one it calls, passed straight on.
         unsafe { super::filled(addr, size, descriptor) };
+    }
+
+    /// # Safety
+    ///
+    /// As [`__rucc_check_type`], whose arguments these are.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_typed_init(
+        addr: *const c_void,
+        size: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::allowed(addr, size, ty, descriptor) };
     }
 
     /// # Safety

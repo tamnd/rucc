@@ -43,7 +43,7 @@
 //! linker already knows how to do, it costs the same one instruction the index cost, and the
 //! reporter reads it by dereferencing it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_ir::{
@@ -148,13 +148,22 @@ fn calls(
 ) {
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let pairs = pairs(func, &insts);
+    let fused: HashSet<Inst> = pairs.values().copied().collect();
     for &inst in &insts {
+        // The init check of a pair is lowered by its type check, which asks both questions in one
+        // call, so there is nothing left here for it to be.
+        if fused.contains(&inst) {
+            continue;
+        }
         match func[inst].opcode {
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckFree => freed(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, inst),
-            Opcode::CheckType => typed(func, names, word, numbers, table, inst),
+            Opcode::CheckType => {
+                typed(func, names, word, numbers, table, inst, pairs.get(&inst).copied());
+            }
             Opcode::CheckInit => began(func, names, word, table, inst),
             Opcode::CheckRace => raced(func, names, word, table, inst),
             Opcode::CheckRestrictRead => promised(func, names, word, table, inst, false),
@@ -366,6 +375,64 @@ fn deriv(
     call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
 }
 
+/// Which type checks have an init check beside them that belongs to the same read.
+///
+/// The pair is what tamnd/rucc#1617's fifth box asks about. `rucc_safety::access_checks` writes a
+/// type check and an init check in front of every read, they take the same address and the same
+/// width, they carry the same descriptor row, and they are the same function in the runtime up to
+/// which plane it ends at. So a read that needs both finds the region twice, and finding the region
+/// is the expensive half of either one.
+///
+/// What is not assumed is that the two are still a pair. `crate::discharge` takes one out without
+/// the other often enough that the second half of this file's work has to check rather than trust,
+/// and a type check fused with an init check belonging to some later read would be an init check
+/// asked earlier than the program asks it, which is a refusal of a correct program.
+fn pairs(func: &Func, insts: &[Inst]) -> HashMap<Inst, Inst> {
+    let mut found = HashMap::new();
+    for &inst in insts {
+        if func[inst].opcode != Opcode::CheckType {
+            continue;
+        }
+        if let Some(partner) = partner(func, inst) {
+            found.insert(inst, partner);
+        }
+    }
+    found
+}
+
+/// The init check that belongs to the same read as this type check, if there is one.
+///
+/// Same address, same width, same block, and nothing between the two that writes memory or ends
+/// the block. Another check of either kind in between ends the search rather than being walked
+/// past, because a second one is a second read and the pair is one read's.
+fn partner(func: &Func, check: Inst) -> Option<Inst> {
+    let [_capability, pointer] = func[func[check].args] else { return None };
+    let Extra::Mem(mem) = func[check].extra else { return None };
+    let size = func[mem].size;
+    let block = func.block_of(check)?;
+    let mut after = false;
+    for inst in func.insts(block) {
+        if inst == check {
+            after = true;
+            continue;
+        }
+        if !after {
+            continue;
+        }
+        match func[inst].opcode {
+            Opcode::CheckInit => {
+                let [_capability, other] = func[func[inst].args] else { return None };
+                let Extra::Mem(at) = func[inst].extra else { return None };
+                return (other == pointer && func[at].size == size).then_some(inst);
+            }
+            Opcode::CheckType => return None,
+            opcode if opcode.writes_memory() || opcode.is_terminator() => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `check_type` becomes `__rucc_check_type(pointer, size, type, descriptor)`.
 ///
 /// The one check with a type number on it, and the number is the same one [`judgement`] passes for
@@ -375,6 +442,11 @@ fn deriv(
 /// The descriptor says J1 rather than a judgement of its own. The type plane is one of the planes
 /// document 04 section 4.4's first judgement names, so a read the plane refused is an access the
 /// planes did not permit, which is the sentence the reporter already prints.
+///
+/// With an init check beside it that [`partner`] recognised as the same read's, it becomes
+/// `__rucc_check_typed_init` instead, with the same four arguments, and that check is taken out.
+/// The two rows are identical, so the one descriptor recorded here serves both, and the runtime
+/// asks the type plane first, which is the order the two calls ran in.
 fn typed(
     func: &mut Func,
     names: &mut Interner,
@@ -382,6 +454,7 @@ fn typed(
     numbers: &HashMap<Meta, u32>,
     table: &mut Vec<Descriptor>,
     inst: Inst,
+    partner: Option<Inst>,
 ) {
     let [_capability, pointer] = func[func[inst].args] else { return };
     let Extra::Mem(mem) = func[inst].extra else { return };
@@ -400,7 +473,14 @@ fn typed(
     let small = Type::int(32);
     let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
     let params = &[Type::PTR, word, small, Type::PTR];
-    call(func, names, inst, "__rucc_check_type", params, &[], &[pointer, bytes, ty, desc]);
+    let routine = match partner {
+        Some(init) => {
+            func.remove_inst(init);
+            "__rucc_check_typed_init"
+        }
+        None => "__rucc_check_type",
+    };
+    call(func, names, inst, routine, params, &[], &[pointer, bytes, ty, desc]);
 }
 
 /// `check_init` becomes `__rucc_check_init(pointer, size, descriptor)`.
@@ -1298,13 +1378,14 @@ mod tests {
 
     #[test]
     fn a_read_of_the_plane_becomes_the_call_that_carries_the_type_asked_about() {
-        // Four rows rather than two, because a read now asks two questions of two planes and each
-        // of them is a judgement that has to say what it refused. The type travels as the same
+        // Three rows rather than two, because a read now asks two questions of two planes and the
+        // pair of them is a judgement that has to say what it refused. The type travels as the same
         // number a store of the same type would have recorded, which is the only way the two can be
-        // compared, and the init question carries no type at all.
+        // compared. There is no fourth row for the init question because the two questions are one
+        // call here, and a type check's row and an init check's row say the same thing.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 4);
+        assert_eq!(lower(&mut module, &mut names), 3);
 
         // The printer writes an `i32` immediate as a signed number and the identifier is a hash
         // that uses the whole width, so what appears is the same bits read the other way round.
@@ -1326,12 +1407,9 @@ mod tests {
                  %6 = global_addr @__rucc_safety_desc_2\n    \
                  %7 = iconst.i64 4\n    \
                  %8 = iconst.i32 {number}\n    \
-                 call @__rucc_check_type(%0, %7, %8, %6) : (ptr, i64, i32, ptr)\n    \
-                 %9 = global_addr @__rucc_safety_desc_3\n    \
-                 %10 = iconst.i64 4\n    \
-                 call @__rucc_check_init(%0, %10, %9) : (ptr, i64, ptr)\n    \
-                 %11 = load.i32 %0, size 4, align 4, tbaa !1\n    \
-                 return %11\n\
+                 call @__rucc_check_typed_init(%0, %7, %8, %6) : (ptr, i64, i32, ptr)\n    \
+                 %9 = load.i32 %0, size 4, align 4, tbaa !1\n    \
+                 return %9\n\
                  }}\n"
             )
         );
@@ -1341,12 +1419,102 @@ mod tests {
         }
     }
 
+    /// What stands between the two plane checks in [`plane_checks`].
+    enum Between {
+        /// Nothing at all, which is what one read leaves behind.
+        Nothing,
+        /// Nothing, but the init check asks about twice as many bytes.
+        Wider,
+        /// A store, which is memory changing between the two questions.
+        Store,
+        /// Another type check, which is another read.
+        Another,
+    }
+
+    /// A function with a type check and an init check over the same four bytes at its parameter,
+    /// with `between` standing between the two, and the type check.
+    ///
+    /// The shape [`crate::access_checks`] writes in front of a read, cut down to the two checks
+    /// [`partner`] has to decide about. Nothing here is lowered, because what is being tested is
+    /// the decision rather than the call it leads to.
+    fn plane_checks(names: &mut Interner, between: Between) -> (Func, Inst) {
+        let mut func = Func::new(names.intern("read"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        marker(&mut b, Opcode::CheckType, Some(info), &[cap, p]);
+        let check = b.func().insts(entry).last().expect("the type check was just put in");
+        match between {
+            Between::Nothing | Between::Wider => {}
+            Between::Store => {
+                let zero = b.iconst(Type::int(32), 0);
+                marker(&mut b, Opcode::Store, Some(info), &[zero, p]);
+            }
+            Between::Another => marker(&mut b, Opcode::CheckType, Some(info), &[cap, p]),
+        }
+        let asked = match between {
+            Between::Wider => MemInfo { size: 8, ..info },
+            _ => info,
+        };
+        marker(&mut b, Opcode::CheckInit, Some(asked), &[cap, p]);
+        b.ret(&[]);
+        (func, check)
+    }
+
+    #[test]
+    fn the_init_check_beside_a_type_check_belongs_to_the_same_read() {
+        let mut names = Interner::new();
+        let (func, check) = plane_checks(&mut names, Between::Nothing);
+        let found = partner(&func, check).expect("the two are one read's");
+        assert_eq!(func[found].opcode, Opcode::CheckInit);
+    }
+
+    #[test]
+    fn an_init_check_over_other_bytes_than_the_type_check_asked_about_is_not_its_partner() {
+        // Same address and a different width is two reads of the same place, and fusing them would
+        // ask the init question about four bytes the program has not read yet.
+        let mut names = Interner::new();
+        let (func, check) = plane_checks(&mut names, Between::Wider);
+        assert!(partner(&func, check).is_none());
+    }
+
+    #[test]
+    fn a_store_between_the_two_plane_checks_keeps_them_apart() {
+        // The two calls happen either side of the store, so the init question is answered against
+        // the planes the store left rather than the ones the type question saw.
+        let mut names = Interner::new();
+        let (func, check) = plane_checks(&mut names, Between::Store);
+        assert!(partner(&func, check).is_none());
+    }
+
+    #[test]
+    fn the_init_check_of_a_later_read_is_not_an_earlier_reads_partner() {
+        // A second type check is a second read, and its init check is the one that follows it. The
+        // search stops rather than walking past, because pairing across it would move an init
+        // question earlier than the program asks it.
+        let mut names = Interner::new();
+        let (func, check) = plane_checks(&mut names, Between::Another);
+        assert!(partner(&func, check).is_none());
+    }
+
     #[test]
     fn the_judgement_a_type_check_names_is_the_one_about_the_planes() {
         // J1 rather than a judgement of its own. Document 04 section 4.4's first judgement is an
         // access the capability, the planes or the alignment did not permit, and both the type
         // plane and the init plane are planes, so that is the sentence the reporter should print
-        // for either of them.
+        // for either of them. That the two say the same thing is also why the one row the fused
+        // call carries can stand for both of them.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
         lower(&mut module, &mut names);
@@ -1363,7 +1531,7 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(rows, [ACCESS, ACCESS, ACCESS, ACCESS]);
+        assert_eq!(rows, [ACCESS, ACCESS, ACCESS]);
     }
 
     #[test]
