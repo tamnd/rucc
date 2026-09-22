@@ -7859,6 +7859,30 @@ block5:
         assert_eq!(small, large, "four times the labels and the same values: {small}, {large}");
     }
 
+    /// A template that saves the callee-saved registers by name, which is micropython's non local
+    /// return and is tamnd/rucc#1583.
+    ///
+    /// Every register in it is one the template named rather than one the statement handed over,
+    /// because the buffer is defined as holding those registers and there is no constraint letter
+    /// that means `%rsp`. The instructions come out naming what the program named, and the
+    /// allocator, which was told about the writes rather than left to find out, saves the ones the
+    /// calling convention says belong to whoever called.
+    #[test]
+    fn a_template_that_names_its_own_registers_gets_the_ones_it_named() {
+        let source = "void save(void *nlr) {
+    __asm volatile (
+        \"movq   %%rsp, 32(%%rdi)   \\n\"
+        \"movq   %%rbx, 40(%%rdi)   \\n\"
+        \"movq   %%r12, 48(%%rdi)   \\n\"
+        : : \"D\" (nlr) : \"memory\");
+}
+";
+        let text = asm(source);
+        assert!(text.contains("\tmovq\t%rsp, 32(%rdi)\n"), "{text}");
+        assert!(text.contains("\tmovq\t%rbx, 40(%rdi)\n"), "{text}");
+        assert!(text.contains("\tmovq\t%r12, 48(%rdi)\n"), "{text}");
+    }
+
     #[test]
     fn a_jump_to_an_address_no_label_in_the_function_has_arrives_nowhere() {
         // The address came from outside the function, and a jump to a label in another function
