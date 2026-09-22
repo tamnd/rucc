@@ -14,7 +14,7 @@
 
 use rucc_target::x86_64::{
     Addr, Arg, GPR, INSTS, R8, R9, R10, R11, R12, R13, RAX, RBP, RCX, RDX, RSI, RSP, Value, Width,
-    encode, gpr_name, written,
+    encode, gpr_high, gpr_name, written,
 };
 use rucc_target::{Constraint, PhysReg, RegClass};
 
@@ -111,6 +111,29 @@ fn main() {
                                     let reg = bank[0];
                                     values.push(Value::Reg(reg, Width::Quad));
                                     text.push(format!("*{}", name(reg, Width::Quad, GPR)));
+                                }
+                                // The two halves of a word, which is the one instruction here that
+                                // names part of a register rather than an amount of one. Both ends
+                                // of it are pinned, so the bank has no say and the register is
+                                // whatever the description pinned them to.
+                                Arg::Low(at) => {
+                                    let desc = operands[usize::from(at)];
+                                    let reg = match desc.constraint {
+                                        Constraint::Fixed(fixed) => fixed,
+                                        _ => bank[usize::from(at) % bank.len()],
+                                    };
+                                    values.push(Value::Reg(reg, Width::Byte));
+                                    text.push(name(reg, Width::Byte, desc.class));
+                                }
+                                Arg::High(at) => {
+                                    let desc = operands[usize::from(at)];
+                                    let reg = match desc.constraint {
+                                        Constraint::Fixed(fixed) => fixed,
+                                        _ => bank[usize::from(at) % bank.len()],
+                                    };
+                                    high = true;
+                                    values.push(Value::High(reg));
+                                    text.push(format!("%{}", gpr_high(reg).unwrap_or("?")));
                                 }
                                 Arg::Named(named) => {
                                     high = true;

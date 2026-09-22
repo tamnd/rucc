@@ -77,9 +77,29 @@
 //! Four of them and not the rest. gcc has a dozen more letters in that position and they do other
 //! things: print a constant without its sigil, print the suffix on its own, print an address. Those
 //! are a template asking for text rather than for an instruction, and text is not what this reads.
-//! `%h`, which is the high byte of one of the four registers that have one, is left out for a
-//! different reason, which is that it names a register rather than a part of one and nothing in
-//! this backend has a name for it.
+//!
+//! # The half of a register the other four do not reach
+//!
+//! `%h` is the fifth and is not a width. `%b0` is the low byte of an operand's register and `%h0`
+//! is the byte above it, and a template that writes one writes the other, because the only thing
+//! to do with the high byte of a word is put it somewhere the low byte can be. femtolisp is the
+//! program that asks: `llt/utils.h` swaps the two bytes of a sixteen bit number with `xchgb
+//! %b0,%h0`, which is how a C library written before `__builtin_bswap16` said it, and that header
+//! is the one every other file of the library includes.
+//!
+//! So it comes back as [`Given::High`] rather than as a width, and the one instruction that takes
+//! one takes both: `xchg_high_16` has an operand at each half and each of them is the whole word,
+//! one going in and one coming out. That is what keeps the allocator out of it. Only the first four
+//! registers have a high byte, nothing here has a way to say "one of those four", and the
+//! description of that opcode says `rax` outright at both ends instead, which is more than the
+//! instruction needs and never less. Nothing has to know what half a register is, because no
+//! operand is ever half of one.
+//!
+//! Two ends rather than one operand named twice, because the register is the description's and not
+//! the allocator's. An instruction whose answer is tied to its source is in whatever register the
+//! source was given, and this one is in `rax` no matter where the source was given, since `rax` is
+//! what its spelling prints. So it is written the way a division is written, with both ends fixed,
+//! and it gets a division's moves in front and behind when the value it is handed lives elsewhere.
 //!
 //! # The labels and the jumps between them
 //!
@@ -600,6 +620,9 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
     let mut operands = vec![None; described.len()];
     let mut at = None;
     let mut imm = None;
+    // Which of the statement's operands the halves of a word seen so far belong to, for the one
+    // instruction that names a half.
+    let mut halves = None;
     for (&arg, &given) in only.args.iter().zip(&given) {
         match (arg, given) {
             (Arg::Reg(index, width), Given::Operand(operand, stated)) => {
@@ -617,6 +640,19 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
                     return None;
                 }
                 *operands.get_mut(usize::from(index))? = Some(Piece::Reg { reg, width });
+            }
+            // The two halves of one word. Each argument names an end of the opcode, which are two
+            // operands pinned to one register, and both of them have to be the same operand of the
+            // statement: this instruction exchanges the halves of a register with each other, so
+            // `xchgb %b0,%h1` is two registers and this row is one. That is not this instruction
+            // and there is no other, which is what the check below says.
+            (Arg::Low(index), Given::Operand(operand, Some(Width::Byte)))
+            | (Arg::High(index), Given::High(operand)) => {
+                if *halves.get_or_insert(operand) != operand {
+                    return None;
+                }
+                *operands.get_mut(usize::from(index))? =
+                    Some(Piece::Operand { index: operand, width: Width::Word, stated: false });
             }
             (Arg::Imm, Given::Imm(value)) => imm = Some(value),
             // An immediate the table wrote is part of the instruction, so a template matches it
@@ -682,6 +718,8 @@ fn suffixed(mnemonic: &str, given: &[Given], widths: &[Option<Width>]) -> Option
     for arg in given {
         let each = match *arg {
             Given::Reg(_, each) => each,
+            // The high byte of a word, which is a byte however wide the operand it is half of is.
+            Given::High(_) => Width::Byte,
             // The template's own answer first, since a program that wrote one wrote it to say
             // something other than what the type says.
             Given::Operand(index, stated) => match stated {
@@ -737,6 +775,12 @@ fn arguments(text: &str) -> Vec<&str> {
 enum Given {
     /// `%0`, with the width the template wrote on it for one that carried a modifier.
     Operand(usize, Option<Width>),
+    /// `%h0`, which is the high byte of the word in that operand's register.
+    ///
+    /// Not [`Given::Operand`] at [`Width::Byte`], because `%b0` is that and the two are different
+    /// halves of the same word. The only instruction that takes one takes both, which is why this
+    /// carries no width: the half it names is a byte and nothing else it could be.
+    High(usize),
     Reg(PhysReg, Width),
     Imm(i64),
     Mem(At),
@@ -746,7 +790,7 @@ impl Given {
     /// What kind of thing it is, which is what an opcode is looked up by.
     fn shape(&self) -> Shape {
         match self {
-            Given::Operand(..) | Given::Reg(..) => Shape::Reg,
+            Given::Operand(..) | Given::High(_) | Given::Reg(..) => Shape::Reg,
             Given::Imm(_) => Shape::Imm,
             Given::Mem(_) => Shape::Mem,
         }
@@ -796,6 +840,11 @@ fn given(text: &str) -> Option<Given> {
 /// four letters are read and why the rest are not.
 fn modified(after: &str) -> Option<Given> {
     let (letter, digits) = after.split_at_checked(1)?;
+    // The high byte, which is the one letter here that names part of a register rather than an
+    // amount of it, so it comes back as its own thing rather than as a width.
+    if letter == "h" {
+        return Some(Given::High(digits.parse().ok()?));
+    }
     let width = match letter {
         "b" => Width::Byte,
         "w" => Width::Word,
@@ -1107,7 +1156,7 @@ mod tests {
         assert_eq!(
             plain("addq %1, %h0", &[Some(Width::Quad); 2]),
             None,
-            "a letter this leaves out"
+            "the letter that names half a register, which no addition takes"
         );
         assert_eq!(
             plain("addq %1, %q", &[Some(Width::Quad); 2]),
@@ -1120,6 +1169,39 @@ mod tests {
             Piece::Reg { reg: gpr_named("bl").expect("bl").0, width: Width::Byte },
             "a register whose name starts with a letter a modifier also uses"
         );
+    }
+
+    /// The one template on this machine that names half a register rather than an amount of one,
+    /// which is how a library written before `__builtin_bswap16` turned a sixteen bit number round.
+    /// Both halves are the same operand of the statement, the opcode has an end at each of them,
+    /// and what each end holds is the whole word, since the two halves together are every bit of
+    /// it and the instruction reads and writes all sixteen.
+    #[test]
+    fn the_two_halves_of_a_word_are_the_exchange_between_them() {
+        let lines =
+            plain("xchgb %b0,%h0", &[Some(Width::Word)]).expect("the swap femtolisp writes");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opcode, "xchg_high_16");
+        let whole = Piece::Operand { index: 0, width: Width::Word, stated: false };
+        assert_eq!(
+            lines[0].operands,
+            vec![whole, whole],
+            "the word coming out and the word going in"
+        );
+    }
+
+    /// Halves of two different registers is not that instruction. This machine exchanges the two
+    /// bytes of one word and has nothing that exchanges a byte of one word with a byte of another,
+    /// so a template writing one is refused rather than being read as the exchange it resembles.
+    #[test]
+    fn two_halves_of_different_operands_are_not_the_exchange() {
+        let widths = [Some(Width::Word); 2];
+        assert_eq!(
+            plain("xchgb %b0,%h1", &widths),
+            None,
+            "the low byte of one and the high of the other"
+        );
+        assert_eq!(plain("xchgb %b1,%h0", &widths), None, "the same the other way round");
     }
 
     /// The suffix is worked out from the operands and from nothing else, so a template whose

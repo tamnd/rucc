@@ -46,7 +46,8 @@ pub use crate::x86_64::insts::{
 };
 pub use crate::x86_64::read::{At, Disp, Line, Piece, Step, read};
 pub use crate::x86_64::text::{
-    Arg, Shape, Width, Written, gpr_letter, gpr_name, gpr_named, machine, operand_width, written,
+    Arg, Shape, Width, Written, gpr_high, gpr_letter, gpr_name, gpr_named, machine, operand_width,
+    written,
 };
 pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 
@@ -675,6 +676,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Literal
             | Form::Landing
             | Form::Swap
+            | Form::SwapHalves
             | Form::Prefetch
             | Form::RetVal
             | Form::RetVal2

@@ -45,7 +45,8 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, SwapHalves, Test, TestCmov, Trap, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -255,6 +256,25 @@ pub enum Form {
     /// not have been wrong. It would have been a claim this machine does not make, and the point of
     /// a form is that it is what the manual says rather than what is convenient.
     Swap,
+    /// The two bytes of a word exchanged with each other, which is the same thing at the one width
+    /// `bswap` does not reach.
+    ///
+    /// [`Form::Swap`] read as an operand vector, and a separate form for the register it has to be
+    /// in. An exchange between the halves of a word names the high byte, only the first four
+    /// registers have one, and the allocator has no way to be told about half a register. So the
+    /// word is fixed to `rax`, which is more than the instruction needs and never less: any of the
+    /// four would do and one of them is all that is wanted, since the only thing that reaches this
+    /// form is a template and a template asks for one of these at a time.
+    ///
+    /// The word going out and the word going in are said separately and both are fixed, rather than
+    /// the second being tied to the first the way every other two-address instruction here ties
+    /// them. A tie says the answer is wherever the allocator put the source, and that is the one
+    /// thing which is not true here: the register this instruction works in is written into its
+    /// spelling, so the answer is in `rax` whatever the allocator would have preferred. Saying it
+    /// as two fixed ends is the shape a division already has, and it gets the same treatment, which
+    /// is a move in front when the source is elsewhere and a move behind when the answer is wanted
+    /// elsewhere. Either move is free when the allocator takes the hint, and it usually does.
+    SwapHalves,
     /// A multiply that keeps the whole of its answer, in the two registers it takes to hold it.
     ///
     /// The product of two numbers of a width is twice that width, and every other multiply on this
@@ -803,6 +823,14 @@ static TWO_ADDRESS_RR: [OperandDesc; 3] = [
 ];
 static TWO_ADDRESS_RI: [OperandDesc; 2] =
     [OperandDesc::write(GPR).with(Constraint::Reuse(1)), OperandDesc::read(GPR)];
+// One register named twice, going in and coming out, with the register said outright at both ends
+// because the instruction names the high byte of it and only the first four registers have one.
+// See [`Form::SwapHalves`] for why it is `rax` rather than whichever of the four the allocator
+// would rather have, and why the two ends are said separately instead of being tied.
+static SWAP_HALVES: [OperandDesc; 2] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+];
 // The count is in `cl` because that is the only register this machine shifts by. It is the
 // whole of `rcx` as far as the allocator is concerned, since `cl` is part of `rcx` and nothing
 // else may be using the rest of it.
@@ -1049,6 +1077,7 @@ impl Form {
             LoadImm => &LOAD_IMM,
             AluRr | AluCarry => &TWO_ADDRESS_RR,
             AluRi | AluCarryI | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
+            SwapHalves => &SWAP_HALVES,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi | CmpSetRm => &ONE_TO_ONE,
@@ -1941,6 +1970,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("xchg_16", Rmw),
     ("xchg_32", Rmw),
     ("xchg_64", Rmw),
+    // The same instruction with both of its arguments in one register, which exchanges the two
+    // bytes of a word and is where the machine's only nameable high byte is.
+    ("xchg_high_16", SwapHalves),
     ("xadd_8", Rmw),
     ("xadd_16", Rmw),
     ("xadd_32", Rmw),
@@ -2174,7 +2206,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 619);
+        assert_eq!(described, 620);
     }
 
     #[test]
