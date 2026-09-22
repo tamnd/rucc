@@ -1,4 +1,4 @@
-//! The printf family, folded into the call its output really is.
+//! A call to the library, folded into the call it really is.
 //!
 //! Section 20.2 of `spec/optimizer/20-idioms-and-libcalls.md`, the half of it that is about a
 //! library call rather than about arithmetic. `printf("hello world\n")` writes the same bytes as
@@ -12,6 +12,11 @@
 //!
 //! All of them measured against gcc 16.2.0 on x86-64 rather than read out of its source, and all of
 //! them conditional on the format being a string this module holds the bytes of.
+//!
+//! `strstr(s, "")` is `s`, since the empty string is found at once wherever it is looked for.
+//! `strstr(s, "w")` is `strchr(s, 'w')`, which is a search for a character rather than for a string
+//! and is worth doing wherever the haystack came from. `strstr` of two strings this module holds is
+//! the answer itself, which is a place in the haystack or a null pointer, and nothing is called.
 //!
 //! `printf` with the format alone: nothing at all when it is empty, `putchar` when it is one
 //! character, and `puts` of the format without its last character when the format holds no `%` and
@@ -34,9 +39,18 @@
 //!
 //! # What a call has to be
 //!
-//! Its result has to be read by nothing. `printf` answers the number of characters written and
-//! `puts` answers a non-negative number that is not that count, so a program looking at the answer
-//! is a program this may not touch.
+//! For the printf family, its result has to be read by nothing. `printf` answers the number of
+//! characters written and `puts` answers a non-negative number that is not that count, so a program
+//! looking at the answer is a program this may not touch. `strstr` is the other way round: the
+//! answer is the whole point of the call and the fold produces it, so a program reading it is the
+//! ordinary case.
+//!
+//! The name has to be the one the source spelled rather than the one the object file will carry.
+//! `extern char *strstr (const char *, const char *) __asm ("my_strstr");` is a declaration of
+//! `strstr`, and a compiler that reads the symbol alone sees a call to a function it knows nothing
+//! about. So the callee is looked up through [`rucc_ir::Func::spelled`], and a call this leaves
+//! behind is a call to whatever symbol the module says that name has, which is the rename again
+//! read from the other end.
 //!
 //! The name has to be one this module does not define. A translation unit holding the body of its
 //! own `fputs` means that body, which is the rule [`crate::heap`] applies to `malloc` and for the
@@ -88,26 +102,45 @@ pub const NAME: &str = "libcall";
 const DEPTH: u32 = 4;
 
 /// The names a fold may leave behind, sorted.
-const REPLACEMENTS: [&str; 5] = ["fputc", "fputs", "fwrite", "putchar", "puts"];
+const REPLACEMENTS: [&str; 6] = ["fputc", "fputs", "fwrite", "putchar", "puts", "strchr"];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 6] =
-    ["fprintf", "fprintf_unlocked", "fputs", "fputs_unlocked", "printf", "printf_unlocked"];
+const SOURCES: [&str; 7] = [
+    "fprintf",
+    "fprintf_unlocked",
+    "fputs",
+    "fputs_unlocked",
+    "printf",
+    "printf_unlocked",
+    "strstr",
+];
 
 /// What the compiler worked out a call writes, which is what it is replaced by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Plan {
     /// It writes nothing, so it goes and nothing takes its place.
     Drop,
+    /// The answer is a place in an argument the call was given, or nowhere at all, and that answer
+    /// takes the place of the call's result.
+    Answer(Answer),
     /// This call takes its place.
     Swap {
-        /// The function the replacement names.
-        callee: &'static str,
+        /// The symbol the replacement names, which is what the module calls that function.
+        callee: Symbol,
         /// What that function takes and returns.
         signature: Signature,
         /// What to pass it.
         args: Vec<Argument>,
     },
+}
+
+/// What a search for a string found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// That many bytes along from a value the call was handed.
+    Along(Value, u64),
+    /// Nowhere in it, which is a null pointer.
+    Nowhere,
 }
 
 /// One argument of a replacement call.
@@ -130,24 +163,31 @@ enum Argument {
 /// a program that declared it as something else stops the fold. The alternative is a fold that
 /// produces IR the verifier refuses, which is a compiler that crashes on a program gcc compiles.
 struct Shapes {
-    /// The signature a call to that name has to carry, and `None` where no call may name it.
-    held: HashMap<&'static str, Option<Signature>>,
+    /// The symbol a call to that name has to carry and the signature it has to have, and `None`
+    /// where no call may name it.
+    held: HashMap<&'static str, Option<(Symbol, Signature)>>,
 }
 
 impl Shapes {
-    /// Reads the module's answer for each of the five names.
-    fn of(module: &Module, names: &Interner) -> Self {
-        let mut held: HashMap<&'static str, Option<Signature>> =
-            REPLACEMENTS.iter().map(|&name| (name, Some(canonical(module, name)))).collect();
+    /// Reads the module's answer for each of the names a fold may leave behind.
+    fn of(module: &Module, names: &mut Interner) -> Self {
+        let mut held: HashMap<&'static str, Option<(Symbol, Signature)>> = REPLACEMENTS
+            .iter()
+            .map(|&name| (name, Some((names.intern(name), canonical(module, name)))))
+            .collect();
         for id in module.funcs() {
-            let Some(slot) = held.get_mut(names.resolve(module[id].name)) else { continue };
-            let declared = module[id].signature();
-            let agrees = slot.as_ref().is_some_and(|want| {
+            // The name the source gave it, so that a module which renamed `puts` is left with a
+            // call to the symbol it renamed it to rather than one to a `puts` it never declared.
+            let func = &module[id];
+            let spelled = func.spelled.unwrap_or(func.name);
+            let Some(slot) = held.get_mut(names.resolve(spelled)) else { continue };
+            let declared = func.signature();
+            let agrees = slot.as_ref().is_some_and(|(_, want)| {
                 !declared.variadic
                     && declared.param_types().eq(want.param_types())
                     && declared.return_types().eq(want.return_types())
             });
-            *slot = agrees.then(|| declared.clone());
+            *slot = agrees.then(|| (func.name, declared.clone()));
         }
         // A variable or a second name for something else is not a function to call, whatever it is
         // spelled.
@@ -165,7 +205,7 @@ impl Shapes {
     }
 
     /// What a call to that name carries, or `None` where this module does not allow one.
-    fn get(&self, name: &'static str) -> Option<Signature> {
+    fn get(&self, name: &'static str) -> Option<(Symbol, Signature)> {
         self.held.get(name)?.clone()
     }
 }
@@ -182,6 +222,7 @@ fn canonical(module: &Module, name: &str) -> Signature {
         "putchar" => Signature::new().with_params(&[int]).with_returns(&[int]),
         "fputc" => Signature::new().with_params(&[int, Type::PTR]).with_returns(&[int]),
         "fputs" => Signature::new().with_params(&[Type::PTR, Type::PTR]).with_returns(&[int]),
+        "strchr" => Signature::new().with_params(&[Type::PTR, int]).with_returns(&[Type::PTR]),
         // `fwrite`, the one that is told how many bytes to write rather than going looking for a
         // terminator, and the only one of the five whose types are the target's rather than fixed.
         _ => {
@@ -216,6 +257,11 @@ pub fn fold(
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
     let shapes = Shapes::of(module, names);
+    // What each symbol was called in the source, for the declarations where the two differ. A call
+    // names a symbol, and a symbol an assembler name replaced says nothing about which library
+    // function it is, so this is what the two names are put back together through.
+    let standard: HashMap<Symbol, Symbol> =
+        module.funcs().filter_map(|id| Some((module[id].name, module[id].spelled?))).collect();
     // A module that defines one of these names itself is where that function comes from, and what a
     // function called `fputs` does in there is whatever it was written to do.
     let defined: HashSet<Symbol> = module
@@ -232,7 +278,7 @@ pub fn fold(
         // walk over its instructions that allocates nothing. The two tables below are a vector and
         // a predecessor list per block, which is a cost worth not paying over a module whose
         // functions print nothing.
-        if module[id].is_declaration() || !mentions(&module[id], names) {
+        if module[id].is_declaration() || !mentions(&module[id], names, &standard) {
             continue;
         }
         let mut stats = Stats::new();
@@ -248,6 +294,7 @@ pub fn fold(
                 shapes: &shapes,
                 counts: &uses::count(func),
                 defined: &defined,
+                standard: &standard,
                 names,
                 no_builtin,
                 pic,
@@ -265,12 +312,15 @@ pub fn fold(
 }
 
 /// Whether this function calls any of the names a fold reads.
-fn mentions(func: &Func, names: &Interner) -> bool {
+fn mentions(func: &Func, names: &Interner, standard: &HashMap<Symbol, Symbol>) -> bool {
     func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
         let data = &func[inst];
         let Extra::Call(at) = data.extra else { return false };
         data.opcode == Opcode::Call
-            && func[at].callee.is_some_and(|callee| SOURCES.contains(&names.resolve(callee)))
+            && func[at].callee.is_some_and(|callee| {
+                let spelled = standard.get(&callee).copied().unwrap_or(callee);
+                SOURCES.contains(&names.resolve(spelled))
+            })
     })
 }
 
@@ -288,6 +338,8 @@ struct Site<'a> {
     counts: &'a [u32],
     /// The names this module defines bodies for.
     defined: &'a HashSet<Symbol>,
+    /// What each renamed symbol was called in the source.
+    standard: &'a HashMap<Symbol, Symbol>,
     /// The spellings, for reading a callee's name.
     names: &'a Interner,
     /// The names `-fno-builtin-<name>` took away.
@@ -309,6 +361,7 @@ impl Site<'_> {
                 }
                 stats.optimized(match &plan {
                     Plan::Drop => "call to the library that writes nothing removed",
+                    Plan::Answer(_) => "call to the library whose answer is known folded",
                     Plan::Swap { .. } => "call to the library folded",
                 });
                 plans.push((inst, plan));
@@ -325,16 +378,15 @@ impl Site<'_> {
             return None;
         }
         // A program looking at how many characters went out is a program the count matters to, and
-        // no two of these functions answer the same number.
-        if data.results().any(|result| self.counts[result.index()] != 0) {
-            return None;
-        }
+        // no two of the printf family answer the same number. `strstr` is not in that position: its
+        // answer is what the call is for and the fold produces the same one.
+        let ignored = data.results().all(|result| self.counts[result.index()] == 0);
         let Extra::Call(at) = data.extra else { return None };
         let callee = self.func[at].callee?;
         if self.defined.contains(&callee) {
             return None;
         }
-        let name = self.names.resolve(callee);
+        let name = self.names.resolve(self.standard.get(&callee).copied().unwrap_or(callee));
         if self.no_builtin.iter().any(|it| it == name) {
             return None;
         }
@@ -342,13 +394,54 @@ impl Site<'_> {
         // The locked and the unlocked spellings take the same arguments and differ only in how far
         // the fold may go, so they are an arm each with a flag rather than two bodies.
         match name {
-            "printf" => self.printf(&args, false),
-            "printf_unlocked" => self.printf(&args, true),
-            "fprintf" => self.fprintf(&args, false),
-            "fprintf_unlocked" => self.fprintf(&args, true),
-            "fputs" => self.fputs(&args, false),
-            "fputs_unlocked" => self.fputs(&args, true),
+            "printf" if ignored => self.printf(&args, false),
+            "printf_unlocked" if ignored => self.printf(&args, true),
+            "fprintf" if ignored => self.fprintf(&args, false),
+            "fprintf_unlocked" if ignored => self.fprintf(&args, true),
+            "fputs" if ignored => self.fputs(&args, false),
+            "fputs_unlocked" if ignored => self.fputs(&args, true),
+            "strstr" => self.strstr(data, &args),
             _ => None,
+        }
+    }
+
+    /// Where a `strstr` finds what it was told to look for.
+    ///
+    /// The three folds gcc has for it, and the order matters: two strings this module holds are an
+    /// answer, and a haystack nothing is known about is a search for a character where the needle is
+    /// one character long.
+    fn strstr(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if args.len() != 2 {
+            return None;
+        }
+        let (haystack, needle) = (args[0], args[1]);
+        if self.func[haystack].ty != Type::PTR || self.func[needle].ty != Type::PTR {
+            return None;
+        }
+        // A declaration of another shape is a function of the program's own, and the answer this
+        // produces is a pointer whatever the program said the call gives back.
+        let mut results = data.results();
+        if !results.next().is_some_and(|result| self.func[result].ty == Type::PTR)
+            || results.next().is_some()
+        {
+            return None;
+        }
+        let needle = self.one(needle)?;
+        // The empty string is found at once, wherever it is looked for and whatever is there.
+        if needle.is_empty() {
+            return Some(Plan::Answer(Answer::Along(haystack, 0)));
+        }
+        match self.one(haystack) {
+            Some(hay) => Some(Plan::Answer(match at(&hay, &needle) {
+                Some(found) => Answer::Along(haystack, u64::try_from(found).ok()?),
+                None => Answer::Nowhere,
+            })),
+            // A needle of one character is a search for that character, which is a smaller function
+            // and is worth doing wherever the haystack came from.
+            None => match needle.as_slice() {
+                [one] => self.call("strchr", vec![Argument::Have(haystack), Argument::Char(*one)]),
+                _ => None,
+            },
         }
     }
 
@@ -487,7 +580,8 @@ impl Site<'_> {
 
     /// A call to that name, or nothing where this module does not allow one.
     fn call(&self, callee: &'static str, args: Vec<Argument>) -> Option<Plan> {
-        Some(Plan::Swap { callee, signature: self.shapes.get(callee)?, args })
+        let (callee, signature) = self.shapes.get(callee)?;
+        Some(Plan::Swap { callee, signature, args })
     }
 
     /// The one string this value points at, or `None` where there is more than one of them.
@@ -629,11 +723,18 @@ fn apply(
     inst: Inst,
     plan: Plan,
 ) {
-    let Plan::Swap { callee, signature, args } = plan else {
-        module[id].remove_inst(inst);
-        return;
+    let (callee, signature, args) = match plan {
+        Plan::Drop => {
+            module[id].remove_inst(inst);
+            return;
+        }
+        Plan::Answer(answer) => {
+            let width = size(module);
+            answered(&mut module[id], inst, answer, width);
+            return;
+        }
+        Plan::Swap { callee, signature, args } => (callee, signature, args),
     };
-    let callee = names.intern(callee);
     // The objects first, because a string the fold prints belongs to the module and the module is
     // what the function is reached through.
     let symbols: Vec<Option<Symbol>> = args
@@ -669,7 +770,53 @@ fn apply(
     let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
     let made = func.create_inst(data, &results, span);
     func.insert_before(made, inst);
+    // Whoever read the old call's answer reads the new one's, where the two are the same kind of
+    // thing. The printf family is folded only where nothing read it, so the map is empty there and
+    // this costs a walk over a function that is about to be walked anyway.
+    let forward: HashMap<Value, Value> = func[inst]
+        .results()
+        .zip(func[made].results().collect::<Vec<Value>>())
+        .filter(|&(from, to)| func[from].ty == func[to].ty)
+        .collect();
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+    }
     func.remove_inst(inst);
+}
+
+/// Writes the answer a search worked out in place of the call that would have worked it out.
+fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
+    let span = func.span(inst);
+    let value = match answer {
+        // The haystack itself, which is what a search for the empty string finds and what a search
+        // that found its needle at the front of one finds. No instruction at all for either.
+        Answer::Along(haystack, 0) => haystack,
+        Answer::Along(haystack, by) => {
+            let step = constant(func, inst, width, i128::from(by));
+            let args = func.push_values(&[haystack, step]);
+            let data = InstData { args, ..InstData::new(Opcode::PtrAdd) };
+            let made = func.create_inst(data, &[Type::PTR], span);
+            func.insert_before(made, inst);
+            func[made].results().next().expect("an address is one value")
+        }
+        Answer::Nowhere => {
+            let zero = constant(func, inst, width, 0);
+            let args = func.push_values(&[zero]);
+            let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+            let made = func.create_inst(data, &[Type::PTR], span);
+            func.insert_before(made, inst);
+            func[made].results().next().expect("a null pointer is one value")
+        }
+    };
+    let forward: HashMap<Value, Value> =
+        func[inst].results().map(|result| (result, value)).collect();
+    uses::substitute(func, &forward);
+    func.remove_inst(inst);
+}
+
+/// Where the second string is inside the first, in bytes from its front.
+fn at(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
 }
 
 /// An integer constant of that type, put in front of the call being replaced.
@@ -1191,5 +1338,167 @@ block0:
         assert_eq!(out.matches("@.Lfold.0 : bytes").count(), 1, "{out}");
         assert!(!out.contains("@.Lfold.1"), "{out}");
         assert_eq!(out.matches("call @puts(").count(), 3, "{out}");
+    }
+
+    /// A search for the empty string finds it at the front of whatever it was given.
+    ///
+    /// The haystack need not be a string this module holds, because the answer does not depend on
+    /// what is in it.
+    #[test]
+    fn a_search_for_nothing_answers_with_the_haystack_itself() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(!out.contains("call @strstr("), "{out}");
+        assert!(out.contains("return %0"), "{out}");
+    }
+
+    /// Two strings this module holds answer themselves, at a place in the first or nowhere in it.
+    #[test]
+    fn two_strings_this_module_holds_answer_without_a_call() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 2 = { bytes "w\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 3 = { bytes "zz\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = global_addr @.Lstr.1
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    %3 = global_addr @.Lstr.2
+    %4 = call @strstr(%0, %3) : (ptr, ptr) -> ptr
+    call @use(%2, %4) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strstr("), "{out}");
+        assert!(out.contains("ptr_add %0, "), "the w is six bytes along, {out}");
+        assert!(out.contains("iconst.i64 6"), "{out}");
+        assert!(out.contains("inttoptr"), "and the zz is nowhere in it, {out}");
+    }
+
+    /// A one character needle is a search for a character, which `strchr` is the name of.
+    #[test]
+    fn a_one_character_needle_becomes_a_search_for_that_character() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 2 = { bytes "o\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(!out.contains("call @strstr("), "{out}");
+        assert!(out.contains("call @strchr(%0, "), "{out}");
+        assert!(out.contains("iconst.i32 111"), "{out}");
+    }
+
+    /// A module whose `strchr` is something else of that name keeps its `strstr` call.
+    #[test]
+    fn a_strchr_of_another_shape_is_not_the_one_to_call() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 2 = { bytes "o\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+func @strchr(ptr, ptr) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(out.contains("call @strstr("), "{out}");
+    }
+
+    /// A declaration renamed by an assembler name is the function the standard describes still.
+    ///
+    /// The call names the symbol the rename asked for, and the fold reads the spelling beside it,
+    /// which is what `gcc.c-torture/execute/builtins/strstr-asm.c` is written to catch.
+    #[test]
+    fn a_renamed_declaration_is_still_the_function_it_was_spelled() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @my_strstr(ptr, ptr) -> ptr, linkage(external), spelled "strstr";
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @my_strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(!out.contains("call @my_strstr("), "{out}");
+        assert!(out.contains("return %0"), "{out}");
+    }
+
+    /// A module that renamed `strchr` gets a call to the symbol it renamed it to.
+    #[test]
+    fn a_renamed_replacement_is_called_by_the_symbol_the_rename_asked_for() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 2 = { bytes "o\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+func @my_strchr(ptr, i32) -> ptr, linkage(external), spelled "strchr";
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(out.contains("call @my_strchr(%0, "), "{out}");
+        assert!(!out.contains("call @strchr("), "{out}");
+    }
+
+    /// `-fno-builtin-strstr` leaves the call alone.
+    #[test]
+    fn a_strstr_taken_away_is_a_call_like_any_other() {
+        let body = r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strstr(ptr, ptr) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strstr(%0, %1) : (ptr, ptr) -> ptr
+    return %2
+}
+"#;
+        let out = run(body, &["strstr".to_owned()], &mut Fuel::unlimited());
+        assert!(out.contains("call @strstr("), "{out}");
     }
 }

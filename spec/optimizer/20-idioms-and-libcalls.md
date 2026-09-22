@@ -77,6 +77,24 @@ in document 34.6 rather than a rule, it runs before the function pipeline starts
 and above where gcc folds these as well. The rules themselves are in `crates/rucc-opt/src/libcall.rs`
 and the three way split of 20.1 turns the whole of it off.
 
+**The other way round, which is a call that answers rather than writes.** `strstr(s, "")` is `s`,
+since the empty string is found at once wherever it is looked for. `strstr(s, "w")` is
+`strchr(s, 'w')`, which is a search for a character rather than for a string and is worth doing
+wherever the haystack came from. `strstr` of two strings the module holds is the answer itself,
+which is a place in the haystack or a null pointer, and nothing is called at all. These live in the
+same module at a time pass because the second of them has to name `strchr` before a call can carry
+it, and they differ from the printf family in what the result is for: a `printf` whose result is
+read is left alone, and a `strstr` is folded whether its result is read or not.
+
+**A rename does not hide the function.** `extern char *strstr (const char *, const char *) __asm
+("my_strstr");` declares the standard `strstr` and says the symbol is `my_strstr`, and a pass with
+only the symbol in front of it sees a call to something it has never heard of. The IR carries the
+name the source spelled beside the symbol, per document 08.8, and this pass reads it to decide what
+the call is, and reads the module the same way to decide what symbol a replacement should name, so
+a module that renamed `strchr` as well gets a call to the symbol it renamed it to.
+`gcc.c-torture/execute/builtins/strstr-asm.c` is the program written to catch a compiler that got
+this wrong, since it aborts unless eight of its nine calls fold.
+
 **The trap.** Inlining `memcpy` as loads and stores requires knowing the alignment, or using
 unaligned accesses, and the result must not read or write outside the copied range. An implementation
 that rounds the size up to a convenient width writes past the end. This is the single most likely

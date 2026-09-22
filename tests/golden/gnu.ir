@@ -351,7 +351,7 @@ block0(%0: i32):
     return %0
 }
 
-func @elsewhere(i32) -> i32, linkage(internal) {
+func @elsewhere(i32) -> i32, linkage(internal), spelled "renamed" {
 block0(%0: i32):
     %1 = iconst.i32 1
     %2 = add.nsw %0, %1

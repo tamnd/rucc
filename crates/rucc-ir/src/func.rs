@@ -45,6 +45,19 @@ use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchH
 pub struct Func {
     /// The name it is called by, which is what a direct call to it names.
     pub name: Symbol,
+    /// The name the source spelled, where an assembler name means the symbol is not that name.
+    ///
+    /// `extern char *strstr (const char *, const char *) __asm ("my_strstr");` declares the
+    /// standard `strstr` and says the symbol is `my_strstr`, and both of those are facts a later
+    /// pass needs: the symbol is what a call names and what the linker resolves, and the spelling
+    /// is what says this is the function the standard describes. Keeping only the symbol is how a
+    /// rename hides a library call from every fold that knows what that library call does, which
+    /// is what `gcc.c-torture/execute/builtins/strstr-asm.c` is written to catch.
+    ///
+    /// `None` where the two are the same, which is every function that renamed nothing, so this
+    /// costs a word on a function and appears in the printed form only where a program asked for
+    /// it.
+    pub spelled: Option<Symbol>,
     /// How the linker sees it. `Internal` for a `static` function.
     pub linkage: Linkage,
     /// How the dynamic linker sees it.
@@ -116,6 +129,7 @@ impl Func {
     pub fn new(name: Symbol, signature: Signature) -> Self {
         Self {
             name,
+            spelled: None,
             linkage: Linkage::External,
             visibility: Visibility::Default,
             section: None,
