@@ -478,18 +478,34 @@ impl Chrec {
 /// gives up. These are the predicates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Assumption {
-    /// The counter starts on the near side of its limit, so the distance between them is a
-    /// number that is not negative.
+    /// The loop is entered at all, so the distance from the counter to its limit is a number that
+    /// is not negative.
     ///
-    /// For a loop ending on an ordering this is the loop being entered at all.
     /// `for (i = 0; i < n; i++)` with `n` of zero runs no times and the distance is zero, but `n`
     /// of minus one also runs no times and the distance is minus one, so a count taken from the
-    /// distance has to be told which case it is in. For a loop ending on `!=` it is the limit
-    /// being somewhere the counter is heading, because one stepping away from its limit never
-    /// arrives.
+    /// distance has to be told which case it is in.
+    ///
+    /// What it does not say anything about is whether the loop comes back. A counter stepping
+    /// toward a limit under an ordering test either reaches it or is already past it, and either
+    /// way that is a finite number of steps, so a caller whose question is whether the loop ends
+    /// may have this one for nothing. [`crate::hoist`] discharges it by clamping the count at zero
+    /// and [`crate::loop_delete`] by never reading the count. That is the whole of why this is a
+    /// separate assumption from [`Assumption::Approaching`] rather than the same one worded to
+    /// cover both.
     ///
     /// Only ever present on a symbolic count. When the distance is a number the sign of it is
     /// there to be read, so this is settled rather than assumed.
+    Entered,
+    /// The limit is somewhere the counter is heading, which for a loop ending on `!=` is what
+    /// makes it end at all.
+    ///
+    /// A counter stepping away from its limit never arrives, and one stepping past it keeps going
+    /// until it wraps, so what is unproven here is termination rather than which number the count
+    /// is. Nothing discharges it by clamping, because there is no number to clamp when the loop
+    /// does not come back. Document 17.2 says rucc does not take out a loop that might not end,
+    /// so a pass that deletes loops refuses this one outright.
+    ///
+    /// Only ever present on a symbolic count, for the same reason [`Assumption::Entered`] is.
     Approaching,
     /// The induction variable does not wrap in its own type before the exit is taken.
     ///
@@ -515,7 +531,8 @@ impl Assumption {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Approaching => "the counter starts on the near side of its limit".to_string(),
+            Self::Entered => "the loop is entered at all".to_string(),
+            Self::Approaching => "the counter is heading towards its limit".to_string(),
             Self::NoWrap(chrec) => {
                 format!("the induction variable does not wrap in i{}", chrec.ty.bits())
             }
@@ -605,13 +622,33 @@ impl Bound {
     /// promised does not wrap. That promise is exactly what the assumption wanted.
     ///
     /// [`Assumption::NoWrap`] is the case where there is no such promise, and it is refused here.
-    /// So is [`Assumption::Approaching`], though only in passing, because it never appears on a
-    /// count that is a number.
+    /// So are [`Assumption::Entered`] and [`Assumption::Approaching`], though only in passing,
+    /// because neither ever appears on a count that is a number.
     #[must_use]
     pub fn under_undefined_overflow(&self) -> Option<Count> {
         self.assumptions
             .iter()
             .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow))
+            .then_some(self.count)
+    }
+
+    /// The count, for a caller that needs the loop to come back and not how many times.
+    ///
+    /// One assumption wider than [`Bound::under_undefined_overflow`], and the one it adds is
+    /// [`Assumption::Entered`]. What that says is whether the count is the distance to the limit
+    /// or zero, and both of those are numbers of iterations the loop has, so a pass asking whether
+    /// the loop ends has already been answered whichever way it goes. A pass multiplying by the
+    /// count has not, which is why this is a second accessor and not a loosening of the first.
+    ///
+    /// [`Assumption::Approaching`] is refused, and telling those two apart is the reason they are
+    /// two assumptions. A loop ending on `!=` whose counter steps past its limit runs until it
+    /// wraps, document 17.2 is explicit that rucc does not take out a loop that might not end, and
+    /// a count that comes back from here is one no caller has to check that against.
+    #[must_use]
+    pub fn comes_back(&self) -> Option<Count> {
+        self.assumptions
+            .iter()
+            .all(|rests_on| matches!(rests_on, Assumption::StrictOverflow | Assumption::Entered))
             .then_some(self.count)
     }
 }
@@ -1285,7 +1322,7 @@ fn ordered(
         // Symbolic, and only for a step of one, because dividing an expression by anything else
         // needs a representation for a division and there is not one here.
         None if step == 1 => {
-            assumptions.push(Assumption::Approaching);
+            assumptions.push(Assumption::Entered);
             let count = distance.plus(Invariant::number(i128::from(inclusive)))?;
             Some((Count::Symbolic(count), assumptions))
         }
@@ -1850,7 +1887,7 @@ mod tests {
         let found = bound(&func).expect("it is counted");
         let (count, assumptions) = found.parts();
         assert_eq!(count, Count::Symbolic(Invariant::of(limit)));
-        assert!(assumptions.contains(&Assumption::Approaching), "{assumptions:?}");
+        assert!(assumptions.contains(&Assumption::Entered), "{assumptions:?}");
         assert!(assumptions.contains(&Assumption::StrictOverflow), "{assumptions:?}");
         assert_eq!(found.proven(), None);
     }

@@ -231,7 +231,13 @@ impl Case {
     /// Whether what the analysis said it needed was true of the run.
     fn holds(self, assumption: &Assumption, run: &Run) -> bool {
         match assumption {
-            Assumption::Approaching => self.narrow(self.to) >= self.narrow(self.from),
+            // Both of these say the limit is on the side the counter is heading for. They are
+            // two assumptions because they are unproven for different reasons, one about which
+            // number the count is and one about the loop coming back, and the run says the same
+            // thing about either.
+            Assumption::Entered | Assumption::Approaching => {
+                self.narrow(self.to) >= self.narrow(self.from)
+            }
             // Asked for under the reading the test takes, which for `!=` is the unsigned one
             // because `!=` compares bit patterns and has no opinion about signs.
             Assumption::NoWrap(_) => {

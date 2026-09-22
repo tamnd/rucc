@@ -260,7 +260,7 @@ enum Extent {
     ///
     /// The recipe is `max(scale * value + offset, 0) * step + reach`, in sixty four bit arithmetic
     /// that [`fits`] has already established cannot wrap. The `max` is
-    /// [`crate::scev::Assumption::Approaching`] discharged rather than assumed: a count that comes
+    /// [`crate::scev::Assumption::Entered`] discharged rather than assumed: a count that comes
     /// out negative is a loop whose test failed the first time it ran, which is a loop that went
     /// round no times and read one access, and zero is the count that says so.
     ///

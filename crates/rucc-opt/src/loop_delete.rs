@@ -1,8 +1,8 @@
-//! Takes out a loop that runs a known number of times, working out what it left behind.
+//! Takes out a loop that comes back, working out what it left behind.
 //!
-//! Design: `spec/optimizer/17-dce.md` for what makes a thing removable and
-//! `spec/optimizer/28-induction-variables.md` for where the trip count comes from. This is
-//! tamnd/rucc#1631.
+//! Design: `spec/optimizer/17-dce.md` for what makes a thing removable and section 28.9 for the
+//! closed form, the off by one in it, and why the two questions this pass asks want different
+//! things from the trip count. This is tamnd/rucc#1631.
 //!
 //! [`crate::dce`] cannot do this and the reason is worth stating, because it looks at first like a
 //! gap in that pass. An empty counted loop has a counter, an add, a compare and a branch, and
@@ -15,13 +15,19 @@
 //!
 //! # Which loops
 //!
-//! A preheader, one exit, and a trip count that is a number rather than an estimate. The count is
-//! what says the loop terminates, which is the third question and the one a person is most likely
-//! to forget: a loop that computes nothing and never comes back still cannot be taken out, because
-//! not coming back is what it does. [`crate::scev::Bound::under_undefined_overflow`] is the same
-//! accessor [`crate::unroll`] reads for the same reason, and section 7.5's distinction between a
-//! bound and an estimate is exactly this: an estimate decides whether a transformation pays and a
-//! bound decides what the program does.
+//! A preheader, one exit, and a bound rather than an estimate. The bound is what says the loop
+//! terminates, which is the third question and the one a person is most likely to forget: a loop
+//! that computes nothing and never comes back still cannot be taken out, because not coming back
+//! is what it does. Section 7.5's distinction between a bound and an estimate is exactly this: an
+//! estimate decides whether a transformation pays and a bound decides what the program does.
+//!
+//! The bound is read through [`crate::scev::Bound::comes_back`] rather than through the accessor
+//! [`crate::unroll`] uses, and the difference is worth a sentence. Unrolling multiplies by the
+//! count, so it needs the count to be the right number. Deleting only needs there to be a last
+//! iteration, and `for (i = 0; i < n; i++)` has one whatever `n` turns out to be, so a count
+//! worked out from a value the loop does not change is as good as a number here. It stops being
+//! as good the moment anything reads what the loop left behind, which is why the two questions
+//! are asked in that order and with different accessors.
 //!
 //! Every instruction inside has to be one whose not happening nothing can tell. That is the
 //! predicate [`crate::dce`] already has, so it is read from there rather than written again, and
@@ -91,9 +97,9 @@ use crate::purity::Facts;
 use crate::scev::{Bound, Count, Invariant, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
-const DELETED: &str = "loop taken out, it runs a known number of times and leaves nothing behind";
+const DELETED: &str = "loop taken out, it comes back and leaves nothing behind";
 const WRITTEN: &str = "what the loop was going to leave behind worked out in front of it instead";
-const NO_COUNT: &str = "loop left as it was, how many times it runs is not a number known here";
+const NO_COUNT: &str = "loop left as it was, nothing here says it comes back";
 const SHAPE: &str =
     "loop left as it was, it has no preheader or it leaves from more than one place";
 const EFFECTS: &str = "loop left as it was, something in it does more than work out a value";
@@ -112,7 +118,7 @@ impl Pass for LoopDelete {
     }
 
     fn describe(&self) -> &'static str {
-        "a loop that runs a known number of times and leaves nothing behind is taken out"
+        "a loop that comes back and leaves nothing behind is taken out"
     }
 
     fn preserves(&self) -> Preserved {
@@ -247,12 +253,13 @@ fn consider(
             }
         }
     }
-    // The count is what says the loop comes back. A loop that computes nothing and runs forever
+    // The bound is what says the loop comes back. A loop that computes nothing and runs forever
     // still does something, which is run forever. A count worked out from a value the loop does
     // not change says that as well as a number does: whatever that value is, the loop gets to it,
-    // and nothing in here needs to know how many steps that took.
-    let count =
-        scev.bound(id).as_ref().and_then(Bound::under_undefined_overflow).ok_or(NO_COUNT)?;
+    // and nothing in here needs to know how many steps that took. What is not allowed is a loop
+    // ending on `!=` whose counter may step past its limit, and that is the one assumption
+    // [`crate::scev::Bound::comes_back`] holds back.
+    let count = scev.bound(id).as_ref().and_then(Bound::comes_back).ok_or(NO_COUNT)?;
 
     let term = func.terminator(only.from).ok_or(SHAPE)?;
     let leaving = func.successors(term).find(|call| call.block == only.to).ok_or(SHAPE)?;
@@ -535,11 +542,14 @@ mod tests {
     }
 
     /// What the limit of the exit test is.
+    #[derive(Clone, Copy)]
     enum Limit {
         /// A number written in the program.
         Number(i128),
         /// A value the function was handed, which the loop does not change.
         Given,
+        /// The same value, waited for with `!=` rather than counted up to with an ordering.
+        Landing,
     }
 
     /// What the loop does, which is the whole of what decides whether it can go.
@@ -625,9 +635,13 @@ mod tests {
         let next = build.binary(Opcode::Add, carried, one, Flags::NSW);
         let stop = match limit {
             Limit::Number(n) => build.iconst(Type::int(32), n),
-            Limit::Given => given,
+            Limit::Given | Limit::Landing => given,
         };
-        let test = build.icmp(IntPred::Slt, next, stop);
+        let pred = match limit {
+            Limit::Landing => IntPred::Ne,
+            _ => IntPred::Slt,
+        };
+        let test = build.icmp(pred, next, stop);
         let out: Vec<Value> = if what.hands_out() { vec![total] } else { Vec::new() };
         build.br_if(test, head, &[next, total], done, &out);
         let mut build = Builder::new(&mut func, done);
@@ -658,21 +672,41 @@ mod tests {
         sound(&it.func, &mut it.names);
     }
 
-    /// A count that rests on more than the front end already promised is not a proof.
+    /// A loop counting up to a value nothing here knows still has a last iteration.
     ///
-    /// The loop here counts up to a value handed to the function, and the bound for it comes back
-    /// [`crate::scev::Count::Symbolic`] with two assumptions on it rather than one. The overflow
-    /// one the front end already promised. [`crate::scev::Assumption::Approaching`] it did not:
-    /// nothing here has shown the counter lands on that limit rather than stepping past it. So the
-    /// pass is not entitled to say the loop ends, and a loop that might not end is a loop that does
-    /// something. Reading the count through [`crate::scev::Bound::under_undefined_overflow`] is
-    /// what makes that the answer, rather than a thing this pass would have to check for itself.
+    /// The bound comes back [`crate::scev::Count::Symbolic`] with two assumptions on it rather
+    /// than one. The overflow one the front end already promised.
+    /// [`crate::scev::Assumption::Entered`] it did not, and what that one says is whether the
+    /// count is the distance to the limit or zero. Both of those are numbers of times a loop goes
+    /// round, so the question this pass asks, which is whether there is a last time, has been
+    /// answered whichever of them it turns out to be. Nothing outside reads what this loop
+    /// computes, so the count is never multiplied by and the assumption is never spent.
     ///
-    /// A symbolic count with nothing but the overflow assumption on it is fine and would be taken.
-    /// This is about which assumptions are left, not about the count being a number.
+    /// This is the `for (i = 0; i < n; i++)` of tamnd/rucc#1631 and of the corpus rows the report
+    /// had rucc losing on. Reading the bound through [`crate::scev::Bound::comes_back`] is what
+    /// makes it the answer.
     #[test]
-    fn a_count_that_rests_on_more_than_signed_overflow_is_not_enough() {
+    fn a_loop_counting_up_to_a_value_handed_in_is_taken_out() {
         let mut it = shaped(Limit::Given, What::Nothing);
+        let stats = delete(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, DELETED), 1);
+        assert_eq!(loops(&it.func), 0);
+        assert_eq!(tally(&it.func, Opcode::Add), 0, "the counter and the total go with it");
+        sound(&it.func, &mut it.names);
+    }
+
+    /// A loop that may step over the value it is waiting for is a loop that may not come back.
+    ///
+    /// `!=` ends a loop on the one iteration where the counter is the limit, so a counter that
+    /// starts past the limit, or that steps over it, goes round until it wraps. That is
+    /// [`crate::scev::Assumption::Approaching`], the one
+    /// [`crate::scev::Bound::comes_back`] holds back, and it is held back because document 17.2
+    /// says rucc does not take out a loop that might not end. The step here is one and the loop
+    /// would in fact arrive, which is the point: the pass refuses on what it has been shown rather
+    /// than on what happens to be true.
+    #[test]
+    fn a_loop_that_may_step_over_the_value_it_waits_for_is_left_alone() {
+        let mut it = shaped(Limit::Landing, What::Nothing);
         let stats = delete(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, DELETED), 0);
         assert_eq!(stats.count(Kind::Missed, NO_COUNT), 1);
