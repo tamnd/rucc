@@ -8246,6 +8246,61 @@ block2:
         }
     }
 
+    /// micropython's `nlr_push`, which is the program that asks for all of this. The body is the
+    /// whole of the function: the return address is read out of `(%rsp)` where the call left it,
+    /// the registers the convention preserves are saved by hand, and the frame that was just built
+    /// is handed to a function written in C that never comes back.
+    ///
+    /// What is checked is what gcc writes for the same file. No prologue in front of the saves,
+    /// since a push would move the return address the first of them reads. No epilogue and no
+    /// `ret`, since the jump is where the function ends. And a `ud2` behind the jump, which is
+    /// where control arrives if the jump is ever not taken and is exactly what gcc puts there.
+    #[test]
+    fn a_naked_function_is_its_own_prologue_and_its_own_ending() {
+        let text = asm(concat!(
+            "unsigned nlr_push_tail(void *nlr);\n",
+            "__attribute__((naked)) unsigned nlr_push(void *nlr) {\n",
+            "  __asm volatile(\n",
+            "    \"movq (%rsp), %rax\\n\"\n",
+            "    \"movq %rax, 16(%rdi)\\n\"\n",
+            "    \"movq %rbx, 40(%rdi)\\n\"\n",
+            "    \"jmp nlr_push_tail\\n\");\n",
+            "}\n",
+        ));
+        assert!(text.contains("\tmovq\t(%rsp), %rax\n"), "{text}");
+        assert!(text.contains("\tjmp\tnlr_push_tail\n"), "{text}");
+        assert!(text.contains("\tud2\n"), "{text}");
+        assert!(!text.contains("\tpushq\t"), "nothing is saved in front of it: {text}");
+        assert!(!text.contains("\tret\n"), "the jump is where it ends: {text}");
+    }
+
+    /// The three things a naked function may not ask for, each of which is a frame nothing sets up
+    /// or a jump over an epilogue there is one of.
+    #[test]
+    fn what_a_function_without_a_prologue_cannot_be_given_is_refused() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        for (source, why) in [
+            (
+                "__attribute__((naked)) void f(void) { volatile long a[8]; a[0] = 1; }\n",
+                "bytes of frame",
+            ),
+            (
+                "__attribute__((naked)) void f(int n) { char a[n]; __asm(\"nop\" ::\"r\"(a)); }\n",
+                "has no prologue to point a frame pointer at it with",
+            ),
+            ("void elsewhere(void); void f(void) { __asm(\"jmp elsewhere\"); }\n", "jumps out of"),
+        ] {
+            let result = run(&opts, source);
+            assert!(result.failed(), "expected this to be refused:\n{source}");
+            assert!(
+                result.messages.iter().any(|message| message.contains(why)),
+                "{:?}",
+                result.messages
+            );
+        }
+    }
+
     #[test]
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();

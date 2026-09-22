@@ -95,12 +95,28 @@
 //! gcc's way of writing a number that differs for every copy of a statement, needs no expanding
 //! here: it is part of a name whose whole job is to say which jump goes with which label.
 //!
-//! Ten conditions, each in every spelling an assembler takes for it, and no unconditional jump. A
-//! condition ends a block with two arms and that is a shape the machine IR already has. A `jmp`
-//! ends one with a single arm and leaves whatever the template wrote behind it reachable by
-//! nothing, and a block nothing reaches is a question about the rest of the pipeline rather than
-//! about this, so it is refused until a program asks for it. Neither is a jump on the sign, the
-//! overflow or the parity, for the plainer reason that this backend has no opcode for those.
+//! Ten conditions, each in every spelling an assembler takes for it. A condition ends a block with
+//! two arms and that is a shape the machine IR already has. Not a jump on the sign, the overflow or
+//! the parity, for the plainer reason that this backend has no opcode for those.
+//!
+//! # The one unconditional jump
+//!
+//! `jmp` to a name no label in the template carries, written last, which is [`Step::Away`] and
+//! which is a tail jump out of the function rather than a jump about anything in the statement. The
+//! name goes into the object file and the linker settles it, which is the one place in this file
+//! where a name a program wrote survives past the reader.
+//!
+//! micropython is what asks. `nlr_push` saves the machine state by hand and ends `jmp
+//! nlr_push_tail`, which hands the frame it has just built to a function written in C and never
+//! comes back. It is a naked function, so there is no epilogue behind the jump and nothing after it
+//! to reach, and that is the whole of why this is readable at all: the two facts are one fact. A
+//! `jmp` in the middle of a template, or in a function that has a prologue to undo, still leaves a
+//! block nothing reaches behind it and is still refused.
+//!
+//! A `jmp` to a name the template does write a label on is refused as well, and it is worth saying
+//! why, since that is the case that looks readable. It ends a block with a single arm, and whatever
+//! the template wrote behind it is then reachable by nothing, which is a question about the rest of
+//! the pipeline rather than about this.
 //!
 //! # The one directive that is read
 //!
@@ -237,6 +253,16 @@ pub enum Step {
         /// Which label it goes to, by the name the template wrote on both.
         to: String,
     },
+    /// A `jmp` out of the function altogether, which is the last step of the template and goes to a
+    /// name nothing in the template carries.
+    ///
+    /// Unlike [`Self::Label`] and [`Self::Jump`], the name here is a symbol and reaches the object
+    /// file, where the linker settles it against whatever function the program meant. See the
+    /// module documentation for why this and only this unconditional jump is read.
+    Away {
+        /// The name it goes to, which is a symbol somewhere else in the program.
+        symbol: String,
+    },
     /// One instruction.
     Line(Line),
 }
@@ -321,11 +347,16 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
 
 /// Whether the labels and the jumps in that template go together.
 ///
-/// Two ways they may not. A name written on two labels is a template with two places of the same
-/// name in it, which an assembler refuses and which nothing below could tell apart. A jump to a name
-/// no label in the template carries is a jump out of the statement, which is a real thing a program
-/// asks for and is asked for with the target list `asm goto` has rather than with the text, so what
-/// is written here is the one that is not that.
+/// Three ways they may not. A name written on two labels is a template with two places of the same
+/// name in it, which an assembler refuses and which nothing below could tell apart. A conditional
+/// jump to a name no label in the template carries is a jump out of the statement, which is a real
+/// thing a program asks for and is asked for with the target list `asm goto` has rather than with
+/// the text, so what is written here is the one that is not that.
+///
+/// And an unconditional jump is only ever the last step and only ever goes somewhere the template
+/// is not. One in the middle leaves the steps behind it reachable by nothing, and one to a label in
+/// the same template does the same thing from the other side, so both of those are still refused.
+/// See the module documentation.
 fn settled(steps: &[Step]) -> bool {
     let names: Vec<&str> = steps
         .iter()
@@ -337,8 +368,9 @@ fn settled(steps: &[Step]) -> bool {
     if names.iter().enumerate().any(|(at, name)| names[..at].contains(name)) {
         return false;
     }
-    steps.iter().all(|step| match step {
+    steps.iter().enumerate().all(|(at, step)| match step {
         Step::Jump { to, .. } => names.contains(&to.as_str()),
+        Step::Away { symbol } => at + 1 == steps.len() && !names.contains(&symbol.as_str()),
         _ => true,
     })
 }
@@ -346,12 +378,24 @@ fn settled(steps: &[Step]) -> bool {
 /// The jump that line is, or nothing for a line that is not one.
 ///
 /// The argument has to be a name, which is what keeps `jmp *%rax` and anything else that goes to an
-/// address out of this: a jump this reads goes to a place in the same template and nowhere else.
+/// address out of this: a conditional jump this reads goes to a place in the same template and
+/// nowhere else, and the unconditional one goes to a name the linker settles.
+///
+/// Which of the two a `jmp` is cannot be told from the line alone, since the name it goes to may or
+/// may not be one the template writes a label on and the rest of the template is not in hand here.
+/// It is read as the one that goes away and [`settled`] decides, which is the same place the other
+/// jumps are decided and for the same reason.
 fn jumped(text: &str) -> Option<Step> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace)?;
-    let opcode = condition(mnemonic)?;
     let to = rest.trim();
-    is_label(to).then(|| Step::Jump { opcode, to: to.to_owned() })
+    if !is_label(to) {
+        return None;
+    }
+    if mnemonic == "jmp" {
+        return Some(Step::Away { symbol: to.to_owned() });
+    }
+    let opcode = condition(mnemonic)?;
+    Some(Step::Jump { opcode, to: to.to_owned() })
 }
 
 /// The opcode a conditional jump's mnemonic names, in every spelling an assembler takes for it.
@@ -835,7 +879,7 @@ mod tests {
             .into_iter()
             .map(|step| match step {
                 Step::Line(line) => Some(line),
-                Step::Label(_) | Step::Jump { .. } => None,
+                Step::Label(_) | Step::Jump { .. } | Step::Away { .. } => None,
             })
             .collect()
     }
@@ -1168,7 +1212,6 @@ mod tests {
         );
         assert_eq!(plain("idivb %0", &[]), None, "an opcode the machine writes as more than one");
         assert_eq!(read("1:", &[]), None, "a local label, which the direction on a jump names");
-        assert_eq!(read("jmp again", &[]), None, "an unconditional jump");
         assert_eq!(read("js again", &[]), None, "a condition this backend has no opcode for");
         assert_eq!(read("jc away", &[]), None, "a jump to a label the template does not define");
         assert_eq!(read("again:\njc again\nagain:", &[]), None, "one name on two labels");
@@ -1221,6 +1264,27 @@ mod tests {
                 assert_eq!(steps[1], want, "{text}");
             }
         }
+    }
+
+    /// The end of micropython's `nlr_push`, cut down to the last save and the jump, which is the
+    /// template this variant was built to read. The name it goes to is a function somewhere else
+    /// in the program and nothing in the template carries a label of it.
+    #[test]
+    fn a_jump_to_a_name_the_template_does_not_carry_goes_out_of_the_function() {
+        let steps = read("movq %rbx, 40(%rdi)\njmp nlr_push_tail", &[])
+            .expect("the tail jump micropython ends with");
+        assert_eq!(steps.len(), 2);
+        let away = Step::Away { symbol: "nlr_push_tail".to_owned() };
+        assert_eq!(steps[1], away, "the name the linker settles rather than one this compares");
+    }
+
+    /// The three shapes that look like the one above and are not, all of which leave steps behind
+    /// the jump that nothing reaches. See the module documentation.
+    #[test]
+    fn an_unconditional_jump_anywhere_but_the_end_of_a_template_is_refused() {
+        assert_eq!(read("jmp away\nnop", &[]), None, "a jump with a step behind it");
+        assert_eq!(read("top:\nnop\njmp top", &[]), None, "a jump to a label in the template");
+        assert_eq!(read("nop\njmp 1f\nnop\n1:\nnop", &[]), None, "a jump to a local label");
     }
 
     /// An empty template is no instructions rather than one that could not be read, which is the

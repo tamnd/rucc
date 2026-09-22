@@ -162,7 +162,7 @@ fn plain(form: Form) -> Timing {
         // Control flow. A jump the machine predicts costs about nothing and a jump it does not
         // costs about fifteen, and which one it is is not something a schedule changes, so the
         // number here is the one that matters for ordering: it takes the one branch unit.
-        Jcc | Jmp => (1, Unit::Branch),
+        Jcc | Jmp | JmpAway => (1, Unit::Branch),
         JmpReg | Call | Ret => (2, Unit::Branch),
         // A read or write of a memory location the whole machine agrees about. The locked forms
         // are tens of cycles and the number here is a floor on that rather than a measurement,

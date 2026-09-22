@@ -59,7 +59,7 @@ use rucc_types::{ArrayLen, IntKind, TypeId, TypeKind, Types, int_width};
 
 use crate::convert::Conv;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+    Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
     StorageDuration,
 };
 use crate::eval::{Eval, NotConstant};
@@ -392,16 +392,12 @@ impl<'a> Checker<'a> {
                 duration: StorageDuration::Automatic,
                 state: Definition::Defined,
                 alignment: None,
-                constant: false,
-                retained: false,
+                flags: DeclFlags::NONE,
                 asm_label: None,
                 alias: None,
                 inline: Emission::Silent,
-                gnu_inline: false,
-                noreturn: false,
                 effects: Effects::Any,
                 visibility: None,
-                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,

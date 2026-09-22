@@ -36,9 +36,9 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclId, DeclKind, Eval, ExprId, ExprKind,
-    ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId,
-    StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, DeclFlags, DeclId, DeclKind, Eval, ExprId,
+    ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt,
+    StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
@@ -2858,6 +2858,17 @@ impl<'u> Body<'_, 'u> {
     /// The end of the body, where falling off the end has to become a terminator.
     fn finish(&mut self, decl: DeclId, span: Span) {
         if self.at.is_none() {
+            return;
+        }
+        // A naked function has no return of any kind, whatever it says it gives back, because the
+        // return is written by the epilogue and there is none. What goes here instead is a stop,
+        // which is what gcc writes in the same place: control reaching the end of a function that
+        // said it writes the whole of itself has left the part anybody reasoned about, and a `ud2`
+        // is a better place to arrive than the first instruction of whatever was linked next.
+        if self.tast()[decl].flags.contains(DeclFlags::NAKED) {
+            self.build(span).inst(InstData::new(Opcode::Trap), &[]);
+            self.build(span).unreachable();
+            self.at = None;
             return;
         }
         if self.func.signature().returns.is_empty() {

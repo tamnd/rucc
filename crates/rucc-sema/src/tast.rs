@@ -497,7 +497,9 @@ mod tests {
     use rucc_types::{IntKind, Types};
 
     use super::*;
-    use crate::decl::{DeclKind, Definition, Effects, Emission, Linkage, Startup, StorageDuration};
+    use crate::decl::{
+        DeclFlags, DeclKind, Definition, Effects, Emission, Linkage, Startup, StorageDuration,
+    };
     use crate::expr::{Category, Conversion, ExprKind};
 
     /// The sizes are asserted rather than left to whoever adds the next variant.
@@ -564,11 +566,19 @@ mod tests {
     /// did not take one: it is asked about at every declaration the lowering walks past, which
     /// is every local in the program, and a table that is empty for all but a handful of them is
     /// a lookup per local to find nothing.
+    ///
+    /// Seventy two back down to sixty eight when `naked` was the sixth boolean and the six of them
+    /// became one byte of [`DeclFlags`](crate::decl::DeclFlags). That is the fold the paragraph
+    /// about `noreturn` above said was worth doing once there was a sixth, and doing it took a
+    /// declaration below the size it was before rather than four bytes above it. What is left is
+    /// eight one byte fields filling two words exactly, so the seventh yes or no question about a
+    /// declaration and several after it now cost nothing at all, which is most of what an attribute
+    /// is and is the reason the fold was worth more than the four bytes it gave back.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 72);
+        assert_eq!(size_of::<Decl>(), 68);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -611,16 +621,12 @@ mod tests {
                 duration: StorageDuration::Automatic,
                 state: Definition::Defined,
                 alignment: None,
-                constant: false,
-                retained: false,
+                flags: DeclFlags::NONE,
                 asm_label: None,
                 alias: None,
                 inline: Emission::Silent,
-                gnu_inline: false,
-                noreturn: false,
                 effects: Effects::Any,
                 visibility: None,
-                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,

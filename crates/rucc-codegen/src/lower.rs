@@ -81,8 +81,8 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
-    Abi, AsmOperand, AsmOperands, Block, Def, Extra, Flags, FloatPred, Func, Inst, Linkage,
-    MemOrder, Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
+    Abi, AsmOperand, AsmOperands, AttrSet, Block, Def, Extra, Flags, FloatPred, Func, Inst,
+    Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
@@ -106,6 +106,13 @@ pub(crate) const PREFIX: &str = "x64.";
 /// it. It is spelled out here because the relocation it takes is only legal on a `mov` with a REX
 /// prefix, so the width is part of the requirement rather than a choice.
 const GOT_LOAD: &str = "mov_rm_64";
+
+/// The instruction a template's `jmp` to a name outside it becomes.
+///
+/// Named here for [`GOT_LOAD`]'s reason turned round: a frame never writes one, because the only
+/// function it appears in has no prologue and no epilogue for the frame to write anything into.
+/// See [`x86_64::Step::Away`].
+const AWAY: &str = "jmp_away";
 
 /// How wide an address is on this target, which is the width a cast between a pointer and an
 /// integer has to be at for the cast to be nothing.
@@ -352,6 +359,17 @@ pub enum Unsupported {
         /// What about it is not built here yet.
         refused: Written,
     },
+    /// A naked function whose frame is not empty.
+    ///
+    /// Not an instruction no rule fires on, and there is nothing in the body to point at: the
+    /// function asked for no prologue and then wanted bytes only a prologue takes. Refused rather
+    /// than given the bytes anyway, because an offset into a frame nothing set up reaches into
+    /// whatever the caller left below its own stack pointer, which is wrong code that assembles.
+    /// See [`crate::frame::Layout::naked`].
+    Naked {
+        /// How many bytes it wanted, which is the whole of what is wrong.
+        bytes: u32,
+    },
 }
 
 /// What about an `asm` statement is not built yet.
@@ -365,6 +383,8 @@ pub enum Written {
     Operand,
     /// A clobber list naming something this has no register for.
     Clobber,
+    /// A `jmp` out of the function in a function that has an epilogue behind it.
+    Away,
 }
 
 impl Written {
@@ -379,6 +399,10 @@ impl Written {
             Written::Goto => "jumps to a label, which nothing here builds an edge for",
             Written::Operand => "has an operand this cannot place",
             Written::Clobber => "says it destroys a register this has no name for",
+            Written::Away => {
+                "jumps out of the function, which only a function that is `naked` may do, since \
+                 anywhere else there is an epilogue behind it to give the frame back"
+            }
         }
     }
 }
@@ -399,6 +423,12 @@ pub enum Growing {
     /// is IR that arrived without going through that pass and the fixed local in
     /// [`crate::pipeline`] that wants the same thing from the other side.
     Aligned,
+    /// A variable length array in a function written without a prologue.
+    ///
+    /// A frame that grows is reached from a frame pointer, and establishing one is the first two
+    /// instructions of a prologue that `__attribute__((naked))` asked there be none of. See
+    /// [`crate::frame::Layout::naked`].
+    Naked,
 }
 
 impl Growing {
@@ -410,6 +440,10 @@ impl Growing {
             Growing::Aligned => {
                 "wants more alignment than the stack pointer is left on, which needs a base \
                  register nothing here keeps"
+            }
+            Growing::Naked => {
+                "is in a function that is `naked`, which has no prologue to point a frame pointer \
+                 at it with"
             }
         }
     }
@@ -428,7 +462,9 @@ impl Unsupported {
             | Unsupported::Returned { inst, .. }
             | Unsupported::Dynamic { inst, .. }
             | Unsupported::Assembly { inst, .. } => Some(inst),
-            Unsupported::Argument { .. } | Unsupported::Phi { .. } => None,
+            Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
+                None
+            }
         }
     }
 }
@@ -466,6 +502,10 @@ impl fmt::Display for Unsupported {
                 )
             }
             Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
+            Unsupported::Naked { bytes } => write!(
+                f,
+                "this function is `naked` and wants {bytes} bytes of frame, which there is no prologue to take"
+            ),
         }
     }
 }
@@ -3296,6 +3336,28 @@ impl<'a> Lowering<'a> {
                     *self.out.succs_mut(from) =
                         vec![mir::BlockCall::with(block, args), mir::BlockCall::to(next)];
                     self.at = Some(next);
+                }
+                x86_64::Step::Away { symbol } => {
+                    // Only in a function that is written without a prologue, which is the one
+                    // place the jump means what it says. Anywhere else there is an epilogue behind
+                    // the statement that puts the registers back and gives the frame up, and a
+                    // jump over it goes to the next function with this function's frame still
+                    // taken. The reader already made sure it is the last step of the template, so
+                    // what is left to ask is about the function around it.
+                    if !self.source.attrs.set.contains(AttrSet::NAKED) {
+                        return Err(Unsupported::Assembly { inst, refused: Written::Away });
+                    }
+                    let from = self.at.expect("a block is being filled");
+                    let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{AWAY}")));
+                    let symbol = self.names.intern(symbol);
+                    self.out.build(from, opcode).at(span).symbol(symbol).finish();
+                    // Nowhere, which is what a jump out of the function leaves behind it and is
+                    // the same list a `ret` leaves. The block after it is made for the walk above
+                    // rather than for the program: the statement may be in the middle of a body
+                    // that goes on being lowered, and what that lowering writes is reached by
+                    // nothing and thrown away with the block.
+                    *self.out.succs_mut(from) = Vec::new();
+                    self.at = Some(self.out.create_block());
                 }
                 x86_64::Step::Line(line) => {
                     self.instruction(inst, line, places, list, clobbered)?;

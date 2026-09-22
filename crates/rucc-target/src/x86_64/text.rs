@@ -916,6 +916,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("jcc_a", &[spell("ja", &[Label])]),
     ("jcc_ae", &[spell("jae", &[Label])]),
     ("jmp", &[spell("jmp", &[Label])]),
+    ("jmp_away", &[spell("jmp", &[Symbol])]),
     // A jump through a register, which is the same mnemonic and a different instruction, the way
     // `call_reg` above is. The star is the whole of the difference in the text.
     ("jmp_reg", &[spell("jmp", &[Through])]),
@@ -1518,7 +1519,7 @@ mod tests {
             assert_eq!(mem, form.takes_mem(), "{name} and its addressing mode disagree");
             assert_eq!(
                 symbol || through,
-                matches!(form, Form::Call | Form::JmpReg),
+                matches!(form, Form::Call | Form::JmpReg | Form::JmpAway),
                 "{name} and where it goes disagree"
             );
             assert!(!(symbol && through), "{name} goes to a name and through a register at once");

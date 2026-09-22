@@ -52,22 +52,8 @@ pub struct Decl {
     pub state: Definition,
     /// The alignment `alignas` asked for, absent when the type's own alignment stands.
     pub alignment: Option<u32>,
-    /// Whether `constexpr` was written, which makes the object a named constant.
-    ///
-    /// C23 6.6p8 puts a named constant of an integer type among the things an integer constant
-    /// expression may be built out of, and a member of one of a structure or union type with
-    /// it. That is the whole reason the keyword exists and it is why this is a fact about the
-    /// declaration rather than something a reader could work out: a `const` object with a
-    /// constant initializer is not one of them, so `const int n = 1; int a[n];` is a variable
-    /// length array and the same two lines with `constexpr` are an array of one.
-    pub constant: bool,
-    /// Whether an attribute asks for this to exist where nothing in the file refers to it.
-    ///
-    /// `used`, `retain`, `constructor`, `destructor` and `alias` each say that something reaches
-    /// the definition from where the compiler cannot see it, which is the only reason a program
-    /// ever writes one of them. Nothing else in the tree says that, and a `static` function
-    /// nothing refers to is not emitted, so this is how a program keeps one that has to be.
-    pub retained: bool,
+    /// The yes or no answers about this declaration, one bit each. See [`DeclFlags`].
+    pub flags: DeclFlags,
     /// The symbol this name stands for in the object file, when a declaration of it wrote an
     /// assembler name of its own.
     ///
@@ -100,37 +86,17 @@ pub struct Decl {
     /// definition again, which is why this is a fact about the name and is settled where the
     /// declarations of a name are merged.
     ///
-    /// The two readings of `inline` swap over under [`Self::gnu_inline`], where it is the
+    /// The two readings of `inline` swap over under [`DeclFlags::GNU_INLINE`], where it is the
     /// definition alone that decides and `extern inline` is the one that is not emitted.
     pub inline: Emission,
-    /// Whether this name is under GNU's reading of `inline` rather than C's.
-    ///
-    /// `__attribute__((__gnu_inline__))` asks for it by name, and the C89 dialects are under it
-    /// throughout, which is what `__GNUC_GNU_INLINE__` tells a header. It is kept because the two
-    /// readings fold differently over the declarations of a name, and because gcc refuses a name
-    /// whose declarations disagree about which one they are under.
-    pub gnu_inline: bool,
     /// The initializer, flattened, absent when there was none. An empty list is `= {}`, which
     /// C23 added and which zero-initializes, and is not the same as no initializer at all.
     pub init: Option<InitList>,
-    /// Whether control does not come back from a call to this function.
-    ///
-    /// `_Noreturn`, `__attribute__((noreturn))` and `[[noreturn]]` all say it and all land here.
-    /// What a caller does with it is put an `unreachable` after the call, so a program that tests
-    /// its allocation with `if (!p) abort();` stops having a path where the block after the test is
-    /// reached carrying a null pointer. Nothing else in the compiler can work that out, because
-    /// what `abort` does belongs to `abort`.
-    ///
-    /// A fact about the name rather than about one declaration of it, so one declaration saying it
-    /// is enough and the merge keeps it. That is the same rule [`Self::retained`] is under and it
-    /// is there for the same reason: the usual place to write it is a header, and the definition in
-    /// the file below writes nothing.
-    pub noreturn: bool,
     /// What a declaration of this name promised a call to it does, and [`Effects::Any`] where
     /// none of them said.
     ///
     /// `__attribute__((const))` and `__attribute__((pure))`. A fact about the name rather than
-    /// about one declaration of it, merged the way [`Self::noreturn`] is and for the same
+    /// about one declaration of it, merged the way [`DeclFlags::NORETURN`] is and for the same
     /// reason: the place either attribute is written is a header, and the file that defines the
     /// function writes an ordinary definition.
     pub effects: Effects,
@@ -155,24 +121,6 @@ pub struct Decl {
     /// and keeps the first when a later one disagrees, since the calls above it have already been
     /// compiled against the answer it gave.
     pub visibility: Option<Visibility>,
-    /// Whether `__attribute__((weak))` was written on a declaration of this name.
-    ///
-    /// It asks for two different things depending on whether this file defines the name. On a
-    /// definition it says that another object's definition of the same name wins over this one,
-    /// which is how a library ships a default somebody may replace. On a declaration of something
-    /// this file does not define it says that the link may leave the name undefined rather than
-    /// fail, and the address a reference gets is then zero, which is how a library offers a hook a
-    /// profiler may fill in: the calls are written under `if (hook)` and the test is false when
-    /// nobody filled it in. zstd's four tracing hooks are the second of those and are what made
-    /// this field, since without it the link of thirty of its files fails.
-    ///
-    /// A fact about the name rather than about one declaration of it, like [`Self::retained`], and
-    /// merged the way that one is: one declaration saying it is enough, so a header may say it and
-    /// the definition below may be written as an ordinary definition.
-    ///
-    /// It is refused on a name with internal linkage, since what it asks for is that the linker
-    /// let somebody else win and a `static` name is one the linker never sees.
-    pub weak: bool,
     /// The function `__attribute__((cleanup(f)))` named, which runs on every way out of the block
     /// the object was declared in, and nothing when the attribute was not written.
     ///
@@ -202,6 +150,125 @@ pub struct Decl {
     pub body: Option<StmtId>,
 }
 
+/// The yes or no answers about a declaration, one bit each.
+///
+/// These were six `bool` fields until the sixth arrived. Each one byte field on a declaration is
+/// nearly free until the byte that spills past a word, and then it costs four, which happened once
+/// for `constexpr` and again for `noreturn` and would have happened a third time for `naked`. A
+/// byte with six bits in it takes the node below the size it was before all three, and leaves
+/// enough room that the next several questions of this kind cost nothing at all.
+///
+/// What that trades away is where the paragraphs live. A field carries its explanation on the
+/// field, where a reader of the struct meets it; a bit carries it on a constant here, one step
+/// away. The constants below are written the way the fields were so the step is the only
+/// difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclFlags(u8);
+
+impl DeclFlags {
+    /// Nothing written.
+    pub const NONE: Self = Self(0);
+
+    /// `constexpr` was written, which makes the object a named constant.
+    ///
+    /// C23 6.6p8 puts a named constant of an integer type among the things an integer constant
+    /// expression may be built out of, and a member of one of a structure or union type with
+    /// it. That is the whole reason the keyword exists and it is why this is a fact about the
+    /// declaration rather than something a reader could work out: a `const` object with a
+    /// constant initializer is not one of them, so `const int n = 1; int a[n];` is a variable
+    /// length array and the same two lines with `constexpr` are an array of one.
+    pub const CONSTANT: Self = Self(1 << 0);
+
+    /// An attribute asks for this to exist where nothing in the file refers to it.
+    ///
+    /// `used`, `retain`, `constructor`, `destructor` and `alias` each say that something reaches
+    /// the definition from where the compiler cannot see it, which is the only reason a program
+    /// ever writes one of them. Nothing else in the tree says that, and a `static` function
+    /// nothing refers to is not emitted, so this is how a program keeps one that has to be.
+    pub const RETAINED: Self = Self(1 << 1);
+
+    /// This name is under GNU's reading of `inline` rather than C's.
+    ///
+    /// `__attribute__((__gnu_inline__))` asks for it by name, and the C89 dialects are under it
+    /// throughout, which is what `__GNUC_GNU_INLINE__` tells a header. It is kept because the two
+    /// readings fold differently over the declarations of a name, and because gcc refuses a name
+    /// whose declarations disagree about which one they are under.
+    pub const GNU_INLINE: Self = Self(1 << 2);
+
+    /// Control does not come back from a call to this function.
+    ///
+    /// `_Noreturn`, `__attribute__((noreturn))` and `[[noreturn]]` all say it and all land here.
+    /// What a caller does with it is put an `unreachable` after the call, so a program that tests
+    /// its allocation with `if (!p) abort();` stops having a path where the block after the test is
+    /// reached carrying a null pointer. Nothing else in the compiler can work that out, because
+    /// what `abort` does belongs to `abort`.
+    ///
+    /// A fact about the name rather than about one declaration of it, so one declaration saying it
+    /// is enough and the merge keeps it. That is the same rule [`Self::RETAINED`] is under and it
+    /// is there for the same reason: the usual place to write it is a header, and the definition in
+    /// the file below writes nothing.
+    pub const NORETURN: Self = Self(1 << 3);
+
+    /// The function is written without a prologue, an epilogue or a return.
+    ///
+    /// `__attribute__((naked))`, which says the body is the whole of the function and the compiler
+    /// is to write nothing around it. What a program does with it is save and restore machine state
+    /// by hand, which is what micropython's non local return is and what an interrupt handler is,
+    /// and neither of those survives a prologue being written in front of it: the first instruction
+    /// of micropython's `nlr_push` reads the return address out of `(%rsp)`, and a push in front of
+    /// it moves the address somewhere else.
+    ///
+    /// A fact about the name rather than about one declaration of it, merged the way
+    /// [`Self::NORETURN`] is, because it is written in the same places for the same reason.
+    pub const NAKED: Self = Self(1 << 4);
+
+    /// `__attribute__((weak))` was written on a declaration of this name.
+    ///
+    /// It asks for two different things depending on whether this file defines the name. On a
+    /// definition it says that another object's definition of the same name wins over this one,
+    /// which is how a library ships a default somebody may replace. On a declaration of something
+    /// this file does not define it says that the link may leave the name undefined rather than
+    /// fail, and the address a reference gets is then zero, which is how a library offers a hook a
+    /// profiler may fill in: the calls are written under `if (hook)` and the test is false when
+    /// nobody filled it in. zstd's four tracing hooks are the second of those and are what made
+    /// this bit, since without it the link of thirty of its files fails.
+    ///
+    /// A fact about the name rather than about one declaration of it, like [`Self::RETAINED`], and
+    /// merged the way that one is: one declaration saying it is enough, so a header may say it and
+    /// the definition below may be written as an ordinary definition.
+    ///
+    /// It is refused on a name with internal linkage, since what it asks for is that the linker
+    /// let somebody else win and a `static` name is one the linker never sees.
+    pub const WEAK: Self = Self(1 << 5);
+
+    /// Whether every bit of `other` is set here.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The same set with `flag` set when `on` and cleared when not, which is what a caller with a
+    /// `bool` in hand wants.
+    #[must_use]
+    pub const fn with(self, flag: Self, on: bool) -> Self {
+        if on { Self(self.0 | flag.0) } else { Self(self.0 & !flag.0) }
+    }
+}
+
+impl std::ops::BitOr for DeclFlags {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl std::ops::BitOrAssign for DeclFlags {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
 /// Whether a declaration declares an object, a function or a name for a type.
 ///
 /// An enumerator is none of them, since what the program can do with one is what it can do with
@@ -228,7 +295,7 @@ pub enum DeclKind {
 /// `__attribute__((const))` and `__attribute__((pure))` are the two claims. They are kept here
 /// rather than worked out from a body because the body is usually in some other file: a unit that
 /// only declares `strtol` has nothing to look at, so the promise travels on the declaration or it
-/// does not travel at all. That is the rule [`Decl::noreturn`] is under and it is there for the
+/// does not travel at all. That is the rule [`DeclFlags::NORETURN`] is under and it is there for the
 /// same reason.
 ///
 /// The optimizer works out its own answer for the functions it can see, and this is not that

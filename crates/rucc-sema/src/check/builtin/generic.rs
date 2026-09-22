@@ -43,7 +43,8 @@ use rucc_types::{
 
 use crate::check::Checker;
 use crate::decl::{
-    Decl, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup, StorageDuration,
+    Decl, DeclFlags, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+    StorageDuration,
 };
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::{Base, Const};
@@ -420,16 +421,12 @@ impl Checker<'_> {
                 duration: StorageDuration::Static,
                 state: Definition::Declared,
                 alignment: None,
-                constant: false,
-                retained: false,
+                flags: DeclFlags::NONE,
                 asm_label: None,
                 alias: None,
                 inline: Emission::Silent,
-                gnu_inline: false,
-                noreturn: false,
                 effects: Effects::Any,
                 visibility: None,
-                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,
