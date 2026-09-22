@@ -1,5 +1,5 @@
-//! The entries in `.debug_info`: the types a unit describes, the functions it defines and the
-//! variables it defines at file scope.
+//! The entries in `.debug_info`: the types a unit describes, the functions it defines, the
+//! variables it defines at file scope, and the locals of those functions that have a frame slot.
 //!
 //! Design: `spec/11-asm-objects-debug.md` section 11.4.
 //!
@@ -35,7 +35,7 @@
 //! [`Function::sig`]: crate::Function::sig
 
 use crate::line::{Error, Function};
-use crate::shape::{Constant, Encoding, Global, Member, Place, Qualifier, Shape, Sig};
+use crate::shape::{Constant, Encoding, Global, Local, Member, Place, Qualifier, Shape, Sig};
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
 
@@ -151,7 +151,7 @@ fn fill(
             points(dwarf, at, *of, ids)?;
         }
         Shape::Qualified { of, .. } => points(dwarf, at, *of, ids)?,
-        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids)?,
+        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, false)?,
     }
     Ok(())
 }
@@ -181,6 +181,12 @@ fn fill(
 ///
 /// A file-scope variable needs none of it: its address is its own symbol and the linker knows where
 /// that went.
+///
+/// The locals that have a frame slot hang off it, each one a `DW_OP_fbreg` at its own offset, and
+/// they are written only where a frame base was, since an offset from an attribute that is not
+/// there resolves to nothing. A parameter with a slot gets its location on the entry the signature
+/// already wrote for it rather than an entry of its own, because two entries of one name in one
+/// scope is a debugger's problem rather than a reader's.
 fn defined(
     dwarf: &mut gimli::write::DwarfUnit,
     func: &Function,
@@ -206,7 +212,45 @@ fn defined(
         expr.op(gimli::DW_OP_call_frame_cfa);
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
     }
-    takes(dwarf, at, sig, ids)
+    takes(dwarf, at, sig, ids, frames)?;
+    for local in &func.locals {
+        kept(dwarf, at, local, files, ids, frames)?;
+    }
+    Ok(())
+}
+
+/// One local the program declared that lowering gave a frame slot, as a child of its function.
+///
+/// `DW_AT_location` is one `DW_OP_fbreg` at the local's offset from the frame base, which is right
+/// at every program counter in the function: the slot is handed out once by the frame layout and
+/// nothing moves it afterwards. That is what makes this the first location worth writing and the
+/// only one that needs no list.
+///
+/// Nothing at all in a build with no frame base, which is a build that asked for no unwind table.
+/// The offset would be from an attribute that is not there, and a name with an unreadable location
+/// is worse than a name a debugger says it cannot find: one of them is a wrong answer and the other
+/// is an honest one.
+///
+/// A local with no type still gets an entry, for the reason [`held_at`] gives.
+fn kept(
+    dwarf: &mut gimli::write::DwarfUnit,
+    at: UnitEntryId,
+    local: &Local,
+    files: &[FileId],
+    ids: &[UnitEntryId],
+    frames: bool,
+) -> Result<(), Error> {
+    if !frames {
+        return Ok(());
+    }
+    let child = dwarf.unit.add(at, gimli::DW_TAG_variable);
+    title(dwarf, child, &local.name);
+    came_from(dwarf, child, &local.name, local.decl, files)?;
+    points(dwarf, child, local.ty, ids)?;
+    let mut expr = gimli::write::Expression::new();
+    expr.op_fbreg(local.at);
+    dwarf.unit.get_mut(child).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
+    Ok(())
 }
 
 /// The entry for one variable this unit defines at file scope.
@@ -268,11 +312,16 @@ fn came_from(
 }
 
 /// What a signature says, which is the same attributes on a subprogram and on a function type.
+///
+/// A parameter that has a frame slot carries where it is, the same one operation a local carries
+/// and under the same condition. A function type's parameters never have one, since a type is not a
+/// piece of code and has no frame to be in.
 fn takes(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     sig: &Sig,
     ids: &[UnitEntryId],
+    frames: bool,
 ) -> Result<(), Error> {
     if sig.prototyped {
         flag(dwarf, at, gimli::DW_AT_prototyped);
@@ -284,6 +333,11 @@ fn takes(
             title(dwarf, child, name);
         }
         points(dwarf, child, Some(param.ty), ids)?;
+        if let Some(offset) = param.at.filter(|_| frames) {
+            let mut expr = gimli::write::Expression::new();
+            expr.op_fbreg(offset);
+            dwarf.unit.get_mut(child).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
+        }
     }
     if sig.variadic {
         dwarf.unit.add(at, gimli::DW_TAG_unspecified_parameters);
@@ -436,11 +490,12 @@ mod tests {
                 decl: Some(Place { file: 0, line: 3 }),
                 sig: Some(Sig {
                     returns: Some(0),
-                    params: vec![Param { name: Some("n".to_owned()), ty: 0 }],
+                    params: vec![Param { name: Some("n".to_owned()), ty: 0, at: None }],
                     variadic: false,
                     prototyped: true,
                 }),
                 external: true,
+                locals: Vec::new(),
             }],
             globals: Vec::new(),
             pointer: 8,
@@ -533,6 +588,69 @@ mod tests {
         unit.frames = false;
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &base()), "a frame base nothing answers");
+    }
+
+    /// The attribute and the form a location is written as, read the same way a frame base is.
+    fn spot() -> [u8; 2] {
+        [
+            u8::try_from(gimli::DW_AT_location.0).expect("a one byte attribute"),
+            u8::try_from(gimli::DW_FORM_exprloc.0).expect("a one byte form"),
+        ]
+    }
+
+    /// An expression of one `DW_OP_fbreg` at this offset, as the bytes it is written as.
+    ///
+    /// The offset is a signed LEB128, so the two offsets the tests below use are one byte each: the
+    /// low seven bits of the number with its sign bit already in place. Writing them out rather
+    /// than encoding them keeps the test from agreeing with a mistake in the encoder.
+    fn away(offset: u8) -> [u8; 3] {
+        [2, gimli::DW_OP_fbreg.0, offset]
+    }
+
+    /// A local with a frame slot says where it is, and where is an offset from the frame base.
+    #[test]
+    fn a_local_with_a_slot_says_how_far_below_the_frame_base_it_is() {
+        let mut unit = one();
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: Some(Place { file: 0, line: 4 }),
+            at: -16,
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the local");
+        assert!(holds(&info, ".debug_info", &away(0x70)), "the local is not 16 below the base");
+        assert!(named(&info).contains(&"total".to_owned()), "the local is not named");
+    }
+
+    /// A parameter with a frame slot says where it is on the entry its signature already wrote.
+    ///
+    /// The count is the point of the test: a parameter is a local, so the obvious way to write it
+    /// would put a second entry of the same name in the same scope, and a debugger asked for `n`
+    /// would then have two answers to pick between.
+    #[test]
+    fn a_parameter_with_a_slot_gets_its_location_and_not_a_second_entry() {
+        let mut unit = one();
+        unit.funcs[0].sig.as_mut().expect("a signature").params[0].at = Some(-8);
+        let info = write(&unit).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the parameter");
+        assert!(holds(&info, ".debug_info", &away(0x78)), "the parameter is not 8 below the base");
+        let names = named(&info);
+        assert_eq!(names.iter().filter(|name| *name == "n").count(), 1, "twice over, {names:?}");
+    }
+
+    /// A build with no unwind table says nothing about where a local is, for the same reason it
+    /// says nothing about what a local would be measured from.
+    #[test]
+    fn a_build_that_writes_no_unwind_table_says_nothing_about_where_a_local_is() {
+        let mut unit = one();
+        unit.frames = false;
+        unit.funcs[0].sig.as_mut().expect("a signature").params[0].at = Some(-8);
+        unit.funcs[0].locals =
+            vec![Local { name: "total".to_owned(), ty: Some(0), decl: None, at: -16 }];
+        let info = write(&unit).expect("sections");
+        assert!(!holds(&info, ".debug_abbrev", &spot()), "a location nothing can resolve");
+        assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
     }
 
     /// A record holding a pointer to itself is one entry and terminates.

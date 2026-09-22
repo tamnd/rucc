@@ -38,9 +38,11 @@
 //!
 //! What the program means is in `tree.rs` and goes in the same unit: the types, the functions and
 //! the variables the unit defines at file scope, which is what a debugger reads a value through.
-//! Local variables and their location expressions are still to come and are the rest of
-//! tamnd/rucc#9, and what makes them a different piece of work rather than more of this one is that
-//! they are checked differently: a line table is right or wrong against `addr2line` and a local's
+//! Half the locals are there too, which is the ones lowering gave a frame slot, each a
+//! `DW_OP_fbreg` at an offset the frame layout worked out. The other half are held in SSA values
+//! and need a location list built over the register allocator's output, which is the rest of
+//! tamnd/rucc#9. What makes a location a different piece of work rather than more of this one is
+//! that it is checked differently: a line table is right or wrong against `addr2line` and a local's
 //! location is right or wrong against a debugger that stops in the middle of a function and prints
 //! it.
 //!
@@ -50,7 +52,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Global, Place, Shape, Sig};
+use crate::shape::{Global, Local, Place, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -116,6 +118,11 @@ pub struct Function {
     pub sig: Option<Sig>,
     /// Whether anything outside this unit can see it, which is the opposite of `static`.
     pub external: bool,
+    /// The locals lowering gave a frame slot, in the order the slots were asked for, which is the
+    /// order they were declared in.
+    ///
+    /// Parameters are not among them, whether or not they have a slot. See [`Local`].
+    pub locals: Vec<Local>,
 }
 
 /// One row of the table: an address, and where the code at it came from.
