@@ -223,7 +223,7 @@ options:
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
   -std=<dialect>         c89 through c23, and the gnu spellings
-  -fgnuc-version=<v>     the GCC release to claim, default 7.0.0
+  -fgnuc-version=<v>     the GCC release to claim, default 16.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
