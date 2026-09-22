@@ -517,6 +517,21 @@ pub fn compile_recording(
     let share = Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths);
     let layout = Layout { share: Some(&share), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
+
+    // Here because this is where the two halves of the answer are both in hand: which local is
+    // which declaration came down from selection, and where a local is was settled a line ago.
+    // Nothing further on could work it out, since the frame is not carried past this function and
+    // an offset in a finished instruction says nothing about what the bytes it reaches are for.
+    //
+    // Whatever the command line said about debugging information, because the list is one entry
+    // per local the program named and a function has tens of those at most. Asking the flags would
+    // cost more to thread down here than the list costs to build.
+    func.locals = stack
+        .declared
+        .iter()
+        .filter_map(|&(local, decl)| Some((decl, frame.from_frame_base(local)?)))
+        .collect();
+
     let scratch = machine.env.scratch(machine.conv.int_class);
     let protect = guard.map(|guard| Protect {
         guard,
@@ -649,6 +664,42 @@ mod tests {
              x64.ret\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn a_declared_local_comes_out_saying_how_far_below_the_call_frame_address_it_is() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 4,
+            align: 4,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mem = build.func().add_mem(info);
+        let slot = build.value(
+            ir::InstData { extra: ir::Extra::Mem(mem), ..ir::InstData::new(Opcode::Alloca) },
+            Type::PTR,
+        );
+        build.func().declare_mem(mem, 5);
+        build.store(args[0], slot, info, IrFlags::default());
+        let loaded = build.load(i32, slot, info, IrFlags::default());
+        build.ret(&[loaded]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+
+        // `int f(int a) { int x = a; return x; }` with the address of `x` taken, so it is four
+        // bytes in the frame. A leaf this small lives in the red zone, so the stack pointer never
+        // moves. What is below it is a whole word, since everything a frame holds is counted in
+        // words whether or not it fills one, and the call frame address is one more word above the
+        // stack pointer for the return address the call pushed.
+        assert_eq!(out.locals, vec![(5, -16)]);
     }
 
     /// What `-Zlowering` is built out of, and the reason it is worth a test here rather than only

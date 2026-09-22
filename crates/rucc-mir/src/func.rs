@@ -227,6 +227,19 @@ pub struct Func {
     /// instruction, and a field and a method of the same name on the same type is a reading
     /// hazard for no gain.
     pub declared: Span,
+    /// Where each local the program declared ended up, as the declaration it is and how far it is
+    /// from the call frame address.
+    ///
+    /// The declaration is the number the IR function carried and means nothing in this crate. The
+    /// distance is negative, because the call frame address is the stack pointer the caller held
+    /// and the frame is below it.
+    ///
+    /// Written by whatever lays the frame out, because that is the only thing that knows where
+    /// anything in a frame is, and read by the debugging information, which is where the number
+    /// turns back into a name and a type. Empty until then, and empty in a function whose
+    /// alignment the prologue had to force, where the distance is not a constant. See
+    /// `Frame::from_frame_base` in `rucc-codegen`.
+    pub locals: Vec<(u32, i32)>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -257,6 +270,7 @@ impl Func {
             patch: None,
             labels: Vec::new(),
             declared: Span::DUMMY,
+            locals: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),

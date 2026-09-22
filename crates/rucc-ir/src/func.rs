@@ -98,6 +98,7 @@ pub struct Func {
     signatures: Vec<Signature>,
     facts: Vec<(Value, Facts)>,
     labels: Vec<(Block, Symbol)>,
+    mem_decls: Vec<(Idx<MemInfo>, u32)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -138,6 +139,7 @@ impl Func {
             signatures: vec![signature],
             facts: Vec::new(),
             labels: Vec::new(),
+            mem_decls: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -812,6 +814,37 @@ impl Func {
     /// Every block that has a name, in block order.
     pub fn named_blocks(&self) -> impl Iterator<Item = (Block, Symbol)> + '_ {
         self.labels.iter().copied()
+    }
+
+    /// Says which declaration in the source a piece of memory was made for, which is how a build
+    /// that was asked for debugging information ends up able to print a local by its name.
+    ///
+    /// The number is whatever the front end counts declarations by and means nothing here. This
+    /// crate sits below the one that has a type for it, and inventing a second name for the same
+    /// thing so that it could be spelled out here would buy nothing: nothing between the front end
+    /// that writes the number and the back end that hands it back reads it.
+    ///
+    /// On the memory rather than on the `alloca` that asks for it because the memory is what
+    /// survives. An instruction is rewritten, moved and renumbered by every pass it goes through,
+    /// and [`MemInfo`] is appended to and never reordered, so the number an access carries today is
+    /// the number it carries at the end.
+    ///
+    /// One declaration per piece of memory, and the first ask wins. Nothing asks twice.
+    pub fn declare_mem(&mut self, mem: Idx<MemInfo>, decl: u32) {
+        let found = self.mem_decls.binary_search_by_key(&mem.raw(), |&(at, _)| at.raw());
+        if let Err(at) = found {
+            self.mem_decls.insert(at, (mem, decl));
+        }
+    }
+
+    /// The declaration a piece of memory was made for, or `None` for memory no declaration in the
+    /// source asked for, which is every temporary and every spill.
+    #[must_use]
+    pub fn mem_decl(&self, mem: Idx<MemInfo>) -> Option<u32> {
+        match self.mem_decls.binary_search_by_key(&mem.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => Some(self.mem_decls[at].1),
+            Err(_) => None,
+        }
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {
@@ -1712,6 +1745,34 @@ mod tests {
         assert_eq!(func[store].results, 0);
         assert_eq!(func[store].flags, Flags::VOLATILE);
         assert_eq!(func[value].ty, Type::int(32));
+    }
+
+    #[test]
+    fn memory_remembers_which_declaration_asked_for_it_and_which_did_not() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let first = func.add_mem(info);
+        let second = func.add_mem(info);
+        let third = func.add_mem(info);
+
+        // Out of order, because a declaration is recorded where the walk reaches it and the table
+        // is kept sorted so that reading it back is a search rather than a scan.
+        func.declare_mem(third, 7);
+        func.declare_mem(first, 2);
+        // The second ask about the same memory keeps the first answer.
+        func.declare_mem(first, 9);
+
+        assert_eq!(func.mem_decl(first), Some(2));
+        assert_eq!(func.mem_decl(third), Some(7));
+        // Memory no declaration asked for, which is what every temporary is.
+        assert_eq!(func.mem_decl(second), None);
     }
 
     #[test]

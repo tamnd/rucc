@@ -483,6 +483,29 @@ impl Frame {
         self.locals.get(local).copied()
     }
 
+    /// Where a local is, from the call frame address, which is what a debugger counts from.
+    ///
+    /// The call frame address is the stack pointer the caller held when it made the call, and
+    /// [`Frame::incoming`] is already the distance up to it, since the first argument passed on the
+    /// stack sits there. So the answer is one subtraction, and it is a negative number, because the
+    /// frame is below the address the call was made from.
+    ///
+    /// `None` in a frame whose alignment the prologue had to force, where there is no answer to
+    /// give. Rounding the stack pointer down throws away however far it was from where the caller
+    /// left it, so the distance from the body's stack pointer up to the call frame address is not a
+    /// constant in such a function, and the two numbers subtracted here are counted from different
+    /// registers on top of that. What the locals of such a function want is a location counted from
+    /// the frame pointer, which is a different expression from the one a frame base gives.
+    ///
+    /// `None` as well for a local this frame never placed.
+    #[must_use]
+    pub fn from_frame_base(&self, local: usize) -> Option<i32> {
+        if self.realign.is_some() {
+            return None;
+        }
+        Some(self.local(local)? - self.incoming.at)
+    }
+
     /// Where the stack protector's canary is, from the stack pointer in the body of the function,
     /// or `None` in a frame that has none.
     #[must_use]
@@ -812,6 +835,53 @@ mod tests {
         // where it was put.
         assert_eq!(frame.size(), 40);
         assert_eq!(frame.realign(), None);
+    }
+
+    #[test]
+    fn a_local_is_counted_from_the_call_frame_address_wherever_the_frame_was_put() {
+        let (func, allocation) = pressure(&SYSV, 2, 4);
+        let base = Layout::new(&SYSV, REGS);
+
+        let locals = [
+            Local { size: 1, align: 1 },
+            Local { size: 16, align: 16 },
+            Local { size: 8, align: 8 },
+        ];
+        let taken = Frame::of(&func, &allocation, &Layout { locals: &locals, ..base });
+
+        // The frame is forty bytes and the return address is eight more, so the call frame address
+        // is forty eight above the stack pointer and every local is that much less than wherever
+        // the layout put it. The one byte one is nearest, at the top of the frame.
+        assert_eq!(taken.incoming(), Incoming::from_stack(48));
+        assert_eq!(taken.from_frame_base(1), Some(-48));
+        assert_eq!(taken.from_frame_base(2), Some(-32));
+        assert_eq!(taken.from_frame_base(0), Some(-24));
+        assert_eq!(taken.from_frame_base(3), None);
+
+        // And a leaf small enough to live in the red zone takes no frame at all, so its stack
+        // pointer is still one return address below the call frame address and its local is below
+        // that. The same subtraction answers both, which is the point of doing it this way.
+        let one = [Local { size: 8, align: 8 }];
+        let free = Frame::of(&func, &allocation, &Layout { locals: &one, ..base });
+
+        assert_eq!(free.size(), 0);
+        assert_eq!(free.incoming(), Incoming::from_stack(8));
+        assert_eq!(free.from_frame_base(0), Some(-16));
+    }
+
+    #[test]
+    fn a_realigned_frame_is_no_constant_distance_from_the_call_frame_address() {
+        let (func, allocation) = pressure(&SYSV, 2, 4);
+        let locals = [Local { size: 64, align: 32 }];
+        let base = Layout::new(&SYSV, REGS);
+        let frame = Frame::of(&func, &allocation, &Layout { locals: &locals, ..base });
+
+        // The prologue rounds the stack pointer down to a multiple of thirty two, which throws
+        // away however far the caller left it from there, so how far the local is below the call
+        // frame address is a different number every time the function is called.
+        assert_eq!(frame.realign(), Some(32));
+        assert_eq!(frame.local(0), Some(0));
+        assert_eq!(frame.from_frame_base(0), None);
     }
 
     #[test]
