@@ -240,6 +240,23 @@ pub struct Func {
     /// alignment the prologue had to force, where the distance is not a constant. See
     /// `Frame::from_frame_base` in `rucc-codegen`.
     pub locals: Vec<(u32, i32)>,
+    /// Which declaration in the source each virtual register holds a value of, for the ones that
+    /// hold one, as the declaration it is and the register that holds it.
+    ///
+    /// The other half of [`Func::locals`] and the same opaque number, arrived at from the other
+    /// side: a local the front end gave a frame slot is somewhere in the frame and a local it kept
+    /// in a value is in a register, and neither of them knows what the number means.
+    ///
+    /// One declaration is many registers. A value written in two places is two definitions before
+    /// anything joins them, a constant is written again in every block that wants one, and a
+    /// declaration the program assigns to twice was two values before this crate saw either. So
+    /// this is a list of pairs and not a map in either direction, the same shape and for the same
+    /// reason as the list the IR carries.
+    ///
+    /// Written by whatever selects instructions, because that is what turns a value into a
+    /// register, and read by the debugging information after the allocator has said where each of
+    /// these registers ended up and over which addresses. Empty until the first of those.
+    pub named: Vec<(u32, Reg)>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -271,6 +288,7 @@ impl Func {
             labels: Vec::new(),
             declared: Span::DUMMY,
             locals: Vec::new(),
+            named: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),

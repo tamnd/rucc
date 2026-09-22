@@ -4360,12 +4360,21 @@ impl<'a> Lowering<'a> {
     }
 
     /// A fresh register for a value, which is what the instruction computing it writes.
+    ///
+    /// Any declaration the value is a value of comes with it. Here rather than once at the end over
+    /// the whole map, because a constant is written again in every block that wants one and the map
+    /// only remembers the last of those registers, and a local held in a constant is a local that
+    /// would otherwise be findable in one block of the function and nowhere else.
     fn new_reg(&mut self, value: Value) -> mir::Reg {
         if let Some(reg) = self.regs[value.index()] {
             return reg;
         }
         let reg = self.out.new_vreg(self.class_of(self.source[value].ty));
         self.regs[value.index()] = Some(reg);
+        let source = self.source;
+        for decl in source.value_decls(value) {
+            self.out.named.push((decl, reg));
+        }
         reg
     }
 
@@ -5679,6 +5688,81 @@ mod tests {
         // reached first and is local zero, so the declared one is local one.
         assert_eq!(lowered.stack.locals.len(), 2);
         assert_eq!(lowered.stack.declared, vec![(1, 41)]);
+    }
+
+    /// A local the program kept in a value comes out saying which register holds it.
+    ///
+    /// The other half of the local above, which had a slot. This one has none, so what carries the
+    /// declaration is the register the instruction computing it writes into.
+    #[test]
+    fn a_local_the_program_kept_in_a_value_says_which_register_holds_it() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut source, block);
+        let nine = build.iconst(Type::int(32), 9);
+        let ten = build.iconst(Type::int(32), 10);
+        let sum = build.binary(Opcode::Add, nine, ten, Flags::default());
+        build.func().declare_value(sum, 41);
+        build.ret(&[sum]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+
+        // One pair and not three. The constants are values the program never declared, and a
+        // register holding one of those is nobody's. The register is the one the addition writes,
+        // which the listing under it is what pins down.
+        assert_eq!(lowered.func.named, vec![(41, mir::Reg::virtual_reg(1))]);
+        assert_eq!(
+            mir::print_func(&lowered.func, &names, &REGS),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 9\n    \
+             %1:gpr(reuse 1) = x64.add_ri_32 %0, 10\n    x64.ret_val_32 %1($rax)\n}\n"
+        );
+    }
+
+    /// A local held in a constant two blocks want is two registers and both of them are it.
+    ///
+    /// Why the declaration is written down as each register is handed out rather than once at the
+    /// end over the map from values to registers. That map remembers the last register a value was
+    /// written into, and a constant is written again in every block that wants one, so a local held
+    /// in one would come out findable in the last block of the function and nowhere else.
+    #[test]
+    fn a_local_held_in_a_constant_two_blocks_want_is_named_in_both_of_them() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let then = source.create_block();
+        let other = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+
+        let mut build = Builder::new(&mut source, entry);
+        let seven = build.iconst(i32, 7);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.func().declare_value(seven, 41);
+        build.br_if(cond, then, &[], other, &[]);
+        Builder::new(&mut source, then).jump(join, &[seven]);
+        Builder::new(&mut source, other).jump(join, &[seven]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+
+        let held = &lowered.func.named;
+        assert_eq!(held.len(), 2, "one register per block that wanted the seven: {held:?}");
+        assert!(held.iter().all(|&(decl, _)| decl == 41), "{held:?}");
+        assert_ne!(held[0].1, held[1].1, "the same register in two blocks: {held:?}");
+    }
+
+    /// A function with nothing declared in it says nothing, which is every function compiled
+    /// without debugging information asked for.
+    #[test]
+    fn a_function_the_front_end_named_nothing_in_names_no_registers() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let mut build = Builder::new(&mut source, block);
+        let nine = build.iconst(Type::int(32), 9);
+        build.ret(&[nine]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+        assert!(lowered.func.named.is_empty(), "{:?}", lowered.func.named);
     }
 
     #[test]
