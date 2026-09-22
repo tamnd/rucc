@@ -4,20 +4,24 @@
 //!
 //! # Status
 //!
-//! The line table, the types, the functions, the variables a unit defines at file scope and the
-//! locals that have a frame slot. [`write()`] takes one unit's worth of addresses, the places in
-//! the source they came from, the types the unit names, what each of its functions takes and gives
-//! back, what each of its file-scope variables is and where in its frame each of its placed locals
-//! sits, and gives back the sections that say so. That is enough for `addr2line` to answer a
-//! program counter with a file and a line, enough for a debugger to produce a backtrace with
-//! argument types in it, enough for one to print a global, and enough for one to print a local that
-//! is in memory. It is not enough for a local held in an SSA value, because one of those has to be
-//! said where it is at the program counter that is asking, which is a list of places rather than
-//! one. The shape of that list is here and nothing fills it in yet: a local can be said to be in a
-//! register over one stretch of a function's addresses and somewhere else over the next, and a
-//! `.debug_loclists` saying so comes out, but what the driver hands over is still one place for the
-//! whole of a function. Working out the stretches needs the register allocator's output and is the
-//! rest of M8 and of tamnd/rucc#9.
+//! The line table, the types, the functions, the variables a unit defines at file scope, the locals
+//! of those functions wherever they are kept, and the scopes the locals were declared in.
+//! [`write()`] takes one unit's worth of addresses, the places in the source they came from, the
+//! types the unit names, what each of its functions takes and gives back, what each of its
+//! file-scope variables is and where each of its locals is at each address, and gives back the
+//! sections that say so. That is enough for `addr2line` to answer a program counter with a file and
+//! a line, enough for a debugger to produce a backtrace with argument types in it, enough for one to
+//! print a global, and enough for one to print a local whether it is in the frame or in a register.
+//!
+//! A local in the frame is one `DW_OP_fbreg` for the whole of its function. A local the register
+//! allocator placed is a list instead, since one of those has to be said where it is at the program
+//! counter that is asking, and a `.debug_loclists` saying so comes out. Which of the two a local
+//! gets is decided by what lowering did with it rather than by the optimization level.
+//!
+//! What is still missing is marking a variable unavailable at a program counter where it is dead
+//! rather than leaving the address uncovered, a `.debug_frame` for a build that writes no unwind
+//! table, and the debugger differential that would say all of this is right against another
+//! compiler on the same program. That is the rest of M8 and of tamnd/rucc#9.
 //!
 //! The reason that part came first is tamnd/rucc#1558. A report from the safety monitor carries a
 //! program counter and deliberately carries no source location, because
@@ -55,8 +59,8 @@ mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, write};
 pub use crate::shape::{
-    Bits, Constant, Encoding, Global, Held, Local, Member, Param, Place, Qualifier, Shape, Sig,
-    Span, Spot,
+    Bits, Constant, Encoding, Global, Held, Local, Member, Param, Place, Qualifier, Reach, Scope,
+    Shape, Sig, Span, Spot,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

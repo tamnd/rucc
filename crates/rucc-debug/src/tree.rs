@@ -36,7 +36,8 @@
 
 use crate::line::{Error, Function};
 use crate::shape::{
-    Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Shape, Sig, Spot,
+    Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach, Scope, Shape, Sig,
+    Spot,
 };
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
@@ -189,6 +190,10 @@ fn fill(
 /// there resolves to nothing. A parameter with a slot gets its location on the entry the signature
 /// already wrote for it rather than an entry of its own, because two entries of one name in one
 /// scope is a debugger's problem rather than a reader's.
+///
+/// A local declared inside a `{ ... }` of its own hangs off a `DW_TAG_lexical_block` rather than off
+/// the subprogram, so that two blocks each declaring an `i` are two variables a reader can tell
+/// apart by where the program counter is. See [`nested`].
 fn defined(
     dwarf: &mut gimli::write::DwarfUnit,
     func: &Function,
@@ -215,10 +220,126 @@ fn defined(
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
     }
     takes(dwarf, at, sig, ids, Some(index), frames)?;
+    let nests = nested(dwarf, func, at, index, frames)?;
     for local in &func.locals {
-        kept(dwarf, at, local, files, ids, index, frames)?;
+        // Under the scope it was declared in, or under the function itself for one written straight
+        // into the body. A scope index nothing was made for is a local this build says nothing about
+        // anyway, so the function is as good a parent as any and the entry is never written.
+        let under = local.scope.and_then(|scope| nests.get(scope).copied().flatten()).unwrap_or(at);
+        kept(dwarf, under, local, files, ids, index, frames)?;
     }
     Ok(())
+}
+
+/// A `DW_TAG_lexical_block` for each of a function's inner scopes that has something to hold, and
+/// which entry each of them got.
+///
+/// Only the ones worth writing. A scope is written when a local declared in it has an entry, or when
+/// a scope inside it is written, and a scope that ends up with neither is a nest with nothing in it,
+/// which costs bytes and tells a reader nothing it did not already know. That is most of them in a
+/// real program: every `if` body and every loop body is a scope and few of them declare anything.
+///
+/// Parents first, which is what lets each entry be added under the one it belongs to as the walk
+/// goes. A scope is always written down after the one it is inside, since a scope is opened before
+/// anything inside it is reached, so one pass backwards marks every ancestor of everything wanted
+/// and one pass forwards builds the tree.
+fn nested(
+    dwarf: &mut gimli::write::DwarfUnit,
+    func: &Function,
+    at: UnitEntryId,
+    which: usize,
+    frames: bool,
+) -> Result<Vec<Option<UnitEntryId>>, Error> {
+    let mut wanted = vec![false; func.scopes.len()];
+    for local in &func.locals {
+        let Some(scope) = local.scope else { continue };
+        if sayable(&local.spot, frames) {
+            if let Some(seen) = wanted.get_mut(scope) {
+                *seen = true;
+            }
+        }
+    }
+    for index in (0..wanted.len()).rev() {
+        if let (true, Some(parent)) = (wanted[index], func.scopes[index].parent) {
+            if let Some(seen) = wanted.get_mut(parent) {
+                *seen = true;
+            }
+        }
+    }
+    let mut nests: Vec<Option<UnitEntryId>> = vec![None; func.scopes.len()];
+    for (index, scope) in func.scopes.iter().enumerate() {
+        if !wanted[index] {
+            continue;
+        }
+        let under = scope.parent.and_then(|parent| nests[parent]).unwrap_or(at);
+        let nest = dwarf.unit.add(under, gimli::DW_TAG_lexical_block);
+        covers(dwarf, nest, scope, which)?;
+        nests[index] = Some(nest);
+    }
+    Ok(nests)
+}
+
+/// Which of a function's addresses a scope covers.
+///
+/// One stretch is a low and a high, which is two attributes and no section to hold them, and that is
+/// what most scopes are. Several is `DW_AT_ranges` and a list, which is what a scope whose code the
+/// back end laid out in more than one piece needs.
+///
+/// A scope with no stretches at all gets neither, which DWARF 5 section 3.5 allows and a reader
+/// takes as a block covering whatever its parent does. That is a scope whose code all went away and
+/// whose names are the only thing left of it, and saying nothing about where it is beats inventing
+/// an answer.
+///
+/// # Errors
+///
+/// [`Error::Refused`] on a stretch of no length or one that starts further into the function than a
+/// signed offset can reach, for the reasons `somewhere` gives about the same two.
+fn covers(
+    dwarf: &mut gimli::write::DwarfUnit,
+    at: UnitEntryId,
+    scope: &Scope,
+    which: usize,
+) -> Result<(), Error> {
+    let mut list = Vec::with_capacity(scope.over.len());
+    for reach in &scope.over {
+        list.push(gimli::write::Range::StartLength {
+            begin: where_it_starts(reach, which)?,
+            length: reach.len,
+        });
+    }
+    match list.as_slice() {
+        [] => {}
+        &[gimli::write::Range::StartLength { begin, length }] => {
+            let entry = dwarf.unit.get_mut(at);
+            entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(begin));
+            entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(length));
+        }
+        _ => {
+            let id = dwarf.unit.ranges.add(gimli::write::RangeList(list));
+            dwarf.unit.get_mut(at).set(gimli::DW_AT_ranges, AttributeValue::RangeListRef(id));
+        }
+    }
+    Ok(())
+}
+
+/// Where a stretch of a function's addresses begins, as the function's own symbol plus a distance
+/// into it, which is how the linker is asked the same question a subprogram's low PC asks it.
+///
+/// # Errors
+///
+/// [`Error::Refused`] on a stretch of no length, which covers no address at all, or one starting
+/// further into the function than a signed offset reaches, which the writer underneath would read as
+/// a stretch somewhere else entirely.
+fn where_it_starts(reach: &Reach, which: usize) -> Result<gimli::write::Address, Error> {
+    if reach.len == 0 {
+        let why = "a scope covers no addresses at all".to_owned();
+        return Err(Error::Refused { why });
+    }
+    let Ok(addend) = i64::try_from(reach.from) else {
+        let why = format!("a scope starts {} bytes into its function", reach.from);
+        return Err(Error::Refused { why });
+    };
+    Ok(gimli::write::Address::Symbol { symbol: which, addend })
 }
 
 /// One local the program declared, as a child of its function.
@@ -588,6 +709,7 @@ mod tests {
                 }),
                 external: true,
                 locals: Vec::new(),
+                scopes: Vec::new(),
             }],
             globals: Vec::new(),
             pointer: 8,
@@ -718,6 +840,7 @@ mod tests {
             ty: Some(0),
             decl: Some(Place { file: 0, line: 4 }),
             spot: Spot::Always(Held::Frame(-16)),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the local");
@@ -769,6 +892,7 @@ mod tests {
                 Span { from: 0, len: 8, held: Held::Reg(3) },
                 Span { from: 8, len: 8, held: Held::Frame(-16) },
             ]),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &listed()), "the location is not a list");
@@ -795,6 +919,7 @@ mod tests {
                 Span { from: 0, len: 8, held: Held::Reg(3) },
                 Span { from: 8, len: 8, held: Held::Reg(4) },
             ]),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         let list = info.chunks.iter().find(|chunk| chunk.name == ".debug_loclists");
@@ -820,6 +945,7 @@ mod tests {
             ty: Some(0),
             decl: None,
             spot: Spot::Over(Vec::new()),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &listed()), "a list of nothing");
@@ -840,6 +966,7 @@ mod tests {
             ty: Some(0),
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 0, held: Held::Reg(3) }]),
+            scope: None,
         }];
         assert!(write(&unit).is_err());
     }
@@ -851,8 +978,13 @@ mod tests {
         let mut unit = one();
         unit.frames = false;
         unit.funcs[0].sig.as_mut().expect("a signature").params[0].spot = slot(-8);
-        unit.funcs[0].locals =
-            vec![Local { name: "total".to_owned(), ty: Some(0), decl: None, spot: fixed(-16) }];
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: fixed(-16),
+            scope: None,
+        }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &spot()), "a location nothing can resolve");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
@@ -872,6 +1004,7 @@ mod tests {
             ty: Some(0),
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Reg(3) }]),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &listed()), "the register went with the frame base");
@@ -897,6 +1030,7 @@ mod tests {
                 Span { from: 0, len: 8, held: Held::Reg(3) },
                 Span { from: 8, len: 8, held: Held::Frame(-16) },
             ]),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         let start = gimli::DW_LLE_start_length.0;
@@ -917,6 +1051,7 @@ mod tests {
             ty: Some(0),
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Frame(-16) }]),
+            scope: None,
         }];
         let info = write(&unit).expect("sections");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
@@ -1041,5 +1176,90 @@ mod tests {
         let names = named(&write(&unit).expect("sections"));
         assert!(names.contains(&"small".to_owned()), "{names:?}");
         assert!(!names.contains(&"huge".to_owned()), "{names:?}");
+    }
+
+    /// Where in a function each relocation against it asks the linker for, in the order they were
+    /// written.
+    ///
+    /// A subprogram's low PC and a lexical block's are the same relocation against the same symbol
+    /// and differ in the addend, which is the distance into the function, so the addends are what
+    /// says which entries were written and where each of them starts.
+    fn asked(info: &Info, section: &str) -> Vec<i64> {
+        let Some(chunk) = info.chunks.iter().find(|chunk| chunk.name == section) else {
+            return Vec::new();
+        };
+        chunk.relocs.iter().filter(|reloc| reloc.symbol == "f").map(|reloc| reloc.addend).collect()
+    }
+
+    /// The unit of `one` with one inner scope over the given stretches and one local declared in it.
+    fn inside(over: Vec<Reach>) -> Unit {
+        let mut unit = one();
+        unit.funcs[0].scopes = vec![Scope { parent: None, over }];
+        unit.funcs[0].locals = vec![Local {
+            name: "inner".to_owned(),
+            ty: Some(0),
+            decl: Some(Place { file: 0, line: 5 }),
+            spot: fixed(-16),
+            scope: Some(0),
+        }];
+        unit
+    }
+
+    /// A local declared in a `{ ... }` of its own hangs off a block that says which addresses it is.
+    #[test]
+    fn a_local_declared_in_an_inner_scope_gets_a_block_around_it() {
+        let info = write(&inside(vec![Reach { from: 4, len: 8 }])).expect("sections");
+
+        // The function itself and the one block inside it, which begins four bytes into it.
+        assert_eq!(asked(&info, ".debug_info"), vec![0, 4]);
+        assert!(named(&info).contains(&"inner".to_owned()), "the local is not named");
+    }
+
+    /// A scope the back end laid out in more than one piece says so with a list rather than a pair.
+    #[test]
+    fn a_scope_laid_out_in_two_pieces_gets_a_list_of_them() {
+        let over = vec![Reach { from: 4, len: 8 }, Reach { from: 24, len: 4 }];
+        let info = write(&inside(over)).expect("sections");
+
+        // The subprogram's low PC is the only thing left in the unit itself, and both pieces are in
+        // the range list, which is a section of its own. The nothing in front of them there is the
+        // unit's own list, which says the unit covers the whole of this one function.
+        assert_eq!(asked(&info, ".debug_info"), vec![0]);
+        assert_eq!(asked(&info, ".debug_rnglists"), vec![0, 4, 24]);
+    }
+
+    /// A scope whose code all went away keeps its names and says nothing about where they were.
+    #[test]
+    fn a_scope_with_no_addresses_left_still_holds_its_names() {
+        let info = write(&inside(Vec::new())).expect("sections");
+        assert_eq!(asked(&info, ".debug_info"), vec![0], "a block that says where it is not");
+        assert!(named(&info).contains(&"inner".to_owned()), "the local went with it");
+    }
+
+    /// A scope that declared nothing gets no block, which is most of the scopes a program writes.
+    #[test]
+    fn a_scope_with_nothing_declared_in_it_gets_no_block() {
+        let mut unit = inside(vec![Reach { from: 4, len: 8 }]);
+        unit.funcs[0].locals[0].scope = None;
+        let info = write(&unit).expect("sections");
+        assert_eq!(asked(&info, ".debug_info"), vec![0], "an empty nest");
+    }
+
+    /// A scope that holds only another scope is written too, since the tree has to reach the inner
+    /// one and a reader builds the tree from where the entries are.
+    #[test]
+    fn a_scope_whose_only_child_is_a_scope_with_a_local_is_written() {
+        let mut unit = inside(vec![Reach { from: 4, len: 20 }]);
+        unit.funcs[0].scopes.push(Scope { parent: Some(0), over: vec![Reach { from: 8, len: 8 }] });
+        unit.funcs[0].locals[0].scope = Some(1);
+        let info = write(&unit).expect("sections");
+        assert_eq!(asked(&info, ".debug_info"), vec![0, 4, 8], "the outer nest is missing");
+    }
+
+    /// A scope over no addresses at all is a mistake here rather than something a program can write.
+    #[test]
+    fn a_scope_over_a_stretch_of_no_length_is_refused() {
+        let over = vec![Reach { from: 4, len: 0 }];
+        assert!(matches!(write(&inside(over)), Err(Error::Refused { .. })));
     }
 }

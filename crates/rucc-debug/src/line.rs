@@ -52,7 +52,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Global, Local, Place, Shape, Sig};
+use crate::shape::{Global, Local, Place, Scope, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -123,6 +123,12 @@ pub struct Function {
     ///
     /// Parameters are not among them, whether or not they have a slot. See [`Local`].
     pub locals: Vec<Local>,
+    /// The inner scopes of the function, each after the scope it is written inside.
+    ///
+    /// The function's own body is not one of them, for the reason [`Scope`] gives. A scope nothing
+    /// above names is written down anyway and costs nothing: an entry is only made for one that has
+    /// a local of its own or holds a scope that does.
+    pub scopes: Vec<Scope>,
 }
 
 /// One row of the table: an address, and where the code at it came from.
