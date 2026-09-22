@@ -45,3 +45,7 @@ rucc-sysroot.workspace = true
 rucc-target.workspace = true
 rucc-tuple.workspace = true
 rucc-types.workspace = true
+# The zip, cabinet, compound file and MSI readers, which is what a Windows SDK download is four
+# formats of. Here rather than under the sysroot crate because the sysroot crate says which files
+# are wanted and this one is the layer that has them on disk.
+rucc-unpack.workspace = true
