@@ -405,12 +405,8 @@ mod tests {
             },
             Shape::Pointer { to: Some(0), size: 8 },
         ];
-        unit.funcs[0].sig = Some(Sig {
-            returns: Some(1),
-            params: Vec::new(),
-            variadic: false,
-            prototyped: true,
-        });
+        unit.funcs[0].sig =
+            Some(Sig { returns: Some(1), params: Vec::new(), variadic: false, prototyped: true });
         let names = named(&write(&unit).expect("sections"));
         assert_eq!(names.iter().filter(|name| *name == "node").count(), 1, "{names:?}");
         assert!(names.contains(&"next".to_owned()), "{names:?}");
