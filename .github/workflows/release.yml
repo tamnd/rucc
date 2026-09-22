@@ -59,6 +59,34 @@ jobs:
             exit 1
           }
       - run: cargo xtask ci
+      # Every sysroot this release pins, fetched the way a user fetches it. Two other things already
+      # look at these pins and neither of them asks this question. `cargo xtask provenance --check`
+      # in the gate above says PROVENANCE matches the tables it is generated from, which is a
+      # question about two files in this repository. The nightly run in tamnd/rucc-cross rebuilds
+      # each sysroot from source and holds the archive against the hash named here, which is a
+      # question about the recipe. Neither of them asks whether the URL still serves the file, and a
+      # pin that has gone is a compiler that builds, passes everything, ships, and then cannot get a
+      # sysroot on the first machine that asks for one.
+      #
+      # `--fetch` rather than curl and sha256sum, because it is the code path a user is on: choosing
+      # a downloader, the cache layout, the hash check and the refusal are all the compiler's, and
+      # all of them are being asked here rather than approximated. Three archives of a few megabytes
+      # is seconds, and the from source reproduction that costs nine minutes stays in the nightly
+      # where it already is, which is the decision section 13.6 left open.
+      - name: every pinned sysroot is still there and still hashes to what it says
+        run: |
+          set -euo pipefail
+          pinned=$(awk -F'\t' '$1 == "target" && $3 == "pinned" { print $2 }' PROVENANCE)
+          if [ -z "$pinned" ]; then
+            echo "PROVENANCE pins no sysroots, which is either a table that changed shape or a"
+            echo "column that moved, and a check that quietly passes when it finds nothing is not"
+            echo "a check. If unpinning all of them was deliberate, this step goes with them."
+            exit 1
+          fi
+          cargo build --release --bin rucc
+          for target in $pinned; do
+            ./target/release/rucc --fetch "$target"
+          done
 
   build:
     name: build for ${{ matrix.target }}
