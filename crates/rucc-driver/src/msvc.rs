@@ -81,7 +81,7 @@ fn stored_as(name: &str) -> &str {
 /// manifest says and the x86-64 one 745,102 smaller, while every SDK payload sampled is served at
 /// exactly its declared size, and all of their hashes match. Section 13.4 records that. It is a
 /// figure to tell somebody what they are about to download and nothing is held against it, so being
-/// a per cent over on three files out of fourteen is not worth a second source.
+/// a per cent over on the CRT half of the selection is not worth a second source.
 fn mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
@@ -205,6 +205,12 @@ fn refuse(licence: &str, chosen: &Selection, tuple: &str) {
     for file in &chosen.files {
         println!("  {:>9}  {}", mb(file.payload.size), stored_as(&file.payload.name));
     }
+    println!(
+        "\nThe Windows SDK installers in that list hold no bytes of their own. Each one is a small\n\
+         database naming the cabinets its headers and libraries are in, and those cabinets are\n\
+         separate files that this total does not count, because which of them a target needs is a\n\
+         question only the installers can answer."
+    );
     println!(
         "\nIf you accept that licence, run this again with --accept-licence on the command line.\n\
          If you would rather not, build for the mingw-w64 environment instead, which is fully\n\

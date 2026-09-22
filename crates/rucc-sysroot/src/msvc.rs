@@ -39,10 +39,36 @@
 //! # What is chosen, and why it is so little
 //!
 //! A C compiler needs headers and import libraries and nothing else. No linker, no assembler, no
-//! debugger, no redistributables, no spectre mitigated variants, no store or onecore flavours of
-//! the desktop libraries, and no tools of any kind, because the tool is this compiler. That comes
-//! to the CRT headers, one CRT library package per architecture, and six of the Windows SDK's
-//! installers, out of a manifest with nineteen thousand packages in it.
+//! debugger, no redistributables, no spectre mitigated variants, no onecore flavour of the desktop
+//! libraries, and no tools of any kind, because the tool is this compiler. That comes to the CRT
+//! headers, two CRT library packages per architecture, and seven of the Windows SDK's installers,
+//! which is ten files for one target out of a manifest with nineteen thousand packages in it. Five
+//! of the seven are the same whatever the architecture, so the three architectures we target come to
+//! seventeen files rather than thirty.
+//!
+//! # Why the store package is one of the two
+//!
+//! Because it is where Microsoft puts the import libraries for the DLL CRT, which is what a program
+//! built the ordinary way links against. Measured by unpacking both packages of Visual C++
+//! 14.44.35207 for x86-64: the desktop package is 38 files, the static CRT and its debug
+//! information, `libcmt.lib` and `libcpmt.lib` and `libvcruntime.lib` and the rest, and `msvcrt.lib`
+//! is not among them. The store package is 96 files and has `msvcrt.lib`, `vcruntime.lib`,
+//! `oldnames.lib` and the CRT's own object fragments such as `chkstk.obj` in it. Both unpack into
+//! the same `lib/<chip>` directory of a Visual Studio installation, so the two together are what
+//! that directory is, and the store package's `store` and `uwp` subdirectories are the part of it
+//! that is actually about store apps and that an unpack leaves behind. `xwin` takes it for the same
+//! reason and says so in the same words, which is a second opinion rather than the source of this
+//! one.
+//!
+//! # The cabinets are named by the installers rather than by the manifest
+//!
+//! The Windows SDK half of the selection is MSIs, and an MSI holds no bytes: it is a small database
+//! saying which cabinet each of its files is in and what that cabinet calls it, and the cabinets are
+//! separate files in the same package, named by a hash. The newest kit publishes 149 of them and
+//! they come to 484 MB, of which one target wants a fraction, so which cabinets to download is a
+//! question only the installers can answer and this module does not guess at it. What it does is
+//! carry them: [`Selection::cab`] takes the name an installer gives and hands back the file the
+//! manifest publishes under it.
 //!
 //! The newest version of each is taken rather than a pinned one. A pinned version would be a
 //! promise about a file on somebody else's server, which section 13.8 already declines to make for
@@ -285,13 +311,20 @@ pub struct Selection {
     pub sdk: String,
     /// Every file, sorted by package and then by name so that two runs agree about the order.
     pub files: Vec<Wanted>,
+    /// The cabinets the Windows SDK publishes, sorted by name, which is where the bytes the
+    /// installers in [`Selection::files`] describe actually are.
+    ///
+    /// All of them rather than the ones a target needs, because that is not a question this module
+    /// can answer: an installer is a database and the cabinet it wants is a row in it. A caller that
+    /// has read one looks the name up with [`Selection::cab`] and downloads what comes back.
+    pub cabs: Vec<Wanted>,
 }
 
 impl Selection {
     /// Choose what to download out of an installer manifest.
     ///
     /// `chips` is which architectures to get libraries for. The headers are shared, so a selection
-    /// for four architectures is four library packages and one of everything else.
+    /// for four architectures is eight library packages and one of everything else.
     ///
     /// # Errors
     ///
@@ -307,7 +340,10 @@ impl Selection {
         let headers = format!("Microsoft.VC.{crt}.CRT.Headers.base");
         let mut wanted = vec![headers.clone()];
         for chip in sorted(chips) {
+            // Two packages per architecture, and the store one is not about store apps. This
+            // module's note says what is in each of them and how it was measured.
             wanted.push(format!("Microsoft.VC.{crt}.CRT.{}.Desktop.base", chip.in_package()));
+            wanted.push(format!("Microsoft.VC.{crt}.CRT.{}.Store.base", chip.in_package()));
         }
         // The headers package's own version is what the CRT is reported as, not the last library
         // package's. They are two numbers of one release and the headers are the one to name.
@@ -340,11 +376,41 @@ impl Selection {
             });
         }
 
+        let mut cabs: Vec<Wanted> = sdk
+            .payloads
+            .iter()
+            .filter(|payload| leaf(&payload.name).to_ascii_lowercase().ends_with(".cab"))
+            .map(|payload| Wanted {
+                package: sdk_id.clone(),
+                version: sdk.version.clone(),
+                payload: payload.clone(),
+            })
+            .collect();
+        cabs.sort_by(|a, b| a.payload.name.cmp(&b.payload.name));
+
         files.sort_by(|a, b| (&a.package, &a.payload.name).cmp(&(&b.package, &b.payload.name)));
-        Ok(Selection { crt: crt_version, sdk: sdk.version.clone(), files })
+        Ok(Selection { crt: crt_version, sdk: sdk.version.clone(), files, cabs })
     }
 
-    /// How many bytes the whole selection is, which is what a person is told before accepting.
+    /// The cabinet an installer named, or [`None`] for a name the Windows SDK does not publish.
+    ///
+    /// The two documents spell it differently and neither spelling is wrong. An installer's own
+    /// table says `d60d1d4a1b5da9e4d41b0bcb0b1dcb14.cab`, because that is what it calls the file it
+    /// wants, and the manifest says `Installers\d60d1d4a1b5da9e4d41b0bcb0b1dcb14.cab`, because that
+    /// is where the Visual Studio installer would put it. So the comparison is on the last component
+    /// and it ignores case, which costs nothing and is what a Windows file name means.
+    #[must_use]
+    pub fn cab(&self, name: &str) -> Option<&Wanted> {
+        self.cabs.iter().find(|cab| leaf(&cab.payload.name).eq_ignore_ascii_case(leaf(name)))
+    }
+
+    /// How many bytes the files are, which is what a person is told before accepting.
+    ///
+    /// The files and not the cabinets. A cabinet is downloaded only once an installer has named it,
+    /// so a total that included all 149 of them would be several times what a run actually moves,
+    /// and one that included none of them would be short by most of the Windows SDK. What is honest
+    /// before anything has been read is the number this gives and a sentence saying the cabinets
+    /// come after, which is what the caller prints.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.files.iter().map(|file| file.payload.size).sum()
@@ -635,8 +701,12 @@ mod tests {
           "payloads": [ { "fileName": "de.vsix", "sha256": "cc", "size": 3, "url": "https://example.invalid/de" } ] },
         { "id": "Microsoft.VC.14.44.17.14.CRT.x64.Desktop.base", "version": "14.44.35226", "type": "Vsix",
           "payloads": [ { "fileName": "x64.vsix", "sha256": "b2", "size": 51521199, "url": "https://example.invalid/x64" } ] },
+        { "id": "Microsoft.VC.14.44.17.14.CRT.x64.Store.base", "version": "14.44.35226", "type": "Vsix",
+          "payloads": [ { "fileName": "x64-store.vsix", "sha256": "b4", "size": 28032384, "url": "https://example.invalid/x64-store" } ] },
         { "id": "Microsoft.VC.14.44.17.14.CRT.ARM64.Desktop.base", "version": "14.44.35226", "type": "Vsix",
           "payloads": [ { "fileName": "arm64.vsix", "sha256": "b3", "size": 49166761, "url": "https://example.invalid/arm64" } ] },
+        { "id": "Microsoft.VC.14.44.17.14.CRT.ARM64.Store.base", "version": "14.44.35226", "type": "Vsix",
+          "payloads": [ { "fileName": "arm64-store.vsix", "sha256": "b5", "size": 26214400, "url": "https://example.invalid/arm64-store" } ] },
         { "id": "Microsoft.VC.14.44.17.14.CRT.x64.Desktop.spectre.base", "version": "14.44.35226", "type": "Vsix",
           "payloads": [ { "fileName": "spectre.vsix", "sha256": "dd", "size": 4, "url": "https://example.invalid/spectre" } ] },
         { "id": "Microsoft.VisualStudio.Component.Windows11SDK", "version": "17.14.35", "type": "Component",
@@ -656,7 +726,8 @@ mod tests {
             { "fileName": "Installers\\Windows SDK for Windows Store Apps Headers-x86_en-us.msi", "sha256": "c9", "size": 1060864, "url": "https://example.invalid/store-h" },
             { "fileName": "Installers\\Windows SDK for Windows Store Apps Libs-x86_en-us.msi", "sha256": "ca", "size": 528384, "url": "https://example.invalid/store-l" },
             { "fileName": "Installers\\Windows SDK Desktop Tools x64-x86_en-us.msi", "sha256": "cb", "size": 475136, "url": "https://example.invalid/tools" },
-            { "fileName": "0f1a2b3c.cab", "sha256": "cc", "size": 9999, "url": "https://example.invalid/cab" }
+            { "fileName": "Installers\\0f1a2b3c.cab", "sha256": "cc", "size": 9999, "url": "https://example.invalid/cab" },
+            { "fileName": "Installers\\7e6d5c4b.cab", "sha256": "cd", "size": 8888, "url": "https://example.invalid/other-cab" }
           ] }
       ]
     }"#;
@@ -697,13 +768,13 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_is_the_headers_one_library_package_per_chip_and_the_installers() {
+    fn a_selection_is_the_headers_two_library_packages_per_chip_and_the_installers() {
         let one = Selection::parse(MANIFEST, &[Chip::X64]).expect("a selection");
-        assert_eq!(one.files.len(), 1 + 1 + 7);
+        assert_eq!(one.files.len(), 1 + 2 + 7);
 
         let two = Selection::parse(MANIFEST, &[Chip::X64, Chip::Arm64]).expect("a selection");
-        // One more library package and two more installers, and the headers are still one copy.
-        assert_eq!(two.files.len(), one.files.len() + 3);
+        // Two more library packages and two more installers, and the headers are still one copy.
+        assert_eq!(two.files.len(), one.files.len() + 4);
         assert!(two.size() > one.size());
 
         // The order is the same however the command line was written, and nothing appears twice.
@@ -719,10 +790,42 @@ mod tests {
         for unwanted in ["spectre.vsix", "de.vsix", "nothing.vsix"] {
             assert!(!names.contains(&unwanted), "{unwanted} is in {names:?}");
         }
-        // The tools are not a compiler's business, and the cabs are not chosen here because the
+        // The tools are not a compiler's business, and the cabs are not among the files because the
         // installer is what says which of them it needs.
         assert!(!names.iter().any(|name| name.contains("Tools")), "{names:?}");
         assert!(!names.iter().any(|name| name.ends_with(".cab")), "{names:?}");
+    }
+
+    #[test]
+    fn the_store_package_is_taken_for_its_import_libraries_and_the_spectre_one_is_not() {
+        let chosen = Selection::parse(MANIFEST, &[Chip::X64]).expect("a selection");
+        let packages: Vec<&str> = chosen.files.iter().map(|file| file.package.as_str()).collect();
+        // `msvcrt.lib` and `oldnames.lib` are in this one and in no other, which is why a compiler
+        // that only took the desktop package could link nothing against the DLL CRT.
+        assert!(packages.contains(&"Microsoft.VC.14.44.17.14.CRT.x64.Store.base"), "{packages:?}");
+        assert!(
+            packages.contains(&"Microsoft.VC.14.44.17.14.CRT.x64.Desktop.base"),
+            "{packages:?}"
+        );
+        assert!(
+            !packages.contains(&"Microsoft.VC.14.44.17.14.CRT.x64.Desktop.spectre.base"),
+            "{packages:?}"
+        );
+    }
+
+    #[test]
+    fn a_cabinet_is_found_by_the_name_an_installer_gives_it() {
+        let chosen = Selection::parse(MANIFEST, &[Chip::X64]).expect("a selection");
+        assert_eq!(chosen.cabs.len(), 2);
+        // The name an MSI's own table carries, which has no directory on it and is the manifest's
+        // name with the Windows path taken off.
+        let cab = chosen.cab("0f1a2b3c.cab").expect("the cabinet");
+        assert_eq!(cab.payload.name, r"Installers\0f1a2b3c.cab");
+        assert_eq!(cab.payload.url, "https://example.invalid/cab");
+        assert_eq!(cab.package, "Win11SDK_10.0.26100");
+        // Case is not a difference between two Windows file names.
+        assert_eq!(chosen.cab("0F1A2B3C.CAB"), Some(cab));
+        assert_eq!(chosen.cab("nothing.cab"), None);
     }
 
     #[test]
