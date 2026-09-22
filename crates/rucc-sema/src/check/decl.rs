@@ -1213,7 +1213,10 @@ impl Checker<'_> {
             self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);
             return previous;
         }
-        if node.state == Definition::Defined && declared.state == Definition::Defined {
+        if node.state == Definition::Defined
+            && declared.state == Definition::Defined
+            && !self.replaces_a_gnu_inline_body(&node, &declared)
+        {
             let spelled = self.text(declared.name).to_owned();
             let (note, at) = self.previous_note(previous);
             self.report(
@@ -1356,6 +1359,31 @@ impl Checker<'_> {
             external: specs.storage == Some(StorageClass::Extern),
             defining,
         }
+    }
+
+    /// Whether this definition is the real one and the definition above it was a body offered for
+    /// inlining, which is not a redefinition of anything.
+    ///
+    /// A GNU `extern inline` definition is never emitted. It is a body a call may be replaced by
+    /// and nothing else, and the name is expected to be defined somewhere, which is the whole
+    /// point of the idiom: glibc writes `vprintf` that way in `bits/stdio.h` so that a call in an
+    /// optimised build turns into the call to `vfprintf` it is, while the real `vprintf` stays in
+    /// the shared library. A translation unit that then defines `vprintf` itself is supplying that
+    /// definition rather than writing a second one, and gcc takes it, emits it, and stops offering
+    /// the header's body. micropython's `shared/libc/printf.c` is a program that does exactly
+    /// that, because the firmware it is usually built for has no C library to get the name from
+    /// and the unix port builds the same file.
+    ///
+    /// In that order and no other. A body offered for inlining underneath a definition is a
+    /// second body for a name that already has one and gcc refuses it, and so are two of these,
+    /// and so is a C99 inline definition on either side of an ordinary one, which is 6.7.4p7 and
+    /// a different rule entirely. So what is asked here is about the declaration above and about
+    /// the reading it was under: [`Emission::Inline`] means a definition that is not emitted, and
+    /// it means that under GNU's reading only when the definition wrote both `extern` and
+    /// `inline`, which is what [`Self::emission`] settled when that declaration was read.
+    fn replaces_a_gnu_inline_body(&self, node: &Decl, declared: &Declared) -> bool {
+        let gnu = node.flags.contains(DeclFlags::GNU_INLINE) || self.cx.gnu_inline_by_default();
+        gnu && node.inline == Emission::Inline && !declared.written.inline
     }
 
     /// What one declaration says about whether a definition of the name is emitted, read the way
@@ -2870,6 +2898,107 @@ mod tests {
              block\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_definition_under_a_gnu_inline_body_replaces_it_rather_than_redefining_it() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        specs.attrs = f.gnu_inline();
+        let offered = f.block(&[]);
+        let first = f.define(specs, "f", &[function()], offered);
+        let plain = f.int_specs();
+        let two = f.int(2);
+        let ret = f.stmt(ast::Stmt::Return(Some(two)));
+        let own = f.block(&[ret]);
+        let second = f.define(plain, "f", &[function()], own);
+
+        let mut c = f.checker();
+        let list = c.check_decl(first);
+        let id = only(&c, list);
+        c.check_decl(second);
+
+        // This is the shape every program that includes `stdio.h` at `-O1` and then defines
+        // `vprintf` or `putchar` itself is in, micropython's `shared/libc/printf.c` among them.
+        // The header's `extern inline` body is offered for inlining and never emitted, so the
+        // program is supplying the one definition of the name rather than writing a second one.
+        // What comes out is the program's body, external, with the header's gone.
+        let dumped = dump(&c, id);
+        assert_eq!(
+            dumped.lines().next().unwrap(),
+            "decl #0 f : int(void) function external defined"
+        );
+        assert!(dumped.contains("return"), "{dumped}");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn a_gnu_inline_body_under_a_definition_is_a_second_body_and_is_refused() {
+        let mut f = Fixture::new();
+        let plain = f.int_specs();
+        let own = f.block(&[]);
+        let first = f.define(plain, "f", &[function()], own);
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        specs.attrs = f.gnu_inline();
+        let offered = f.block(&[]);
+        let second = f.define(specs, "f", &[function()], offered);
+
+        let mut c = f.checker();
+        c.check_decl(first);
+        c.check_decl(second);
+
+        // The other order, which is not the one glibc writes and is not accepted. A body offered
+        // for inlining underneath a definition is a second body for a name that already has one,
+        // and gcc refuses it.
+        let said = messages(&c);
+        assert!(said.iter().any(|m| m.contains("redefinition of 'f'")), "got {said:?}");
+    }
+
+    #[test]
+    fn two_gnu_inline_bodies_of_one_name_are_still_two_bodies() {
+        let mut f = Fixture::new();
+        let mut specs = f.inline_specs();
+        specs.storage = Some(StorageClass::Extern);
+        specs.attrs = f.gnu_inline();
+        let first_body = f.block(&[]);
+        let first = f.define(specs, "f", &[function()], first_body);
+        let mut again = f.inline_specs();
+        again.storage = Some(StorageClass::Extern);
+        again.attrs = f.gnu_inline();
+        let second_body = f.block(&[]);
+        let second = f.define(again, "f", &[function()], second_body);
+
+        let mut c = f.checker();
+        c.check_decl(first);
+        c.check_decl(second);
+
+        // What is taken is a definition replacing a body that was only ever offered, and a second
+        // offer is not that. gcc refuses this pair too.
+        let said = messages(&c);
+        assert!(said.iter().any(|m| m.contains("redefinition of 'f'")), "got {said:?}");
+    }
+
+    #[test]
+    fn a_definition_under_a_c99_inline_one_is_a_redefinition_as_it_was_before() {
+        let mut f = Fixture::new();
+        let specs = f.inline_specs();
+        let offered = f.block(&[]);
+        let first = f.define(specs, "f", &[function()], offered);
+        let plain = f.int_specs();
+        let own = f.block(&[]);
+        let second = f.define(plain, "f", &[function()], own);
+
+        let mut c = f.checker();
+        c.check_decl(first);
+        c.check_decl(second);
+
+        // C99's `inline` is a different rule from GNU's and the allowance does not reach it. An
+        // inline definition under 6.7.4p7 is still a definition of the name, so a second one is a
+        // redefinition, and gcc says so.
+        let said = messages(&c);
+        assert!(said.iter().any(|m| m.contains("redefinition of 'f'")), "got {said:?}");
     }
 
     #[test]
