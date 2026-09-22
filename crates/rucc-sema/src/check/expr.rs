@@ -289,13 +289,27 @@ impl Checker<'_> {
             let message = format!("implicit declaration of function '{spelled}'");
             self.report(Diagnostic::new(severity, message, span).with_code("E0521"));
         }
-        let ret = self.types.int(IntKind::Int);
-        let ty = self.types.function(FunctionType {
-            ret,
-            params: Vec::new(),
-            variadic: false,
-            prototyped: false,
-        });
+        // A name the implementation knows the type of gets that type rather than the one C89
+        // wrote down, which is gcc's answer and the reason an undeclared `alloca` is expanded
+        // where it stands rather than called. In `check/builtin.rs`, with what was measured.
+        let ty = match self.implicit_builtin_type(name) {
+            Some(ty) => {
+                let spelled = self.text(name).to_owned();
+                let message =
+                    format!("incompatible implicit declaration of built-in function '{spelled}'");
+                self.report(Diagnostic::warning(message, span).with_code("E0713"));
+                ty
+            }
+            None => {
+                let ret = self.types.int(IntKind::Int);
+                self.types.function(FunctionType {
+                    ret,
+                    params: Vec::new(),
+                    variadic: false,
+                    prototyped: false,
+                })
+            }
+        };
         let decl = self.tast.decl(
             Decl {
                 name: Some(name),

@@ -212,6 +212,41 @@ impl Checker<'_> {
         Some(decl)
     }
 
+    /// The type the implicit declaration of `name` gets, when the name is one the implementation
+    /// knows the type of.
+    ///
+    /// C89 6.3.2.2 says a call to a name nothing declared declares `extern int f()`, and gcc says
+    /// something else when the name is one of its builtins: the declaration is the builtin's, so
+    /// an implicitly declared `alloca` takes a `size_t` and answers a `void *` and is expanded
+    /// where it stands rather than called. Measured against gcc 16.2.0 over `alloca`, `memcpy`
+    /// and `strlen`, each of which comes out with no call in it and with
+    /// `incompatible implicit declaration of built-in function` beside the implicit declaration
+    /// warning. A declaration the program wrote that disagrees with the builtin's type is not
+    /// this, and was measured too: gcc keeps the program's type and writes the call.
+    ///
+    /// Four torture programs turn on it. `gcc.c-torture/execute/20020314-1.c` and its three
+    /// neighbours call `alloca` with nothing declaring it, and a compiler that took C89 at its
+    /// word emitted a call to a name no C library defines, since `alloca` is a macro for the
+    /// builtin in every header that offers it.
+    ///
+    /// The plain name only, since the prefixed one is never undeclared, and only where the
+    /// program has left the name to the library, which is what `-fno-builtin` and
+    /// `-ffreestanding` take away. A builtin nothing implements and nothing in the library
+    /// answers for is left alone as well, because a prototype for one of those turns a program
+    /// that was going to reach the linker into one that is refused here.
+    pub(in crate::check) fn implicit_builtin_type(&mut self, name: Symbol) -> Option<TypeId> {
+        let spelled = self.text(name);
+        if spelled.starts_with("__") || !self.cx.means_the_library(spelled) {
+            return None;
+        }
+        let prefixed = format!("__builtin_{spelled}");
+        let feature = rucc_gnu::lookup(Kind::Builtin, &prefixed)?;
+        if feature.signature.is_empty() || unimplemented_builtin(feature.name) {
+            return None;
+        }
+        self.signature_type(feature.signature)
+    }
+
     /// The type a signature from the table names.
     ///
     /// Answers nothing only if the table is wrong, which `build.rs` and the test at the bottom
