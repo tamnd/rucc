@@ -86,6 +86,28 @@ same module at a time pass because the second of them has to name `strchr` befor
 it, and they differ from the printf family in what the result is for: a `printf` whose result is
 read is left alone, and a `strstr` is folded whether its result is read or not.
 
+**The rest of the family that answers.** `strchr`, `strrchr`, `strlen`, `strnlen`, `strcmp`,
+`strncmp`, `strspn`, `strcspn`, `strpbrk` and `memchr` over strings the module holds are each a
+number or a place in one of their arguments, worked out the way the library would work it out.
+`index` and `rindex` are the older spellings of the first two and are folded as the same two
+searches, which is what `gcc.c-torture/execute/builtins/strchr.c` and its `strrchr` companion ask for
+beside the modern names. Three of them have a shape rule that does not need the string at all:
+nothing is inside an empty set, so `strspn(s, "")` is zero, `strcspn(s, "")` is `strlen(s)`, and
+`strpbrk(s, "")` is a null pointer whatever `s` is, and a set of one character makes
+`strpbrk(s, "c")` a `strchr(s, 'c')` the same way a needle of one character does for `strstr`. A
+fourth is that a string has one terminator in it, so `strrchr(s, 0)` is `strchr(s, 0)` and which end
+the walk started at stops mattering. A comparison answers one of minus one, zero and one, because the
+sign is what the standard promises and the magnitude is not, and that is what gcc leaves behind as
+well.
+
+**Two of them read a count rather than a terminator.** `memchr` and `strnlen` are told how many
+bytes they may look at, so they read the object rather than the string in it, and `memchr` finds a
+byte that sits past the terminator where the object still holds one. That makes the object's size
+the limit rather than the string's length: a count the object does not have that many bytes for is a
+read whose end the compiler cannot see, and the call stays. The count itself is almost always
+written as an `int` in the source and widened on the way into a `size_t` parameter, so the pass
+looks under the widening for it, and refuses a source constant that was negative.
+
 **A rename does not hide the function.** `extern char *strstr (const char *, const char *) __asm
 ("my_strstr");` declares the standard `strstr` and says the symbol is `my_strstr`, and a pass with
 only the symbol in front of it sees a call to something it has never heard of. The IR carries the
