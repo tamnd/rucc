@@ -518,6 +518,20 @@ impl Frame {
         Some(self.local(local)? - self.incoming.at)
     }
 
+    /// Where a spill slot is, from the call frame address, which is what a debugger counts from.
+    ///
+    /// The same subtraction [`Frame::from_frame_base`] makes and `None` in the same function, for
+    /// the same reasons. It is the other half of the same question: a local the program named is
+    /// either in the part of the frame the front end asked for or in the part the allocator ran
+    /// out of registers into, and a debugger wants both counted from the same place.
+    #[must_use]
+    pub fn slot_from_frame_base(&self, slot: u32) -> Option<i32> {
+        if self.realign.is_some() {
+            return None;
+        }
+        Some(self.slot(slot)? - self.incoming.at)
+    }
+
     /// Where the stack protector's canary is, from the stack pointer in the body of the function,
     /// or `None` in a frame that has none.
     #[must_use]

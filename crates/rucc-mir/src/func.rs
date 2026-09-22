@@ -29,7 +29,7 @@ use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
-use rucc_target::RegClass;
+use rucc_target::{PhysReg, RegClass};
 
 use crate::inst::{
     Amode, Block, BlockCall, BlockData, Flags, Imm, ImmRef, Inst, InstData, InstLayout, Mem,
@@ -169,6 +169,36 @@ pub struct Patch {
     pub after: Option<Inst>,
 }
 
+/// Where one declaration in the source is, over one stretch of one function.
+///
+/// The answer to what [`Func::named`] asks, and the shape it is in is the shape a debugger's
+/// location list is in, because that is the only thing that reads it. A declaration the program
+/// kept in a register is somewhere for part of a function rather than for the whole of it, which
+/// is the difference between this and [`Func::locals`]: a frame slot belongs to its local for as
+/// long as the frame exists, and a register is handed to the next value the moment this one is
+/// done with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kept {
+    /// Which declaration in the source, as the opaque number the IR function carried.
+    pub decl: u32,
+    /// Where it is over this stretch.
+    pub at: Where,
+    /// The first instruction the answer holds at.
+    pub from: Inst,
+    /// The last instruction it holds at, which is in the stretch rather than past the end of it.
+    pub to: Inst,
+}
+
+/// One place a value can be, as the allocator left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Where {
+    /// In a register, which is the answer a value the allocator found room for gets.
+    Reg(PhysReg),
+    /// That far from the call frame address, which is what a value it had to spill gets. Negative,
+    /// for the reason the distances in [`Func::locals`] are.
+    Frame(i32),
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -254,9 +284,27 @@ pub struct Func {
     /// reason as the list the IR carries.
     ///
     /// Written by whatever selects instructions, because that is what turns a value into a
-    /// register, and read by the debugging information after the allocator has said where each of
-    /// these registers ended up and over which addresses. Empty until the first of those.
+    /// register, and read by the allocator's answer below. Empty until the first of those.
     pub named: Vec<(u32, Reg)>,
+    /// Where each of those registers ended up, once the allocator has said, and over which of the
+    /// function's instructions the answer holds.
+    ///
+    /// [`Func::named`] is the question and this is the answer, and the thing in between is the
+    /// allocation. A register is not a place until something has chosen one, and the place is only
+    /// good over the stretch the value in it is live, since the allocator hands the same register
+    /// to another value the moment this one is done with it.
+    ///
+    /// One entry per stretch, so a declaration appears as many times as it has pieces, and two
+    /// entries for one declaration can overlap where the program assigns to it from itself: the
+    /// value being read and the value being written are both live across the instruction that does
+    /// it. Nothing here picks between them.
+    ///
+    /// A stretch is named by the first and the last instruction in it rather than by a count of
+    /// bytes, because a machine instruction has no length until it is encoded. So this is written
+    /// at the very end of the back end, once nothing further will take an instruction out or move
+    /// one, and read by the debugging information once the encoder has given every instruction an
+    /// address. Empty until the first of those.
+    pub kept: Vec<Kept>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -289,6 +337,7 @@ impl Func {
             declared: Span::DUMMY,
             locals: Vec::new(),
             named: Vec::new(),
+            kept: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
