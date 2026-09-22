@@ -1624,9 +1624,15 @@ impl Unit<'_> {
     }
 
     /// The value of a constant expression, reporting what folding it reported.
+    ///
+    /// Everything this is asked about is part of the image of an object that exists before the
+    /// program runs, which is the one place C23 6.6p10 lets a compiler take more than the rest of
+    /// 6.6 does, so it asks for the reading the front end already accepted there. Asking the
+    /// strict way instead would refuse here what was allowed a pass earlier, which is a wrong
+    /// answer arriving late rather than an extra check.
     fn fold(&mut self, expr: ExprId) -> Option<Const> {
         let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
-        let folded = eval.constant(expr);
+        let folded = eval.initializer(expr);
         let reported = eval.finish();
         self.diagnostics.extend(reported);
         match folded {

@@ -762,7 +762,12 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        let folded = self.eval_constant(value);
+        // A `constexpr` object is folded the strict way and a static one the loose way, which is
+        // the difference C23 6.6p10 leaves to the implementation and the difference gcc draws:
+        // `char c[] = { "ab"[1], 0 };` is a static initializer it takes and
+        // `constexpr char c = "ab"[1];` is not.
+        let folded =
+            if w.constant { self.eval_constant(value) } else { self.eval_initializer(value) };
         // An address into nothing whose offset is zero is a null pointer written the long way
         // round, and a null pointer is the one a `constexpr` object may hold. Anything else with
         // a number for an address is a number and not null, so it falls to the rule below.
@@ -1271,6 +1276,11 @@ mod tests {
                 remarks: Remarks::default(),
             });
             self.ast.expr(ast::Expr::Str(id), Span::DUMMY)
+        }
+
+        /// `s[n]`, which is how a read of one character of a literal is written.
+        fn element(&mut self, base: ast::ExprId, index: ast::ExprId) -> ast::ExprId {
+            self.ast.expr(ast::Expr::Index { base, index }, Span::DUMMY)
         }
 
         /// One member of a record, from its specifiers and its declarator.
@@ -2333,6 +2343,38 @@ decl #1 p : int * object external static defined
             messages(&c),
             ["initializer element is not constant"],
             "reading the object is not, since nothing has put a value in it yet"
+        );
+    }
+
+    #[test]
+    fn a_static_object_may_hold_a_character_of_a_literal_and_a_constexpr_one_may_not() {
+        let mut f = Fixture::new();
+        let literal = f.text("ab", Encoding::Plain);
+        let one = f.int(1);
+        let read = f.element(literal, one);
+        let init = f.value(read);
+        let held = f.var(f.int_specs(), "n", &[], Some(init));
+        let literal = f.text("ab", Encoding::Plain);
+        let one = f.int(1);
+        let read = f.element(literal, one);
+        let init = f.value(read);
+        let mut specs = f.int_specs();
+        specs.constexpr = true;
+        let named = f.var(specs, "m", &[], Some(init));
+
+        let mut c = f.checker();
+        c.check_decl(held);
+        assert!(
+            messages(&c).is_empty(),
+            "C23 6.6p10 lets the one place an object is being initialized take more than the \
+             rest of 6.6 does, and a character of a literal is what gcc takes there"
+        );
+        c.check_decl(named);
+        assert_eq!(
+            messages(&c),
+            ["initializer element is not constant"],
+            "a 'constexpr' object is not that place: it wants an integer constant expression, \
+             and gcc refuses the same line written that way"
         );
     }
 

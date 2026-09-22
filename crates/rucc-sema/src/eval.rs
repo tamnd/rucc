@@ -56,6 +56,16 @@
 //! bound, a `case` label and an enumerator each go through [`Eval::integer`], which asks for a
 //! number and gets [`NotConstant`] for any of these.
 //!
+//! # The one place that takes more
+//!
+//! C23 6.6p10 says an implementation may accept other forms of constant expression where an
+//! object with static storage duration is initialized, and nowhere else. gcc takes one thing
+//! there: a read out of a string literal at a place it can work out, so `char c[] = { "ab"[1], 0
+//! };` compiles and `enum { e = "ab"[1] };` does not, and neither does the same read in an array
+//! bound, a `case` label, a `static_assert` or a `constexpr` initializer. That is a mode on the
+//! folder rather than another arm, because an arm that always folded would accept five things
+//! gcc refuses. [`Eval::initializer`] is the mode and [`Eval::constant`] is the rest of 6.6.
+//!
 //! # What is not here
 //!
 //! Folding happens where a constant is wanted, so an expression nothing asks about is not
@@ -101,6 +111,7 @@ pub struct Eval<'a> {
     names: &'a Interner,
     diagnostics: Vec<Diagnostic>,
     addressed: bool,
+    literals: bool,
 }
 
 impl<'a> Eval<'a> {
@@ -112,7 +123,15 @@ impl<'a> Eval<'a> {
         target: &'a TargetInfo,
         names: &'a Interner,
     ) -> Eval<'a> {
-        Eval { tast, types, target, names, diagnostics: Vec::new(), addressed: false }
+        Eval {
+            tast,
+            types,
+            target,
+            names,
+            diagnostics: Vec::new(),
+            addressed: false,
+            literals: false,
+        }
     }
 
     /// Whether the folding went looking for the address of something.
@@ -136,6 +155,22 @@ impl<'a> Eval<'a> {
     /// [`NotConstant`] when the expression is not one, which is an ordinary answer rather than a
     /// failure: whether it is a diagnostic depends on where the expression was.
     pub fn constant(&mut self, expr: ExprId) -> Result<Const, NotConstant> {
+        self.eval(expr)
+    }
+
+    /// The same, where an object that exists before the program runs is being initialized.
+    ///
+    /// C23 6.6p10 lets an implementation take more in that one place than an integer constant
+    /// expression, and what gcc takes there and nowhere else is a read out of a string literal at
+    /// a place it can work out. `char c[] = { "ab"[1], 0 };` is accepted and
+    /// `enum { e = "ab"[1] };` is not, which is 6.6p6 not moving an inch, and tcc's own test file
+    /// writes the first and says in a comment beside it that only gcc 8 and later take it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotConstant`] when the expression is not one, the same way [`Self::constant`] is.
+    pub fn initializer(&mut self, expr: ExprId) -> Result<Const, NotConstant> {
+        self.literals = true;
         self.eval(expr)
     }
 
@@ -211,9 +246,10 @@ impl<'a> Eval<'a> {
             // Reading an object, which is not a constant however `const` the object is:
             // `const int n = 1; int a[n];` is a variable length array in C, and it is this arm
             // that makes it one. A named constant is the exception C23 added and the reason
-            // `constexpr` is a keyword rather than a promise.
+            // `constexpr` is a keyword rather than a promise. A character of a string literal is
+            // the other exception, and it is one only where [`Self::initializer`] was asked.
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
-                match self.named_constant(operand) {
+                match self.named_constant(operand).or_else(|| self.string_element(expr, operand)) {
                     Some(value) => Ok(value),
                     None => Err(self.stop(expr)),
                 }
@@ -737,6 +773,46 @@ impl<'a> Eval<'a> {
         // A member the initializer did not reach holds a zero, which is what the contract on
         // an initializer list says: the object starts as zero and the entries are applied to it.
         self.eval(entry.value).ok()
+    }
+
+    /// The character a string literal holds at a place, and [`None`] when the expression is not a
+    /// read of one or is not somewhere a read of one counts.
+    ///
+    /// A literal is an object that exists before the program runs and whose contents are known
+    /// here rather than being a promise the linker keeps, so a read of one at a place the lvalue
+    /// walk can work out has an answer. Whether the answer is wanted is the caller's question, and
+    /// [`Self::initializer`] is where the one place that wants it is written down.
+    ///
+    /// The offset the walk gives back is in bytes and the elements are as wide as the encoding
+    /// says, so an offset that does not land on an element is not a read of one and neither is a
+    /// read at a width the elements are not: `((char *)L"ab")[1]` is the second byte of a wide
+    /// character, and what a byte of one holds is the target's byte order rather than anything the
+    /// literal says. One past the last element is the terminating zero, which belongs to the type
+    /// rather than to the spelling, which is why the zero is put on the end here instead of being
+    /// looked for in the list.
+    fn string_element(&mut self, expr: ExprId, operand: ExprId) -> Option<Const> {
+        if !self.literals {
+            return None;
+        }
+        let info = self.int_shape(self.tast[expr].ty)?;
+        let address = self.place(operand).ok()?;
+        let Base::Str(id) = address.base else { return None };
+        let width = self.tast[id].encoding.element_width(self.target);
+        if info.width != width {
+            return None;
+        }
+        let step = i128::from(width / 8);
+        if step == 0 || address.offset < 0 || address.offset % step != 0 {
+            return None;
+        }
+        let at = usize::try_from(address.offset / step).ok()?;
+        // Past the terminator is past the object, which is a read gcc refuses as well, and it is
+        // refused here by there being nothing at that index rather than by a rule of its own.
+        let element = self.tast[id].elements.get(at).copied().or(match at {
+            at if at == self.tast[id].elements.len() => Some(0),
+            _ => None,
+        })?;
+        Some(Const::Int(info.wrap(i128::from(element))))
     }
 
     /// The object a designation names and the byte offset into it, through members only.
@@ -1454,6 +1530,17 @@ mod tests {
             self.expr(ast::Expr::Str(id))
         }
 
+        /// The same with an `L` in front of it, whose elements are as wide as `wchar_t`.
+        fn wide_string(&mut self, text: &str) -> ast::ExprId {
+            let elements = text.chars().map(|c| c as u32).collect();
+            let id = self.ast.add_string(StringLiteral {
+                elements,
+                encoding: Encoding::Wide,
+                remarks: Remarks::default(),
+            });
+            self.expr(ast::Expr::Str(id))
+        }
+
         fn subscript(&mut self, base: ast::ExprId, index: ast::ExprId) -> ast::ExprId {
             self.expr(ast::Expr::Index { base, index })
         }
@@ -1570,6 +1657,12 @@ mod tests {
     fn value(checker: &mut Checker<'_>, expr: ast::ExprId) -> Result<Const, NotConstant> {
         let id = checker.check_expr(expr);
         checker.eval_constant(id)
+    }
+
+    /// The same, where an object that exists before the program runs is being initialized.
+    fn initial(checker: &mut Checker<'_>, expr: ast::ExprId) -> Result<Const, NotConstant> {
+        let id = checker.check_expr(expr);
+        checker.eval_initializer(id)
     }
 
     /// The object an address constant is into, and how far.
@@ -1784,6 +1877,87 @@ mod tests {
         let mut c = f.checker();
         assert_eq!(address(value(&mut c, moved)), Some((0, 1)));
         assert!(messages(&c).is_empty());
+    }
+
+    /// `+s[n]`, which is a read of one character of a literal.
+    ///
+    /// The `+` is there because a lvalue is turned into the value in it by whatever wanted a
+    /// value, and a test that checks an expression on its own has nothing that wanted one. It
+    /// promotes as well, so what comes back is an `int` and the characters below are written as
+    /// bytes rather than as the type they were read at.
+    fn character(f: &mut Fixture, literal: ast::ExprId, index: i128) -> ast::ExprId {
+        let at = f.int(index.unsigned_abs(), IntKind::Int);
+        let at = match index < 0 {
+            true => f.unary(UnaryOp::Minus, at),
+            false => at,
+        };
+        let read = f.subscript(literal, at);
+        f.unary(UnaryOp::Plus, read)
+    }
+
+    #[test]
+    fn a_character_of_a_string_literal_is_a_constant_only_where_an_object_is_being_initialized() {
+        let mut f = Fixture::new();
+        let literal = f.string("hi");
+        let read = character(&mut f, literal, 1);
+        let literal = f.string("hi");
+        let again = character(&mut f, literal, 1);
+
+        let mut c = f.checker();
+        assert_eq!(
+            initial(&mut c, read),
+            Ok(Const::Int(i128::from(b'i'))),
+            "the contents of a literal are known here, so a read of one at a place we can work \
+             out has an answer"
+        );
+        assert!(
+            value(&mut c, again).is_err(),
+            "and it is an answer C23 6.6p10 only allows where an object is being initialized, \
+             which is why an enumerator written this way is still refused"
+        );
+        assert!(messages(&c).is_empty(), "neither of them is worth saying anything about");
+    }
+
+    #[test]
+    fn the_zero_a_string_literal_ends_with_is_a_character_of_it_and_nothing_past_it_is() {
+        let mut f = Fixture::new();
+        let literal = f.string("hi");
+        let terminator = character(&mut f, literal, 2);
+        let literal = f.string("hi");
+        let past = character(&mut f, literal, 3);
+        let literal = f.string("hi");
+        let before = character(&mut f, literal, -1);
+
+        let mut c = f.checker();
+        assert_eq!(
+            initial(&mut c, terminator),
+            Ok(Const::Int(0)),
+            "the zero belongs to the type rather than to the spelling, and it is still there"
+        );
+        assert!(initial(&mut c, past).is_err(), "one past the zero is past the object");
+        assert!(initial(&mut c, before).is_err(), "and so is anything in front of the first");
+    }
+
+    #[test]
+    fn a_literal_is_read_at_the_width_its_elements_are_and_not_at_another() {
+        let mut f = Fixture::new();
+        let literal = f.wide_string("hi");
+        let wide = character(&mut f, literal, 1);
+        let literal = f.wide_string("hi");
+        let narrowed = f.cast(f.builtin(BuiltinSet::CHAR), &[pointer()], literal);
+        let byte = character(&mut f, narrowed, 0);
+
+        let mut c = f.checker();
+        assert_eq!(
+            initial(&mut c, wide),
+            Ok(Const::Int(i128::from(b'i'))),
+            "a wide literal holds wide characters and is read one of them at a time"
+        );
+        assert!(
+            initial(&mut c, byte).is_err(),
+            "a byte of one is not a character of it: what a byte of a wide character holds is \
+             the order the target keeps its bytes in, which the literal says nothing about"
+        );
     }
 
     #[test]
