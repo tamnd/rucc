@@ -4362,8 +4362,8 @@ mod tests {
         let (opts, _) = compile(&["a.c"]);
         assert_eq!(
             opts.gnuc,
-            GnucVersion { major: 7, minor: 0, patch: 0 },
-            "the lowest claim a modern glibc gives its own declarations to"
+            GnucVersion { major: 16, minor: 0, patch: 0 },
+            "the release this compiler is written against, and the earliest one of that series"
         );
 
         let (opts, _) = compile(&["-fgnuc-version=15.1.0", "a.c"]);
