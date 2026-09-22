@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `strcmp` and `strncmp` answer in three more shapes, where only one of the two strings is known or neither is. A comparison reads the first byte of both of its strings before it can answer anything, so where one string is known and the other is not there is still an answer in the two cases that byte settles on its own: a `strncmp` whose count is one, which is that byte and nothing else, and a comparison against the empty string, whose terminator stops the walk however many bytes the count allowed. The answer is the difference between the byte the compiler knows and the byte the other string holds, both read as `unsigned char`, which is what the standard says a comparison compares. That is the first answer this pass has that is an instruction rather than a constant or an address, because the byte is in memory and has to be read, and the read is safe wherever the call was, since the call was going to make it. The third shape is a count of zero, which reads neither string, so the answer is zero whatever the two of them hold and whether they are there to be read at all. A comparison declared to answer something no wider than a byte is left alone, because there is no room in it for the difference. `gcc.c-torture/execute/builtins/strcmp.c` and `strncmp.c` both pass now at all six levels, which they did not before: each defines its own copy of the function and aborts when it is reached, so passing means the fold happened rather than the answer happening to be right. Section 20.2 of `spec/optimizer/20-idioms-and-libcalls.md` is the write up. Part of tamnd/rucc#1677.
+
 ## 0.10.76
 
 ### Added
