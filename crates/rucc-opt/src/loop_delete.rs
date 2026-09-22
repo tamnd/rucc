@@ -70,6 +70,23 @@
 //! reaches the function. A loop adding one a million times leaves a constant behind and a loop
 //! adding an invariant `n` a million times leaves one multiply.
 //!
+//! A count that is an expression rather than a number is written as `base + step * max(count, 0)`,
+//! and the two things bolted onto it there are two assumptions paid for rather than believed. The
+//! clamp is [`crate::scev::Assumption::Entered`]. A count that comes out negative is a loop whose
+//! test failed the first time it ran, which is a loop that took its back edge no times and handed
+//! over what one pass through its body left, and zero is the count that says exactly that. The
+//! widening is the reading the exit test took, a sign extension for a signed test and a zero
+//! extension for an unsigned one. Section 7.7 is the warning about getting that one wrong: a limit
+//! past the middle of a thirty two bit type is a large number to an unsigned test and a negative
+//! one to a signed test, so sign extending what an unsigned test compared would clamp to zero and
+//! turn a loop over three billion elements into one that ran no times.
+//!
+//! The clamp is done in sixty four bits and the arithmetic in the value's own type, and the cut
+//! between the two is exact rather than close enough. Multiplying modulo two to the width and then
+//! cutting to a narrower width is the same number as cutting first and then multiplying, so a count
+//! worked out wide and truncated is the count. Widening it instead is a zero extension, because the
+//! clamp has already made it a number that is not negative.
+//!
 //! It is only done when it lets the loop go, which is a cost rule rather than a correctness one.
 //! Writing the final value down where the loop stays behind costs a multiply in the preheader and
 //! saves nothing, because the loop still carries the value round its own back edge and nothing in
@@ -88,13 +105,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, Builder, Func, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Block, Builder, Extra, Func, Inst, InstData, IntPred, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::purity::Facts;
-use crate::scev::{Bound, Count, Invariant, Scev};
+use crate::scev::{Count, Invariant, Plain, Reading, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const DELETED: &str = "loop taken out, it comes back and leaves nothing behind";
@@ -170,12 +187,33 @@ struct Job {
 }
 
 /// What a value the loop defines holds by the time anything outside it looks.
+///
+/// Two shapes for the two shapes a count comes in, and what separates them is how much of the
+/// answer is settled before anything reaches the function. A count that is a number settles all of
+/// it, so what is left is one expression and often one constant. A count that is an expression
+/// settles none of it and the preheader does the work.
 #[derive(Clone, Copy, Debug)]
-struct Leaves {
-    /// The type it evolved in, which is the type the arithmetic is done in.
-    ty: Type,
-    /// `base + step * count`, as far as it goes without writing anything down.
-    end: Invariant,
+enum Leaves {
+    /// `base + step * count`, worked out in full because the count is a number.
+    Worked {
+        /// The type it evolved in, which is the type the arithmetic is done in.
+        ty: Type,
+        /// The whole of it, as far as it goes without writing anything down.
+        end: Invariant,
+    },
+    /// `base + step * max(count, 0)`, built in the preheader because the count is an expression.
+    Built {
+        /// The type it evolved in, which is the type the arithmetic is done in.
+        ty: Type,
+        /// What the value holds the first time anything outside could have looked.
+        base: Invariant,
+        /// How much it goes up by each time round.
+        step: Invariant,
+        /// How many times the back edge is taken, before the clamp the module notes describe.
+        count: Plain,
+        /// How the exit test read what the count is built on, which is the widening owed.
+        reading: Reading,
+    },
 }
 
 /// The innermost loop that can go, and what it would take.
@@ -259,7 +297,11 @@ fn consider(
     // and nothing in here needs to know how many steps that took. What is not allowed is a loop
     // ending on `!=` whose counter may step past its limit, and that is the one assumption
     // [`crate::scev::Bound::comes_back`] holds back.
-    let count = scev.bound(id).as_ref().and_then(Bound::comes_back).ok_or(NO_COUNT)?;
+    let bound = scev.bound(id).ok_or(NO_COUNT)?;
+    // Taken here rather than inside [`ending`] because it belongs to the exit test rather than to
+    // any one value the loop hands over, so every one of them owes the same widening.
+    let reading = bound.reading();
+    let count = bound.comes_back().ok_or(NO_COUNT)?;
 
     let term = func.terminator(only.from).ok_or(SHAPE)?;
     let leaving = func.successors(term).find(|call| call.block == only.to).ok_or(SHAPE)?;
@@ -281,9 +323,9 @@ fn consider(
 
     let mut ends = Vec::with_capacity(wanted.len());
     for value in wanted {
-        let end = ending(func, scev, id, value, count).ok_or(NO_FORM)?;
+        let end = ending(func, scev, id, value, count, reading).ok_or(NO_FORM)?;
         debug_assert!(
-            named(end).is_none_or(|on| doms.dominates(defined_in(func, on), preheader)),
+            names(end).iter().all(|&on| doms.dominates(defined_in(func, on), preheader)),
             "a value the loop does not change is defined outside it and so dominates the preheader"
         );
         ends.push((value, end));
@@ -324,40 +366,74 @@ fn read_outside(func: &Func, blocks: &[Block], inside: &HashSet<Block>) -> Vec<V
 
 /// What the loop leaves in a value it hands over, or `None` when that is not a thing to write down.
 ///
-/// The count has to be a number here rather than an expression, which is a narrower rule than the
-/// one the loop itself is kept under. A count worked out from something the loop does not change
-/// says the loop ends, which is all the loop needs, but multiplying by it means writing it down in
-/// the counter's own type and under the reading its exit test took, and getting that wrong turns a
-/// loop over three billion elements into a loop that runs no times. Section 7.7's warning is about
-/// exactly that, so until there is a reason to, this takes the count it can count.
+/// Every refusal here is asked before anything is written, so that a refusal is a refusal rather
+/// than a preheader with half an expression in it. There is no undo and there should not need to
+/// be.
 fn ending(
     func: &Func,
     scev: &mut Scev<'_>,
     id: LoopId,
     value: Value,
     count: Count,
+    reading: Reading,
 ) -> Option<Leaves> {
-    let Count::Exact(trips) = count else {
-        return None;
-    };
-    let trips = i128::try_from(trips).ok()?;
     let chrec = scev.evolution(id, value).chrec()?;
-    let end = chrec.step.times(Invariant::number(trips)).and_then(|all| chrec.base.plus(all))?;
-    // Asked before anything is written, so that a refusal is a refusal rather than a preheader with
-    // half an expression in it. There is no undo here and there should not need to be.
-    let plain = end.plain()?;
+    // The arithmetic below is integer arithmetic in one lane. A chrec over anything else is not a
+    // thing this knows how to write down, whatever the count turned out to be.
+    if !chrec.ty.is_int() || chrec.ty.is_vector() {
+        return None;
+    }
+    match count {
+        Count::Exact(trips) => {
+            let trips = i128::try_from(trips).ok()?;
+            let all = chrec.step.times(Invariant::number(trips))?;
+            let end = chrec.base.plus(all)?;
+            writable(func, end, chrec.ty)?;
+            Some(Leaves::Worked { ty: chrec.ty, end })
+        }
+        Count::Symbolic(count) => {
+            writable(func, chrec.base, chrec.ty)?;
+            writable(func, chrec.step, chrec.ty)?;
+            let count = count.plain()?;
+            // A count built on a value that is itself read through an extension carries a widening
+            // of its own, and which of that one and the exit test's should be spent is not a
+            // question with an answer here. Refused rather than guessed at, the same way
+            // [`crate::trip::counted`] refuses it.
+            if count.read.is_some() {
+                return None;
+            }
+            // Room for the clamp to happen in. A count built on something already as wide as the
+            // arithmetic that carries it has nowhere to be negative.
+            if count.value.filter(|_| count.scale != 0).is_none_or(|on| func[on].ty.bits() > 64) {
+                return None;
+            }
+            Some(Leaves::Built { ty: chrec.ty, base: chrec.base, step: chrec.step, count, reading })
+        }
+    }
+}
+
+/// Whether [`write`] can put an expression in front of the loop in the type given.
+fn writable(func: &Func, part: Invariant, ty: Type) -> Option<Plain> {
+    let plain = part.plain()?;
     if plain.read.is_some() {
         return None;
     }
-    if plain.value.is_some_and(|named| func[named].ty != chrec.ty) {
+    if plain.value.is_some_and(|named| func[named].ty != ty) {
         return None;
     }
-    Some(Leaves { ty: chrec.ty, end })
+    Some(plain)
 }
 
-/// The one value an expression is built on, when it is built on one.
-fn named(leaves: Leaves) -> Option<Value> {
-    leaves.end.plain().and_then(|plain| plain.value.filter(|_| plain.scale != 0))
+/// Every value an expression is built on, which is what the dominance assertion is asked of.
+fn names(leaves: Leaves) -> Vec<Value> {
+    let on =
+        |part: Invariant| part.plain().and_then(|plain| plain.value.filter(|_| plain.scale != 0));
+    match leaves {
+        Leaves::Worked { end, .. } => on(end).into_iter().collect(),
+        Leaves::Built { base, step, count, .. } => {
+            [on(base), on(step), count.value].into_iter().flatten().collect()
+        }
+    }
 }
 
 /// The block a value is defined in.
@@ -376,8 +452,20 @@ fn defined_in(func: &Func, value: Value) -> Block {
 fn apply(func: &mut Func, job: &Job) -> usize {
     let term = func.terminator(job.preheader).expect("a preheader ends in a jump to the header");
     let mut instead: HashMap<Value, Value> = HashMap::new();
+    // One clamp for the whole loop rather than one per value, since the count belongs to the loop
+    // and the values differ only in what they do with it.
+    let mut times: Option<Value> = None;
     for &(value, leaves) in &job.ends {
-        let worked = write(func, term, leaves.ty, leaves.end);
+        let worked = match leaves {
+            Leaves::Worked { ty, end } => write(func, term, ty, end),
+            Leaves::Built { ty, base, step, count, reading } => {
+                let all = match times {
+                    Some(had) => had,
+                    None => *times.insert(clamped(func, term, count, reading)),
+                };
+                built(func, term, ty, base, step, all)
+            }
+        };
         instead.insert(value, worked);
     }
     swap_in(func, job, &instead);
@@ -433,6 +521,91 @@ fn write(func: &mut Func, before: Inst, ty: Type, end: Invariant) -> Value {
     so_far
 }
 
+/// How many times the back edge is taken, worked out in front of the loop and clamped at zero.
+///
+/// `max(read(value) * scale + offset, 0)`, in sixty four bits whatever the count's own type is, and
+/// the module notes say what each of those two is paying for. The clamp is a `select` rather than a
+/// branch because the whole of this has to be straight line code in a preheader, and nothing on any
+/// of it promises anything about overflow, since the count came out of a subtraction the analysis
+/// already reasoned about rather than out of anything written here.
+fn clamped(func: &mut Func, before: Inst, count: Plain, reading: Reading) -> Value {
+    let word = Type::int(64);
+    let on = count.value.expect("a count that is an expression is built on a value");
+    let mut wide = on;
+    if func[on].ty.bits() < 64 {
+        let widen = match reading {
+            Reading::Signed => Opcode::SExt,
+            Reading::Unsigned => Opcode::ZExt,
+        };
+        wide = cast(func, before, widen, wide, word);
+    }
+    if count.scale != 1 {
+        let by = crate::ivopts::number(func, before, word, count.scale);
+        wide = arith(func, before, Opcode::Mul, wide, by, word);
+    }
+    if count.offset != 0 {
+        let by = crate::ivopts::number(func, before, word, count.offset);
+        wide = arith(func, before, Opcode::Add, wide, by, word);
+    }
+    let none = crate::ivopts::number(func, before, word, 0);
+    let args = func.push_values(&[wide, none]);
+    let test =
+        InstData { args, extra: Extra::IntPred(IntPred::Sgt), ..InstData::new(Opcode::ICmp) };
+    let entered = made(func, before, test, word.with_lane(Type::I1));
+    let args = func.push_values(&[entered, wide, none]);
+    made(func, before, InstData { args, ..InstData::new(Opcode::Select) }, word)
+}
+
+/// `base + step * times`, worked out in front of the loop in the type the value evolved in.
+///
+/// The trivial parts are left out where the numbers make them trivial, for the reason [`write`]
+/// leaves them out: nothing after this pass folds a multiply by one, so a loop counting by ones
+/// would otherwise leave one in every preheader.
+fn built(
+    func: &mut Func,
+    before: Inst,
+    ty: Type,
+    base: Invariant,
+    step: Invariant,
+    times: Value,
+) -> Value {
+    if step.as_number() == Some(0) {
+        return write(func, before, ty, base);
+    }
+    let narrow = resize(func, before, times, ty);
+    let mut so_far = narrow;
+    if step.as_number() != Some(1) {
+        let by = write(func, before, ty, step);
+        so_far = arith(func, before, Opcode::Mul, by, narrow, ty);
+    }
+    if base.as_number() != Some(0) {
+        let from = write(func, before, ty, base);
+        so_far = arith(func, before, Opcode::Add, from, so_far, ty);
+    }
+    so_far
+}
+
+/// The clamped count in the type the arithmetic is done in.
+///
+/// A truncation where that type is narrower, which loses nothing that matters: cutting a product
+/// modulo two to the width and multiplying a cut are the same number. A zero extension where it is
+/// wider, which is exact because the clamp has already made the count a number that is not
+/// negative. Neither where the widths agree.
+fn resize(func: &mut Func, before: Inst, times: Value, ty: Type) -> Value {
+    let had = func[times].ty.bits();
+    if had == ty.bits() {
+        return times;
+    }
+    let either = if ty.bits() < had { Opcode::Trunc } else { Opcode::ZExt };
+    cast(func, before, either, times, ty)
+}
+
+/// One widening or narrowing, worked out in front of another instruction.
+fn cast(func: &mut Func, before: Inst, opcode: Opcode, arg: Value, ty: Type) -> Value {
+    let args = func.push_values(&[arg]);
+    made(func, before, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
 /// One arithmetic instruction, worked out in front of another one and promising nothing.
 ///
 /// Neither `nsw` nor `nuw`, which is the point rather than an omission. The module notes say why:
@@ -447,9 +620,14 @@ fn arith(
     right: Value,
     ty: Type,
 ) -> Value {
-    let span = func.span(before);
     let args = func.push_values(&[left, right]);
-    let inst = func.create_inst(InstData { args, ..InstData::new(opcode) }, &[ty], span);
+    made(func, before, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
+/// One instruction with one result, put in front of another one and given its source location.
+fn made(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[ty], span);
     func.insert_before(inst, before);
     func[inst].first_result.expect("one result was asked for")
 }
@@ -777,6 +955,48 @@ mod tests {
         let handed = handed_value(&it.func, &it.done).expect("the total is handed over");
         let (imm, ty) = crate::fold::constant(&it.func, handed).expect("and it is a number");
         assert_eq!(imm.signed(ty), 1000);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// The total handed over by a loop counting up to a value nothing here knows.
+    ///
+    /// The loop adds `n` to a running total until the counter arrives at `n`, so what it hands over
+    /// is `n + n * max(n - 1, 0)` and every part of that is written down in front of where the loop
+    /// was. The `select` is the clamp. [`crate::scev::Assumption::Entered`] says the count is
+    /// either the distance to the limit or zero, and taking the larger of the two is that
+    /// assumption paid for rather than leaned on. The sign extension in front of it is the exit
+    /// test's own reading of the value, which is `<` on signed values here.
+    #[test]
+    fn a_total_from_a_loop_counting_up_to_a_value_handed_in_is_worked_out() {
+        let mut it = shaped(Limit::Given, What::HandsOut);
+        let stats = delete(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, DELETED), 1);
+        assert_eq!(stats.count(Kind::Optimized, WRITTEN), 1);
+        assert_eq!(loops(&it.func), 0);
+        assert_eq!(tally(&it.func, Opcode::Select), 1, "the clamp at zero");
+        assert_eq!(tally(&it.func, Opcode::ICmp), 1, "and the test it picks on");
+        let read = "the count read the way the exit test read it";
+        assert_eq!(tally(&it.func, Opcode::SExt), 1, "{read}");
+        assert_eq!(tally(&it.func, Opcode::Trunc), 1, "and cut back to what the total is added in");
+        assert_eq!(tally(&it.func, Opcode::Mul), 1, "one multiply, by the count");
+        assert_eq!(tally(&it.func, Opcode::Add), 2, "the off by one on the count and the base");
+        sound(&it.func, &mut it.names);
+    }
+
+    /// The same total read after the loop rather than handed over, which is the corpus row.
+    ///
+    /// `loop-deletion.u32.1000000.unknown.read-back` is this shape, a bound nothing can see and a
+    /// total read once the loop is done. It is the row rucc ran a million times and gcc 16 ran no
+    /// times at all. The store stays and what it stores is worked out where the loop used to be.
+    #[test]
+    fn a_total_read_after_a_loop_counting_up_to_a_value_handed_in_is_worked_out() {
+        let mut it = shaped(Limit::Given, What::ReadAfter);
+        let stats = delete(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, DELETED), 1);
+        assert_eq!(stats.count(Kind::Optimized, WRITTEN), 1);
+        assert_eq!(loops(&it.func), 0);
+        assert_eq!(tally(&it.func, Opcode::Select), 1, "the clamp at zero");
+        assert_eq!(tally(&it.func, Opcode::Store), 1, "and the store that read it is still there");
         sound(&it.func, &mut it.names);
     }
 
