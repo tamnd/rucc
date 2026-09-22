@@ -227,7 +227,7 @@ struct Place {
 /// and answers with that. An output nothing is tied to answers `None`, which is a program that told
 /// the compiler the assembly only writes the operand while the instruction reads it before it
 /// writes it, and is refused where it is asked.
-fn read_as(list: &[AsmOperand], index: usize) -> Option<Value> {
+fn read_as(list: &[AsmOperand<'_>], index: usize) -> Option<Value> {
     let operand = list.get(index)?;
     if operand.value.is_some() {
         return operand.value;
@@ -239,10 +239,12 @@ fn read_as(list: &[AsmOperand], index: usize) -> Option<Value> {
 /// Which of an assembly statement's operands is in that register, for an instruction that reaches
 /// the register without its text saying so.
 ///
-/// The constraint letter is what says so, and it is the only thing in such a statement that could:
-/// `"=a"` is an output in `rax` and `"c"` is an input in `rcx`, and a register nothing names is a
-/// register nobody has said anything about. So a write looks among the outputs and a read among the
-/// inputs, and an output written `+` answers for either, since it is read before it is written.
+/// The constraint is what says so, and it is the only thing in such a statement that could:
+/// `"=a"` is an output in `rax`, `"c"` is an input in `rcx`, an operand that is a local register
+/// variable is in the register its declaration named, and a register nothing names is a register
+/// nobody has said anything about. So a write looks among the outputs and a read among the inputs,
+/// and an output written `+` answers for either, since it is read before it is written. See
+/// [`pinned`], which is the one question asked of both ways of saying it.
 ///
 /// The other way a read of such a register is said is a matching constraint. `"=a"` on an output
 /// and `"0"` on an input is the program saying that one register holds the input on the way in and
@@ -255,10 +257,9 @@ fn read_as(list: &[AsmOperand], index: usize) -> Option<Value> {
 /// `None` is a register the instruction uses and the statement put nothing in, which is the usual
 /// answer rather than an unusual one. `cpuid` writes four registers and a program that wanted one
 /// of them names one. See [`Lowering::spare`], which is where that one goes.
-fn bound(list: &[AsmOperand], reg: PhysReg, role: Role) -> Option<usize> {
-    let letter = |operand: &AsmOperand| operand.fixed.and_then(x86_64::gpr_letter);
+fn bound(list: &[AsmOperand<'_>], reg: PhysReg, role: Role) -> Option<usize> {
     let named = list.iter().position(|operand| {
-        letter(operand) == Some(reg)
+        pinned(operand) == Some(reg)
             && if role.is_def() { operand.result.is_some() } else { operand.value.is_some() }
     });
     if named.is_some() || role.is_def() {
@@ -268,8 +269,30 @@ fn bound(list: &[AsmOperand], reg: PhysReg, role: Role) -> Option<usize> {
         operand.value.is_some()
             && operand
                 .tied
-                .is_some_and(|at| list.get(at).is_some_and(|out| letter(out) == Some(reg)))
+                .is_some_and(|at| list.get(at).is_some_and(|out| pinned(out) == Some(reg)))
     })
+}
+
+/// The register one of an assembly statement's operands is in, whichever of the two ways said it.
+///
+/// A constraint letter is one way and is the only way a program can say one of the six registers
+/// that have a letter. A local register variable is the other, and it is the only way to say any
+/// of the rest: there is no letter for `r12`, which is the whole reason the extension exists, so
+/// the declaration says it and the front end wrote the name into the constraint. The name is read
+/// against this machine's table here, the same place the letter is read against it, and a name the
+/// machine has not got answers nothing, which leaves the operand where an operand nobody placed
+/// goes.
+///
+/// The sigil gcc allows in front of a name is taken off here, because what a name is written with
+/// is syntax and which register it means is this question.
+fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
+    match operand.named {
+        Some(name) => {
+            let (reg, _) = x86_64::gpr_named(name.strip_prefix('%').unwrap_or(name))?;
+            Some(reg)
+        }
+        None => operand.fixed.and_then(x86_64::gpr_letter),
+    }
 }
 
 /// Why a function could not be lowered.
@@ -3146,7 +3169,7 @@ impl<'a> Lowering<'a> {
         let results: Vec<Value> = data.results().collect();
         let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
             .ok_or_else(refused)?;
-        let list: Vec<AsmOperand> = operands.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
 
         // Read after the constraints and not before them, because a mnemonic whose suffix the
         // program left off is read at the width of the operands it names, and the operands are
@@ -3315,7 +3338,7 @@ impl<'a> Lowering<'a> {
     /// an operand into a block before the instruction that fills it, so both are a use in front of
     /// every definition. What the program is owed there is nothing, since the value is undefined
     /// either way, and what the allocator is owed is a register something wrote.
-    fn seeded(&mut self, inst: Inst, operand: AsmOperand) -> Result<mir::Reg, Unsupported> {
+    fn seeded(&mut self, inst: Inst, operand: AsmOperand<'_>) -> Result<mir::Reg, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let value = operand.result.or(operand.value).ok_or_else(refused)?;
         let class = self.class_of(self.source[value].ty);
@@ -3368,7 +3391,7 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         steps: &[x86_64::Step],
         places: &mut [Place],
-        list: &[AsmOperand],
+        list: &[AsmOperand<'_>],
         clobbered: &[PhysReg],
         writes: &[usize],
     ) -> Result<(), Unsupported> {
@@ -3546,7 +3569,7 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         line: &x86_64::Line,
         places: &[Place],
-        list: &[AsmOperand],
+        list: &[AsmOperand<'_>],
         clobbered: &[PhysReg],
     ) -> Result<(), Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -3629,10 +3652,10 @@ impl<'a> Lowering<'a> {
     /// out rather than given a spare one, which is the difference from `cpuid` and is right for the
     /// same reason: `cpuid` writes four registers whatever the program said, and what these bytes
     /// touch is known only from what the program said.
-    fn lettered(&self, list: &[AsmOperand]) -> (Vec<OperandDesc>, Vec<x86_64::Piece>) {
+    fn lettered(&self, list: &[AsmOperand<'_>]) -> (Vec<OperandDesc>, Vec<x86_64::Piece>) {
         let mut named: Vec<PhysReg> = Vec::new();
         for operand in list {
-            if let Some(reg) = operand.fixed.and_then(x86_64::gpr_letter) {
+            if let Some(reg) = pinned(operand) {
                 if !named.contains(&reg) {
                     named.push(reg);
                 }
@@ -3664,7 +3687,7 @@ impl<'a> Lowering<'a> {
         desc: OperandDesc,
         piece: x86_64::Piece,
         places: &[Place],
-        list: &[AsmOperand],
+        list: &[AsmOperand<'_>],
     ) -> Result<mir::Operand, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         // A register the instruction reaches without its text naming it belongs to whichever of the
@@ -3736,7 +3759,15 @@ impl<'a> Lowering<'a> {
                 return Err(refused());
             }
         }
-        Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
+        // An operand the program pinned is in that register and nowhere else, whatever the opcode
+        // would have allowed it. That is the whole of what a local register variable asks for, and
+        // it is the same shape a division already has: the allocator is told the register, puts a
+        // move in front or behind where it has to, and leaves it out where it does not.
+        let constraint = match pinned(&operand) {
+            Some(reg) => Constraint::Fixed(reg),
+            None => desc.constraint,
+        };
+        Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint })
     }
 
     /// A register the template named in its own text.
@@ -3805,7 +3836,7 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         at: x86_64::At,
         places: &[Place],
-        list: &[AsmOperand],
+        list: &[AsmOperand<'_>],
     ) -> Result<mir::Mem, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let base = match at.base {
@@ -6186,6 +6217,32 @@ mod tests {
              %1:gpr = x64.mov_ri_64 0\n    \
              %2:gpr($rax), %3:gpr($rbx), %4:gpr($rcx), %5:gpr($rdx) = x64.cpuid %0($rax), \
              %1($rcx)\n    x64.ret_val_32 %2($rax)\n}\n"
+        );
+    }
+
+    /// An operand the program pinned, by declaring the object it comes from `register long x asm
+    /// ("r12")`. The letter on its own leaves the allocator to pick, and a template that reads the
+    /// register by name needs the two to be the same register, so the brace is what ties them
+    /// together. That is the one use of a local register variable the GNU manual calls reliable,
+    /// and it is what tcc's `tests/tcctest.c` counts on.
+    #[test]
+    fn an_operand_the_program_pinned_is_placed_in_the_register_it_named() {
+        let u64 = Type::int(64);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let out =
+            assembly(&mut source, block, &mut names, "mov $0x4542, %r12", "=r{r12}", &[], &[u64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // The template is one instruction the table already has, so it lowers to that instruction
+        // rather than to text nobody read, and the register it names is the statement's own output
+        // because the brace put the output there. Without the brace the letter would have let the
+        // allocator pick, the two `%r12` would have been different registers, and the program would
+        // have come back with whatever was in the one it picked.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr($r12) = x64.mov_ri_64 17730\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
         );
     }
 

@@ -104,15 +104,39 @@ fn a_name_this_machine_has_not_got_is_refused() {
 }
 
 #[test]
-fn an_asm_operand_kept_in_a_named_register_is_refused() {
-    // gcc puts such an operand in the register the declaration named whatever the constraint would
-    // otherwise have allowed, and a program that writes one is counting on that: tcc's
-    // `tests/tcctest.c` declares one in `%eax` and hands it to a template that reads `%eax` by
-    // name. Here the operand would go wherever the allocator put the variable, so it is turned
-    // down rather than assembled into a program that reads something else.
-    let source = "long f(void) { register long x asm (\"rbx\") = 1; asm (\"\" : : \"r\" (x)); \
+fn an_asm_operand_kept_in_a_named_register_goes_in_that_register() {
+    // The one use of these the GNU manual calls reliable, and the only way to name a register the
+    // constraint letters have no letter for. The template reads `%r12` by name and says nothing
+    // about where the operand is, so the declaration is the only thing that can put the two in the
+    // same place.
+    let source = "long f(void) { register long x asm (\"r12\"); \
+                  asm volatile (\"mov $0x4542, %%r12\" : \"=r\" (x)); return x; }\n";
+    let text = asm("operand", source);
+    assert!(text.contains("%r12"), "the operand did not land in the register named:\n{text}");
+    assert!(
+        !text.contains("movq\t%rax, %rax"),
+        "the operand went somewhere else and was copied back:\n{text}"
+    );
+}
+
+#[test]
+fn an_input_in_a_named_register_is_the_register_the_template_reads() {
+    // The other half of the same thing. tcc's `tests/tcctest.c` hands one of these to a template
+    // that names the register outright, so the value has to be in `%r12` before the template runs.
+    let source = "long f(long a) { register long x asm (\"r12\") = a; long y; \
+                  asm volatile (\"mov %%r12, %0\" : \"=r\" (y) : \"r\" (x)); return y; }\n";
+    let text = asm("input", source);
+    assert!(text.contains("%r12"), "the input never reached the register named:\n{text}");
+}
+
+#[test]
+fn an_operand_wanted_in_memory_and_in_a_named_register_is_refused() {
+    // A register is not an address, so there is nowhere for this one to go. Refused rather than
+    // quietly given one of the two, because either choice is a program that does not do what it
+    // says.
+    let source = "long f(void) { register long x asm (\"r12\") = 1; asm (\"\" : : \"m\" (x)); \
                   return x; }\n";
-    let (ok, _, said) = run("operand", source);
-    assert!(!ok, "an operand in a named register was accepted");
-    assert!(said.contains("named register"), "{said}");
+    let (ok, _, said) = run("both", source);
+    assert!(!ok, "an operand in memory and in a register at once was accepted");
+    assert!(said.contains("in memory and in a named register"), "{said}");
 }
