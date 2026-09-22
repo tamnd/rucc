@@ -113,8 +113,7 @@ fn section<'a>(object: &'a [u8], want: &str) -> Option<&'a [u8]> {
 
 /// Whether those bytes are somewhere in that section, and false for a section that is not there.
 fn holds(object: &[u8], name: &str, want: &[u8]) -> bool {
-    section(object, name)
-        .is_some_and(|bytes| bytes.windows(want.len()).any(|seen| seen == want))
+    section(object, name).is_some_and(|bytes| bytes.windows(want.len()).any(|seen| seen == want))
 }
 
 #[test]

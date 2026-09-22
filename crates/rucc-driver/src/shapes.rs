@@ -309,12 +309,8 @@ impl Walk<'_> {
             params.push(Param { name: name.map(|name| self.spelled(name)), ty, at: None });
             declared.push(written.get(index).map(|param| param.raw()));
         }
-        let sig = Sig {
-            returns,
-            params,
-            variadic: signature.variadic,
-            prototyped: signature.prototyped,
-        };
+        let sig =
+            Sig { returns, params, variadic: signature.variadic, prototyped: signature.prototyped };
         Some((sig, declared))
     }
 
