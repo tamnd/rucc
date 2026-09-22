@@ -133,6 +133,16 @@ pub struct Enumerator {
     pub value: i128,
 }
 
+/// A typedef name the program wrote, and what it stands for.
+#[derive(Debug, Clone, Copy)]
+pub struct Alias {
+    /// The name.
+    pub name: Symbol,
+    /// The type it was written for, which is the same type the name resolves to rather than a
+    /// type of its own.
+    pub of: TypeId,
+}
+
 /// Every type in one translation unit.
 #[derive(Debug)]
 pub struct Types {
@@ -142,6 +152,7 @@ pub struct Types {
     function_map: HashMap<FunctionType, FunctionId>,
     records: Vec<RecordInfo>,
     enums: Vec<EnumInfo>,
+    aliases: Vec<Alias>,
     void: TypeId,
     boolean: TypeId,
     ints: [TypeId; 13],
@@ -169,6 +180,7 @@ impl Types {
             function_map: HashMap::new(),
             records: Vec::new(),
             enums: Vec::new(),
+            aliases: Vec::new(),
             // Fixed up immediately below. There is no id to put here before the table exists,
             // and an `Option` on each of them would be paid for on every read for the sake of
             // four lines of construction.
@@ -508,6 +520,32 @@ impl Types {
     /// Panics if `id` came from a different table.
     pub fn list_enumerators(&mut self, id: EnumId, enumerators: Vec<Enumerator>) {
         self.enums[id.0 as usize].enumerators = enumerators;
+    }
+
+    /// Records that the program wrote `name` as a typedef name for `of`.
+    ///
+    /// Beside the table rather than in it, and that is the decision this is. A typedef name is a
+    /// second name for a type and not a type of its own, so an ordinary typedef interns nothing
+    /// and the name is written nowhere the types can be asked for it. Making it a type of its own
+    /// would mean two names for one type are two ids, and then the equality of two [`TypeId`]s
+    /// stops meaning the two are the same type, which is the question this table is built to
+    /// answer in one comparison. So the names go in a list that changes nothing about what a type
+    /// is.
+    ///
+    /// What the list cannot answer is which of two names a particular declaration was written
+    /// with, since that is a fact about the declaration and this is a fact about the type. A
+    /// reader gets the names the program wrote and what each one stands for, and no more.
+    pub fn alias(&mut self, name: Symbol, of: TypeId) {
+        if self.aliases.iter().any(|had| had.name == name && had.of == of) {
+            return;
+        }
+        self.aliases.push(Alias { name, of });
+    }
+
+    /// Every typedef name the program wrote, in the order it wrote them.
+    #[must_use]
+    pub fn aliases(&self) -> &[Alias] {
+        &self.aliases
     }
 
     /// A typedef name standing for `underlying`.

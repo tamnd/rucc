@@ -114,7 +114,7 @@ pub use crate::record::{
     Extent, Field, FieldDecl, RecordError, RecordLayout, RecordOptions, VariableLayout,
     layout_record,
 };
-pub use crate::types::{EnumInfo, Enumerator, RecordInfo, TypeId, Types};
+pub use crate::types::{Alias, EnumInfo, Enumerator, RecordInfo, TypeId, Types};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";
@@ -423,6 +423,26 @@ mod tests {
         assert_eq!(types.canonical(name), int, "and no rule ever sees it");
         assert!(types.is_sugar(name));
         assert!(!types.is_sugar(int));
+    }
+
+    /// The names are a list beside the table and change nothing about what a type is.
+    ///
+    /// Two names for one type are one type, which is the whole reason they are kept here rather
+    /// than interned: the list grows and the identifiers do not, so the equality of two type
+    /// identifiers still means the two are the same type.
+    #[test]
+    fn a_typedef_name_is_recorded_without_making_a_type_of_its_own() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        types.alias(interner.intern("int32_t"), int);
+        types.alias(interner.intern("word"), int);
+        types.alias(interner.intern("int32_t"), int);
+        let names: Vec<_> =
+            types.aliases().iter().map(|had| interner.resolve(had.name).to_owned()).collect();
+        assert_eq!(names, ["int32_t", "word"], "the same name twice is one entry");
+        assert!(types.aliases().iter().all(|had| had.of == int));
+        assert_eq!(types.int(IntKind::Int), int, "and the type is the type it was");
     }
 
     #[test]
