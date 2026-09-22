@@ -2123,30 +2123,36 @@ impl<'u> Body<'_, 'u> {
             return;
         }
 
-        // An operand that names a local kept in a machine register. gcc puts such an operand in
-        // the register the declaration named, whatever the constraint would otherwise have
-        // allowed, and a program that writes one is counting on that: tcc's `tests/tcctest.c`
-        // declares one in `%eax` and hands it to a template that reads `%eax` by name. Here the
-        // operand would go wherever the allocator put the variable, which is a different register
-        // on most days, so it is turned down rather than assembled into a program that reads
-        // something else.
-        for list in [node.outputs, node.inputs] {
-            for index in 0..tast[list].len() {
-                let operand = tast[list][index];
-                if self.in_a_named_register(operand.value) {
-                    let at = tast.expr_span(operand.value);
-                    self.unsupported("an `asm` operand kept in a named register", at);
-                    return;
-                }
-            }
-        }
-
         // The constraints of every operand, in the order the template counts them, which is
         // also the order the operands below are built in.
+        //
+        // An operand that names a local kept in a machine register carries that register's name in
+        // braces on the end of its constraint. gcc puts such an operand in the register the
+        // declaration named whatever the constraint would otherwise have allowed, and a program
+        // that writes one is counting on that: tcc's `tests/tcctest.c` declares one in `r12` and
+        // hands it to a template that names `%r12` in its own text, so the two have to be the same
+        // register or the statement reads something the program never wrote. The name is the whole
+        // of what the back end needs and the constraint list is what already travels with the
+        // statement, which is why it goes there rather than in a list of its own.
         let mut written = Vec::new();
         for list in [node.outputs, node.inputs] {
             for index in 0..tast[list].len() {
-                written.push(self.asm_text(tast[list][index].constraint));
+                let operand = tast[list][index];
+                let mut text = self.asm_text(operand.constraint);
+                if let Some(register) = self.named_register(operand.value) {
+                    // An operand handed over as an address is the address of the object, and an
+                    // object in a register has no address. gcc refuses the same pair.
+                    if operand.memory {
+                        let at = tast.expr_span(operand.value);
+                        self.unsupported("an `asm` operand in memory and in a named register", at);
+                        return;
+                    }
+                    let name = self.asm_text(register);
+                    text.push('{');
+                    text.push_str(&name);
+                    text.push('}');
+                }
+                written.push(text);
             }
         }
         let constraints = written.join(",");
@@ -2244,20 +2250,21 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// Whether an operand of an assembly statement names a local kept in a named register.
+    /// The machine register an operand of an assembly statement is kept in, for an operand that
+    /// names a local declared to be in one.
     ///
     /// The name and the read of it and nothing else. An output operand is the object itself and
     /// an input operand is the object with a read on top, so the read is looked through, and an
     /// expression with anything else on top is a value computed from the object rather than the
     /// object, which is what gcc makes of one too.
-    fn in_a_named_register(&self, expr: ExprId) -> bool {
+    fn named_register(&self, expr: ExprId) -> Option<rucc_sema::StrId> {
         let tast = self.tast();
         let named = match tast[expr].kind {
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => tast[operand].kind,
             kind => kind,
         };
-        let ExprKind::Decl(decl) = named else { return false };
-        tast[decl].register.is_some()
+        let ExprKind::Decl(decl) = named else { return None };
+        tast[decl].register
     }
 
     /// The integer one structure or union in a register constraint travels as.

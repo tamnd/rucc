@@ -20,6 +20,16 @@
 //! has. A disagreement means the constraint is not the whole story for that statement, and the
 //! answer is nothing at all rather than a guess, because the caller's next move is to place values
 //! and placing them by a guess is a wrong program rather than a refused one.
+//!
+//! # A register the letters cannot name
+//!
+//! One entry may carry a machine register name in braces, `=r{r12}`, which the front end writes
+//! for an operand that is a local register variable. That is not a constraint any program writes:
+//! what a program writes is `register long x asm ("r12");` on the declaration, and the brace is
+//! where the declaration's answer is put so that the back end reads it in the same place it reads
+//! everything else about an operand. It is spelled this way round because a constraint list is
+//! already the one thing that travels with the statement, and a second list beside it would be a
+//! second thing to keep in step with the first.
 
 use crate::Value;
 
@@ -34,7 +44,7 @@ pub enum AsmRole {
 
 /// One operand of an assembly statement, as its constraint describes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AsmOperand {
+pub struct AsmOperand<'a> {
     /// Which side of the colon it was written on.
     pub role: AsmRole,
     /// Whether the assembly is handed the address of an object rather than a value.
@@ -66,21 +76,36 @@ pub struct AsmOperand {
     /// `None` when no letter named a register, and also when more than one did, since a constraint
     /// offering a choice of registers has not named one.
     pub fixed: Option<char>,
+    /// The machine register named outright, for an operand that is a local register variable.
+    ///
+    /// `register long x asm ("r12"); asm ("..." : "=r" (x));` is the GNU extension for a register
+    /// the constraint letters cannot say, and it is the reason the extension exists: there is a
+    /// letter for `rax` and one for `rcx` and there is no letter at all for `r12`. So the front end
+    /// writes the name into the constraint in braces, `=r{r12}`, and the operand is in that
+    /// register whatever the rest of the constraint would have allowed.
+    ///
+    /// The name as the program wrote it, sigil and all, because which register a name means is the
+    /// target's business the same way which register a letter means is. See [`Self::fixed`].
+    pub named: Option<&'a str>,
 }
 
 /// The operands of one assembly statement, in the order the template counts them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AsmOperands {
-    list: Vec<AsmOperand>,
+pub struct AsmOperands<'a> {
+    list: Vec<AsmOperand<'a>>,
 }
 
-impl AsmOperands {
+impl<'a> AsmOperands<'a> {
     /// The operands of a statement with that constraint list, those results and those values.
     ///
     /// Nothing when the list does not describe what the instruction carries, which is what a
     /// constraint that is not the whole story looks like from here. See the module documentation.
     #[must_use]
-    pub fn read(constraints: &str, results: &[Value], values: &[Value]) -> Option<AsmOperands> {
+    pub fn read(
+        constraints: &'a str,
+        results: &[Value],
+        values: &[Value],
+    ) -> Option<AsmOperands<'a>> {
         // An empty list is no operands and not one operand spelled with nothing, which is what
         // splitting the empty string on commas would otherwise give.
         let written: Vec<&str> =
@@ -103,6 +128,7 @@ impl AsmOperands {
                 value: read,
                 tied: entry.tied,
                 fixed: entry.fixed,
+                named: entry.named,
             });
         }
 
@@ -124,7 +150,7 @@ impl AsmOperands {
     }
 
     /// The operands, in the order the template counts them.
-    pub fn iter(&self) -> impl Iterator<Item = &AsmOperand> {
+    pub fn iter(&self) -> impl Iterator<Item = &AsmOperand<'a>> {
         self.list.iter()
     }
 
@@ -156,31 +182,33 @@ impl AsmOperands {
 
 /// One constraint, read for the three things the scan above needs from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Entry {
+struct Entry<'a> {
     role: AsmRole,
     memory: bool,
     updates: bool,
     tied: Option<usize>,
     fixed: Option<char>,
+    named: Option<&'a str>,
 }
 
-impl Entry {
+impl<'a> Entry<'a> {
     /// One constraint, or nothing for one with a letter this does not know.
     ///
     /// Not knowing a letter is the same answer as a count that does not add up and for the same
     /// reason. A letter nobody has read is a letter that may mean the operand is somewhere other
     /// than where the rest of the constraint suggests.
-    fn read(text: &str) -> Option<Entry> {
+    fn read(text: &'a str) -> Option<Entry<'a>> {
         let mut role = AsmRole::Input;
         let mut updates = false;
         let mut memory = false;
         let mut register = false;
         let mut tied = None;
         let mut fixed = None;
+        let mut named = None;
         let mut several = false;
 
-        let mut rest = text.chars().peekable();
-        while let Some(letter) = rest.next() {
+        let mut rest = text.char_indices().peekable();
+        while let Some((at, letter)) = rest.next() {
             match letter {
                 '=' => role = AsmRole::Output,
                 '+' => {
@@ -222,11 +250,30 @@ impl Entry {
                 // number is the whole run of them rather than the first.
                 '0'..='9' => {
                     let mut number = letter.to_digit(10)? as usize;
-                    while let Some(next) = rest.peek().and_then(|&c| c.to_digit(10)) {
+                    while let Some(next) = rest.peek().and_then(|&(_, c)| c.to_digit(10)) {
                         number = number * 10 + next as usize;
                         rest.next();
                     }
                     tied = Some(number);
+                    register = true;
+                }
+                // A machine register named outright, which is what the front end writes for a
+                // local register variable. See [`AsmOperand::named`]. It is one register, so a
+                // second one in the same constraint is two answers to one question and is no
+                // answer, the same way two letters naming two registers is.
+                '{' => {
+                    let start = at + letter.len_utf8();
+                    let mut end = None;
+                    for (at, letter) in rest.by_ref() {
+                        if letter == '}' {
+                            end = Some(at);
+                            break;
+                        }
+                    }
+                    let inside = text.get(start..end?)?;
+                    if inside.is_empty() || named.replace(inside).is_some() {
+                        return None;
+                    }
                     register = true;
                 }
                 _ => return None,
@@ -239,7 +286,7 @@ impl Entry {
             return None;
         }
         let fixed = if several { None } else { fixed };
-        Some(Entry { role, memory: memory && !register, updates, tied, fixed })
+        Some(Entry { role, memory: memory && !register, updates, tied, fixed, named })
     }
 }
 
@@ -298,7 +345,7 @@ mod tests {
         let results = values(1);
         let args = values(1);
         let read = AsmOperands::read("=r,0", &results, &args).expect("an output and its match");
-        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
         assert_eq!(list[1].tied, Some(0));
         assert_eq!(read.tied_to(0), Some(args[0]));
     }
@@ -307,7 +354,7 @@ mod tests {
     fn an_operand_in_memory_is_an_address_whichever_side_it_is_on() {
         let args = values(2);
         let read = AsmOperands::read("=m,m", &[], &args).expect("an output and an input in memory");
-        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
         assert!(list[0].memory && list[1].memory);
         assert_eq!(list[0].result, None);
         assert_eq!(list[0].value, Some(args[0]));
@@ -348,7 +395,7 @@ mod tests {
         let results = values(1);
         let args = values(2);
         let read = AsmOperands::read("=a,c,r", &results, &args).expect("the three of them");
-        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
         assert_eq!(list[0].fixed, Some('a'), "an output in rax");
         assert_eq!(list[1].fixed, Some('c'), "an input in rcx");
         assert_eq!(list[2].fixed, None, "an input the allocator places");
@@ -360,9 +407,40 @@ mod tests {
     fn a_letter_that_names_more_than_one_register_names_none_of_them() {
         let args = values(2);
         let read = AsmOperands::read("ad,A", &[], &args).expect("two inputs");
-        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
         assert_eq!(list[0].fixed, None, "a choice between two registers");
         assert_eq!(list[1].fixed, None, "the letter that names a pair");
+    }
+
+    #[test]
+    fn a_register_named_outright_is_kept_as_the_program_spelled_it() {
+        let results = values(1);
+        let args = values(1);
+        let read = AsmOperands::read("=r{r12},r{%esi}", &results, &args).expect("two operands");
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
+        assert_eq!(list[0].named, Some("r12"), "an output in a register no letter can name");
+        assert_eq!(list[0].role, AsmRole::Output, "and the rest of the constraint still read");
+        assert_eq!(
+            list[1].named,
+            Some("%esi"),
+            "the sigil gcc allows in front of a name is part of the name here, since what a name \
+             means is the target's question and so is what it may be written with"
+        );
+    }
+
+    #[test]
+    fn a_constraint_naming_two_registers_outright_is_refused() {
+        assert_eq!(
+            AsmOperands::read("r{r12}{r13}", &[], &values(1)),
+            None,
+            "two answers to which one register an operand is in is no answer"
+        );
+    }
+
+    #[test]
+    fn a_name_with_no_end_to_it_and_a_name_with_nothing_in_it_are_refused() {
+        assert_eq!(AsmOperands::read("r{r12", &[], &values(1)), None);
+        assert_eq!(AsmOperands::read("r{}", &[], &values(1)), None);
     }
 
     #[test]
@@ -379,10 +457,10 @@ mod tests {
     fn a_number_of_more_than_one_digit_is_the_whole_run() {
         let results = values(11);
         let args = values(1);
-        let outputs = ["=r"; 11].join(",");
-        let read = AsmOperands::read(&format!("{outputs},10"), &results, &args)
+        let constraints = format!("{},10", ["=r"; 11].join(","));
+        let read = AsmOperands::read(&constraints, &results, &args)
             .expect("eleven outputs and a match on the last");
-        let list: Vec<AsmOperand> = read.iter().copied().collect();
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
         assert_eq!(list[11].tied, Some(10));
         assert_eq!(read.tied_to(10), Some(args[0]));
     }
