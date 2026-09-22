@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.75
+
 ### Added
 
 - `rucc-debug` can write a location that changes as the program counter moves. A local's place is now either one expression good for the whole function, which is what a frame slot is, or a list of stretches, each one saying where the local is over that many bytes of the function, and a list goes into `.debug_loclists` with a `DW_AT_location` of `DW_FORM_sec_offset` pointing at it. A stretch names its addresses by the function's own symbol plus how far into the function it starts, so a linker resolves it the same way it resolves the function's low PC, which is what `-ffunction-sections` needs. A place is an offset from the frame base or a register, and a register is named by the number the target's DWARF numbering gives it rather than by the one the back end uses. An address no stretch covers is an address the local is nowhere, which a debugger prints as unavailable rather than showing whatever is in the register now, and a local that is nowhere over the whole of a function gets no location at all and keeps its name. Nothing produces a list yet and no output changes: the driver still hands over one place per local, and working out the stretches needs the register allocator's output. Part of tamnd/rucc#1645.
