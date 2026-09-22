@@ -38,12 +38,16 @@
 //! DWARF has for that is an expression, which is the same thing the variable length array itself
 //! is waiting for.
 //!
-//! A typedef reaches [`Shape::Alias`] only when it was written with an alignment on it, which is
-//! not a hole here but a thing the checker does not keep: an ordinary typedef binds its name to the
-//! very type the name stood for, so `types.kind` for a parameter declared `size_type` answers
-//! `unsigned long` and the name `size_type` is not anywhere to be asked for. A debugger reads the
-//! right type under a different name, which is worth fixing where the name is dropped rather than
-//! here.
+//! The typedef names come from the list beside the type table rather than from the types, because
+//! an ordinary typedef binds its name to the very type the name stood for and interns nothing of
+//! its own. Every name the program wrote at file scope gets a `DW_TAG_typedef` saying what it
+//! stands for, which is what lets a debugger answer a question asked in the program's own words.
+//! What it does not do is make a declaration point at the name it was written with: `types.kind`
+//! for a parameter declared `size_type` answers `unsigned long` and always did, so the parameter's
+//! `DW_AT_type` is the underlying type and a debugger printing that parameter says `unsigned long`.
+//! Which of the names a declaration used is a fact about the declaration rather than about the
+//! type, and nothing between the checker and here carries it. That half is still open on
+//! tamnd/rucc#1640.
 
 use std::collections::HashMap;
 
@@ -160,6 +164,15 @@ pub(crate) fn collect(
             }
             _ => {}
         }
+    }
+    // The typedef names last, so that nothing else waits behind a name that may turn out to stand
+    // for a type nothing else mentions. A name whose type cannot be described is left out rather
+    // than written with no `DW_AT_type`, since that is how DWARF spells a name for `void` and a
+    // program that wrote `typedef void none;` is entitled to have that one come out right.
+    for &alias in types.aliases() {
+        let Some(of) = walk.told_or_void(alias.of) else { continue };
+        let name = walk.spelled(alias.name);
+        walk.out.push(Shape::Alias { name, of });
     }
     Meaning { types: walk.out, funcs, objects }
 }

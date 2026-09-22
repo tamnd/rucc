@@ -762,6 +762,16 @@ impl Checker<'_> {
             Some(align) => self.types.aligned_typedef(name, ty, align),
             None => ty,
         };
+        // The name goes beside the table whether or not anything was interned for it, which is
+        // the only record of it there will be: the binding below is in a scope that closes, and
+        // the ordinary typedef above interned nothing, so by the end of the translation unit
+        // there is otherwise nowhere left that knows the program wrote the word. Debug
+        // information is the reader. File scope only, because a block-scope typedef belongs to
+        // the block it was written in and there is nothing yet that says which block a type was
+        // named in.
+        if self.scopes.at_file_scope() {
+            self.types.alias(name, ty);
+        }
         match self.scopes.lookup_here(name) {
             // A typedef may be written twice for the same type, which is what lets two headers
             // that both define `size_t` be included by one file.
