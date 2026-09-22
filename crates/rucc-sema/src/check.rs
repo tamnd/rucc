@@ -338,6 +338,19 @@ impl<'a> Checker<'a> {
         value
     }
 
+    /// The same, where an object that exists before the program runs is being initialized, which
+    /// is the one place C23 6.6p10 lets an implementation take more than the rest of 6.6 does.
+    ///
+    /// # Errors
+    ///
+    /// [`NotConstant`] when the expression is not one, the same way [`Self::eval_constant`] is.
+    pub fn eval_initializer(&mut self, expr: ExprId) -> Result<Const, NotConstant> {
+        let mut eval = self.eval();
+        let value = eval.initializer(expr);
+        self.absorb(eval.finish());
+        value
+    }
+
     /// The same, for a context that needs an integer constant expression.
     ///
     /// # Errors
