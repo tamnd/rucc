@@ -378,6 +378,7 @@ impl Assembler<'_> {
                     // nothing to carry: the depth is in the opcode byte the mnemonic picks, so
                     // what the encoder needs from here is that an argument was there at all.
                     Arg::Stack(_) => Value::Stack,
+                    Arg::Lit(lane) => Value::Imm(i64::from(lane)),
                     // The first operand read, which is where a call puts the address it goes
                     // through. Everything in front of it is a register the call writes.
                     Arg::Through => {

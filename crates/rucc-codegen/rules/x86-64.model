@@ -76,6 +76,15 @@
 (semantics (x64.movq_to_xmm v) (float_from_bits 64 v))
 (semantics (x64.movd_from_xmm v) (bits_from_float 32 v))
 (semantics (x64.movq_from_xmm v) (bits_from_float 64 v))
+;; The lane moves, which are the same reinterpretation sixteen bits wide. `pinsrw` and `pextrw`
+;; name one of the eight lanes of a vector register with an immediate, and the immediate this
+;; compiler writes is always zero, because the low lane is where the psABI puts a `_Float16` and
+;; where every runtime routine that takes one looks. So these three say nothing about a lane: the
+;; instruction they stand for has the number already and the number is part of the instruction.
+(semantics (x64.pinsrw_rr v) (float_from_bits 16 v))
+(semantics (x64.pextrw_rr v) (bits_from_float 16 v))
+(semantics (x64.pinsrw_rm a)
+           (float_from_bits 16 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
 
 ;; Comparing two floats and setting a byte, which is one term for the reason the integer
 ;; comparisons are: the flags between the compare and the set are not a value.
@@ -355,6 +364,8 @@
 ;; is written down because it is the whole of the difference: `movss` moves bits and does not
 ;; look at them, so a rule that lowered a float load to an integer one would be right about the
 ;; machine, and it would still be a rule that put the value in the wrong register file.
+(semantics (load.f16 a)
+           (float_from_bits 16 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
 (semantics (load.f32 a)
            (float_from_bits 32
                    (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
@@ -559,6 +570,7 @@
 (semantics (x64.ret_val_16 v) v)
 (semantics (x64.ret_val_32 v) v)
 (semantics (x64.ret_val_64 v) v)
+(semantics (x64.ret_val_f16 v) v)
 (semantics (x64.ret_val_f32 v) v)
 (semantics (x64.ret_val_f64 v) v)
 (semantics (x64.ret_val_f128 v) v)

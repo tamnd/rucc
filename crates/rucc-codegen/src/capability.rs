@@ -360,6 +360,21 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPToSI, "f128.i64", "__fixtfdi"),
     (Opcode::FPToUI, "f128.i32", "__fixunstfsi"),
     (Opcode::FPToUI, "f128.i64", "__fixunstfdi"),
+    // The half format, which no x86-64 instruction computes in either. `crate::half` is the pass,
+    // and it needs fewer rows than the quad does because it has somewhere to go: a half widens to
+    // a `float` exactly, so every operation is the `float` one with a widening in front of it and
+    // a narrowing behind it, and only the widening and the narrowings are calls.
+    //
+    // The three narrowings are three rows and not one, and that is the part worth reading twice.
+    // Each of them rounds once, and rounding twice is a different answer: a `double` that sits
+    // just above the halfway point between two halves rounds down to that halfway point in a
+    // `float` and then to even from there, which is the wrong neighbour. libgcc has a routine per
+    // source width for exactly this reason and gcc calls the one that matches, so this table has a
+    // row per source width too.
+    (Opcode::FPExt, "f16.f32", "__extendhfsf2"),
+    (Opcode::FPTrunc, "f32.f16", "__truncsfhf2"),
+    (Opcode::FPTrunc, "f64.f16", "__truncdfhf2"),
+    (Opcode::FPTrunc, "f128.f16", "__trunctfhf2"),
     // An integer wider than a register. `crate::wide` splits what it can into halves and calls for
     // what it cannot, which is the four that need the whole value at once and the conversions.
     (Opcode::UDiv, "i128", "__udivti3"),

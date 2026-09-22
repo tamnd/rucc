@@ -166,6 +166,7 @@ pub mod expand;
 pub mod finish;
 pub mod fold;
 pub mod frame;
+pub mod half;
 pub mod layout;
 pub mod lower;
 pub mod lowering;
