@@ -53,8 +53,8 @@ use std::collections::HashMap;
 
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
-use rucc_diag::SourceMap;
-use rucc_sema::{DeclId, DeclKind, Linkage, StorageDuration, Tast};
+use rucc_diag::{SourceMap, Span};
+use rucc_sema::{DeclId, DeclKind, Linkage, Stmt, StmtId, StorageDuration, Tast};
 use rucc_target::TargetInfo;
 use rucc_types::{
     ArrayLen, IntKind, Qualifiers, RecordId, RecordKind, Type, TypeId, TypeKind, Types,
@@ -88,6 +88,35 @@ pub(crate) struct Meaning {
     /// whether or not the function it is in was emitted. Which of them get an entry is decided by
     /// the back end handing over the ones the frame placed, and the rest are never asked for.
     pub locals: HashMap<u32, Named>,
+    /// Every scope any local in the unit was declared in, each after the scope it is written inside.
+    ///
+    /// One table over the whole unit rather than one per function, because a local is looked up by
+    /// its declaration number and the number is a fact about the unit. Which function a scope
+    /// belongs to is never asked: what reads this reads it through the locals of one function, so
+    /// the scopes it reaches are that function's by construction.
+    pub scopes: Vec<Scope>,
+}
+
+/// One `{ ... }` a local was declared in, which is a `DW_TAG_lexical_block` where anything comes of
+/// it.
+///
+/// A function's own body is not one. A local written straight into it belongs to the function, and
+/// the scopes are the ones written inside that.
+#[derive(Debug, Clone)]
+pub(crate) struct Scope {
+    /// Which scope this one is written inside, and [`None`] for one written directly in a body.
+    ///
+    /// Always an earlier entry than this one, since a scope is opened before anything written in it
+    /// is reached. What reads this leans on that to build the tree in one pass.
+    pub parent: Option<usize>,
+    /// The source bytes the compound statement covers, brace to brace.
+    ///
+    /// This is how a scope turns into addresses, and it is the one thing here that is not simply
+    /// carried through. Every machine instruction already knows which source bytes it was built for,
+    /// because the line table is written from exactly that, so the instructions of a scope are the
+    /// ones whose bytes are inside these and the addresses of a scope are the addresses those
+    /// instructions got. Nothing new has to be carried down the compiler for it.
+    pub span: Span,
 }
 
 /// What is known about one function.
@@ -133,6 +162,9 @@ pub(crate) struct Named {
     ///
     /// A local with nothing here still gets an entry, for the reason [`Held::ty`] gives.
     pub ty: Option<usize>,
+    /// Which entry in [`Meaning::scopes`] it was declared in, and [`None`] for one written straight
+    /// into the body of its function or into no function at all.
+    pub scope: Option<usize>,
 }
 
 /// What is known about one file-scope variable.
@@ -218,6 +250,11 @@ pub(crate) fn collect(
     // for one of those is an entry in the table nothing points at, which costs its bytes and is
     // read by nothing, and the alternative is to know here which functions survive, which is not
     // decided until code generation has run.
+    //
+    // Which scope each of them was declared in is the one thing the flat walk cannot answer, since
+    // a declaration says nothing about the block it was written in, so the bodies are walked first
+    // and what comes back is a lookup from a declaration to a scope.
+    let nests = nesting(tast);
     let mut locals = HashMap::new();
     for raw in 0..u32::try_from(tast.counts().decls).unwrap_or(u32::MAX) {
         let id = DeclId::new(raw);
@@ -229,7 +266,8 @@ pub(crate) fn collect(
         let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
         let ty = walk.told(decl.ty);
         let name = walk.spelled(name);
-        locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty });
+        let scope = nests.which.get(&raw).copied();
+        locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty, scope });
     }
     // The typedef names last, so that nothing else waits behind a name that may turn out to stand
     // for a type nothing else mentions. A name whose type cannot be described is left out rather
@@ -240,7 +278,100 @@ pub(crate) fn collect(
         let name = walk.spelled(alias.name);
         walk.out.push(Shape::Alias { name, of });
     }
-    Meaning { types: walk.out, funcs, objects, locals }
+    Meaning { types: walk.out, funcs, objects, locals, scopes: nests.out }
+}
+
+/// Which `{ ... }` each local in the unit was declared in.
+///
+/// A walk over the statements of every body rather than over the declarations, because a block is a
+/// statement and a declaration carries no note of the one it was written in. Only the blocks matter:
+/// everything else is walked through so that a block nested in an `if` or a loop is reached, and
+/// nothing else opens a scope.
+///
+/// Two things that are not blocks and are scopes anyway. A function's own body is a block and is not
+/// one of these, because a local written straight into it belongs to the function itself. And
+/// `for (int i = 0; ...)` declares `i` in a scope that is the whole `for` statement rather than its
+/// body, which is what C 6.8.5p5 says and is what stops the `i` of two loops in a row from being one
+/// name declared twice in the same place.
+fn nesting(tast: &Tast) -> Nests<'_> {
+    let mut nests = Nests { tast, out: Vec::new(), which: HashMap::new() };
+    for &id in tast.top_level() {
+        let decl = &tast[id];
+        if decl.kind != DeclKind::Function {
+            continue;
+        }
+        let Some(body) = decl.body else { continue };
+        // The body itself rather than the block it is, so that the top of a function is the function
+        // and not a scope inside it.
+        if let Stmt::Block(list) = tast[body] {
+            for &stmt in &tast[list] {
+                nests.walk(stmt, None);
+            }
+        }
+    }
+    nests
+}
+
+/// The walk that finds the scopes, and what it has found so far.
+struct Nests<'a> {
+    tast: &'a Tast,
+    out: Vec<Scope>,
+    /// Which scope each declaration is in, by the number the declaration has.
+    which: HashMap<u32, usize>,
+}
+
+impl Nests<'_> {
+    /// One statement, and every statement inside it, with the scope they are written in.
+    fn walk(&mut self, at: StmtId, inside: Option<usize>) {
+        match self.tast[at] {
+            Stmt::Block(list) => {
+                let scope = self.open(self.tast.stmt_span(at), inside);
+                for &stmt in &self.tast[list] {
+                    self.walk(stmt, Some(scope));
+                }
+            }
+            Stmt::Decls(list) => {
+                let Some(scope) = inside else { return };
+                for &decl in &self.tast[list] {
+                    self.which.insert(decl.raw(), scope);
+                }
+            }
+            Stmt::If { then, otherwise, .. } => {
+                self.walk(then, inside);
+                if let Some(otherwise) = otherwise {
+                    self.walk(otherwise, inside);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Switch { body, .. }
+            | Stmt::Case { body, .. }
+            | Stmt::Default { body }
+            | Stmt::Label { body, .. } => self.walk(body, inside),
+            Stmt::For { init, body, .. } => {
+                // A `for` whose first clause declares something is a scope covering the whole
+                // statement, and one whose first clause is an expression or nothing is not a scope
+                // at all. Opening one either way would cost an entry per loop in the program and
+                // say nothing, since a scope with no declaration in it holds no name to tell apart.
+                let declares = init.is_some_and(|init| matches!(self.tast[init], Stmt::Decls(_)));
+                let inside = match declares {
+                    true => Some(self.open(self.tast.stmt_span(at), inside)),
+                    false => inside,
+                };
+                if let Some(init) = init {
+                    self.walk(init, inside);
+                }
+                self.walk(body, inside);
+            }
+            _ => {}
+        }
+    }
+
+    /// A new scope inside the one given, and which it is.
+    fn open(&mut self, span: Span, inside: Option<usize>) -> usize {
+        self.out.push(Scope { parent: inside, span });
+        self.out.len() - 1
+    }
 }
 
 /// The name a declaration will have in the object file.

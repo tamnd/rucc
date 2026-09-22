@@ -18,6 +18,10 @@
 //! why it takes an address: a function of nothing but scalars would say nothing about the first
 //! kind and one of nothing but arrays would say nothing about the second.
 //!
+//! And which scope it was declared in, which is the third thing, because a name declared inside a
+//! `{ ... }` is not the same name as one of the same spelling declared outside it and a debugger
+//! that cannot tell them apart prints the wrong one.
+//!
 //! The assertions read the sections out of the object rather than searching the whole file for the
 //! bytes, which the other tests here do. Two of the three things checked are a byte or two long,
 //! and a byte pair occurs everywhere in a page of machine code, so a search over the file would
@@ -62,12 +66,47 @@ const FBREG: [u8; 2] = [0x02, 0x91];
 /// over part of a function rather than over the whole of it, so this is the form it gets.
 const LISTED: [u8; 2] = [0x02, 0x17];
 
+/// A program that declares something inside a `{ ... }` of its own, and something inside that.
+///
+/// `held` is an array so that it is in the frame whatever the lowering does with it, which is what
+/// makes the outer block a block worth writing whichever way the allocator goes. `total` is
+/// written straight into the body and is the one in here that should not end up under a block.
+const NESTED: &str = "\
+int sum(int many) {
+    int total = 0;
+    {
+        int held[2] = {many, 1};
+        {
+            int inner = held[0] + held[1];
+            total += inner;
+        }
+        total += held[0];
+    }
+    return total;
+}
+";
+
+/// A program with blocks in it that declare nothing.
+///
+/// Every `if` and every loop body in C is a block, and a build that wrote an entry for each of
+/// them would put one around most of the instructions in most programs and say nothing by it. A
+/// block is only worth an entry when a name is declared in it, because telling two names apart is
+/// the whole of what the entry is for.
+const PLAIN: &str = "\
+int plain(int many) {
+    int total = 0;
+    if (many > 0) { total += many; }
+    while (total > 100) { total -= 3; }
+    return total;
+}
+";
+
 /// A directory of this test's own, so that two of these running at once do not write the same
 /// file, with the source already in it.
-fn fixture(what: &str) -> PathBuf {
+fn fixture(what: &str, source: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rucc-dv-{}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
-    std::fs::write(dir.join("one.c"), SOURCE).expect("the fixture can be written");
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
     dir
 }
 
@@ -117,6 +156,50 @@ fn section<'a>(object: &'a [u8], want: &str) -> Option<&'a [u8]> {
     })
 }
 
+/// One unsigned LEB128, read from `at` and leaving it just after the number.
+fn leb(bytes: &[u8], at: &mut usize) -> u64 {
+    let (mut out, mut shift) = (0u64, 0);
+    while let Some(&byte) = bytes.get(*at) {
+        *at += 1;
+        out |= u64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Every tag the unit's abbreviation table has an entry for.
+///
+/// An entry is a code, a tag, a byte saying whether entries of that shape have children, and then
+/// pairs of an attribute and a form until a pair of zeros. All of the numbers are unsigned LEB128s
+/// and a zero where a code would be is the end of the table. One file is compiled here so there is
+/// one table, and nothing below needs the attributes, so they are walked past rather than kept.
+fn tags(object: &[u8]) -> Vec<u64> {
+    let Some(bytes) = section(object, ".debug_abbrev") else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut at = 0;
+    loop {
+        if leb(bytes, &mut at) == 0 {
+            return out;
+        }
+        out.push(leb(bytes, &mut at));
+        at += 1;
+        loop {
+            let (attr, form) = (leb(bytes, &mut at), leb(bytes, &mut at));
+            if attr == 0 && form == 0 {
+                break;
+            }
+            // `DW_FORM_implicit_const` carries its value here rather than on the entry, so there
+            // is a third number in the pair and walking past two of them would lose the place.
+            if form == 0x21 {
+                leb(bytes, &mut at);
+            }
+        }
+    }
+}
+
 /// Whether those bytes are somewhere in that section, and false for a section that is not there.
 fn holds(object: &[u8], name: &str, want: &[u8]) -> bool {
     section(object, name).is_some_and(|bytes| bytes.windows(want.len()).any(|seen| seen == want))
@@ -124,7 +207,7 @@ fn holds(object: &[u8], name: &str, want: &[u8]) -> bool {
 
 #[test]
 fn a_local_with_a_frame_slot_comes_out_named_and_placed() {
-    let dir = fixture("placed");
+    let dir = fixture("placed", SOURCE);
     let object = build(&dir, &["-g"], "with.o");
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -149,7 +232,7 @@ fn a_local_with_a_frame_slot_comes_out_named_and_placed() {
 /// with nothing under it.
 #[test]
 fn a_build_with_nothing_to_resolve_the_frame_base_against_places_nothing() {
-    let dir = fixture("loose");
+    let dir = fixture("loose", SOURCE);
     let flags = ["-g", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables"];
     let object = build(&dir, &flags, "loose.o");
     let _ = std::fs::remove_dir_all(&dir);
@@ -178,7 +261,7 @@ fn a_build_with_nothing_to_resolve_the_frame_base_against_places_nothing() {
 /// value at every optimization level including this one.
 #[test]
 fn a_local_the_program_kept_in_a_register_comes_out_named_and_placed_over_stretches() {
-    let dir = fixture("kept");
+    let dir = fixture("kept", SOURCE);
     let object = build(&dir, &["-g"], "kept.o");
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -189,4 +272,54 @@ fn a_local_the_program_kept_in_a_register_comes_out_named_and_placed_over_stretc
     // would be a name and an offset with no stretches under them.
     let list = section(&object, ".debug_loclists");
     assert!(list.is_some_and(|bytes| !bytes.is_empty()), "the stretches are not written down");
+}
+
+/// `DW_TAG_lexical_block`, which is the entry a name declared inside a `{ ... }` hangs off.
+const BLOCK: u64 = 0x0b;
+
+/// A name declared in an inner scope is written inside a block rather than beside the function.
+///
+/// What that buys is the question of which `i` a debugger means. Two blocks of one function that
+/// each declare one are two variables of the same name, and with both of them children of the
+/// subprogram a reader has no way to pick between them at the address it stopped at. Under a block
+/// with addresses on it there is one answer.
+///
+/// What is asserted here is that the wire runs: the front end's scopes reached the writer and a
+/// real object came out with a block in it holding the name that was declared inside one. The
+/// shape of the tree is checked in `rucc-debug`, against the relocations the entries ask for,
+/// which is a thing that can be read without a DWARF reader in the test.
+#[test]
+fn a_name_declared_in_an_inner_scope_is_written_inside_a_block() {
+    let dir = fixture("nested", NESTED);
+    let object = build(&dir, &["-g"], "nested.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(tags(&object).contains(&BLOCK), "nothing wrote a scope at all");
+    assert!(holds(&object, ".debug_str", b"inner"), "the name in the inner scope is not there");
+    assert!(holds(&object, ".debug_str", b"held"), "the name in the outer scope is not there");
+
+    // And the addresses under it, which are what make it an answer rather than a label. A block
+    // with nothing saying where it is covers whatever its parent covers, which is the function,
+    // which is the thing this is meant to stop.
+    let ranges = section(&object, ".debug_rnglists");
+    assert!(ranges.is_some_and(|bytes| !bytes.is_empty()), "the scope covers nothing");
+}
+
+/// A block that declares nothing gets no entry.
+///
+/// Every `if` and every loop body is one of these, so a build that wrote them all would pay an
+/// entry for each and buy nothing: the reason to write a block down is that a name in it would
+/// otherwise be confused with a name outside it, and a block holding no name has none to confuse.
+#[test]
+fn a_block_with_nothing_declared_in_it_is_not_written_down() {
+    let dir = fixture("plain", PLAIN);
+    let object = build(&dir, &["-g"], "plain.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!tags(&object).contains(&BLOCK), "a scope nothing was declared in was written");
+
+    // The function is still described, which is what says the blocks were left out rather than
+    // the debug information.
+    assert!(holds(&object, ".debug_str", b"plain"), "the function went with them");
+    assert!(holds(&object, ".debug_str", b"total"), "a local of the body went with them");
 }

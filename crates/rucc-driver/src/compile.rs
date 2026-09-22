@@ -10,6 +10,7 @@
 //! reading, so one [`Session`] has to outlive all of them and there has to be one place that
 //! holds it.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rucc_base::Interner;
@@ -1107,8 +1108,13 @@ fn describe(
         // were asked for. A number with nothing to look up is one whose declaration had no name,
         // which is a compound literal rather than anything the program can ask the value of.
         let mut locals = Vec::with_capacity(placed.len() + spots.len());
+        // And which scope each of them was declared in, kept beside the list rather than on it,
+        // because what goes on the entry is a place in this function's own table of scopes and that
+        // table is not known until every local has been looked up.
+        let mut wants: Vec<Option<usize>> = Vec::with_capacity(locals.capacity());
         for (decl, at) in placed {
             let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+            wants.push(named.scope);
             locals.push(rucc_debug::Local {
                 name: named.name.clone(),
                 ty: named.ty,
@@ -1117,6 +1123,7 @@ fn describe(
                     line: named.line,
                 }),
                 spot: rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))),
+                scope: None,
             });
         }
         // And the ones with no slot at all, which are the locals the front end kept in a value.
@@ -1125,6 +1132,7 @@ fn describe(
         spots.sort_by_key(|(decl, _)| *decl);
         for (decl, spans) in spots {
             let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+            wants.push(named.scope);
             locals.push(rucc_debug::Local {
                 name: named.name.clone(),
                 ty: named.ty,
@@ -1133,7 +1141,16 @@ fn describe(
                     line: named.line,
                 }),
                 spot: rucc_debug::Spot::Over(spans),
+                scope: None,
             });
+        }
+        // And the scopes the locals were declared in, which is where a name declared in an inner
+        // block stops being one of the function's own. The numbers the walk over the tree handed out
+        // are over the whole unit, and what goes on an entry is a place in this function's table, so
+        // the two are joined here.
+        let (scopes, at) = nests(&wants, &origin.meaning.scopes, extent, rows);
+        for (local, want) in locals.iter_mut().zip(&wants) {
+            local.scope = want.and_then(|want| at.get(&want).copied());
         }
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
@@ -1143,6 +1160,7 @@ fn describe(
             sig,
             external: known.is_some_and(|known| known.external),
             locals,
+            scopes,
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
@@ -1204,19 +1222,11 @@ fn stretches(
     let (false, Some(regs)) = (built.kept.is_empty(), target.call_regs) else {
         return Vec::new();
     };
+    let ends = ends(extent, rows);
     let mut bounds = vec![None; built.inst_count()];
     for (which, row) in rows.iter().enumerate() {
         let Some(inst) = row.inst else { continue };
-        let at = row.at as u64;
-        // The next row that is at a different address, rather than simply the next row, because an
-        // instruction that encodes to nothing leaves two rows on one byte and the one in front of
-        // it is not where anything ends.
-        let end = rows[which + 1..]
-            .iter()
-            .map(|next| next.at as u64)
-            .find(|&next| next > at)
-            .unwrap_or(extent.len as u64);
-        bounds[inst.index()] = Some((at, end));
+        bounds[inst.index()] = Some((row.at as u64, ends[which]));
     }
     let mut spots: Vec<(u32, Vec<rucc_debug::Span>)> = Vec::new();
     for kept in &built.kept {
@@ -1247,6 +1257,109 @@ fn stretches(
     }
     spots.retain(|(_, spans)| !spans.is_empty());
     spots
+}
+
+/// Where the instruction each of a function's line table rows was written for ends.
+///
+/// The row after it, which is where the next instruction begins, and the end of the function for the
+/// last one. The row after it at a different address rather than simply the row after it, because an
+/// instruction that encodes to nothing leaves two rows on one byte and the one in front of it is not
+/// where anything ends.
+///
+/// Backwards, because that is one pass rather than a search from each row for the next address that
+/// differs, and a function the size of `sqlite3VdbeExec` has tens of thousands of rows.
+fn ends(extent: &rucc_object::Extent, rows: &[rucc_asm::Row]) -> Vec<u64> {
+    let mut out = vec![extent.len as u64; rows.len()];
+    let mut next = extent.len as u64;
+    for which in (0..rows.len()).rev() {
+        let at = rows[which].at as u64;
+        // The answer the row behind got, for a row sharing an address with the one in front of it,
+        // since the two end in the same place and the one in front has already been asked.
+        out[which] = match next > at {
+            true => next,
+            false => out.get(which + 1).copied().unwrap_or(extent.len as u64),
+        };
+        next = next.min(at);
+    }
+    out
+}
+
+/// The scopes one function's locals were declared in, as the debug writer wants them, and which of
+/// its entries each of the unit's scopes became.
+///
+/// Only the ones a local of this function is in, and their ancestors. The unit's table holds every
+/// scope in the translation unit, and a function reaches its own by walking up from the locals the
+/// back end handed over, which is both the filter and the answer to which function a scope belongs
+/// to. A scope no local of this function is in is not this function's business even if the numbers
+/// happen to sit next to each other.
+///
+/// The addresses come from the source. A scope is a run of source bytes, every row of the line table
+/// says which source bytes its instruction was built for, and the rows already say where each
+/// instruction is, so the addresses of a scope are the addresses of the instructions whose bytes are
+/// inside it. Nothing had to be carried down the compiler for this, and the nesting comes out right
+/// on its own: a scope's bytes hold the bytes of every scope inside it, so its addresses hold
+/// theirs.
+fn nests(
+    wants: &[Option<usize>],
+    scopes: &[crate::shapes::Scope],
+    extent: &rucc_object::Extent,
+    rows: &[rucc_asm::Row],
+) -> (Vec<rucc_debug::Scope>, HashMap<usize, usize>) {
+    let mut needed: Vec<usize> = Vec::new();
+    for &want in wants {
+        let mut up = want;
+        while let Some(which) = up {
+            if needed.contains(&which) {
+                break;
+            }
+            needed.push(which);
+            up = scopes.get(which).and_then(|scope| scope.parent);
+        }
+    }
+    // In the order the unit wrote them, which puts a scope after the one it is inside, because that
+    // is the order the writer wants and is what lets a parent be named by an entry already made.
+    needed.sort_unstable();
+    let at: HashMap<usize, usize> =
+        needed.iter().enumerate().map(|(which, &scope)| (scope, which)).collect();
+    let ends = ends(extent, rows);
+    let out = needed
+        .iter()
+        .map(|&which| {
+            let scope = &scopes[which];
+            rucc_debug::Scope {
+                parent: scope.parent.and_then(|parent| at.get(&parent).copied()),
+                over: spread(scope.span, &ends, rows),
+            }
+        })
+        .collect();
+    (out, at)
+}
+
+/// Which of a function's addresses were built for a run of its source bytes.
+///
+/// A row whose own bytes are inside the run is code the run asked for, and the addresses of a scope
+/// are the addresses of every such row joined up. Two rows that meet or overlap are one stretch,
+/// which is what almost all of a scope is: the rows of a block are next to each other unless
+/// something moved them, and a block the back end split into pieces is exactly the case a list is
+/// for.
+fn spread(span: Span, ends: &[u64], rows: &[rucc_asm::Row]) -> Vec<rucc_debug::Reach> {
+    let mut out: Vec<rucc_debug::Reach> = Vec::new();
+    for (which, row) in rows.iter().enumerate() {
+        if row.span.is_dummy() || row.span.lo < span.lo || row.span.hi > span.hi {
+            continue;
+        }
+        let (from, to) = (row.at as u64, ends[which]);
+        if to <= from {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.from + last.len >= from => {
+                last.len = to.saturating_sub(last.from).max(last.len);
+            }
+            _ => out.push(rucc_debug::Reach { from, len: to - from }),
+        }
+    }
+    out
 }
 
 /// One declaration's stretches with the disagreements taken out and the neighbours joined up.
@@ -8673,5 +8786,113 @@ away:
         let one = span(0, 4, rucc_debug::Held::Reg(3));
         let two = span(16, 4, rucc_debug::Held::Reg(3));
         assert_eq!(settle(vec![one, two]), vec![one, two]);
+    }
+
+    /// A function of `len` bytes, since that is the only thing about one these tests look at.
+    fn extent(len: usize) -> rucc_object::Extent {
+        rucc_object::Extent {
+            name: "f".to_owned(),
+            start: 0,
+            len,
+            align: 1,
+            binding: rucc_object::Binding::Global,
+            visibility: rucc_object::Visibility::Default,
+            patch: None,
+        }
+    }
+
+    /// A line table row at `at` built for the source bytes `lo` to `hi`.
+    fn row(at: usize, lo: u32, hi: u32) -> rucc_asm::Row {
+        let span = Span::new(lo, hi);
+        rucc_asm::Row { at, span, inst: None }
+    }
+
+    #[test]
+    fn a_row_ends_where_the_next_address_begins() {
+        let rows = [row(0, 0, 1), row(4, 1, 2), row(10, 2, 3)];
+        assert_eq!(ends(&extent(16), &rows), vec![4, 10, 16]);
+    }
+
+    #[test]
+    fn rows_sharing_an_address_all_end_where_the_next_address_begins() {
+        // Two instructions that encoded to nothing sit on the address of the one after them, and
+        // none of the three ends in front of that one.
+        let rows = [row(0, 0, 1), row(4, 1, 2), row(4, 2, 3), row(4, 3, 4)];
+        assert_eq!(ends(&extent(12), &rows), vec![4, 12, 12, 12]);
+    }
+
+    #[test]
+    fn the_rows_of_a_scope_that_are_next_to_each_other_come_out_as_one_stretch() {
+        let rows = [row(0, 0, 4), row(4, 10, 14), row(8, 14, 18), row(12, 40, 44)];
+        let ends = ends(&extent(16), &rows);
+        let scope = Span::new(8, 20);
+        assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 8 }]);
+    }
+
+    #[test]
+    fn a_scope_the_back_end_split_in_two_comes_out_as_two_stretches() {
+        let rows = [row(0, 10, 14), row(4, 40, 44), row(8, 14, 18)];
+        let ends = ends(&extent(12), &rows);
+        let scope = Span::new(8, 20);
+        let over = spread(scope, &ends, &rows);
+        assert_eq!(
+            over,
+            vec![rucc_debug::Reach { from: 0, len: 4 }, rucc_debug::Reach { from: 8, len: 4 }]
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_source_of_its_own_belongs_to_no_scope() {
+        // The prologue is the one of these every function has, and it is not inside any block.
+        let rows = [rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None }, row(4, 10, 14)];
+        let ends = ends(&extent(8), &rows);
+        let scope = Span::new(0, 20);
+        assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 4 }]);
+    }
+
+    /// A scope of the unit, written short because these tests are about nothing else.
+    fn scope(parent: Option<usize>, lo: u32, hi: u32) -> crate::shapes::Scope {
+        let span = Span::new(lo, hi);
+        crate::shapes::Scope { parent, span }
+    }
+
+    #[test]
+    fn a_function_gets_the_scopes_its_own_locals_are_in_and_nothing_else() {
+        // Two functions' worth of scopes in one table, and this one is in the second pair.
+        let scopes = [scope(None, 0, 10), scope(None, 20, 30), scope(Some(1), 22, 26)];
+        let rows = [row(0, 22, 24), row(4, 26, 28)];
+        let (out, at) = nests(&[Some(2)], &scopes, &extent(8), &rows);
+        // The one the local is in and the one that is inside, numbered from zero for this
+        // function, with the parent named by the entry it became rather than by where it was.
+        assert_eq!(at.get(&1), Some(&0));
+        assert_eq!(at.get(&2), Some(&1));
+        assert_eq!(at.get(&0), None);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].parent, None);
+        assert_eq!(out[1].parent, Some(0));
+        assert_eq!(out[0].over, vec![rucc_debug::Reach { from: 0, len: 8 }]);
+        assert_eq!(out[1].over, vec![rucc_debug::Reach { from: 0, len: 4 }]);
+    }
+
+    #[test]
+    fn a_local_written_straight_into_the_body_pulls_no_scope_in() {
+        let scopes = [scope(None, 20, 30)];
+        let rows = [row(0, 22, 24)];
+        let (out, at) = nests(&[None], &scopes, &extent(4), &rows);
+        assert_eq!(out, Vec::new());
+        assert!(at.is_empty());
+    }
+
+    #[test]
+    fn a_scope_whose_code_all_went_away_is_still_one_of_the_functions_scopes() {
+        // Nothing was built for the bytes it covers, so there is nowhere to say its names were
+        // live. The entry is written anyway, since dropping it would move a local up into the
+        // function and make it answer to a name it was not declared under.
+        let scopes = [scope(None, 20, 30)];
+        let rows = [row(0, 40, 44)];
+        let (out, at) = nests(&[Some(0)], &scopes, &extent(4), &rows);
+        assert_eq!(at.get(&0), Some(&0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].over, Vec::new());
     }
 }

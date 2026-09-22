@@ -269,6 +269,43 @@ pub struct Local {
     pub decl: Option<Place>,
     /// Where in the machine it is, over the addresses of the function it is in.
     pub spot: Spot,
+    /// Which of its function's [`scopes`](crate::Function::scopes) it was declared in, and [`None`]
+    /// for one written directly in the body of the function.
+    pub scope: Option<usize>,
+}
+
+/// One inner scope of a function, which is a `{ ... }` the program declared something in.
+///
+/// A function's own body is not one of these. It is the subprogram, and a local written straight
+/// into it is a child of the subprogram, so the scopes are the ones written inside that.
+///
+/// What they are for is the question of which `i` a debugger means. A function with two blocks that
+/// each declare one has two variables of that name, and with every local a child of the subprogram
+/// a reader has no way to tell which of them is in scope at the address it stopped at. Nesting the
+/// entries and saying which addresses each nest covers is the answer DWARF has for that, and it is
+/// the only thing here that is about a scope rather than about a variable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scope {
+    /// Which scope this one is written inside, and [`None`] for one written directly in the body of
+    /// the function.
+    ///
+    /// Always an earlier entry than this one, since a scope is opened before anything written in it
+    /// is reached, which is what lets a reader build the tree in one pass.
+    pub parent: Option<usize>,
+    /// The stretches of the function's addresses the code written inside it ended up at.
+    ///
+    /// Empty for a scope whose code all went away, which is a scope that still says which names it
+    /// held and says nothing about where they were.
+    pub over: Vec<Reach>,
+}
+
+/// One stretch of a function's addresses, with nothing said about what is at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reach {
+    /// How far into the function the stretch starts, in bytes.
+    pub from: u64,
+    /// How long it is, in bytes. A stretch of no length covers nothing and is refused.
+    pub len: u64,
 }
 
 /// Where a local is over the addresses of the function it is in.
