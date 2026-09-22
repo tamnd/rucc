@@ -967,7 +967,7 @@ fn generate(
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
             let info = if opts.debug_info {
-                describe(&text, &assembled.lines, origin, opts, target)
+                describe(&text, &data, &assembled.lines, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
@@ -1008,6 +1008,7 @@ fn generate(
 /// behind on.
 fn describe(
     text: &rucc_object::Text,
+    data: &rucc_object::Data,
     lines: &[Vec<rucc_asm::Row>],
     origin: Origin<'_>,
     opts: &Options,
@@ -1078,6 +1079,25 @@ fn describe(
             external: known.is_some_and(|known| known.external),
         });
     }
+    // And the file-scope variables, from the objects the back end laid out rather than from the
+    // declarations, so that a name with an entry here is a name with a symbol to relocate against.
+    // One the walk found and this did not is a `static` nothing read, and one this found and the
+    // walk did not is a name the compiler made up rather than one the program wrote, a string
+    // literal and a compound literal being the two: both are in the file and neither is a variable
+    // anybody can ask the value of by name.
+    let mut globals = Vec::new();
+    for object in &data.objects {
+        let Some(held) = origin.meaning.objects.get(&object.name) else { continue };
+        globals.push(rucc_debug::Global {
+            name: object.name.clone(),
+            ty: held.ty,
+            decl: Some(rucc_debug::Place {
+                file: interned(&mut files, rewrite(&held.file)),
+                line: held.line,
+            }),
+            external: held.external,
+        });
+    }
     let unit = rucc_debug::Unit {
         name: rewrite(origin.name),
         // A single dot when the process could not say where it was, which is a directory name every
@@ -1087,6 +1107,7 @@ fn describe(
         files,
         types: origin.meaning.types.clone(),
         funcs,
+        globals,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())

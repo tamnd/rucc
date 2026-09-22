@@ -36,12 +36,13 @@
 //!
 //! # What is not here
 //!
-//! What the program means is in `tree.rs` and goes in the same unit: the types and the functions,
-//! which is what a debugger reads a value through. Variables and their location expressions are
-//! still to come and are the rest of tamnd/rucc#9, and what makes them a different piece of work
-//! rather than more of this one is that they are checked differently: a line table is right or
-//! wrong against `addr2line` and a variable's location is right or wrong against a debugger that
-//! stops in the middle of a function and prints it.
+//! What the program means is in `tree.rs` and goes in the same unit: the types, the functions and
+//! the variables the unit defines at file scope, which is what a debugger reads a value through.
+//! Local variables and their location expressions are still to come and are the rest of
+//! tamnd/rucc#9, and what makes them a different piece of work rather than more of this one is that
+//! they are checked differently: a line table is right or wrong against `addr2line` and a local's
+//! location is right or wrong against a debugger that stops in the middle of a function and prints
+//! it.
 //!
 //! One sequence per function, each beginning at that function's own symbol. A sequence is the unit
 //! of address ordering in a line program and its rows have to run forwards, so a table with one
@@ -49,7 +50,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Place, Shape, Sig};
+use crate::shape::{Global, Place, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -76,6 +77,12 @@ pub struct Unit {
     pub types: Vec<Shape>,
     /// The functions, in the order the text section holds them.
     pub funcs: Vec<Function>,
+    /// The file-scope variables this unit defines, in the order the object file holds them.
+    ///
+    /// Only the ones it defines. A name this unit declares and another one defines is a name the
+    /// linker resolves, so an entry for it here would be an entry whose address is somebody
+    /// else's, and a reader wanting the type of one reads the unit that has it.
+    pub globals: Vec<Global>,
     /// How many bytes an address is on this target.
     pub pointer: u8,
 }
@@ -263,12 +270,19 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     root.set(gimli::DW_AT_comp_dir, gimli::write::AttributeValue::LineStringRef(held(dir)?));
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
     root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
-    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs)?;
+    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals)?;
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
     let mut info = Info::default();
+    // One index space over both lists, the functions first. `gimli` calls a relocation target a
+    // symbol number and leaves it to the caller to say what a number means, and what one means here
+    // is a position in this: the line table and a subprogram's low PC ask for a function, and a
+    // variable's location asks for a variable.
     let named = |target: gimli::write::RelocationTarget| match target {
-        gimli::write::RelocationTarget::Symbol(index) => unit.funcs[index].name.clone(),
+        gimli::write::RelocationTarget::Symbol(index) => match unit.funcs.get(index) {
+            Some(func) => func.name.clone(),
+            None => unit.globals[index - unit.funcs.len()].name.clone(),
+        },
         gimli::write::RelocationTarget::Section(id) => id.name().to_owned(),
     };
     sections.for_each(|id, section| {
@@ -353,6 +367,7 @@ mod tests {
                 ],
                 ..Function::default()
             }],
+            globals: Vec::new(),
             pointer: 8,
         }
     }
