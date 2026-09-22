@@ -1603,6 +1603,176 @@ used_by = ["glibc"]
 tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
 
 [[feature]]
+name = "__builtin_fprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(FILE *, const char *, ...)"
+library = "fprintf"
+used_by = ["glibc", "systemd", "curl", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fprintf_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(FILE *, const char *, ...)"
+library = "fprintf_unlocked"
+used_by = ["glibc", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_vfprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(FILE *, const char *, __builtin_va_list)"
+library = "vfprintf"
+used_by = ["glibc", "systemd", "curl"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_vprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(const char *, __builtin_va_list)"
+library = "vprintf"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_vsprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(char *, const char *, __builtin_va_list)"
+library = "vsprintf"
+used_by = ["glibc", "sqlite"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_vsnprintf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(char *, size_t, const char *, __builtin_va_list)"
+library = "vsnprintf"
+used_by = ["glibc", "sqlite", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_printf_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(const char *, ...)"
+library = "printf_unlocked"
+used_by = ["glibc", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_fputs"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(const char *, FILE *)"
+library = "fputs"
+used_by = ["glibc", "systemd", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fputs_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(const char *, FILE *)"
+library = "fputs_unlocked"
+used_by = ["glibc", "systemd", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fputc"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(int, FILE *)"
+library = "fputc"
+used_by = ["glibc", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fputc_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(int, FILE *)"
+library = "fputc_unlocked"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_putc"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(int, FILE *)"
+library = "putc"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_putc_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(int, FILE *)"
+library = "putc_unlocked"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fwrite"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "size_t(const void *, size_t, size_t, FILE *)"
+library = "fwrite"
+used_by = ["glibc", "curl", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_fwrite_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "size_t(const void *, size_t, size_t, FILE *)"
+library = "fwrite_unlocked"
+used_by = ["glibc", "systemd"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function", "rucc-sema::a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it"]
+
+[[feature]]
+name = "__builtin_puts_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(const char *)"
+library = "puts_unlocked"
+used_by = ["glibc", "gcc-torture"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
+name = "__builtin_putchar_unlocked"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "int(int)"
+library = "putchar_unlocked"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
+
+[[feature]]
 name = "__builtin_clzl"
 kind = "builtin"
 gcc_version = "3.4"
