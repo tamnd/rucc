@@ -731,9 +731,7 @@ impl Site<'_> {
         let ty = self.answers(data)?;
         // An empty first string is no bytes to walk over, whatever the set is, and that is the
         // answer `strcspn("", s)` wants where nothing is known about `s`.
-        if let Some(text) = self.one(args[0])
-            && text.is_empty()
-        {
+        if self.one(args[0]).is_some_and(|text| text.is_empty()) {
             return Some(Plan::Answer(Answer::Number(0)));
         }
         let accept = self.one(args[1])?;
