@@ -111,6 +111,12 @@ analysis, and the trip count analysis's `assumptions` field (document 07.5) is w
 land. rucc does the same: the rewrite is performed only when the trip count is a `Bound` rather than
 an `Estimate`, and when the derived limit provably does not overflow.
 
+**What the proof is when the count is an expression.** Most loops have one. `for (i = 0; i < n; i++)` gets a count of `n` rather than a number, and the limit for one of those is the count worked out in the preheader, clamped at zero and multiplied by the step. The clamp is the entry assumption paid for rather than leaned on, the same trade 28.9 makes: a count taken from a distance that came out negative is a loop that runs no times, and a limit equal to where the pointer starts is a test that refuses the first time it is asked.
+
+The overflow proof is the part with no number to check, and what stands in for the number is a bound on it. A count built on a value of `b` bits is at most two to the `b` whichever way the exit test read it, so the whole walk is at most that, times the count's own scale, plus its offset, times the step. Worked out in a hundred and twenty eight bit number and refused unless it fits in sixty four, which is the same check the number case makes, asked of a bound instead. `for (int i = 0; i < n; i++)` over four byte elements needs thirty four bits and passes with room to spare, and that is most of the loops a C program writes. A counter as wide as a pointer has no width to argue from and is refused.
+
+GCC 16 rewrites the pointer-wide case anyway. `for (size_t i = 0; i < n; i++) t += p[i];` comes out as `cmpq %rcx, %rdi; jne` with the limit formed by one `leaq` in the preheader, and the argument it must be resting on is that the loop forms every one of those addresses itself, so a walk that wrapped the address space was a program that had already left its object. That argument is a real one and rucc does not make it, because it rests on the program being free of undefined behaviour rather than on anything in the IR, and the measurement that would say what it is worth has not been made. `crate::range` is the other way to widen this, since a length checked before it is walked is bounded by the check and the width is only what is left when nothing checked it.
+
 The neighbouring transformation is 28.9, final value replacement, and the two are worth reading
 together because one of them needs the overflow proof above and the other looks like it does and
 does not.
