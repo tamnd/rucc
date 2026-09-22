@@ -66,6 +66,17 @@ bytes stays a call. The crossover is a cost-model number, it depends on the targ
 and on whether the library's implementation is good, and it belongs in document 40. GCC's equivalent
 knob for the comparison case is `builtin-string-cmp-inline-length` (`gcc/params.opt:125`).
 
+**The one group that cannot be a rule.** `printf("hello world\n")` writes what `puts("hello world")`
+writes, and a program is entitled to notice which of the two it was compiled into: the `builtins`
+cases of `gcc.c-torture/execute` define a `puts` of their own and abort when it is not called. A rule
+rewrites one instruction into instructions, and this rewrite needs two things a rule has no way to
+reach. The name `puts` has to be interned before any call can carry it, and the string handed to it
+is not one the module already holds, since "hello world" with a terminator is not a suffix of
+"hello world\n" with one. So the printf family is a module at a time transformation beside the two
+in document 34.6 rather than a rule, it runs before the function pipeline starts, and it is at `-O1`
+and above where gcc folds these as well. The rules themselves are in `crates/rucc-opt/src/libcall.rs`
+and the three way split of 20.1 turns the whole of it off.
+
 **The trap.** Inlining `memcpy` as loads and stores requires knowing the alignment, or using
 unaligned accesses, and the result must not read or write outside the copied range. An implementation
 that rounds the size up to a convenient width writes past the end. This is the single most likely

@@ -126,6 +126,7 @@ pub mod ipa;
 pub mod ipasra;
 pub mod ipcp;
 pub mod ivopts;
+pub mod libcall;
 pub mod licm;
 pub mod live;
 pub mod load;

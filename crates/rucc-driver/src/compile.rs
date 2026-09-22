@@ -399,7 +399,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             diagnostics.extend(complaints);
                         } else if let Err(complaints) = optimize(
                             &mut lowered.module,
-                            &sess.interner,
+                            &mut sess.interner,
                             &sess.target,
                             opts,
                             name,
@@ -635,7 +635,7 @@ struct Instrumented {
 /// lowering is.
 fn optimize(
     module: &mut rucc_ir::Module,
-    names: &Interner,
+    names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
     file: &str,
@@ -653,6 +653,12 @@ fn optimize(
         false => IrPic::Executable,
     };
     settings.toggles.clone_from(&opts.passes);
+    // The same pair the front end reads a call to a standard name with, which is section 20.1's
+    // three way split: `-ffreestanding` says the library is not there, `-fno-builtin` says it is
+    // there and is not to be assumed to do what the standard says, and a fold that leaves behind a
+    // call to `puts` needs both of those to be off.
+    settings.builtins = opts.builtins && opts.hosted;
+    settings.no_builtin.clone_from(&opts.no_builtin);
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;
