@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::SourceMap;
-use rucc_sema::{DeclId, DeclKind, Linkage, Tast};
+use rucc_sema::{DeclId, DeclKind, Linkage, StorageDuration, Tast};
 use rucc_target::TargetInfo;
 use rucc_types::{
     ArrayLen, IntKind, Qualifiers, RecordId, RecordKind, Type, TypeId, TypeKind, Types,
@@ -68,6 +68,12 @@ pub(crate) struct Meaning {
     /// emitting is decided after this runs: a `static` function nothing calls is dropped, and the
     /// order the text section comes out in is not the order of the source.
     pub funcs: HashMap<String, Known>,
+    /// What is known about each file-scope variable, by the name it will have in the object file.
+    ///
+    /// Keyed by name for the same reason the functions are, and read the same way: the back end
+    /// hands over the objects it actually laid out and each of them is looked up here. A `static`
+    /// nothing reads is not among them and so is never asked for.
+    pub objects: HashMap<String, Held>,
 }
 
 /// What is known about one function.
@@ -91,7 +97,25 @@ pub(crate) struct Known {
     pub external: bool,
 }
 
-/// The types and the signatures of every function this unit defines.
+/// What is known about one file-scope variable.
+#[derive(Debug, Clone)]
+pub(crate) struct Held {
+    /// The file its definition was written in, as the source map spells it, for the reason
+    /// [`Known::file`] is a name.
+    pub file: String,
+    /// The line it is declared on, counting from one.
+    pub line: u32,
+    /// Which entry in [`Meaning::types`] it is, and [`None`] when it cannot be described.
+    ///
+    /// Unlike a function, a variable with nothing here still gets an entry, because a
+    /// `DW_TAG_variable` with no `DW_AT_type` says nothing where a `DW_TAG_subprogram` with none
+    /// says `void`. See `held_at` in `rucc-debug`.
+    pub ty: Option<usize>,
+    /// Whether anything outside the unit can see it.
+    pub external: bool,
+}
+
+/// The types, the signatures and the file-scope variables of everything this unit defines.
 pub(crate) fn collect(
     tast: &Tast,
     types: &Types,
@@ -102,35 +126,60 @@ pub(crate) fn collect(
     let mut walk =
         Walk { types, target, names, out: Vec::new(), memo: HashMap::new(), tags: HashMap::new() };
     let mut funcs = HashMap::new();
+    let mut objects = HashMap::new();
     for &id in tast.top_level() {
         let decl = &tast[id];
-        // A definition rather than a declaration, since what is being described is the code in
-        // this object. `int f(int);` on its own defines nothing for an address to be inside of.
-        if decl.kind != DeclKind::Function || decl.body.is_none() {
-            continue;
-        }
-        let Some(name) = decl.name else { continue };
         let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
-        let known = Known {
-            file: at.name.to_owned(),
-            line: at.line,
-            sig: walk.signature(tast, id),
-            external: decl.linkage == Linkage::External,
-        };
-        // The assembler name where a declaration wrote one, because the symbol is what the entry
-        // has to be found by. `extern int f(int) __asm__("g");` is how the C library redirects a
-        // name, and matching on the C name alone would leave every `_FORTIFY_SOURCE` wrapper and
-        // every `_FILE_OFFSET_BITS=64` definition without an entry. The other renaming
-        // `rucc-lower` does is for `__builtin_` names, which nothing defines, so it is not here.
-        let symbol = match decl.asm_label {
-            Some(label) => {
-                tast[label].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
+        let Some(symbol) = symbol(tast, names, id) else { continue };
+        let external = decl.linkage == Linkage::External;
+        match decl.kind {
+            // A definition rather than a declaration, since what is being described is the code in
+            // this object. `int f(int);` on its own defines nothing for an address to be inside of.
+            DeclKind::Function if decl.body.is_some() => {
+                let known = Known {
+                    file: at.name.to_owned(),
+                    line: at.line,
+                    sig: walk.signature(tast, id),
+                    external,
+                };
+                funcs.insert(symbol, known);
             }
-            None => names.resolve(name).to_owned(),
-        };
-        funcs.insert(symbol, known);
+            // A file-scope object, whether or not it has an initializer, because a `static` one
+            // with none is still in the file as zeroed bytes. Whether the back end laid it out is
+            // not decided here and does not need to be: a name nothing emitted is a name nothing
+            // looks up. A block-scope `static` is not here at all, because the top level does not
+            // hold one, and neither is a `Tentative` definition of a name another unit defines,
+            // which the linker resolves to somebody else's address.
+            DeclKind::Object if decl.duration == StorageDuration::Static => {
+                let held = Held {
+                    file: at.name.to_owned(),
+                    line: at.line,
+                    ty: walk.told(decl.ty),
+                    external,
+                };
+                objects.insert(symbol, held);
+            }
+            _ => {}
+        }
     }
-    Meaning { types: walk.out, funcs }
+    Meaning { types: walk.out, funcs, objects }
+}
+
+/// The name a declaration will have in the object file.
+///
+/// The assembler name where a declaration wrote one, because the symbol is what the entry has to be
+/// found by. `extern int f(int) __asm__("g");` is how the C library redirects a name, and matching
+/// on the C name alone would leave every `_FORTIFY_SOURCE` wrapper and every `_FILE_OFFSET_BITS=64`
+/// definition without an entry. The other renaming `rucc-lower` does is for `__builtin_` names,
+/// which nothing defines, so it is not here.
+fn symbol(tast: &Tast, names: &Interner, id: DeclId) -> Option<String> {
+    let decl = &tast[id];
+    match decl.asm_label {
+        Some(label) => {
+            Some(tast[label].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect())
+        }
+        None => Some(names.resolve(decl.name?).to_owned()),
+    }
 }
 
 /// The walk over the checker's types, building the table as it goes.

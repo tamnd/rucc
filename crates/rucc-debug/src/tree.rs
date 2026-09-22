@@ -1,4 +1,5 @@
-//! The entries in `.debug_info`: the types a unit describes and the functions it defines.
+//! The entries in `.debug_info`: the types a unit describes, the functions it defines and the
+//! variables it defines at file scope.
 //!
 //! Design: `spec/11-asm-objects-debug.md` section 11.4.
 //!
@@ -27,18 +28,25 @@
 //! no entry falls back to the symbol table, which is what it does for every function compiled by
 //! this compiler today, and a debugger given a wrong return type has no way to find out.
 //!
+//! A variable is the other way round, and `held_at` says why: a `DW_TAG_variable` with no
+//! `DW_AT_type` is not a variable of type `void`, because there is no such thing, so it is a
+//! variable whose type was not recorded and the name and the address are still worth having.
+//!
 //! [`Function::sig`]: crate::Function::sig
 
 use crate::line::{Error, Function};
-use crate::shape::{Encoding, Member, Qualifier, Shape, Sig};
+use crate::shape::{Encoding, Global, Member, Place, Qualifier, Shape, Sig};
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
 
 /// Everything a unit says about what its addresses mean, added to a unit that already has a line
 /// program.
 ///
-/// The type entries first and the functions after, so that a subprogram's `DW_AT_type` names an
+/// The type entries first and the things that name them after, so that a `DW_AT_type` names an
 /// entry that is already there.
+///
+/// The symbol number a relocation carries is a position in the functions followed by the globals,
+/// which is the one index space `line.rs` turns back into a name.
 ///
 /// # Errors
 ///
@@ -49,6 +57,7 @@ pub(crate) fn describe(
     shapes: &[Shape],
     files: &[FileId],
     funcs: &[Function],
+    globals: &[Global],
 ) -> Result<(), Error> {
     let ids = kinds(dwarf, shapes);
     for (shape, &id) in shapes.iter().zip(&ids) {
@@ -57,6 +66,9 @@ pub(crate) fn describe(
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
         defined(dwarf, func, sig, index, files, &ids)?;
+    }
+    for (index, global) in globals.iter().enumerate() {
+        held_at(dwarf, global, funcs.len() + index, files, &ids)?;
     }
     Ok(())
 }
@@ -146,11 +158,12 @@ fn fill(
 /// for it does and against the same symbol. `DW_AT_high_pc` is a length rather than an address,
 /// which is DWARF 4 and later and is what lets one relocation do for both.
 ///
-/// No `DW_AT_frame_base`, because nothing here needs one yet. A frame base is what a variable's
-/// location is measured from, there are no variables yet, and the two answers worth having are the
+/// No `DW_AT_frame_base`, because nothing here needs one yet. A frame base is what a local's
+/// location is measured from, there are no locals yet, and the two answers worth having are the
 /// call frame address, which needs the unwind tables this compiler does not write, and a register,
 /// which is only right if the frame really is laid out that way. That choice belongs with the
-/// locations it would be read through rather than here.
+/// locations it would be read through rather than here. A file-scope variable needs none of it: its
+/// address is its own symbol and the linker knows where that went.
 fn defined(
     dwarf: &mut gimli::write::DwarfUnit,
     func: &Function,
@@ -165,20 +178,70 @@ fn defined(
     if func.external {
         flag(dwarf, at, gimli::DW_AT_external);
     }
-    if let Some(place) = func.decl {
-        let Some(&file) = files.get(place.file) else {
-            let why = format!("{} names file {}, which is not one", func.name, place.file);
-            return Err(Error::Refused { why });
-        };
-        let entry = dwarf.unit.get_mut(at);
-        entry.set(gimli::DW_AT_decl_file, AttributeValue::FileIndex(Some(file)));
-        entry.set(gimli::DW_AT_decl_line, AttributeValue::Udata(u64::from(place.line)));
-    }
+    came_from(dwarf, at, &func.name, func.decl, files)?;
     let entry = dwarf.unit.get_mut(at);
     let start = gimli::write::Address::Symbol { symbol: index, addend: 0 };
     entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(start));
     entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(func.len));
     takes(dwarf, at, sig, ids)
+}
+
+/// The entry for one variable this unit defines at file scope.
+///
+/// `DW_AT_location` is an expression of one operation, `DW_OP_addr` over the variable's own symbol,
+/// and the linker fills the address in the same way it fills in a function's low PC. That is the
+/// whole of why a file-scope variable is easy and a local is not: this address is the same for the
+/// whole run of the program, so one expression says it, where a local is wherever the code was
+/// keeping it at the program counter the debugger stopped at.
+///
+/// A variable with no type still gets an entry, which is the opposite of the rule for a function
+/// above, and the reason is that the missing attribute means something different on each. There is
+/// no such thing as a variable of type `void`, so a reader of a `DW_TAG_variable` with no
+/// `DW_AT_type` has nothing to be misled into believing, and the name and the address on their own
+/// are what lets a debugger resolve the name at all.
+fn held_at(
+    dwarf: &mut gimli::write::DwarfUnit,
+    global: &Global,
+    symbol: usize,
+    files: &[FileId],
+    ids: &[UnitEntryId],
+) -> Result<(), Error> {
+    let root = dwarf.unit.root();
+    let at = dwarf.unit.add(root, gimli::DW_TAG_variable);
+    title(dwarf, at, &global.name);
+    if global.external {
+        flag(dwarf, at, gimli::DW_AT_external);
+    }
+    came_from(dwarf, at, &global.name, global.decl, files)?;
+    points(dwarf, at, global.ty, ids)?;
+    let mut expr = gimli::write::Expression::new();
+    expr.op_addr(gimli::write::Address::Symbol { symbol, addend: 0 });
+    dwarf.unit.get_mut(at).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
+    Ok(())
+}
+
+/// `DW_AT_decl_file` and `DW_AT_decl_line`, for whatever knows where it was written.
+///
+/// # Errors
+///
+/// [`Error::Refused`] on a file index the unit's line program does not have. Writing one anyway
+/// would be a `DW_AT_decl_file` a reader resolves to whatever file happens to be at that index.
+fn came_from(
+    dwarf: &mut gimli::write::DwarfUnit,
+    at: UnitEntryId,
+    name: &str,
+    place: Option<Place>,
+    files: &[FileId],
+) -> Result<(), Error> {
+    let Some(place) = place else { return Ok(()) };
+    let Some(&file) = files.get(place.file) else {
+        let why = format!("{name} names file {}, which is not one", place.file);
+        return Err(Error::Refused { why });
+    };
+    let entry = dwarf.unit.get_mut(at);
+    entry.set(gimli::DW_AT_decl_file, AttributeValue::FileIndex(Some(file)));
+    entry.set(gimli::DW_AT_decl_line, AttributeValue::Udata(u64::from(place.line)));
+    Ok(())
 }
 
 /// What a signature says, which is the same attributes on a subprogram and on a function type.
@@ -332,6 +395,7 @@ mod tests {
                 }),
                 external: true,
             }],
+            globals: Vec::new(),
             pointer: 8,
         }
     }
@@ -426,5 +490,44 @@ mod tests {
         let mut unit = one();
         unit.funcs[0].decl = Some(Place { file: 4, line: 3 });
         assert!(write(&unit).is_err());
+    }
+
+    /// A file-scope variable gets an entry whose address the linker fills in, against its own name.
+    ///
+    /// The symbol number in a relocation is a position in the functions followed by the globals, so
+    /// this is also what says the two lists share one index space: getting the offset wrong would
+    /// put the function's name on the variable's address or run off the end of the list.
+    #[test]
+    fn a_file_scope_variable_gets_an_entry_the_linker_fills_in() {
+        let mut unit = one();
+        unit.globals = vec![Global {
+            name: "counter".to_owned(),
+            ty: Some(0),
+            decl: Some(Place { file: 0, line: 1 }),
+            external: true,
+        }];
+        let info = write(&unit).expect("sections");
+        let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        let at = held.relocs.iter().find(|reloc| reloc.symbol == "counter").expect("an address");
+        assert_eq!(at.kind, Reference::Address { bytes: 8 });
+        assert_eq!(at.addend, 0);
+        assert!(held.relocs.iter().any(|reloc| reloc.symbol == "f"), "and the function still");
+        assert!(named(&info).contains(&"counter".to_owned()));
+    }
+
+    /// A variable whose type could not be described keeps its name and its address.
+    ///
+    /// The opposite of the rule for a function, and on purpose: nothing in C is a variable of type
+    /// `void`, so a missing `DW_AT_type` here misleads nobody, and a debugger that can resolve the
+    /// name and be told the address can be told the type by whoever is reading.
+    #[test]
+    fn a_variable_with_no_type_still_gets_an_entry() {
+        let mut unit = one();
+        unit.globals =
+            vec![Global { name: "opaque".to_owned(), ty: None, decl: None, external: false }];
+        let info = write(&unit).expect("sections");
+        let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        assert!(held.relocs.iter().any(|reloc| reloc.symbol == "opaque"));
+        assert!(named(&info).contains(&"opaque".to_owned()));
     }
 }

@@ -204,6 +204,34 @@ pub struct Param {
     pub ty: usize,
 }
 
+/// One variable the unit defines at file scope.
+///
+/// Not the same problem as a local, and that is the whole reason this is here and a local is not.
+/// A file-scope variable is at one address for the whole of the program, so its location is the
+/// address of its own symbol and the linker fills it in, the same way it fills in a function's. A
+/// local's location is wherever the code happens to be keeping it at the program counter the
+/// debugger stopped at, which is a list rather than an expression, and that is the rest of
+/// tamnd/rucc#9.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Global {
+    /// Its name, as the C program spelled it, which is what the relocation asks the linker for.
+    pub name: String,
+    /// Which of the unit's [`types`](crate::Unit::types) it is, and [`None`] when this compiler
+    /// cannot yet say.
+    ///
+    /// A variable with nothing here still gets an entry, which is the one place the rule for a
+    /// function is turned around. A `DW_TAG_variable` with no `DW_AT_type` does not say `void`,
+    /// because nothing in C is a variable of type `void`, so a reader takes it as a variable whose
+    /// type was not recorded. The name and the address are worth having on their own: they are
+    /// what lets a debugger resolve the name at all, and a program that knows what it is looking
+    /// at can cast.
+    pub ty: Option<usize>,
+    /// Where it was declared, and nothing when that is not known.
+    pub decl: Option<Place>,
+    /// Whether anything outside this unit can see it, which is the opposite of `static`.
+    pub external: bool,
+}
+
 /// Where in the source something was declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Place {

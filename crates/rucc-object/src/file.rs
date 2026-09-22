@@ -636,17 +636,33 @@ pub fn write(
                 // for the reason the unwind table's records are written that way: a global name is
                 // answered at load time by whichever object defines it first, and a distance to
                 // one is not a distance a linker can work out.
-                None => {
-                    let found = text.funcs.iter().position(|func| func.name == reloc.symbol);
-                    let Some((section, at)) = found.map(|i| split[i]) else {
-                        let why = format!(
-                            "'{}' is named by the debug information and is not a function here",
-                            reloc.symbol
-                        );
-                        return Err(Error::Refused { why });
-                    };
-                    (obj.section_symbol(section), reloc.addend + at as i64)
-                }
+                None => match text.funcs.iter().position(|func| func.name == reloc.symbol) {
+                    Some(which) => {
+                        let (section, at) = split[which];
+                        (obj.section_symbol(section), reloc.addend + at as i64)
+                    }
+                    // Or a variable this file defines, which a `DW_TAG_variable` asks for the
+                    // address of. Against its section for the reason a function is, where it has
+                    // one. A variable the linker is being asked for zeroed space for has no
+                    // section to count from and nothing but its own name to ask by, which is the
+                    // one case here where the name goes in the relocation.
+                    None => {
+                        let found = data.objects.iter().position(|had| had.name == reloc.symbol);
+                        let Some(which) = found else {
+                            let why = format!(
+                                "'{}' is named by the debug information and is not defined here",
+                                reloc.symbol
+                            );
+                            return Err(Error::Refused { why });
+                        };
+                        match placed[which] {
+                            (Some(section), at) => {
+                                (obj.section_symbol(section), reloc.addend + at as i64)
+                            }
+                            (None, _) => (symbols[&reloc.symbol], reloc.addend),
+                        }
+                    }
+                },
             };
             let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),

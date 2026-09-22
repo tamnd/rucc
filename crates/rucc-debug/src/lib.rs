@@ -4,12 +4,15 @@
 //!
 //! # Status
 //!
-//! The line table, the types and the functions. [`write()`] takes one unit's worth of addresses,
-//! the places in the source they came from, the types the unit names and what each of its functions
-//! takes and gives back, and gives back the sections that say so. That is enough for `addr2line` to
-//! answer a program counter with a file and a line, enough for a debugger to produce a backtrace
-//! with argument types in it, and not enough for one to print a variable, because a variable also
-//! needs to be said where it is. That last part is the rest of M8 and of tamnd/rucc#9.
+//! The line table, the types, the functions and the variables a unit defines at file scope.
+//! [`write()`] takes one unit's worth of addresses, the places in the source they came from, the
+//! types the unit names, what each of its functions takes and gives back and what each of its
+//! file-scope variables is, and gives back the sections that say so. That is enough for `addr2line`
+//! to answer a program counter with a file and a line, enough for a debugger to produce a backtrace
+//! with argument types in it, and enough for one to print a global. It is not enough for one to
+//! print a local, because a local has to be said where it is at the program counter that is asking,
+//! which is a list of places rather than one. That last part is the rest of M8 and of
+//! tamnd/rucc#9.
 //!
 //! The reason that part came first is tamnd/rucc#1558. A report from the safety monitor carries a
 //! program counter and deliberately carries no source location, because
@@ -46,7 +49,7 @@ mod shape;
 mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, write};
-pub use crate::shape::{Bits, Encoding, Member, Param, Place, Qualifier, Shape, Sig};
+pub use crate::shape::{Bits, Encoding, Global, Member, Param, Place, Qualifier, Shape, Sig};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M8";
