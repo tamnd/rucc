@@ -4,10 +4,12 @@
 //!
 //! # Status
 //!
-//! The line table and nothing else. [`write()`] takes one unit's worth of addresses and the places
-//! in the source they came from and gives back the sections that say so, which is enough for
-//! `addr2line` to answer a program counter with a file and a line and not enough for a debugger to
-//! print a variable. The rest of M8 is tamnd/rucc#9.
+//! The line table, the types and the functions. [`write()`] takes one unit's worth of addresses,
+//! the places in the source they came from, the types the unit names and what each of its functions
+//! takes and gives back, and gives back the sections that say so. That is enough for `addr2line` to
+//! answer a program counter with a file and a line, enough for a debugger to produce a backtrace
+//! with argument types in it, and not enough for one to print a variable, because a variable also
+//! needs to be said where it is. That last part is the rest of M8 and of tamnd/rucc#9.
 //!
 //! The reason that part came first is tamnd/rucc#1558. A report from the safety monitor carries a
 //! program counter and deliberately carries no source location, because
@@ -40,8 +42,11 @@
 #![doc(html_root_url = "https://docs.rs/rucc-debug/0.10.74")]
 
 mod line;
+mod shape;
+mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, write};
+pub use crate::shape::{Bits, Encoding, Member, Param, Place, Qualifier, Shape, Sig};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M8";

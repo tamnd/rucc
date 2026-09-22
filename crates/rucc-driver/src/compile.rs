@@ -329,6 +329,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             .map(|bytes| bytes.as_slice().to_vec())
                             .map_err(|why| why.to_string())
                     };
+                    // What the debug information will say about types and signatures, taken
+                    // here because this is the last place the checker's types are readable
+                    // without the back end's borrow of the interner in the way. Nothing at all
+                    // when the build asked for no debug information, since a translation unit
+                    // the size of an amalgamation has tens of thousands of types in it.
+                    let meaning = if opts.debug_info {
+                        crate::shapes::collect(
+                            &checked.tast,
+                            &checked.types,
+                            &sess.target,
+                            &sess.interner,
+                            &sess.sources,
+                        )
+                    } else {
+                        crate::shapes::Meaning::default()
+                    };
                     let mut lowered = rucc_lower::lower(
                         crate::phase::source_name(name),
                         rucc_lower::Context {
@@ -429,7 +445,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     lowerings: &mut lowerings,
                                 },
                                 &mut temps.assembly,
-                                Origin { map: &sess.sources, name },
+                                Origin { map: &sess.sources, name, meaning: &meaning },
                             ) {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
@@ -713,15 +729,18 @@ fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
 
 /// Where the file being generated came from, which is what the debug information is about.
 ///
-/// The two together rather than separately because neither is any use on its own here: a span
-/// without the map it points into is a pair of numbers, and a name without the spans is a file
-/// nothing in the object refers to.
+/// The three together rather than separately because none of them is any use on its own here: a
+/// span without the map it points into is a pair of numbers, a name without the spans is a file
+/// nothing in the object refers to, and a signature without the name of the function it belongs to
+/// is an entry with nothing to attach it to.
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     /// Where every span in the module points.
     map: &'a SourceMap,
     /// What the command line called the file, which is what `DW_AT_name` says.
     name: &'a str,
+    /// The types and the signatures, and empty where the build wanted no debug information.
+    meaning: &'a crate::shapes::Meaning,
 }
 
 fn generate(
@@ -997,7 +1016,8 @@ fn describe(
     let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
     // The file table, built as the rows are walked rather than up front, because what belongs in it
     // is the files the code came from and not the files the preprocessor opened. A header that
-    // contributed nothing but declarations is not one of them.
+    // contributed nothing but declarations is not one of them, and one that holds a definition is
+    // in it twice over: once for the rows and once for the line the definition is declared on.
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(text.funcs.len());
     for (extent, rows) in text.funcs.iter().zip(lines) {
@@ -1009,15 +1029,7 @@ fn describe(
             let Some(at) = origin.map.presumed(row.span.lo) else {
                 continue;
             };
-            let name = rewrite(at.name);
-            let found = files.iter().position(|have| *have == name);
-            let which = match found {
-                Some(which) => which,
-                None => {
-                    files.push(name);
-                    files.len() - 1
-                }
-            };
+            let which = interned(&mut files, rewrite(at.name));
             let place = rucc_debug::Row {
                 at: row.at as u64,
                 file: which,
@@ -1047,10 +1059,23 @@ fn describe(
         if let Some(first) = out.first_mut() {
             first.at = 0;
         }
+        // And what the function is, for the one this unit holds a definition of. A function the
+        // walk above found and this did not is one whose name in the object is not the name the
+        // declaration had, which `__asm__` on a declaration is the way to arrange, and one whose
+        // signature could not be described. Both get rows and no entry, which leaves a debugger
+        // where it is for every function today rather than anywhere worse.
+        let known = origin.meaning.funcs.get(&extent.name);
+        let decl = known.map(|known| rucc_debug::Place {
+            file: interned(&mut files, rewrite(&known.file)),
+            line: known.line,
+        });
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
             len: extent.len as u64,
             rows: out,
+            decl,
+            sig: known.and_then(|known| known.sig.clone()),
+            external: known.is_some_and(|known| known.external),
         });
     }
     let unit = rucc_debug::Unit {
@@ -1060,10 +1085,26 @@ fn describe(
         dir: rewrite(opts.working_dir.as_deref().unwrap_or(".")),
         producer: format!("rucc {}", crate::VERSION),
         files,
+        types: origin.meaning.types.clone(),
         funcs,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())
+}
+
+/// Where a file name is in the table, putting it there if it is not there yet.
+///
+/// A walk rather than a map because the table holds the files one object's code came from, which is
+/// a handful even for an amalgamation: everything the preprocessor opened and nothing was generated
+/// out of stays out of it.
+fn interned(files: &mut Vec<String>, name: String) -> usize {
+    match files.iter().position(|have| *have == name) {
+        Some(which) => which,
+        None => {
+            files.push(name);
+            files.len() - 1
+        }
+    }
 }
 
 /// What the command line decided about the file being written, in the words the assembler and the

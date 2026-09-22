@@ -41,6 +41,7 @@ mod map;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;
+mod shapes;
 
 use std::fmt::Write as _;
 use std::io::Write as _;

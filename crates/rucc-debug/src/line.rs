@@ -23,10 +23,10 @@
 //! its header, and the strings those tables name, in `.debug_line_str`. Beside them the smallest
 //! compilation unit that makes them findable: one `DW_TAG_compile_unit` in `.debug_info` with the
 //! producer, the name of the file, the directory the compiler ran in, a `DW_AT_stmt_list` pointing
-//! at the program and a `DW_AT_ranges` saying which addresses this unit covers, and the abbreviation
-//! it is written against in `.debug_abbrev`. A reader that is handed an address walks the units,
-//! and a unit with no entry in `.debug_info` is a unit nothing walks, so the table alone would have
-//! been a section no tool reads.
+//! at the program and a `DW_AT_ranges` saying which addresses this unit covers, and the
+//! abbreviation it is written against in `.debug_abbrev`. A reader handed an address walks the
+//! units, and a unit with no entry in `.debug_info` is a unit nothing walks, so the table alone
+//! would have been a section no tool reads.
 //!
 //! The ranges are a list with one entry per function rather than a low and a high address over the
 //! whole unit. Under `-ffunction-sections` each function is a section of its own and the linker may
@@ -36,11 +36,12 @@
 //!
 //! # What is not here
 //!
-//! Everything about what the program means: no `DW_TAG_subprogram`, no types, no variables and no
-//! location expressions. Those are M8 and tamnd/rucc#9, and what makes them a different piece of
-//! work rather than more of this one is that they are checked differently: a line table is right or
-//! wrong against `addr2line` and a description of a variable is right or wrong against a debugger
-//! that stops in the middle of a function and prints it.
+//! What the program means is in `tree.rs` and goes in the same unit: the types and the functions,
+//! which is what a debugger reads a value through. Variables and their location expressions are
+//! still to come and are the rest of tamnd/rucc#9, and what makes them a different piece of work
+//! rather than more of this one is that they are checked differently: a line table is right or
+//! wrong against `addr2line` and a variable's location is right or wrong against a debugger that
+//! stops in the middle of a function and prints it.
 //!
 //! One sequence per function, each beginning at that function's own symbol. A sequence is the unit
 //! of address ordering in a line program and its rows have to run forwards, so a table with one
@@ -48,9 +49,12 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
+use crate::shape::{Place, Shape, Sig};
+use crate::tree;
+
 use rucc_object::{Chunk, Info, Reference, Reloc};
 
-/// One compilation unit's worth of line information.
+/// One compilation unit's worth of debug information.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Unit {
     /// The file being compiled, as the command line spelled it, already prefix mapped.
@@ -65,13 +69,18 @@ pub struct Unit {
     pub producer: String,
     /// Every file any row names, in the order the rows refer to them by.
     pub files: Vec<String>,
+    /// Every type anything in the unit names, in the order they refer to them by.
+    ///
+    /// A table of indices rather than a tree, so that a type naming itself is an ordinary entry.
+    /// See [`Shape`] for what is in one and what is deliberately left out of one.
+    pub types: Vec<Shape>,
     /// The functions, in the order the text section holds them.
     pub funcs: Vec<Function>,
     /// How many bytes an address is on this target.
     pub pointer: u8,
 }
 
-/// One function, and where each of its instructions came from.
+/// One function: where each of its instructions came from, and what it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Function {
     /// Its name, as the C program spelled it, which is what a relocation here asks the linker for.
@@ -80,6 +89,16 @@ pub struct Function {
     pub len: u64,
     /// The rows, in increasing order of address.
     pub rows: Vec<Row>,
+    /// Where it was declared, and nothing when that is not known.
+    pub decl: Option<Place>,
+    /// What it takes and gives back, and [`None`] when this compiler cannot yet say.
+    ///
+    /// A function with nothing here gets no entry in `.debug_info` at all, for the reason in the
+    /// `tree.rs` module documentation: an entry with no return type is an entry saying `void`, so
+    /// half an answer here is a wrong one rather than a partial one.
+    pub sig: Option<Sig>,
+    /// Whether anything outside this unit can see it, which is the opposite of `static`.
+    pub external: bool,
 }
 
 /// One row of the table: an address, and where the code at it came from.
@@ -154,7 +173,7 @@ impl gimli::write::RelocateWriter for Section {
     }
 }
 
-/// The sections a unit's line information goes in.
+/// The sections a unit's debug information goes in.
 ///
 /// The result is empty when nothing in the unit has a row, which is a file of declarations and a
 /// file whose every function was dropped. An empty `.debug_line` is worse than no section at all,
@@ -244,6 +263,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     root.set(gimli::DW_AT_comp_dir, gimli::write::AttributeValue::LineStringRef(held(dir)?));
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
     root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
+    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs)?;
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
     let mut info = Info::default();
@@ -323,6 +343,7 @@ mod tests {
             dir: "/tmp".to_owned(),
             producer: "rucc".to_owned(),
             files: vec!["a.c".to_owned()],
+            types: Vec::new(),
             funcs: vec![Function {
                 name: "f".to_owned(),
                 len: 16,
@@ -330,6 +351,7 @@ mod tests {
                     Row { at: 0, file: 0, line: 3, column: 1 },
                     Row { at: 8, file: 0, line: 4, column: 5 },
                 ],
+                ..Function::default()
             }],
             pointer: 8,
         }
