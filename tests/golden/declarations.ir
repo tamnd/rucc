@@ -34,7 +34,10 @@ block0(%0: i32):
     return %10
 }
 
-func @always_inline_me(i32) -> i32, linkage(external);
+func @always_inline_me(i32) -> i32, linkage(linkonce) {
+block0(%0: i32):
+    return %0
+}
 
 func @inline_but_also_declared(i32) -> i32, linkage(external) {
 block0(%0: i32):

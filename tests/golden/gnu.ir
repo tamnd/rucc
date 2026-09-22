@@ -379,7 +379,12 @@ block0(%0: i32):
     return %3
 }
 
-func @held_back(i32) -> i32, linkage(external);
+func @held_back(i32) -> i32, linkage(linkonce) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = add.nsw %0, %1
+    return %2
+}
 
 func @emitted_anyway(i32) -> i32, linkage(external) {
 block0(%0: i32):

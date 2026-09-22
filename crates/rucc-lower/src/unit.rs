@@ -36,9 +36,9 @@ use rucc_ir::{
     Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
-    Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Eval,
-    ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId,
-    Tast, Visibility,
+    Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
+    Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration,
+    StrId, Tast, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
@@ -714,18 +714,22 @@ impl Unit<'_> {
             Effects::Pure => AttrSet::READONLY,
             Effects::Const => AttrSet::READNONE,
         };
-        func.linkage = self.told(decl, linkage);
+        // An inline definition this unit calls, which this unit has to put a copy of out of line
+        // because it has no inliner to make the call go away. See [`Self::out_of_line`].
+        let copied = body.is_some() && self.out_of_line(decl, node.inline);
+        func.linkage = if copied { IrLinkage::LinkOnce } else { self.told(decl, linkage) };
         // The same question as for an object, and the same answer, with one wrinkle: an inline
-        // definition this unit does not emit is a declaration here, since C 6.7.4p7 sends the
-        // calls to whatever unit holds the external definition, so it is not this file's to
-        // describe. That is the condition the body is lowered under, a few lines below.
-        func.visibility = self.seen(decl, body.is_some() && node.inline.emits());
+        // definition this unit neither emits nor calls is a declaration here, since C 6.7.4p7
+        // sends the calls to whatever unit holds the external definition, so it is not this
+        // file's to describe. That is the condition the body is lowered under, a few lines below.
+        func.visibility = self.seen(decl, body.is_some() && (node.inline.emits() || copied));
         // An inline definition is not an external definition, so what goes in the module is the
         // declaration and not the body. C 6.7.4p7 says the calls in this unit go to the definition
         // some other unit holds, which is what the declaration gives them, and glibc's headers
         // rely on it: every one of their inline definitions would otherwise be a second definition
-        // of a name the library already defines.
-        if body.is_some() && node.inline.emits() {
+        // of a name the library already defines. Unless this unit is one of the callers, which is
+        // the case [`Self::out_of_line`] is about.
+        if body.is_some() && (node.inline.emits() || copied) {
             body::lower(self, decl, &mut func, &plan);
             // Only for a definition, because an entry is an address and a declaration of something
             // another file defines has none to put there. gcc reads the attribute off whichever
@@ -994,6 +998,32 @@ impl Unit<'_> {
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
         }
+    }
+
+    /// Whether a body this unit is not meant to emit has to be emitted anyway, because this unit
+    /// calls it and has nothing else to send the call to.
+    ///
+    /// C 6.7.4p7 says an inline definition is not an external definition, and the bargain it
+    /// offers is that the call is replaced by the body, so nobody ever has to resolve the name.
+    /// A compiler that inlines keeps its end of it. This one does not inline, so a call left
+    /// standing is a call to a name no object file defines, and the program fails at the link on
+    /// a function it can see the body of. micropython is a program that does exactly that:
+    /// `py/misc.h` writes `MP_COMPRESSED_ROM_TEXT` as `inline __attribute__((always_inline))`,
+    /// nothing anywhere defines it out of line, and every file that reports an error calls it.
+    ///
+    /// So a copy goes out of line, under [`IrLinkage::LinkOnce`]. Every unit that calls one emits
+    /// its own copy of the same body, the linker keeps one and the rest are discarded, and a unit
+    /// that holds the real external definition beats all of them because a strong definition
+    /// beats a weak one. What that costs is object size in the units that call one. What it buys
+    /// is that the address of the function is the same everywhere and that the program links,
+    /// which is the whole of what the program was asking for.
+    ///
+    /// Only when this unit names it, which is why [`reach`] stopped treating one of these as a
+    /// root. An unreferenced inline definition is still emitted as nothing at all, which is what
+    /// keeps a file that includes `stdio.h` from carrying its own `vprintf`, `putchar`, `getchar`
+    /// and the dozen more glibc writes beside them.
+    fn out_of_line(&self, decl: DeclId, emission: Emission) -> bool {
+        !emission.emits() && self.reachable.contains(&decl)
     }
 
     /// The same for an object, where a global with no image is the declaration.

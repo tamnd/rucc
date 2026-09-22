@@ -109,8 +109,8 @@ pub use crate::check::{
 };
 pub use crate::convert::Conv;
 pub use crate::decl::{
-    Decl, DeclFlags, DeclId, DeclKind, DeclList, DeclRef, Definition, Effects, InitEntry, InitList,
-    Linkage, Priority, Startup, StorageDuration, Visibility,
+    Decl, DeclFlags, DeclId, DeclKind, DeclList, DeclRef, Definition, Effects, Emission, InitEntry,
+    InitList, Linkage, Priority, Startup, StorageDuration, Visibility,
 };
 pub use crate::eval::{Eval, NotConstant};
 pub use crate::expr::{

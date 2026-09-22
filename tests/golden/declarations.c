@@ -28,9 +28,11 @@ static int internal_function(int a) {
 }
 
 // Every file-scope declaration of this name writes `inline` and none writes `extern`, so what is
-// here is an inline definition: nothing is emitted for it and a call goes to the external
-// definition some other unit holds. The declaration is still in the module, since the calls need
-// something to resolve against, and it is the body that is left out.
+// here is an inline definition, which 6.7.4p7 says is not an external definition of the name.
+// The bargain is that the call is replaced by the body so nobody has to resolve the name, and
+// this compiler does not inline, so a copy of the body goes out of line as `linkonce`: the linker
+// keeps one of the copies the calling files each made and a real external definition anywhere
+// beats all of them. A file that does not call this one emits nothing for it at all.
 inline int always_inline_me(int a) {
   return a;
 }

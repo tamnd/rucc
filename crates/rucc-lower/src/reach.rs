@@ -33,6 +33,13 @@
 //! anything a `used`, `retain`, `constructor`, `destructor` or `alias` attribute asks to be kept,
 //! which is [`DeclFlags::RETAINED`] and is the answer for the definitions that are reached from
 //! somewhere no C file says.
+//!
+//! An inline definition is not one of them, for the same reason a `static` function is not. The
+//! name it defines is external, but 6.7.4p7 says this unit emits nothing under it, so no object
+//! file offers it and nothing outside can be calling this body. What that leaves is a set that
+//! means what it says for these as well: a body offered for inlining is in the answer exactly
+//! when something in this file names it, which is the question [`crate::unit`] has to ask before
+//! it puts a copy of the body out of line.
 
 use std::collections::HashSet;
 
@@ -71,7 +78,9 @@ fn is_root(node: &Decl) -> bool {
         // image names is reached. Dropping the ones nothing reads is a separate question with an
         // answer of its own, and until it is asked this has to assume every one of them is there.
         DeclKind::Object => true,
-        DeclKind::Function => node.linkage == Linkage::External,
+        // And not an inline definition, which is external and is still not something another
+        // unit can reach, because this one emits nothing under the name for it to reach.
+        DeclKind::Function => node.linkage == Linkage::External && node.inline.emits(),
         // A name for a type is a place to evaluate a size at, and nothing is emitted for it.
         DeclKind::Type => false,
     }
