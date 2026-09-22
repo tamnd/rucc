@@ -145,11 +145,6 @@ pub enum Shape {
         members: Option<Vec<Member>>,
     },
     /// An `enum`.
-    ///
-    /// Without its enumerators, which are not in this compiler's type table: an enumerator is a
-    /// constant in a scope rather than part of the type, so nothing that has the type also has the
-    /// list. A debugger therefore prints the number rather than the name. Missing rather than
-    /// wrong, and the next thing to fill in here.
     Enumeration {
         /// Its tag, absent for one the program left anonymous.
         name: Option<String>,
@@ -157,6 +152,11 @@ pub enum Shape {
         of: usize,
         /// How many bytes it is.
         size: u64,
+        /// The enumerators in the order the program wrote them.
+        ///
+        /// Empty for an enumeration that has not been completed, which is a thing a C program can
+        /// mention but cannot have an object of.
+        values: Vec<Constant>,
     },
     /// A `typedef` name for another type.
     Alias {
@@ -176,6 +176,20 @@ pub enum Shape {
     },
     /// A function type, which is what a pointer to a function points at.
     Subroutine(Sig),
+}
+
+/// One enumerator of an enumeration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constant {
+    /// The name the program wrote, which is what a debugger prints in place of the number.
+    pub name: String,
+    /// Its value.
+    ///
+    /// Wider than any enumeration a target has, so that the writer decides which DWARF form the
+    /// number goes in rather than the caller having to know. A value wider than 64 bits has no
+    /// form that holds it and is left out, the same way a record drops a member it cannot
+    /// describe and keeps the rest.
+    pub value: i128,
 }
 
 /// What a function takes and gives back.

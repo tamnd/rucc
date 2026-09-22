@@ -49,7 +49,9 @@ mod shape;
 mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, write};
-pub use crate::shape::{Bits, Encoding, Global, Member, Param, Place, Qualifier, Shape, Sig};
+pub use crate::shape::{
+    Bits, Constant, Encoding, Global, Member, Param, Place, Qualifier, Shape, Sig,
+};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M8";

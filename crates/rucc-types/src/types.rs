@@ -108,6 +108,29 @@ pub struct EnumInfo {
     /// It changes the answer to what an enumerator's own type is, and it decides whether an
     /// enumerator that does not fit is an error or a reason to widen.
     pub fixed: bool,
+    /// The enumerators in the order the program wrote them, empty until the enumeration is
+    /// complete.
+    ///
+    /// Nothing the type system itself asks about, since an enumerator is a name in a scope and
+    /// what has the type is the enumeration rather than the list. It is here because the
+    /// declaration is the only place the list ever exists, the scope it is declared into throws
+    /// away the order and the tie to the enumeration, and a reader that wants the list later has
+    /// nowhere else to ask. Debug information is that reader: without this a debugger prints the
+    /// number where the program wrote the name.
+    pub enumerators: Vec<Enumerator>,
+}
+
+/// One enumerator of an enumeration.
+#[derive(Debug, Clone)]
+pub struct Enumerator {
+    /// The name the program wrote.
+    pub name: Symbol,
+    /// Its value, in the enumeration's underlying type.
+    ///
+    /// Held as an [`i128`] because the value is worked out before the underlying type is chosen,
+    /// and because the widest enumeration a target has still has to fit in something wider than
+    /// itself while the list is being read.
+    pub value: i128,
 }
 
 /// Every type in one translation unit.
@@ -442,7 +465,7 @@ impl Types {
     /// Panics past four billion enumeration declarations in one translation unit.
     pub fn declare_enum(&mut self, tag: Option<Symbol>) -> EnumId {
         let id = EnumId(u32::try_from(self.enums.len()).expect("too many types"));
-        self.enums.push(EnumInfo { tag, underlying: None, fixed: false });
+        self.enums.push(EnumInfo { tag, underlying: None, fixed: false, enumerators: Vec::new() });
         id
     }
 
@@ -470,6 +493,21 @@ impl Types {
         let info = &mut self.enums[id.0 as usize];
         info.underlying = Some(underlying);
         info.fixed = fixed;
+    }
+
+    /// Records what an enumeration's enumerators are.
+    ///
+    /// Apart from [`Types::complete_enum`] because it is a different fact with a different reader.
+    /// What an enumeration is represented in decides what its values do in arithmetic and is asked
+    /// by the rest of the compiler; the list of names is asked by nothing but the debug
+    /// information, and an enumeration that reaches completion without one, which is what a C23
+    /// declaration that writes an underlying type and no body does, is complete all the same.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    pub fn list_enumerators(&mut self, id: EnumId, enumerators: Vec<Enumerator>) {
+        self.enums[id.0 as usize].enumerators = enumerators;
     }
 
     /// A typedef name standing for `underlying`.
