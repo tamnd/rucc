@@ -35,7 +35,7 @@
 //! [`Function::sig`]: crate::Function::sig
 
 use crate::line::{Error, Function};
-use crate::shape::{Encoding, Global, Member, Place, Qualifier, Shape, Sig};
+use crate::shape::{Constant, Encoding, Global, Member, Place, Qualifier, Shape, Sig};
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
 
@@ -135,12 +135,15 @@ fn fill(
                 }
             }
         }
-        Shape::Enumeration { name, of, size } => {
+        Shape::Enumeration { name, of, size, values } => {
             if let Some(name) = name {
                 title(dwarf, at, name);
             }
             bytes(dwarf, at, *size);
             points(dwarf, at, Some(*of), ids)?;
+            for value in values {
+                counted(dwarf, at, value);
+            }
         }
         Shape::Alias { name, of } => {
             title(dwarf, at, name);
@@ -292,6 +295,30 @@ fn held(
         None => entry.set(gimli::DW_AT_data_member_location, AttributeValue::Udata(member.at)),
     }
     Ok(())
+}
+
+/// One enumerator, which is a child of the enumeration rather than an attribute on it.
+///
+/// Which form the value goes in follows the value rather than the enumeration's underlying type: a
+/// negative one is signed data and anything else is unsigned data, and a reader that wants the
+/// number in the program's own type has the underlying type on the parent to read it through. A
+/// value wider than 64 bits has no form to go in, so the enumerator is left out, which is the same
+/// answer a record gives for a member it cannot describe and for the same reason: what is left is
+/// still true.
+fn counted(dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, value: &Constant) {
+    let held = match value.value {
+        held if held < 0 => match i64::try_from(held) {
+            Ok(held) => AttributeValue::Sdata(held),
+            Err(_) => return,
+        },
+        held => match u64::try_from(held) {
+            Ok(held) => AttributeValue::Udata(held),
+            Err(_) => return,
+        },
+    };
+    let child = dwarf.unit.add(at, gimli::DW_TAG_enumerator);
+    title(dwarf, child, &value.name);
+    dwarf.unit.get_mut(child).set(gimli::DW_AT_const_value, held);
 }
 
 /// What an array holds and how many, the count being a child entry rather than an attribute.
@@ -529,5 +556,42 @@ mod tests {
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(held.relocs.iter().any(|reloc| reloc.symbol == "opaque"));
         assert!(named(&info).contains(&"opaque".to_owned()));
+    }
+
+    /// An enumeration carries its enumerators, which is what lets a debugger print the name.
+    #[test]
+    fn an_enumeration_names_its_enumerators() {
+        let mut unit = one();
+        unit.types.push(Shape::Enumeration {
+            name: Some("color".to_owned()),
+            of: 0,
+            size: 4,
+            values: vec![
+                Constant { name: "red".to_owned(), value: 0 },
+                Constant { name: "green".to_owned(), value: -1 },
+            ],
+        });
+        let names = named(&write(&unit).expect("sections"));
+        assert!(names.contains(&"color".to_owned()), "{names:?}");
+        assert!(names.contains(&"red".to_owned()), "{names:?}");
+        assert!(names.contains(&"green".to_owned()), "{names:?}");
+    }
+
+    /// An enumerator whose value is wider than any DWARF form is left out and the rest stand.
+    #[test]
+    fn an_enumerator_too_wide_for_a_form_is_left_out() {
+        let mut unit = one();
+        unit.types.push(Shape::Enumeration {
+            name: Some("wide".to_owned()),
+            of: 0,
+            size: 16,
+            values: vec![
+                Constant { name: "small".to_owned(), value: 1 },
+                Constant { name: "huge".to_owned(), value: i128::from(u64::MAX) + 1 },
+            ],
+        });
+        let names = named(&write(&unit).expect("sections"));
+        assert!(names.contains(&"small".to_owned()), "{names:?}");
+        assert!(!names.contains(&"huge".to_owned()), "{names:?}");
     }
 }

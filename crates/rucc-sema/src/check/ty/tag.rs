@@ -50,9 +50,9 @@ use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
-    ArrayLen, EnumId, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError, RecordError, RecordId,
-    RecordKind, RecordLayout, RecordOptions, TypeId, TypeKind, integer_info, is_complete,
-    is_function, is_void, layout, layout_record,
+    ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
+    RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, TypeId, TypeKind, integer_info,
+    is_complete, is_function, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -608,7 +608,14 @@ impl Checker<'_> {
             Some(ty) => ty,
             None => self.enum_underlying(&values),
         };
+        // The list goes into the table as well as into the scope. The scope answers what one name
+        // means and is what the rest of the checker asks, and the table answers what the whole
+        // enumeration is made of, in order, which is what debug information asks and what nothing
+        // else keeps.
+        let listed =
+            values.iter().map(|&(name, value, _)| Enumerator { name, value }).collect::<Vec<_>>();
         self.types.complete_enum(id, underlying, fixed.is_some());
+        self.types.list_enumerators(id, listed);
 
         // Declared a second time, now that there is an answer to what type an enumerator has.
         // Nothing has been folded with the placeholder in between, since an enumerator is the

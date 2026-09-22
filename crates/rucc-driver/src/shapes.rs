@@ -31,8 +31,7 @@
 //! described is left out of the member list and everything else about the record stays, so its size
 //! is still right and every other member is still where it says it is. Losing the whole record
 //! would lose every function that takes a pointer to it, which in a real program is most of them,
-//! and a record with a field missing is the same kind of incompleteness as an enumeration with no
-//! enumerators: less than the truth rather than other than it.
+//! and a record with a field missing is less than the truth rather than other than it.
 //!
 //! A record C calls variably modified, meaning a variable length array is among its members, has
 //! no member list here either. Its members are at offsets that are not numbers, and the attribute
@@ -49,7 +48,7 @@
 use std::collections::HashMap;
 
 use rucc_base::{Interner, Symbol};
-use rucc_debug::{Bits, Encoding, Member, Param, Qualifier, Shape, Sig};
+use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::SourceMap;
 use rucc_sema::{DeclId, DeclKind, Linkage, StorageDuration, Tast};
 use rucc_target::TargetInfo;
@@ -378,9 +377,14 @@ impl Walk<'_> {
                 let info = self.types.enum_info(which);
                 let name = info.tag.map(|tag| self.spelled(tag));
                 let underlying = info.underlying?;
+                let listed = info.enumerators.clone();
                 let size = self.size(underlying)?;
                 let of = self.told(underlying)?;
-                Some(Shape::Enumeration { name, of, size })
+                let values = listed
+                    .iter()
+                    .map(|one| Constant { name: self.spelled(one.name), value: one.value })
+                    .collect();
+                Some(Shape::Enumeration { name, of, size, values })
             }
             TypeKind::Typedef { name, underlying, .. } => {
                 let of = self.told_or_void(underlying)?;
