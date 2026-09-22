@@ -2937,14 +2937,12 @@ impl<'a> Lowering<'a> {
     /// are written from the same table as every other instruction, and a spill around one works
     /// because there is nothing left about it for a spill to get wrong.
     ///
-    /// Three things are refused, all for one reason, which is that placing them by a guess gives a
-    /// program that assembles into something other than what it says.
+    /// A register the template named in its own text is the one thing in there that is nobody's
+    /// operand, and it is placed as itself. See [`Self::itself`] for why that is safer here than
+    /// the thing gcc does, which is to copy the name out and leave the allocator none the wiser.
     ///
-    /// A register the template named itself. The registers an instruction here names are the ones
-    /// the allocator handed out, and a name in the text is a claim on a register nobody told the
-    /// allocator about. A register a constraint letter names is a different thing and is placed,
-    /// which the paragraph below is about: there the statement said which of its own operands is
-    /// in the register, and a name in the middle of a template says no such thing.
+    /// Two things are refused, both for one reason, which is that placing them by a guess gives a
+    /// program that assembles into something other than what it says.
     ///
     /// An output the template writes more than once, which is one place with two definitions in it,
     /// and the machine IR between here and the allocator has one definition per register by
@@ -3043,8 +3041,16 @@ impl<'a> Lowering<'a> {
         let mut held = vec![false; list.len()];
         for step in &steps {
             let x86_64::Step::Line(line) = step else { continue };
-            if let Some(x86_64::Piece::Operand { index, .. }) = line.at.and_then(|at| at.base) {
-                *held.get_mut(index).ok_or_else(refused)? = true;
+            match line.at.and_then(|at| at.base) {
+                Some(x86_64::Piece::Operand { index, .. }) => {
+                    *held.get_mut(index).ok_or_else(refused)? = true;
+                }
+                Some(x86_64::Piece::Reg { reg, .. }) => {
+                    if let Some(index) = bound(&list, reg, Role::Use) {
+                        *held.get_mut(index).ok_or_else(refused)? = true;
+                    }
+                }
+                _ => {}
             }
             let form = x86_64::form(line.opcode).ok_or_else(refused)?;
             // Which registers the instruction reaches, asked the same way it is asked again when
@@ -3066,7 +3072,10 @@ impl<'a> Lowering<'a> {
                         Some(index) => index,
                         None => continue,
                     },
-                    x86_64::Piece::Reg { .. } => continue,
+                    x86_64::Piece::Reg { reg, .. } => match bound(&list, reg, desc.role) {
+                        Some(index) => index,
+                        None => continue,
+                    },
                 };
                 *held.get_mut(index).ok_or_else(refused)? = true;
                 if matches!(desc.role, Role::Def | Role::EarlyDef) {
@@ -3301,7 +3310,10 @@ impl<'a> Lowering<'a> {
                                 Some(index) => index,
                                 None => continue,
                             },
-                            x86_64::Piece::Reg { .. } => continue,
+                            x86_64::Piece::Reg { reg, .. } => match bound(list, reg, desc.role) {
+                                Some(index) => index,
+                                None => continue,
+                            },
                         };
                         let place = places.get_mut(index).ok_or_else(refused)?;
                         if place.write.is_some() {
@@ -3501,7 +3513,15 @@ impl<'a> Lowering<'a> {
                 Some(index) => (index, None),
                 None => return self.spare(inst, desc),
             },
-            x86_64::Piece::Reg { .. } => return Err(refused()),
+            // A register the template named, which belongs to one of the statement's operands when
+            // a constraint letter put that operand there and to nobody otherwise. Asked in that
+            // order rather than placed straight away, because `"D" (p)` with `%rdi` in the text is
+            // the program saying one thing twice, and answering it twice would hand the allocator
+            // one register holding two values.
+            x86_64::Piece::Reg { reg, .. } => match bound(list, reg, desc.role) {
+                Some(index) => (index, None),
+                None => return self.itself(inst, desc, reg),
+            },
         };
         let operand = list.get(index).copied().ok_or_else(refused)?;
         // The two halves of an operand written `+`, which arrives in one register and leaves in
@@ -3555,6 +3575,39 @@ impl<'a> Lowering<'a> {
         Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
     }
 
+    /// A register the template named in its own text.
+    ///
+    /// Not one of the statement's operands and not something the allocator handed out. The program
+    /// wrote `%rbx` in the middle of a template and meant that register, which is what code doing
+    /// something the constraint letters cannot say is made of: micropython saves the callee-saved
+    /// registers into a buffer by name because the whole point of the buffer is that those exact
+    /// registers are in it, and there is no constraint letter for `%rsp`.
+    ///
+    /// So it is placed as itself, fixed to the register the template named. What that buys is the
+    /// thing gcc does not do: the register becomes part of the instruction the allocator sees, so a
+    /// write of one is a definition it knows about and will not leave anything of the program's
+    /// across, and a read of one is a use it will not have put something else in first. gcc copies
+    /// the text out and a register two things believe they own is a wrong program nothing reports.
+    /// Here the allocator is told, and a program that also named the register in its clobber list
+    /// says the same thing twice rather than something new.
+    fn itself(
+        &mut self,
+        inst: Inst,
+        desc: OperandDesc,
+        reg: PhysReg,
+    ) -> Result<mir::Operand, Unsupported> {
+        let refused = Unsupported::Assembly { inst, refused: Written::Operand };
+        if desc.class != self.gpr {
+            return Err(refused);
+        }
+        Ok(mir::Operand {
+            reg: mir::Reg::physical(reg),
+            class: self.gpr,
+            role: desc.role,
+            constraint: Constraint::Fixed(reg),
+        })
+    }
+
     /// A register an instruction of a template uses and the statement put nothing in.
     ///
     /// A write of one is the register being destroyed, which is what a clobber list is usually
@@ -3599,12 +3652,25 @@ impl<'a> Lowering<'a> {
                 let reg = places.get(index).and_then(|place| place.read).ok_or_else(refused)?;
                 Some(mir::Operand::read(reg, self.gpr))
             }
+            // A register the template named, counted from as itself. See [`Self::itself`], and note
+            // that this is the half of it every one of these templates needs: `movq %rax, 16(%rdi)`
+            // names one register as the thing being stored and another as where to store it. An
+            // operand a constraint letter put in that register is that operand, for the reason
+            // [`Self::placed`] gives.
+            Some(x86_64::Piece::Reg { reg, .. }) => match bound(list, reg, Role::Use) {
+                Some(index) => {
+                    let reg = places.get(index).and_then(|place| place.read).ok_or_else(refused)?;
+                    Some(mir::Operand::read(reg, self.gpr))
+                }
+                None => Some(
+                    mir::Operand::read(mir::Reg::physical(reg), self.gpr)
+                        .with(Constraint::Fixed(reg)),
+                ),
+            },
             // An address counted from a register the instruction reaches without being told is
             // not something this machine has: every addressing mode is written out in the text it
             // is part of, so a base that got here another way is a base nothing wrote down.
-            Some(x86_64::Piece::Reg { .. } | x86_64::Piece::Implicit { .. }) => {
-                return Err(refused());
-            }
+            Some(x86_64::Piece::Implicit { .. }) => return Err(refused()),
         };
         // A distance the template wrote, or the one in an operand the template pointed at, which is
         // the same distance said by something that knows how big a thing is. It has to be a number
@@ -5989,22 +6055,41 @@ mod tests {
         );
     }
 
-    /// A register the template named is a claim on a register nobody told the allocator about.
-    /// Refused rather than placed, because a register two things believe they own is a wrong
-    /// program that nothing reports. A register a constraint letter names is a different thing and
-    /// is placed, which the test above is about: there the statement said which of its own operands
-    /// is in the register, and a name in the middle of a template says no such thing.
+    /// A register the template named is placed as itself, fixed to the register the program wrote
+    /// down. A register a constraint letter names is a different thing and is placed too, which the
+    /// test above is about: there the statement said which of its own operands is in the register,
+    /// and a name in the middle of a template says the register and nothing about any operand.
     #[test]
-    fn a_template_naming_a_register_the_allocator_did_not_hand_out_is_refused() {
+    fn a_template_naming_a_register_gets_that_register() {
         let i64 = Type::int(64);
         let (mut names, mut source, block, _) = blank(&[]);
         let out = assembly(&mut source, block, &mut names, "movq %%rax, %0", "=r", &[], &[i64]);
         let produced = source[out].results().next().expect("one result");
         Builder::new(&mut source, block).ret(&[produced]);
 
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("the template named a register");
-        assert_eq!(failed.to_string(), "this `asm` has an operand this cannot place");
+        // `asm ("movq %%rax, %0" : "=r" (x))`, which is a program reading whatever is in `%rax`.
+        // The source is the register itself and the destination is one the allocator picks.
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rr_64 $rax($rax)\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    /// The half of the same thing every register saving template needs. micropython writes the
+    /// callee-saved registers into a buffer one `movq %%r12, 48(%%rdi)` at a time, and both halves
+    /// of that line are a register the template named: the one being stored and the one the address
+    /// is counted from.
+    #[test]
+    fn a_template_counting_an_address_from_a_register_it_named_gets_that_register() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        assembly(&mut source, block, &mut names, "movq %%r12, 48(%%rdi)", "", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    x64.mov_mr_64 $r12($r12), [$rdi + 48]\n}\n"
+        );
     }
 
     #[test]
