@@ -514,6 +514,16 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Which of those locals is which declaration in the source, for the ones the program declared.
+    ///
+    /// The number is the one the IR function carries and means nothing here. What it is for is the
+    /// debugging information, which has to say where a named local ended up and cannot ask the
+    /// frame directly: the frame knows a local by the order the `alloca` for it was lowered in and
+    /// by nothing else.
+    ///
+    /// Shorter than the list above rather than the same length, because most of what a function
+    /// keeps in its frame is memory an expression wanted somewhere to put.
+    pub declared: Vec<(usize, u32)>,
     /// Which instruction computes the address of a piece of memory whose size the function works
     /// out while it runs, which is what a variable length array is.
     ///
@@ -1320,6 +1330,9 @@ impl<'a> Lowering<'a> {
         // go anywhere.
         let index = self.stack.locals.len();
         self.stack.locals.push(Local { size, align: info.align.max(1) });
+        if let Some(decl) = self.source.mem_decl(mem) {
+            self.stack.declared.push((index, decl));
+        }
 
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
@@ -5516,6 +5529,28 @@ mod tests {
              %1:gpr = x64.mov_ri_32 9\n    x64.mov_mr_32 %1, [%0]\n    \
              %2:gpr = x64.mov_rm_32 [%0]\n    x64.ret_val_32 %2($rax)\n}\n"
         );
+    }
+
+    #[test]
+    fn a_local_the_program_declared_says_which_declaration_it_is_and_the_rest_say_nothing() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let scratch = slot(&mut source, block, 4, 4);
+        let mut build = Builder::new(&mut source, block);
+        let mem = build.func().add_mem(MemInfo { size: 8, align: 8, ..plain() });
+        let declared = build
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        build.func().declare_mem(mem, 41);
+        build.store(scratch, declared, MemInfo { size: 8, align: 8, ..plain() }, Flags::default());
+        build.ret(&[]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+
+        // Two locals and one declaration, held against the order the allocas were lowered in,
+        // which is the only name a local has by the time the frame places it. The scratch one was
+        // reached first and is local zero, so the declared one is local one.
+        assert_eq!(lowered.stack.locals.len(), 2);
+        assert_eq!(lowered.stack.declared, vec![(1, 41)]);
     }
 
     #[test]

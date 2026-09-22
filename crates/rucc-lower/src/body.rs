@@ -27,8 +27,8 @@ use std::collections::{HashMap, HashSet};
 use std::iter;
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
-use rucc_base::Symbol;
 use rucc_base::float::{Float as Real, Format};
+use rucc_base::{Idx, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
@@ -963,12 +963,22 @@ impl<'u> Body<'_, 'u> {
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
         let align = repr::local_align(self.types(), self.target(), ty, align);
-        let slot = self.alloca(size, align, span);
+        let (slot, mem) = self.alloca(size, align, span);
+        // Which declaration these bytes are, so that a build asked for debugging information can
+        // say a name and a type about the place the frame ends up putting them. Written here and
+        // not in `alloca` because the other things that ask for a slot are scratch a call needs
+        // and memory an expression wanted somewhere to put, and neither of those is anything the
+        // program named.
+        self.func.declare_mem(mem, decl.raw());
         self.vars.insert(decl, Local::Slot(slot));
     }
 
     /// A stack slot of a fixed size, in the entry block where the verifier wants it.
-    fn alloca(&mut self, size: u64, align: u32, span: Span) -> Value {
+    ///
+    /// The memory comes back along with its address, because what is known about a slot is
+    /// attached to the memory rather than to the instruction, and an `alloca` is the one
+    /// instruction whose caller may have more to say about what the bytes are for.
+    fn alloca(&mut self, size: u64, align: u32, span: Span) -> (Value, Idx<MemInfo>) {
         let mut build = self.build(span);
         let info = MemInfo {
             size,
@@ -979,7 +989,9 @@ impl<'u> Body<'_, 'u> {
             restrict: Restrict::NONE,
         };
         let mem = build.func().add_mem(info);
-        build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
+        let at = build
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        (at, mem)
     }
 
     /// A stack slot in the entry block, wherever the walk has got to.
