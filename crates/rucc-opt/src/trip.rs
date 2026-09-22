@@ -27,6 +27,10 @@ pub(crate) const COUNT_ON_TWO_VALUES: &str = "loop left alone, how many times it
 pub(crate) const COUNT_IS_WIDENED: &str = "loop left alone, how many times it runs is built on a value that has already been widened \
      once";
 
+/// What is reported for a loop that ends on a test its counter may step over.
+pub(crate) const RESTS_ON_APPROACHING: &str =
+    "loop left alone, it ends on a test its counter may step over rather than land on";
+
 /// What is reported for a loop whose count is settled only if its counter does not wrap.
 pub(crate) const RESTS_ON_NO_WRAP: &str =
     "loop left alone, how many times it runs is known only if its counter does not wrap";
@@ -83,13 +87,17 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
     // either the condition discharged or a check written that stands in for it. See #782.
     for rests_on in assumptions {
         match rests_on {
-            // The clamp in [`covered`] is what pays for the first two. It does not pay for
-            // [`Assumption::Approaching`], which is about a loop ending on `!=` coming back at
-            // all rather than about which number the count is, and a loop that runs until its
-            // counter wraps reads far past the extent worked out here. Taken as it stands rather
-            // than tightened, because tightening it withdraws checks this already writes and that
-            // is a measurement rather than an edit. See tamnd/rucc#1661.
-            Assumption::StrictOverflow | Assumption::Entered | Assumption::Approaching => {}
+            // The clamp in [`covered`] is what pays for these two. A count that came out negative
+            // is a loop whose test failed the first time it ran, and zero is how many times that
+            // loop went round.
+            Assumption::StrictOverflow | Assumption::Entered => {}
+            // The clamp does not pay for this one, because there is no number of iterations to
+            // clamp. [`Assumption::Approaching`] only comes from a loop ending on `!=`, and what
+            // it says is that the limit is somewhere the counter is heading. A limit behind the
+            // counter is a loop that goes round until the counter wraps, so the count comes out
+            // negative, the clamp makes it zero, and the check written in front covers nothing
+            // while the loop reads to the end of its object. See tamnd/rucc#1661.
+            Assumption::Approaching => return Err(RESTS_ON_APPROACHING),
             Assumption::NoWrap(_) => return Err(RESTS_ON_NO_WRAP),
         }
     }

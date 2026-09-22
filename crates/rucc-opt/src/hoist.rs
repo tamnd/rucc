@@ -1217,6 +1217,28 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_that_ends_on_a_test_its_counter_may_step_over_keeps_its_check() {
+        // `while (p != end)` with an end nothing here knows. A limit behind the counter is a loop
+        // that goes round until the counter wraps, so the count comes out negative, the clamp at
+        // zero turns that into no iterations at all, and a check written on the strength of it
+        // covers one element in front of a loop reading to the end of its object. The step is one
+        // here and the loop would in fact arrive, which is the point: the refusal is on what the
+        // IR showed rather than on what happens to be true.
+        //
+        // The counter promises not to wrap on the unsigned side, and that promise is what it takes
+        // to reach this reason at all. Without it the count rests on the counter not wrapping as
+        // well, and the refusal above this one answers first, which is why measuring this over the
+        // SQLite amalgamation and the whole corpus found no loop reaching it. See
+        // tamnd/rucc#1661.
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Ne, Flags::NUW, Opcode::ZExt);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, crate::trip::RESTS_ON_APPROACHING), 1);
+        let other = stats.count(Kind::Missed, crate::trip::NOT_COUNTED);
+        assert_eq!(other, 0, "and not as a count nobody worked out");
+    }
+
+    #[test]
     fn a_check_on_an_address_the_analysis_cannot_follow_says_so() {
         // The address is loaded out of the array each time round rather than worked out from the
         // counter, so there is no sequence to describe and nothing to hoist. On real code this is
