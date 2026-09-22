@@ -2125,34 +2125,115 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("assignment of read-only"), "{:?}", result.messages);
     }
 
-    /// The third layout attribute, and the one that is refused rather than read. Reversing the
-    /// byte order of every scalar in a record is not something a compiler can do half of, and a
-    /// compilation that ignored it would lay the record out in the host's order and hand back
-    /// every field with its bytes the wrong way round. Both spellings are here because a header
-    /// writes the armoured one, and the member is here because the refusal has to arrive before
-    /// the layout is used rather than after.
+    /// The third layout attribute, and the one that moves nothing. It says the scalars in the
+    /// record are stored in the byte order it names, so on a target whose order is the other one
+    /// every load through a member swaps its bytes and so does every store. The record is the size
+    /// and the alignment it would be without it and every member is where it would be, which is
+    /// what gcc 16.2.0 does and what was measured before any of this was written.
+    ///
+    /// All four spellings are here because a header writes the armoured one, the attribute may be
+    /// written in front of the body as well as behind it, and the C23 spelling in gcc's namespace
+    /// is the same attribute a fourth way. The order the target already has is the fifth case and
+    /// asks for nothing, since a program saying what would have happened anyway is entitled to be
+    /// compiled as though it had said nothing.
     #[test]
-    fn a_record_that_asks_for_the_other_byte_order_is_refused_rather_than_laid_out_in_this_one() {
-        let opts = options();
+    fn a_record_that_asks_for_the_other_byte_order_swaps_every_scalar_it_holds() {
+        let read = "int f(struct s *p) { return p->i; }\n";
         let big = "struct s { int i; } __attribute__((scalar_storage_order(\"big-endian\")));\n";
-        assert_eq!(
-            run(&opts, big).messages,
-            ["/main.c:1:36: error: 'scalar_storage_order' is not implemented yet [E0688]\n\
-              /main.c:1:36: note: every scalar in this record would be read in the wrong byte \
-              order"]
-        );
+        assert!(body(&format!("{big}{read}")).contains("bswap"), "{big}");
 
         let armoured =
-            "struct s { int i; } __attribute__((__scalar_storage_order__(\"little-endian\")));\n";
-        let messages = run(&opts, armoured).messages;
-        assert!(messages[0].contains("[E0688]"), "{messages:?}");
+            "struct s { int i; } __attribute__((__scalar_storage_order__(\"big-endian\")));\n";
+        assert!(body(&format!("{armoured}{read}")).contains("bswap"), "{armoured}");
 
-        // The attribute in front of the body reaches the same list as the one behind it, and
-        // the C23 spelling in gcc's namespace is the same attribute written a third way.
         let front = "struct __attribute__((scalar_storage_order(\"big-endian\"))) s { int i; };\n";
-        assert!(run(&opts, front).messages[0].contains("[E0688]"), "{front}");
+        assert!(body(&format!("{front}{read}")).contains("bswap"), "{front}");
+
         let standard = "struct s { int i; } [[gnu::scalar_storage_order(\"big-endian\")]];\n";
-        assert!(run(&opts, standard).messages[0].contains("[E0688]"), "{standard}");
+        assert!(body(&format!("{standard}{read}")).contains("bswap"), "{standard}");
+
+        let same =
+            "struct s { int i; } __attribute__((scalar_storage_order(\"little-endian\")));\n";
+        assert!(!body(&format!("{same}{read}")).contains("bswap"), "{same}");
+
+        // A member one byte wide has only one order, and neither has the record itself.
+        let byte = "struct s { char c; } __attribute__((scalar_storage_order(\"big-endian\")));\n";
+        let source = format!("{byte}int f(struct s *p) {{ return p->c; }}\n");
+        assert!(!body(&source).contains("bswap"), "{byte}");
+
+        tast(concat!(
+            "struct s { int i; short h; char c; }",
+            " __attribute__((scalar_storage_order(\"big-endian\")));\n",
+            "_Static_assert(sizeof(struct s) == 8 && _Alignof(struct s) == 4, \"s\");\n",
+            "_Static_assert(__builtin_offsetof(struct s, h) == 4, \"s.h\");\n",
+            "_Static_assert(__builtin_offsetof(struct s, c) == 6, \"s.c\");\n",
+        ));
+    }
+
+    /// A bit-field in one of these records lies in the same bytes and is counted from the top of
+    /// them rather than from the bottom. `execute/20230630-2.c` is the program that says so:
+    /// `short i : 12` in front of four one bit fields holds 341 in the two bytes `15 5f`, so the
+    /// twelve bits are the top twelve and reading them is a shift right by four rather than a mask
+    /// alone. The plain record shifts nothing, since there the field is already at the bottom.
+    #[test]
+    fn a_bit_field_in_one_of_those_records_is_counted_from_the_top_of_its_bytes() {
+        let members = "short i : 12; char c1 : 1; char c2 : 1; char c3 : 1; char c4 : 1;";
+        let read = "int f(struct s *p) { return p->i; }\n";
+        let plain = format!("struct s {{ {members} }};\n{read}");
+        let reversed = format!(
+            "struct s {{ {members} }} __attribute__((scalar_storage_order(\"big-endian\")));\n\
+             {read}"
+        );
+        assert!(body(&plain).contains("shl"), "{}", body(&plain));
+        assert!(!body(&plain).contains("bswap"), "{}", body(&plain));
+        // The two loaded bytes the other way round and then the top twelve bits of them, which
+        // is the arithmetic shift right on its own with nothing to move the field up to the top.
+        let built = body(&reversed);
+        assert!(built.contains("bswap"), "{built}");
+        assert!(!built.contains("shl"), "{built}");
+        assert!(built.contains("ashr"), "{built}");
+    }
+
+    /// The one thing a program may not do with a member of one of these records. The bytes are
+    /// there and they are the other way round, so a pointer to them is a pointer to a value of
+    /// that type which is not the value the member holds. gcc refuses it in these words, and it
+    /// refuses only the scalars: the address of a nested record or of an array member is an
+    /// address of the bytes as they lie, and an access through it asks its own type which order
+    /// it is in.
+    #[test]
+    fn the_address_of_a_scalar_stored_the_other_way_round_is_refused() {
+        let opts = options();
+        let record = "struct s { int i; int a[2]; struct in { int n; } w; }\n\
+                      __attribute__((scalar_storage_order(\"big-endian\")));\n";
+        let taken = format!("{record}int *f(struct s *p) {{ return &p->i; }}\n");
+        assert_eq!(
+            run(&opts, &taken).messages,
+            ["/main.c:3:30: error: cannot take address of scalar with reverse storage order \
+              [E0712]"]
+        );
+        let element = format!("{record}int *f(struct s *p) {{ return &p->a[0]; }}\n");
+        let messages = run(&opts, &element).messages;
+        assert!(messages[0].contains("[E0712]"), "{messages:?}");
+
+        let whole = format!("{record}int *f(struct s *p) {{ return (int *) &p->w; }}\n");
+        assert_eq!(run(&opts, &whole).messages, Vec::<String>::new(), "{whole}");
+    }
+
+    /// An argument that names neither order, which gcc answers with the two words it does take.
+    /// A program that writes one of these is reading a wire format and would rather be told the
+    /// spelling it got wrong than be handed a record laid out in the order it did not ask for.
+    #[test]
+    fn a_storage_order_that_names_neither_end_is_refused_with_the_two_words_that_are_taken() {
+        let opts = options();
+        let wrong = "struct s { int i; } __attribute__((scalar_storage_order(\"middle\")));\n";
+        assert_eq!(
+            run(&opts, wrong).messages,
+            ["/main.c:1:36: error: 'scalar_storage_order' argument must be one of \"big-endian\" \
+              or \"little-endian\" [E0688]"]
+        );
+        let bare = "struct s { int i; } __attribute__((scalar_storage_order));\n";
+        let messages = run(&opts, bare).messages;
+        assert!(messages[0].contains("[E0688]"), "{messages:?}");
     }
 
     /// Where a bit-field goes, which packing decides and which is the part of all this that

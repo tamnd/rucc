@@ -14,11 +14,41 @@
 
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::{Idx, IdxRange};
-use rucc_types::TypeId;
+use rucc_types::{TypeId, TypeKind, Types};
 
 use crate::decl::DeclId;
 use crate::stmt::StmtId;
-use crate::tast::{ConstId, LabelId, StrId};
+use crate::tast::{ConstId, LabelId, StrId, Tast};
+
+/// Whether an object named by this expression is stored in the reverse byte order.
+///
+/// True for a member of a record that carries `scalar_storage_order` naming the order the target
+/// does not have, and for an element of an array that is such a member, since an array is not a
+/// type an order can be written on and an element of one is stored the way the record holding it
+/// stores everything.
+///
+/// Asked again at every member rather than carried down, because a record nested inside one that
+/// carries the attribute keeps its own order. That was measured against gcc 16.2.0 on x86-64: a
+/// plain structure written as a member of a reversed one holds its own scalars in the target's
+/// order, and the reversal reaches the array member beside it.
+///
+/// An array that decayed is followed through and a value that was read is not. `p[i]` where `p` is
+/// a pointer member of a reversed record reads `p` in the reverse order and then subscripts it,
+/// and what it points at is whatever its own type says rather than anything about the record.
+#[must_use]
+pub fn reverse_ordered(tast: &Tast, types: &Types, expr: ExprId) -> bool {
+    match tast[expr].kind {
+        ExprKind::Member { base, .. } => match types.kind(types.canonical(tast[base].ty)) {
+            TypeKind::Record(id) => types.record_info(id).reverse,
+            _ => false,
+        },
+        ExprKind::Subscript { base, .. } => reverse_ordered(tast, types, base),
+        ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => {
+            reverse_ordered(tast, types, operand)
+        }
+        _ => false,
+    }
+}
 
 /// One typed expression in the arena.
 pub type ExprId = Idx<Expr>;

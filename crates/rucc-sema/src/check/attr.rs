@@ -15,11 +15,12 @@
 //! `__attribute__((packed, aligned(4)))`, and there the record is packed and then aligned to
 //! four, which is not the same as either of them alone.
 //!
-//! `scalar_storage_order` is the third of that family and is the one that is refused. It reverses
-//! the byte order of every scalar in the record, so a compiler that reads past it lays the record
-//! out in the host's order and hands back every field with its bytes the wrong way round. There
-//! is no harmless reading of it and no partial one, which is why it is an error here rather than
-//! a warning: a program that does not build is a compiler that told the truth.
+//! `scalar_storage_order` is the third of that family and is the one that changes no offset at
+//! all. It says every scalar in the record is stored in the byte order it names, so on a target
+//! whose order is the other one every load through a member swaps and so does every store, and a
+//! bit-field is allocated from the other end of its storage unit. A compiler that reads past it
+//! lays the record out the same way and hands back every field with its bytes the wrong way round,
+//! which is why the attribute is read here and only the order is taken from it.
 //!
 //! `vector_size(n)` is the fourth one read here and is the one that builds a type rather than
 //! changing a layout. It says the declared type is `n` bytes of the type that was written, taken
@@ -187,12 +188,6 @@ impl Checker<'_> {
                         packing.align = Some(packing.align.unwrap_or(1).max(align));
                     }
                 }
-                "scalar_storage_order" => {
-                    let what = "'scalar_storage_order' is not implemented yet";
-                    let note = "every scalar in this record would be read in the wrong byte order";
-                    let refused = Diagnostic::error(what, attr.span).with_code("E0688");
-                    self.report(refused.note(note, attr.span));
-                }
                 _ => {}
             }
         }
@@ -212,6 +207,65 @@ impl Checker<'_> {
             }
             (rucc_gnu::unarmour(self.text(attr.name)) == "transparent_union").then_some(attr.span)
         })
+    }
+
+    /// The byte order a `scalar_storage_order` in an attribute list asked for.
+    ///
+    /// True for `"big-endian"` and false for `"little-endian"`, and nothing at all when the
+    /// attribute was not written or when what it was written with is not one of those two words.
+    /// Whether the answer means anything is a question about the target and is asked where the
+    /// record is completed, since asking for the order the target already has is a program saying
+    /// what would have happened anyway.
+    ///
+    /// The armour and the namespace are read the way [`Self::packing`] reads them. Only a record is
+    /// ever asked, so an attribute written anywhere else is ignored rather than diagnosed, which is
+    /// what this compiler does with every attribute it has no use for in that position.
+    pub(in crate::check) fn storage_order(&mut self, attrs: AttrList) -> Option<bool> {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) == "scalar_storage_order" {
+                return self.storage_order_argument(attr);
+            }
+        }
+        None
+    }
+
+    /// The order one `scalar_storage_order` names, reporting an argument that names neither.
+    ///
+    /// gcc's wording, down to the quotes around the two words, because the attribute exists for
+    /// programs that read a wire format and one of those would rather be told the spelling it got
+    /// wrong than be handed a record laid out in the order it did not ask for.
+    fn storage_order_argument(&mut self, attr: rucc_ast::Attribute) -> Option<bool> {
+        let args = self.ast[attr.args].to_vec();
+        let what = "'scalar_storage_order' argument must be one of \"big-endian\" or \
+                    \"little-endian\"";
+        let expr = match args.first() {
+            Some(AttrArg::Expr(expr)) => *expr,
+            None | Some(AttrArg::Ident(_)) => {
+                self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
+                return None;
+            }
+        };
+        let checked = self.expr(expr);
+        let ExprKind::Str(id) = self.tast[checked].kind else {
+            let at = self.tast.expr_span(checked);
+            self.report(Diagnostic::error(what, at).with_code("E0688"));
+            return None;
+        };
+        let literal = &self.tast[id];
+        let spelled: Option<String> = (literal.encoding == Encoding::Plain)
+            .then(|| literal.elements.iter().map(|&unit| char::from(unit as u8)).collect());
+        match spelled.as_deref() {
+            Some("big-endian") => Some(true),
+            Some("little-endian") => Some(false),
+            _ => {
+                self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
+                None
+            }
+        }
     }
 
     /// Where `weak` was written in an attribute list, if it was.

@@ -1063,6 +1063,20 @@ impl Checker<'_> {
                 return self.poison(span);
             }
         }
+        // A scalar stored in the reverse byte order has no address a program can use. The bytes
+        // are there and they are in the other order, so a pointer to them is a pointer to a value
+        // of that type that is not the value the member holds, and every read through it would be
+        // wrong in a way nothing downstream could see. gcc refuses it in these words and for this
+        // reason. A member that is not a scalar is fine: the address of a nested record or of an
+        // array is an address of the bytes as they lie, and an access through it asks its own type
+        // which order it is in.
+        if is_scalar(&self.types, self.tast[operand].ty)
+            && crate::expr::reverse_ordered(&self.tast, &self.types, operand)
+        {
+            let what = "cannot take address of scalar with reverse storage order";
+            self.report(Diagnostic::error(what, span).with_code("E0712"));
+            return self.poison(span);
+        }
         let ty = self.types.pointer(self.tast[operand].ty);
         let node = ExprKind::Unary { op: UnaryOp::AddrOf, operand };
         self.tast.expr(Expr::new(node, ty, Category::Rvalue), span)
