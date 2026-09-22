@@ -1547,6 +1547,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // half that is built.
             "-fipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), true)),
             "-fno-ipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), false)),
+            // And the printf family fold, which is a module at a time for the same reason and so is
+            // not a `rucc_opt::Pass` either. gcc has no flag of its own for this one, since
+            // `-fno-builtin` already turns it off along with everything else the standard names
+            // mean. This spelling is for taking one thing away during a bisection without taking
+            // the rest of section 20.1 away with it.
+            "-flibcall" => opts.passes.push((rucc_opt::libcall::NAME.to_owned(), true)),
+            "-fno-libcall" => opts.passes.push((rucc_opt::libcall::NAME.to_owned(), false)),
             _ if arg.strip_prefix("-fno-").is_some_and(|n| rucc_opt::pass::find(n).is_some()) => {
                 opts.passes.push((arg["-fno-".len()..].to_owned(), false));
             }
@@ -3613,6 +3620,26 @@ mod tests {
         assert_eq!(opts.passes, vec![("unroll".to_owned(), true)]);
         let (opts, _) = compile(&["-c", "-fno-unroll-loops", "a.c"]);
         assert_eq!(opts.passes, vec![("unroll".to_owned(), false)]);
+    }
+
+    /// The three transformations that are a module at a time are named by a flag as well, even
+    /// though none of them is a `rucc_opt::Pass` and so none is reached by the generic arms.
+    ///
+    /// A bisection over a miscompilation turns one thing off at a time, and a transformation with
+    /// no spelling of its own cannot be the one turned off.
+    #[test]
+    fn the_transformations_that_are_not_passes_are_still_named_by_a_flag() {
+        let (opts, _) = compile(&["-c", "-fno-ipa-cp", "-fipa-sra", "-fno-libcall", "a.c"]);
+        assert_eq!(
+            opts.passes,
+            vec![
+                (rucc_opt::ipcp::NAME.to_owned(), false),
+                (rucc_opt::ipasra::NAME.to_owned(), true),
+                (rucc_opt::libcall::NAME.to_owned(), false),
+            ]
+        );
+        let (opts, _) = compile(&["-c", "-flibcall", "a.c"]);
+        assert_eq!(opts.passes, vec![(rucc_opt::libcall::NAME.to_owned(), true)]);
     }
 
     /// Where a function starts is a question this compiler answers, so the flag that asks about it

@@ -40,7 +40,7 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    ipasra, ipcp, load, modref, nofree, number, outside, params, pass, purity, reload,
+    ipasra, ipcp, libcall, load, modref, nofree, number, outside, params, pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -601,6 +601,14 @@ pub struct Options {
     /// exports is still read out of the global offset table, because the promise is about which
     /// definition runs rather than about how many copies of the variable there are.
     pub interposition: Pic,
+    /// Whether a call to a library function may be taken to mean what the standard says it means.
+    ///
+    /// `-fno-builtin` and `-ffreestanding` turned around, which is the pair section 20.1 of
+    /// `spec/optimizer/20-idioms-and-libcalls.md` describes. False stops [`crate::libcall`] from
+    /// reading a `printf` as anything but a call to whatever the program links against.
+    pub builtins: bool,
+    /// The library names `-fno-builtin-<name>` took away one at a time.
+    pub no_builtin: Vec<String>,
 }
 
 impl Default for Options {
@@ -616,6 +624,8 @@ impl Default for Options {
             dumps: Dumps::default(),
             verify: cfg!(debug_assertions),
             interposition: Pic::Executable,
+            builtins: true,
+            no_builtin: Vec::new(),
         }
     }
 }
@@ -747,7 +757,7 @@ impl Report {
 /// Every pass sees every function with a body, one at a time, and a pass runs over the whole
 /// module before the next one starts. That order is what makes the dumps readable: a dump is
 /// the state of the program between two passes rather than between two functions.
-pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
+pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report {
     let mut report = Report::default();
     let chosen = opts.chosen();
     // One cache per function, kept across passes because a pass runs over the whole module
@@ -823,6 +833,40 @@ pub fn run(module: &mut Module, names: &Interner, opts: &Options) -> Report {
     // out along with the argument at every call.
     let wants_ipasra =
         !matches!(opts.level, OptLevel::O0 | OptLevel::O1) && opts.wants(ipasra::NAME);
+    // Before the call graph, because it is the one transformation here that takes a call away
+    // altogether and a graph built over the module after it is the smaller of the two. `-O1` and
+    // above, which is where gcc folds these, and off under `-fno-builtin` or `-ffreestanding`,
+    // since a freestanding program left with a call to a `puts` it never wrote will not link.
+    if opts.level != OptLevel::O0 && opts.builtins && opts.wants(libcall::NAME) {
+        let mut fuel = match (allowance.get(libcall::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        let folded = libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        for (id, stats) in folded {
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the {} pass left invalid IR in {func}, {error}",
+                            libcall::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: libcall::NAME, func: module[id].name, stats });
+        }
+        report.spent.push((libcall::NAME, fuel.spent()));
+        if let Some(left) = &mut budget {
+            *left -= fuel.spent();
+        }
+        if let Some(left) = allowance.get_mut(libcall::NAME) {
+            *left -= fuel.spent();
+        }
+    }
     // One graph for all four, because building it is a walk over the module and none of them adds
     // an edge to it. The two transformations take edges away, by leaving a call nothing reaches or
     // an address nothing hands out, and a graph that still holds those is the conservative one.
@@ -1043,7 +1087,7 @@ mod tests {
 
     use super::{Dumps, Options, for_level};
     use crate::stats::Kind;
-    use crate::{Pass, ipasra, ipcp, pass};
+    use crate::{Pass, ipasra, ipcp, libcall, pass};
 
     /// A module with one function whose body has something to fold in it.
     fn module() -> (Interner, Module) {
@@ -1198,9 +1242,9 @@ mod tests {
     /// `addq $0` the machine runs for nothing. tamnd/rucc#875.
     #[test]
     fn an_index_folded_to_zero_is_not_added_to_anything() {
-        let (names, mut module) = a_short_loop();
+        let (mut names, mut module) = a_short_loop();
         assert_eq!(adds_of_zero(&module), 0, "the fixture already has one before anything runs");
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         assert!(spent(&report, "unroll").is_some_and(|it| it > 0), "the loop was not unrolled");
         assert_eq!(adds_of_zero(&module), 0, "{}", rucc_ir::print(&module, &names));
@@ -1245,14 +1289,14 @@ mod tests {
         // occurrence.
         assert!(for_level(OptLevel::O2).iter().filter(|it| **it == "simplify").count() > 1);
 
-        let (names, mut module) = identities();
-        let free = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let (mut names, mut module) = identities();
+        let free = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         assert_eq!(spent(&free, "simplify"), Some(2), "{:?}", free.spent);
 
-        let (names, mut module) = identities();
+        let (mut names, mut module) = identities();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.fuel.insert("simplify".to_owned(), 1);
-        let capped = super::run(&mut module, &names, &opts);
+        let capped = super::run(&mut module, &mut names, &opts);
         assert_eq!(capped.spent.iter().filter(|(name, _)| *name == "simplify").count(), 1);
         assert_eq!(spent(&capped, "simplify"), Some(1), "{:?}", capped.spent);
     }
@@ -1280,7 +1324,7 @@ mod tests {
         build.ret(&[back]);
         module.add_func(func);
 
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("and."), "the masking survived the pipeline\n{text}");
@@ -1395,8 +1439,8 @@ mod tests {
 
     #[test]
     fn running_the_pipeline_changes_the_module_and_reports_what_it_spent() {
-        let (names, mut module) = module();
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let (mut names, mut module) = module();
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         // Folding rewrites the sign extension into a constant, and then the constant it was
         // extending is read by nothing and dead code elimination takes it out. One
         // transformation each, which is what the two of them together are for. Asserted by
@@ -1429,7 +1473,7 @@ mod tests {
             build.ret(&[]);
         }
         module.add_func(func);
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         // The fold, and then the merge of the arm it left with one way into it.
         assert_eq!(spent(&report, "simplify-cfg"), Some(2));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
@@ -1442,9 +1486,9 @@ mod tests {
 
     #[test]
     fn no_pass_that_optimizes_runs_at_no_optimization_however_much_there_is_to_do() {
-        let (names, mut module) = module();
+        let (mut names, mut module) = module();
         let before = rucc_ir::print(&module, &names);
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O0));
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O0));
         // The two passes the level runs looked, found no `__builtin_expect`, no branch they could
         // read and no block nothing reaches, and spent nothing. The constant arithmetic the fixture
         // is full of is still there, which is the part of `-O0` that has not changed.
@@ -1454,10 +1498,10 @@ mod tests {
 
     #[test]
     fn a_gate_takes_a_pass_away_from_one_function_and_leaves_the_other_alone() {
-        let (names, mut module) = two_functions();
+        let (mut names, mut module) = two_functions();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.gates.add(false, "fold=g").expect("g is a function and fold is a pass");
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         assert!(spoke_about(&report, "fold", "f", &names));
         assert!(!spoke_about(&report, "fold", "g", &names), "fold ran where it was gated off");
         assert!(spoke_about(&report, "dce", "g", &names), "one pass gated off is not all of them");
@@ -1469,17 +1513,17 @@ mod tests {
 
     #[test]
     fn a_function_can_be_gated_by_the_number_it_has_in_the_module() {
-        let (names, mut module) = two_functions();
+        let (mut names, mut module) = two_functions();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.gates.add(false, "fold=0").expect("0 is a function and fold is a pass");
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         assert!(!spoke_about(&report, "fold", "f", &names), "function 0 is the first one");
         assert!(spoke_about(&report, "fold", "g", &names));
     }
 
     #[test]
     fn enabling_a_pass_reaches_one_function_at_a_level_that_did_not_ask_for_it() {
-        let (names, mut module) = two_functions();
+        let (mut names, mut module) = two_functions();
         let mut opts = Options::for_level(OptLevel::O0);
         opts.gates.add(true, "fold=1").expect("1 is a function and fold is a pass");
         let running: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
@@ -1488,7 +1532,7 @@ mod tests {
             ["expect", "simplify-cfg", "fold"],
             "the flag has to put the pass in the pipeline"
         );
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         assert!(!spoke_about(&report, "fold", "f", &names), "nothing asked for f");
         assert!(spoke_about(&report, "fold", "g", &names));
         let text = rucc_ir::print(&module, &names);
@@ -1497,13 +1541,13 @@ mod tests {
 
     #[test]
     fn a_pass_gated_off_everywhere_runs_on_nothing_and_still_says_so() {
-        let (names, mut module) = two_functions();
+        let (mut names, mut module) = two_functions();
         let before = rucc_ir::print(&module, &names);
         let mut opts = Options::for_level(OptLevel::O2);
         for pass in pass::PASSES {
             opts.gates.add(false, pass.name()).expect("a pass in the list is a pass that exists");
         }
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         assert!(report.remarks.is_empty(), "a pass that did not run has nothing to report");
         assert_eq!(spent(&report, "fold"), Some(0), "the pass is still in the pipeline");
         assert_eq!(rucc_ir::print(&module, &names), before);
@@ -1527,7 +1571,7 @@ mod tests {
         // The check section 9.10 asks for by name, and the reason it is here rather than in each
         // pass is that it has to hold for every pass that is ever added.
         for pass in pass::PASSES {
-            let (names, mut module) = module();
+            let (mut names, mut module) = module();
             let before = rucc_ir::print(&module, &names);
             let mut opts = Options::for_level(OptLevel::O0);
             // The level's own passes out of the way first, so that what this measures is the one
@@ -1538,7 +1582,7 @@ mod tests {
             opts.toggles.push((pass.name().to_owned(), true));
             opts.fuel.insert("expect".to_owned(), 0);
             opts.fuel.insert(pass.name().to_owned(), 0);
-            let report = super::run(&mut module, &names, &opts);
+            let report = super::run(&mut module, &mut names, &opts);
             let mut want = vec![("expect", 0)];
             if pass.name() != "expect" {
                 want.push((pass.name(), 0));
@@ -1570,7 +1614,7 @@ mod tests {
         }
         let mut opts = Options::for_level(OptLevel::O2);
         opts.fuel.insert("fold".to_owned(), 1);
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         // One fold across both functions, because fuel is per pass and per compilation. Dead
         // code elimination has its own and spends it on the constant the one fold orphaned.
         assert_eq!(spent(&report, "fold"), Some(1));
@@ -1581,10 +1625,10 @@ mod tests {
 
     #[test]
     fn global_fuel_is_spent_by_the_passes_in_order_and_the_rest_get_none() {
-        let (names, mut module) = module();
+        let (mut names, mut module) = module();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.global_fuel = Some(1);
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         // Folding is first and there is one thing to fold, so it takes the one unit and dead
         // code elimination gets nothing. Without the budget it would have taken the constant
         // that fold orphaned, which is what the other test measures.
@@ -1597,11 +1641,11 @@ mod tests {
 
     #[test]
     fn a_budget_of_nothing_leaves_the_module_alone_and_still_runs_every_pass() {
-        let (names, mut module) = module();
+        let (mut names, mut module) = module();
         let before = rucc_ir::print(&module, &names);
         let mut opts = Options::for_level(OptLevel::O2);
         opts.global_fuel = Some(0);
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         assert_eq!(rucc_ir::print(&module, &names), before);
         assert!(report.spent.iter().all(|(_, spent)| *spent == 0), "{:?}", report.spent);
         // Every pass, because a pass out of fuel is a pass that ran and did nothing rather than
@@ -1609,11 +1653,12 @@ mod tests {
         // different pipeline at every step. One line per name rather than one per place the list
         // names it, because what a name was given is one allowance across all of them.
         let mut want: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
-        // And the two transformations that are not in that list, because they are a module at a
+        // And the three transformations that are not in that list, because they are a module at a
         // time rather than one function at a time. They spend out of the same budget and are
         // bisected the same way, so they belong in the same accounting.
         want.push(ipcp::NAME);
         want.push(ipasra::NAME);
+        want.push(libcall::NAME);
         want.sort_unstable();
         want.dedup();
         let mut got: Vec<&str> = report.spent.iter().map(|&(name, _)| name).collect();
@@ -1644,19 +1689,19 @@ mod tests {
     #[test]
     fn the_tighter_of_the_two_limits_is_the_one_that_stops_the_pass() {
         // A pass allowed more than the budget gets the budget.
-        let (names, mut under) = module();
+        let (mut names, mut under) = module();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.global_fuel = Some(0);
         opts.fuel.insert("fold".to_owned(), 9);
-        assert_eq!(spent(&super::run(&mut under, &names, &opts), "fold"), Some(0));
+        assert_eq!(spent(&super::run(&mut under, &mut names, &opts), "fold"), Some(0));
 
         // And a pass allowed less than the budget keeps its own limit, with the budget left
         // over for whatever comes after it.
-        let (names, mut over) = module();
+        let (mut names, mut over) = module();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.global_fuel = Some(9);
         opts.fuel.insert("fold".to_owned(), 0);
-        let report = super::run(&mut over, &names, &opts);
+        let report = super::run(&mut over, &mut names, &opts);
         assert_eq!(spent(&report, "fold"), Some(0));
         assert_eq!(spent(&report, "dce"), Some(0), "nothing was orphaned for it to remove");
     }
@@ -1671,10 +1716,10 @@ mod tests {
 
     #[test]
     fn a_dump_is_taken_on_the_side_that_asked_for_it_and_not_the_other() {
-        let (names, mut module) = module();
+        let (mut names, mut module) = module();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         // The level folds three times, twice at the top on either side of `image` and once after
         // the loop pipeline, and what a dump request names is a pass rather than a position, so
         // every run is written out. The side is what this is about: not one of the three is a
@@ -1691,13 +1736,13 @@ mod tests {
 
     #[test]
     fn asking_for_all_dumps_gives_both_sides_of_every_pass() {
-        let (interner, mut module) = module();
+        let (mut interner, mut module) = module();
         let opts = {
             let mut opts = Options::for_level(OptLevel::O2);
             opts.dumps.add("all").expect("all is always a dump");
             opts
         };
-        let report = super::run(&mut module, &interner, &opts);
+        let report = super::run(&mut module, &mut interner, &opts);
         // Both sides of every pass in the level, numbered by position, whatever the level
         // holds. Written out of the pipeline rather than as a literal, because the point of
         // the test is the pairing and the numbering and not which passes exist this month.
@@ -1723,9 +1768,9 @@ mod tests {
 
     #[test]
     fn every_pass_leaves_a_record_for_every_function_whether_or_not_it_had_anything_to_say() {
-        let (names, mut module) = module();
+        let (mut names, mut module) = module();
         let opts = Options::for_level(OptLevel::O2);
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
         let ran: Vec<&'static str> = opts.passes().into_iter().map(Pass::name).collect();
         // One function in the fixture, so one record per pass, and the passes in the order they
         // ran. A pass that found nothing is in here with an empty record, which is the point:
@@ -1748,8 +1793,8 @@ mod tests {
         // arrived at from two directions. A pass where they disagree either transformed without
         // asking, which breaks bisection, or rewrote without recording, which means the manager
         // did not run the verifier over what it produced.
-        let (names, mut module) = module();
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let (mut names, mut module) = module();
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         for (pass, spent) in &report.spent {
             assert_eq!(
                 report.totals(pass).total(Kind::Optimized),
@@ -1762,8 +1807,8 @@ mod tests {
 
     #[test]
     fn what_the_passes_said_is_what_opt_info_prints() {
-        let (names, mut module) = module();
-        let report = super::run(&mut module, &names, &Options::for_level(OptLevel::O2));
+        let (mut names, mut module) = module();
+        let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         let text = crate::optinfo::render("t.c", &report, &names, crate::Wants::all());
         assert!(
             text.contains(
@@ -1807,7 +1852,7 @@ mod tests {
         opts.toggles.push(("simplify-cfg".to_owned(), false));
         opts.toggles.push(("fold".to_owned(), true));
         opts.verify = true;
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
 
         assert_eq!(report.broke.len(), 1, "{:?}", report.broke);
         let complaint = &report.broke[0];
@@ -1838,7 +1883,7 @@ mod tests {
         opts.toggles.push(("simplify-cfg".to_owned(), false));
         opts.toggles.push(("fold".to_owned(), true));
         opts.verify = true;
-        let report = super::run(&mut module, &names, &opts);
+        let report = super::run(&mut module, &mut names, &opts);
 
         assert!(report.broke.is_empty(), "{:?}", report.broke);
         // And it did run on it, so this is the verifier staying quiet rather than the pass
