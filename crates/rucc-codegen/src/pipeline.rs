@@ -43,6 +43,7 @@ use crate::elsewhere::Elsewhere;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
+use crate::kept;
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
@@ -532,6 +533,13 @@ pub fn compile_recording(
         .reuse
         .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
 
+    // The instructions as they are now, for the locals the front end kept in values. The
+    // allocator's liveness is counted along this order and the rewrite is about to put spills,
+    // reloads and edge moves in among them, so the list has to be taken before it runs. Only in a
+    // function that named something, since a function that named nothing has no use for it. See
+    // [`crate::kept`].
+    let line = (!func.named.is_empty()).then(|| kept::before(&func));
+
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called, flags.verify);
     recording.pressure.record(&called, Cost::of(&allocation));
@@ -649,6 +657,15 @@ pub fn compile_recording(
     // are allowed. Nothing here moves an instruction or changes a block, so being behind the
     // layout's freeze costs it nothing.
     shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names, flags.goal);
+
+    // Last of all, because a stretch is named by the instructions at either end of it and every
+    // pass above is free to take an instruction out or move one. The frame is wanted here as well
+    // as above, since a value the allocator spilled is in the frame over its stretch rather than in
+    // a register, and it is the same distance from the call frame address the locals were given.
+    func.kept = match line {
+        Some(line) => kept::of(&func, &line, &allocation, &frame),
+        None => Vec::new(),
+    };
     Ok(func)
 }
 
@@ -733,6 +750,30 @@ mod tests {
         // words whether or not it fills one, and the call frame address is one more word above the
         // stack pointer for the return address the call pushed.
         assert_eq!(out.locals, vec![(5, -16)]);
+    }
+
+    #[test]
+    fn a_local_kept_in_a_value_comes_out_saying_which_register_holds_it_and_over_what() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[0], args[0], IrFlags::default());
+        build.func().declare_value(sum, 5);
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+
+        // `int f(int a) { int x = a + a; return x; }` with nothing taking the address of `x`, so
+        // it never reaches the frame and the only answer about it is a register. The sum is
+        // written by the addition and read by the move that puts it where the return wants it, so
+        // the stretch is one instruction long and it is the move rather than the addition.
+        assert_eq!(out.kept.len(), 1, "one stretch: {:?}", out.kept);
+        assert_eq!(out.kept[0].decl, 5);
+        assert!(matches!(out.kept[0].at, mir::Where::Reg(_)), "in a register: {:?}", out.kept[0]);
+        assert!(out.locals.is_empty(), "nothing in the frame: {:?}", out.locals);
     }
 
     /// What `-Zlowering` is built out of, and the reason it is worth a test here rather than only
