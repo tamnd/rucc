@@ -345,8 +345,18 @@ pub enum Opcode {
     /// The capability's provenance is still live.
     CheckLive,
     /// The access agrees with the type plane, which is the effective type rule of C 6.5.
+    ///
+    /// A third operand overrides how many bytes are asked about, as on [`Opcode::CheckBounds`] and
+    /// for the same reason. Agreeing with a type is a property of a range that holds of every
+    /// subrange of it, so one check over a loop's whole walk says what the loop's checks were going
+    /// to say, which is `spec/safe-memory/07-check-elimination.md` section 7.4's transformation
+    /// applied to this plane rather than to the bounds. The plane entry stays in the payload, since
+    /// the checks a hoisted one stands for all asked at the same type or it would not have been
+    /// written.
     CheckType,
     /// The bytes the access reads have been written.
+    ///
+    /// A third operand overrides how many bytes are asked about, as on [`Opcode::CheckType`].
     CheckInit,
     /// A pointer derived from another stays inside the capability the first one had.
     ///

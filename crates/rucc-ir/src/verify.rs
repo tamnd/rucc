@@ -1668,20 +1668,18 @@ impl<'a> Verifier<'a> {
             // The checks. Six of them ask about one pointer and the seventh asks whether a
             // second one stayed inside the first one's capability, so that is the only
             // difference in shape between them.
-            Opcode::CheckLive
-            | Opcode::CheckType
-            | Opcode::CheckInit
-            | Opcode::CheckRace
-            | Opcode::CheckFree => {
+            Opcode::CheckLive | Opcode::CheckRace | Opcode::CheckFree => {
                 if self.takes(opcode, arity, 2) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
                 }
             }
-            Opcode::CheckBounds => {
+            Opcode::CheckBounds | Opcode::CheckType | Opcode::CheckInit => {
                 // Two operands is the access the front end wrote, whose length is in the payload.
                 // Three is the hoisted check of section 7.4, whose length the program computes, and
-                // the extra operand is that length in bytes.
+                // the extra operand is that length in bytes. All three of these are a claim about a
+                // range that holds of every subrange of it, which is what makes one of them able to
+                // stand for a loop's worth.
                 if self.takes_either(opcode, arity, 2, 3) {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);

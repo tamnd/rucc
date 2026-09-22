@@ -1,4 +1,4 @@
-//! Taking a bounds check out of a loop and putting one check in front of it.
+//! Taking a check out of a loop and putting one check in front of it.
 //!
 //! Design: `spec/safe-memory/07-check-elimination.md` section 7.4, which calls this the
 //! transformation that matters most and gives the reason in one line: array loops are where the
@@ -109,6 +109,37 @@
 //! Loop splitting, which section 7.4 calls the general form, is not here either. It is what gets
 //! the loops this pass refuses, and it is a different transformation: this one moves a check and
 //! that one makes two loops.
+//!
+//! # The other two planes
+//!
+//! Section 7.4 is written about the bounds check, and the same three kinds of check come out of a
+//! loop here: the bounds check, the type check and the init check. The reason it is the same
+//! transformation rather than three of them is that all three are claims about a range that hold of
+//! every subrange of it. Every byte from here to there is inside the object, every granule from
+//! here to there agrees with this type, every byte from here to there has been written: take any
+//! piece out of the middle of one of those and the same sentence is true of the piece. So one check
+//! of the whole walk says what the walk's checks were going to say, which is exactly the step
+//! `swept.i64` and `swept.sym.i64` are proved about, and nothing in either rule mentions which
+//! plane is being asked. The runtime side costs nothing either, because
+//! `__rucc_check_init(pointer, size, descriptor)` and
+//! `__rucc_check_type(pointer, size, type, descriptor)` already take a width, so the range query
+//! the hoisted check needs is the call that was already there with a larger number in it.
+//!
+//! One condition is new, and it is in `writes`. Nothing a loop with no call in it can do will
+//! move the edges of an object, so a bounds check has nothing to worry about from the loop's own
+//! body. The other two planes are written by ordinary code: a store writes the init plane, and an
+//! assignment through a pointer of a different type writes the type plane. That makes `a[i] =
+//! a[i - 1]` over an array with only `a[0]` written a loop every iteration of which passes its init
+//! check, where one check in front of the loop would refuse the whole array. So a loop that writes
+//! either plane keeps that plane's checks.
+//!
+//! What the hoisted check does not do is report further out than the object it starts in. The
+//! runtime finds the region the first address is in and clips the range to it, so a walk that runs
+//! off the end asks about fewer bytes than the number handed in. That is not a hole, because an
+//! access past the end of the object is what the bounds check reports, and it reports it as the
+//! same judgement J1 the plane checks report. It is under reporting in the case where the bounds
+//! plane is off and one of the other two is on, and that is worth knowing rather than worth
+//! refusing over.
 
 use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
 
@@ -122,12 +153,27 @@ use crate::scev::{Anchor, Evolution, Invariant, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
-/// What is reported when a check comes out of a loop.
+// What is reported when a check stays where it is says "check" rather than naming which of the
+// three kinds it is, and that is deliberate. Every one of these reasons is about the loop or about
+// the address, and two checks of different kinds sitting on the same address are refused by the
+// same one of them for the same reason, so a report that named the kind would say the same sentence
+// three times about one address. What comes out does name the kind, because there the number a
+// reader wants is how many of each went.
+
+/// What is reported when a bounds check comes out of a loop.
 const HOISTED: &str = "bounds check taken out of a loop, one check in front of it covers every \
                        iteration";
 
+/// What is reported when a type check comes out of a loop.
+const HOISTED_TYPE: &str = "type check taken out of a loop, one check in front of it covers every \
+                            iteration";
+
+/// What is reported when an init check comes out of a loop.
+const HOISTED_INIT: &str = "init check taken out of a loop, one check in front of it covers every \
+                            iteration";
+
 /// What is reported when the pass ran out of fuel with a check it was about to take out.
-const NO_FUEL: &str = "bounds check kept, the pass ran out of fuel";
+const NO_FUEL: &str = "check kept, the pass ran out of fuel";
 
 /// What is reported for a loop with nowhere to put the check.
 const NO_PREHEADER: &str = "loop left alone, it has no block in front of it to put a check in";
@@ -144,34 +190,42 @@ const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
 
 /// What is reported for a loop that could cover more bytes than the arithmetic holds.
 const COUNT_TOO_WIDE: &str =
-    "bounds check kept, how many bytes the loop covers might not fit in sixty four bits";
+    "check kept, how many bytes the loop covers might not fit in sixty four bits";
 
 /// What is reported for a check whose address does not walk the loop.
-const NOT_A_SWEEP: &str = "bounds check kept, its address does not walk the loop by a constant";
+const NOT_A_SWEEP: &str = "check kept, its address does not walk the loop by a constant";
 
 /// What is reported for a check whose address the analysis has nothing to say about.
 const NOT_FOLLOWED: &str =
-    "bounds check kept, what its address does round the loop is not something the analysis follows";
+    "check kept, what its address does round the loop is not something the analysis follows";
 
 /// What is reported for a check that already covers a range the program worked out.
 const ALREADY_COMPUTED: &str =
-    "bounds check kept, how many bytes it covers is a number only the program has";
+    "check kept, how many bytes it covers is a number only the program has";
 
 /// What is reported for a check whose address walks backwards.
-const BACKWARDS: &str = "bounds check kept, its address walks the loop from high to low";
+const BACKWARDS: &str = "check kept, its address walks the loop from high to low";
 
 /// What is reported for a check an iteration can finish without reaching.
-const NOT_EVERY_TIME: &str = "bounds check kept, an iteration can finish without reaching it";
+const NOT_EVERY_TIME: &str = "check kept, an iteration can finish without reaching it";
 
 /// What is reported for a check whose step does not keep its alignment.
-const MISALIGNED: &str = "bounds check kept, its step is not a whole number of its alignment";
+const MISALIGNED: &str = "check kept, its step is not a whole number of its alignment";
 
 /// What is reported when the rule declines the range the loop sweeps.
-const TOO_WIDE: &str = "bounds check kept, the range the loop sweeps is too wide for the rule";
+const TOO_WIDE: &str = "check kept, the range the loop sweeps is too wide for the rule";
 
 /// What is reported for a check whose capability is about an object the walk starts along from.
 const NOT_ITS_CAPABILITY: &str =
-    "bounds check kept, its capability is about a pointer the walk does not start on";
+    "check kept, its capability is about a pointer the walk does not start on";
+
+/// What is reported for an init check in a loop that writes the init plane.
+const WRITES_THE_INIT_PLANE: &str = "init check kept, the loop writes the init plane and a later \
+                                     iteration may read what an earlier one wrote";
+
+/// What is reported for a type check in a loop that writes the type plane.
+const WRITES_THE_TYPE_PLANE: &str = "type check kept, the loop writes the type plane and a later \
+                                     iteration may read what an earlier one wrote";
 
 /// The pass.
 #[derive(Debug)]
@@ -183,7 +237,7 @@ impl Pass for Hoist {
     }
 
     fn describe(&self) -> &'static str {
-        "a bounds check in a counted loop becomes one check in front of the loop"
+        "a check in a counted loop becomes one check in front of the loop"
     }
 
     fn preserves(&self) -> Preserved {
@@ -226,14 +280,23 @@ impl Pass for Hoist {
                 stats.missed(NO_FUEL);
                 continue;
             }
+            let done = match plan.opcode {
+                Opcode::CheckType => HOISTED_TYPE,
+                Opcode::CheckInit => HOISTED_INIT,
+                _ => HOISTED,
+            };
             apply(func, &plan);
-            stats.optimized(HOISTED);
+            stats.optimized(done);
         }
         stats
     }
 }
 
 /// One check to take out of one loop, and the check to put in front of it.
+///
+/// The check in front is the same kind as the one coming out, and for the bounds check, the type
+/// check and the init check alike it is written with the range the whole walk covers. See the
+/// module comment for why one transformation covers all three.
 #[derive(Debug)]
 struct Plan {
     /// The block the new check goes in.
@@ -247,6 +310,8 @@ struct Plan {
     span: Extent,
     /// The payload of the check being removed, which the new one keeps everything of but the size.
     info: MemInfo,
+    /// Which of the three kinds of check this is, since the one in front is the same kind.
+    opcode: Opcode,
     /// The check being removed.
     check: Inst,
 }
@@ -291,7 +356,9 @@ fn sweep(
         .iter()
         .filter(|&&block| loops.innermost(block) == Some(id))
         .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
-        .filter(|&inst| func[inst].opcode == Opcode::CheckBounds)
+        .filter(|&inst| {
+            matches!(func[inst].opcode, Opcode::CheckBounds | Opcode::CheckInit | Opcode::CheckType)
+        })
         .collect();
     if checks.is_empty() {
         return;
@@ -311,13 +378,73 @@ fn sweep(
             return;
         }
     };
+    let written = writes(func, loops, id);
 
     for check in checks {
+        if let Some(why) = written.refusing(func[check].opcode) {
+            stats.missed(why);
+            continue;
+        }
         match planned(func, doms, scev, ranges, id, preheader, guard, around, check) {
             Ok(plan) => plans.push(plan),
             Err(why) => stats.missed(why),
         }
     }
+}
+
+/// Which of the two planes a loop writes, which is the condition a plane check has and a bounds
+/// check does not.
+#[derive(Clone, Copy, Debug)]
+struct Written {
+    /// The loop has a `meta_init`, a `meta_init_copy` or a `meta_begin` in it.
+    init: bool,
+    /// The loop has a `meta_type`, a `meta_type_copy` or a `meta_begin` in it.
+    ty: bool,
+}
+
+impl Written {
+    /// Why a check of this kind stays where it is, when it does.
+    fn refusing(self, opcode: Opcode) -> Option<&'static str> {
+        match opcode {
+            Opcode::CheckInit if self.init => Some(WRITES_THE_INIT_PLANE),
+            Opcode::CheckType if self.ty => Some(WRITES_THE_TYPE_PLANE),
+            _ => None,
+        }
+    }
+}
+
+/// What the loop writes to the two planes the plane checks read.
+///
+/// A bounds check needs nothing like this, because nothing a loop with no call in it does can move
+/// the edges of an object. The two planes are not like that. A store writes the init plane and an
+/// assignment through a pointer of a new type writes the type plane, so a loop can make a later
+/// iteration's question answerable that an earlier iteration's would have refused. `a[i] =
+/// a[i - 1]` with only `a[0]` written is the shape: every read inside passes, and one check in
+/// front of the loop asking about the whole walk refuses a correct program, which document 02 calls
+/// a release blocking bug.
+///
+/// `meta_begin` is in both lists because it is an allocation's storage starting its life over, and
+/// the init plane and the type plane are both cleared by it.
+///
+/// Nothing else has to be looked for. [`shaped`] has already refused every call, every inline
+/// assembly block, every `meta_end` and every `meta_transfer`, so the only things left that write a
+/// plane are these five opcodes.
+fn writes(func: &Func, loops: &Loops, id: LoopId) -> Written {
+    let mut written = Written { init: false, ty: false };
+    for &block in loops.blocks(id) {
+        for inst in func.insts(block) {
+            match func[inst].opcode {
+                Opcode::MetaInit | Opcode::MetaInitCopy => written.init = true,
+                Opcode::MetaType | Opcode::MetaTypeCopy => written.ty = true,
+                Opcode::MetaBegin => {
+                    written.init = true;
+                    written.ty = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    written
 }
 
 /// The preheader of a loop this pass can move a check out of, and the block it is left from.
@@ -404,9 +531,7 @@ fn planned(
     let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
         return Err(NOT_A_SWEEP);
     };
-    let Some(named) = named_by(func, capability) else {
-        return Err(NOT_A_SWEEP);
-    };
+    let named = named_by(func, capability);
     let Extra::Mem(held) = func[check].extra else { return Err(NOT_A_SWEEP) };
     let info = func[held];
 
@@ -487,10 +612,20 @@ fn planned(
     // refused, because the address the hoisted check is written at could be in some object further
     // on, and then the question in front is about whoever owns that and the check inside was about
     // whoever owns the pointer the capability names.
-    if named != pointer && (base != Anchor::Value(named) || offset != 0) {
-        return Err(NOT_ITS_CAPABILITY);
+    //
+    // Only a bounds check. The other two lower to a call that is handed the pointer and the width
+    // and nothing else, `rucc_safety::lower::began` and `rucc_safety::lower::typed` being where the
+    // capability operand is read into a name beginning with an underscore. So which instance it
+    // names cannot change what those two answer, and a walk that starts along from the pointer the
+    // capability was taken at is a walk they may still be hoisted out of.
+    let opcode = func[check].opcode;
+    if opcode == Opcode::CheckBounds {
+        let Some(named) = named else { return Err(NOT_A_SWEEP) };
+        if named != pointer && (base != Anchor::Value(named) || offset != 0) {
+            return Err(NOT_ITS_CAPABILITY);
+        }
     }
-    Ok(Plan { preheader, base, offset, span, info, check })
+    Ok(Plan { preheader, base, offset, span, info, opcode, check })
 }
 
 /// The pointer an invariant is an address off, and how far past it, when it is one.
@@ -685,7 +820,7 @@ fn apply(func: &mut Func, plan: &Plan) {
     let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
     made.push(capability);
 
-    // Two shapes of check, and which one is written is which of the two the extent came in. A
+    // Two shapes of operands, and which one is written is which of the two the extent came in. A
     // number goes in the payload, where the front end would have put it. An expression goes in the
     // third operand, and then the payload keeps the size of one element of the walk, which is what
     // `crates/rucc-ir/src/opcode.rs` says that field means on a check of this shape.
@@ -703,7 +838,7 @@ fn apply(func: &mut Func, plan: &Plan) {
         None => vec![capability, first],
     };
     let args = build.func().push_values(&operands);
-    let check = build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+    let check = build.inst(InstData { args, extra, ..InstData::new(plan.opcode) }, &[]);
 
     for value in made {
         let inst = inst_of(func, value);
@@ -1553,6 +1688,149 @@ mod tests {
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, super::TOO_WIDE), 1);
+    }
+
+    /// A counted loop reading one element each time round, checked with `kind` rather than with a
+    /// `check_bounds`, and with `writing` in the body when there is one.
+    ///
+    /// The same loop [`walking`] builds, written out again because what is being tested here is the
+    /// other two kinds of check and the one condition they have that the bounds check does not.
+    fn planed(kind: Opcode, writing: Option<Opcode>) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[array, scaled]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[pointer]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(kind) }, &[]);
+        if let Some(writing) = writing {
+            let bytes = build.iconst(Type::int(64), 4);
+            // The two copies are three operands and everything else is two. `meta_type_copy` is
+            // what the type plane's write is here rather than `meta_type`, because `meta_type`
+            // names a plane entry and a plane entry lives in a module, which this test has none of
+            // until [`sound`] makes one. What is being tested is the same either way, since
+            // [`writes`] reads the opcode and nothing else.
+            let args = match writing {
+                Opcode::MetaTypeCopy | Opcode::MetaInitCopy => {
+                    build.func().push_values(&[pointer, pointer, bytes])
+                }
+                _ => build.func().push_values(&[pointer, bytes]),
+            };
+            build.inst(InstData { args, ..InstData::new(writing) }, &[]);
+        }
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), 16);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func)
+    }
+
+    /// Every check of one kind left in a function, with the block it is in.
+    fn kinds(func: &Func, kind: Opcode) -> Vec<(Block, Inst)> {
+        func.blocks()
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)).collect::<Vec<_>>())
+            .filter(|&(_, inst)| func[inst].opcode == kind)
+            .collect()
+    }
+
+    #[test]
+    fn a_type_check_that_walks_a_counted_loop_comes_out_of_it() {
+        // Agreeing with a type holds of every subrange of a range it holds of, so the step from the
+        // sixteen checks inside to one check of the sixty four bytes in front is the same step the
+        // bounds check takes, and the rule the pass asks is the same rule.
+        let (mut names, mut func) = planed(Opcode::CheckType, None);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::HOISTED_TYPE), 1);
+
+        let left = kinds(&func, Opcode::CheckType);
+        assert_eq!(left.len(), 1);
+        assert_eq!(extent(&func, left[0].1), 64, "fifteen steps of four, plus the last read");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_init_check_that_walks_a_counted_loop_comes_out_of_it() {
+        // And the same for the other plane, where the claim is that every byte has been written.
+        let (mut names, mut func) = planed(Opcode::CheckInit, None);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::HOISTED_INIT), 1);
+
+        let left = kinds(&func, Opcode::CheckInit);
+        assert_eq!(left.len(), 1);
+        assert_eq!(extent(&func, left[0].1), 64);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_that_writes_the_init_plane_keeps_its_init_check() {
+        // `a[i] = a[i - 1]` is the program: every read inside passes because the iteration before
+        // it wrote the bytes, and one check in front of the loop asking about the whole array
+        // refuses a correct program. So a loop with a `meta_init` in it keeps its init checks.
+        let (mut names, mut func) = planed(Opcode::CheckInit, Some(Opcode::MetaInit));
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::WRITES_THE_INIT_PLANE), 1);
+        assert_eq!(kinds(&func, Opcode::CheckInit).len(), 1, "and it is where it was");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_that_writes_the_type_plane_keeps_its_type_check() {
+        let (mut names, mut func) = planed(Opcode::CheckType, Some(Opcode::MetaTypeCopy));
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::WRITES_THE_TYPE_PLANE), 1);
+        assert_eq!(kinds(&func, Opcode::CheckType).len(), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_that_writes_a_plane_still_gives_up_its_bounds_check() {
+        // The condition is about the plane the check reads and nothing else. Nothing a loop with no
+        // call in it does can move the edges of an object, so a `meta_init` in the body says
+        // nothing about where the array ends and the bounds check comes out as it always did.
+        let (mut names, mut func) = planed(Opcode::CheckBounds, Some(Opcode::MetaInit));
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(checks(&func).len(), 1);
+        assert_eq!(extent(&func, checks(&func)[0].1), 64);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_lifetime_starting_in_the_loop_keeps_both_planes_checks() {
+        // `meta_begin` is an instance's storage starting over, which clears both planes at once, so
+        // it is in both lists rather than in neither.
+        for kind in [Opcode::CheckInit, Opcode::CheckType] {
+            let (_, mut func) = planed(kind, Some(Opcode::MetaBegin));
+            let stats = hoisted(&mut func);
+            assert!(!stats.changed(), "{kind:?}");
+        }
     }
 
     /// The instruction that produced a value.
