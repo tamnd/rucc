@@ -306,7 +306,7 @@ impl Walk<'_> {
         for (index, &ty) in signature.params.iter().enumerate() {
             let ty = self.told(ty)?;
             let name = written.get(index).and_then(|&param| tast[param].name);
-            params.push(Param { name: name.map(|name| self.spelled(name)), ty, at: None });
+            params.push(Param { name: name.map(|name| self.spelled(name)), ty, spot: None });
             declared.push(written.get(index).map(|param| param.raw()));
         }
         let sig =
@@ -448,7 +448,7 @@ impl Walk<'_> {
                 for &ty in &signature.params {
                     // No place, because this is a function type rather than a function: nothing
                     // here is code and there is no frame for a parameter of it to be in.
-                    params.push(Param { name: None, ty: self.told(ty)?, at: None });
+                    params.push(Param { name: None, ty: self.told(ty)?, spot: None });
                 }
                 Some(Shape::Subroutine(Sig {
                     returns,

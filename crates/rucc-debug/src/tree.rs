@@ -1,5 +1,5 @@
 //! The entries in `.debug_info`: the types a unit describes, the functions it defines, the
-//! variables it defines at file scope, and the locals of those functions that have a frame slot.
+//! variables it defines at file scope, and the locals of those functions.
 //!
 //! Design: `spec/11-asm-objects-debug.md` section 11.4.
 //!
@@ -35,7 +35,9 @@
 //! [`Function::sig`]: crate::Function::sig
 
 use crate::line::{Error, Function};
-use crate::shape::{Constant, Encoding, Global, Local, Member, Place, Qualifier, Shape, Sig};
+use crate::shape::{
+    Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Shape, Sig, Spot,
+};
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
 
@@ -151,7 +153,7 @@ fn fill(
             points(dwarf, at, *of, ids)?;
         }
         Shape::Qualified { of, .. } => points(dwarf, at, *of, ids)?,
-        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, false)?,
+        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, None)?,
     }
     Ok(())
 }
@@ -212,24 +214,24 @@ fn defined(
         expr.op(gimli::DW_OP_call_frame_cfa);
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
     }
-    takes(dwarf, at, sig, ids, frames)?;
+    // Which function a location is measured into, for the ones that are a list of stretches, and
+    // nothing at all in a build with no frame base to measure the other kind from.
+    let held = frames.then_some(index);
+    takes(dwarf, at, sig, ids, held)?;
     for local in &func.locals {
-        kept(dwarf, at, local, files, ids, frames)?;
+        kept(dwarf, at, local, files, ids, held)?;
     }
     Ok(())
 }
 
-/// One local the program declared that lowering gave a frame slot, as a child of its function.
-///
-/// `DW_AT_location` is one `DW_OP_fbreg` at the local's offset from the frame base, which is right
-/// at every program counter in the function: the slot is handed out once by the frame layout and
-/// nothing moves it afterwards. That is what makes this the first location worth writing and the
-/// only one that needs no list.
+/// One local the program declared, as a child of its function.
 ///
 /// Nothing at all in a build with no frame base, which is a build that asked for no unwind table.
-/// The offset would be from an attribute that is not there, and a name with an unreadable location
+/// An offset would be from an attribute that is not there, and a name with an unreadable location
 /// is worse than a name a debugger says it cannot find: one of them is a wrong answer and the other
-/// is an honest one.
+/// is an honest one. That is why `which` is the function's index and not a plain flag: it is both
+/// the answer to whether anything can be said and the thing a stretch of addresses is measured
+/// into, and a caller cannot have one without the other.
 ///
 /// A local with no type still gets an entry, for the reason [`held_at`] gives.
 fn kept(
@@ -238,19 +240,81 @@ fn kept(
     local: &Local,
     files: &[FileId],
     ids: &[UnitEntryId],
-    frames: bool,
+    which: Option<usize>,
 ) -> Result<(), Error> {
-    if !frames {
-        return Ok(());
-    }
+    let Some(which) = which else { return Ok(()) };
     let child = dwarf.unit.add(at, gimli::DW_TAG_variable);
     title(dwarf, child, &local.name);
     came_from(dwarf, child, &local.name, local.decl, files)?;
     points(dwarf, child, local.ty, ids)?;
-    let mut expr = gimli::write::Expression::new();
-    expr.op_fbreg(local.at);
-    dwarf.unit.get_mut(child).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
+    somewhere(dwarf, child, &local.name, &local.spot, which)
+}
+
+/// `DW_AT_location`, which is one expression where the place never changes and a reference into
+/// `.debug_loclists` where it does.
+///
+/// A local that has a frame slot is the easy one and the one written first: the frame layout hands
+/// the slot out once and nothing moves it afterwards, so one `DW_OP_fbreg` is right at every program
+/// counter in the function. A local the register allocator was left to place is the other, and one
+/// of those has to be said where it is at the address the debugger stopped at rather than once for
+/// the whole run.
+///
+/// A stretch names its addresses by the function's own symbol plus how far into the function it
+/// starts, so the linker resolves it the same way it resolves the function's low PC. A pair of plain
+/// numbers would have been wrong under `-ffunction-sections`, which puts every function in a section
+/// of its own that a linker may place anywhere.
+///
+/// # Errors
+///
+/// [`Error::Refused`] on a stretch of no length or one that starts further into the function than a
+/// signed offset can reach. Neither is something a caller can mean: an empty stretch covers no
+/// address at all, and the writer underneath would read the second as a stretch somewhere else.
+fn somewhere(
+    dwarf: &mut gimli::write::DwarfUnit,
+    at: UnitEntryId,
+    name: &str,
+    spot: &Spot,
+    which: usize,
+) -> Result<(), Error> {
+    let value = match spot {
+        Spot::Always(held) => AttributeValue::Exprloc(saying(*held)),
+        // A list of nothing is a local that is nowhere at every address, and the attribute is left
+        // off rather than written empty. Both say the same thing to a reader and one of them is
+        // fewer bytes.
+        Spot::Over(spans) if spans.is_empty() => return Ok(()),
+        Spot::Over(spans) => {
+            let mut list = Vec::with_capacity(spans.len());
+            for span in spans {
+                let Ok(addend) = i64::try_from(span.from) else {
+                    let why = format!("{name} is somewhere {} bytes into its function", span.from);
+                    return Err(Error::Refused { why });
+                };
+                if span.len == 0 {
+                    let why = format!("{name} is somewhere over no addresses at all");
+                    return Err(Error::Refused { why });
+                }
+                list.push(gimli::write::Location::StartLength {
+                    begin: gimli::write::Address::Symbol { symbol: which, addend },
+                    length: span.len,
+                    data: saying(span.held),
+                });
+            }
+            let id = dwarf.unit.locations.add(gimli::write::LocationList(list));
+            AttributeValue::LocationListRef(id)
+        }
+    };
+    dwarf.unit.get_mut(at).set(gimli::DW_AT_location, value);
     Ok(())
+}
+
+/// The one operation that says a place, as the expression a location is written as.
+fn saying(held: Held) -> gimli::write::Expression {
+    let mut expr = gimli::write::Expression::new();
+    match held {
+        Held::Frame(at) => expr.op_fbreg(at),
+        Held::Reg(number) => expr.op_reg(gimli::Register(number)),
+    }
+    expr
 }
 
 /// The entry for one variable this unit defines at file scope.
@@ -313,15 +377,15 @@ fn came_from(
 
 /// What a signature says, which is the same attributes on a subprogram and on a function type.
 ///
-/// A parameter that has a frame slot carries where it is, the same one operation a local carries
-/// and under the same condition. A function type's parameters never have one, since a type is not a
-/// piece of code and has no frame to be in.
+/// A parameter that has a place carries where it is, written the same way a local's is and under
+/// the same condition. A function type's parameters never have one, so `which` is [`None`] there,
+/// since a type is not a piece of code and has no frame or registers to be in.
 fn takes(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     sig: &Sig,
     ids: &[UnitEntryId],
-    frames: bool,
+    which: Option<usize>,
 ) -> Result<(), Error> {
     if sig.prototyped {
         flag(dwarf, at, gimli::DW_AT_prototyped);
@@ -329,14 +393,13 @@ fn takes(
     points(dwarf, at, sig.returns, ids)?;
     for param in &sig.params {
         let child = dwarf.unit.add(at, gimli::DW_TAG_formal_parameter);
+        let name = param.name.clone().unwrap_or_default();
         if let Some(name) = &param.name {
             title(dwarf, child, name);
         }
         points(dwarf, child, Some(param.ty), ids)?;
-        if let Some(offset) = param.at.filter(|_| frames) {
-            let mut expr = gimli::write::Expression::new();
-            expr.op_fbreg(offset);
-            dwarf.unit.get_mut(child).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
+        if let (Some(spot), Some(which)) = (param.spot.as_ref(), which) {
+            somewhere(dwarf, child, &name, spot, which)?;
         }
     }
     if sig.variadic {
@@ -465,7 +528,7 @@ fn reading(encoding: Encoding) -> gimli::DwAte {
 #[cfg(test)]
 mod tests {
     use crate::line::{Row, Unit, write};
-    use crate::shape::{Member, Param, Place, Shape, Sig};
+    use crate::shape::{Held, Local, Member, Param, Place, Shape, Sig, Span, Spot};
 
     use rucc_object::{Info, Reference};
 
@@ -490,7 +553,7 @@ mod tests {
                 decl: Some(Place { file: 0, line: 3 }),
                 sig: Some(Sig {
                     returns: Some(0),
-                    params: vec![Param { name: Some("n".to_owned()), ty: 0, at: None }],
+                    params: vec![Param { name: Some("n".to_owned()), ty: 0, spot: None }],
                     variadic: false,
                     prototyped: true,
                 }),
@@ -607,6 +670,16 @@ mod tests {
         [2, gimli::DW_OP_fbreg.0, offset]
     }
 
+    /// A place that is a frame slot and never changes, which is what a local with one has.
+    fn fixed(offset: i64) -> Spot {
+        Spot::Always(Held::Frame(offset))
+    }
+
+    /// The same, for a parameter, which may have no place at all.
+    fn slot(offset: i64) -> Option<Spot> {
+        Some(fixed(offset))
+    }
+
     /// A local with a frame slot says where it is, and where is an offset from the frame base.
     #[test]
     fn a_local_with_a_slot_says_how_far_below_the_frame_base_it_is() {
@@ -615,7 +688,7 @@ mod tests {
             name: "total".to_owned(),
             ty: Some(0),
             decl: Some(Place { file: 0, line: 4 }),
-            at: -16,
+            spot: Spot::Always(Held::Frame(-16)),
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the local");
@@ -631,12 +704,115 @@ mod tests {
     #[test]
     fn a_parameter_with_a_slot_gets_its_location_and_not_a_second_entry() {
         let mut unit = one();
-        unit.funcs[0].sig.as_mut().expect("a signature").params[0].at = Some(-8);
+        unit.funcs[0].sig.as_mut().expect("a signature").params[0].spot = slot(-8);
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the parameter");
         assert!(holds(&info, ".debug_info", &away(0x78)), "the parameter is not 8 below the base");
         let names = named(&info);
         assert_eq!(names.iter().filter(|name| *name == "n").count(), 1, "twice over, {names:?}");
+    }
+
+    /// The attribute and the form a location that is a list is written as.
+    ///
+    /// A different form from the one above and that is the whole point: what is at a section offset
+    /// is a list, and a list has no one answer to write inline.
+    fn listed() -> [u8; 2] {
+        [
+            u8::try_from(gimli::DW_AT_location.0).expect("a one byte attribute"),
+            u8::try_from(gimli::DW_FORM_sec_offset.0).expect("a one byte form"),
+        ]
+    }
+
+    /// A local the register allocator moved around says where it is stretch by stretch.
+    ///
+    /// The list itself is read out of `.debug_loclists`: an entry that says start and length, the
+    /// address the linker has yet to fill in, how many bytes the stretch covers, and then the
+    /// expression, which for a value in a register is one operation naming the register and for one
+    /// in the frame is the same operation a slot gets.
+    #[test]
+    fn a_local_that_moves_says_where_it_is_over_each_stretch_of_its_function() {
+        let mut unit = one();
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![
+                Span { from: 0, len: 8, held: Held::Reg(3) },
+                Span { from: 8, len: 8, held: Held::Frame(-16) },
+            ]),
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &listed()), "the location is not a list");
+        let start = gimli::DW_LLE_start_length.0;
+        let reg = [start, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, gimli::DW_OP_reg3.0];
+        assert!(holds(&info, ".debug_loclists", &reg), "the first stretch is not in a register");
+        let mem = [start, 0, 0, 0, 0, 0, 0, 0, 0, 8, 2, gimli::DW_OP_fbreg.0, 0x70];
+        assert!(holds(&info, ".debug_loclists", &mem), "the second stretch is not in the frame");
+    }
+
+    /// Every stretch asks the linker where its function went, the same way a line sequence does.
+    ///
+    /// A pair of plain numbers would have been wrong under `-ffunction-sections`, which puts every
+    /// function in a section of its own that a linker may place anywhere. The addend is how far into
+    /// the function the stretch starts, so the two relocations here are the two starts.
+    #[test]
+    fn a_stretch_names_the_function_it_is_measured_into() {
+        let mut unit = one();
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![
+                Span { from: 0, len: 8, held: Held::Reg(3) },
+                Span { from: 8, len: 8, held: Held::Reg(4) },
+            ]),
+        }];
+        let info = write(&unit).expect("sections");
+        let list = info.chunks.iter().find(|chunk| chunk.name == ".debug_loclists");
+        let list = list.expect("a location list");
+        let asked: Vec<i64> = list
+            .relocs
+            .iter()
+            .filter(|reloc| reloc.symbol == "f")
+            .map(|reloc| reloc.addend)
+            .collect();
+        assert_eq!(asked, [0, 8], "the stretches do not start where they were said to");
+    }
+
+    /// A local that is nowhere at every address gets no location rather than an empty list.
+    ///
+    /// The name is still worth writing. A debugger that knows the variable exists and says it is
+    /// not available is telling the truth, and one that has never heard of it cannot.
+    #[test]
+    fn a_local_that_is_nowhere_at_all_gets_no_location_and_keeps_its_name() {
+        let mut unit = one();
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(Vec::new()),
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(!holds(&info, ".debug_abbrev", &listed()), "a list of nothing");
+        assert!(!holds(&info, ".debug_abbrev", &spot()), "an expression out of nothing");
+        assert!(
+            info.chunks.iter().all(|chunk| chunk.name != ".debug_loclists"),
+            "an empty section"
+        );
+        assert!(named(&info).contains(&"total".to_owned()), "the local lost its name too");
+    }
+
+    /// A stretch of no length covers no address, so it is refused rather than written.
+    #[test]
+    fn a_stretch_that_covers_no_addresses_is_refused() {
+        let mut unit = one();
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![Span { from: 0, len: 0, held: Held::Reg(3) }]),
+        }];
+        assert!(write(&unit).is_err());
     }
 
     /// A build with no unwind table says nothing about where a local is, for the same reason it
@@ -645,9 +821,9 @@ mod tests {
     fn a_build_that_writes_no_unwind_table_says_nothing_about_where_a_local_is() {
         let mut unit = one();
         unit.frames = false;
-        unit.funcs[0].sig.as_mut().expect("a signature").params[0].at = Some(-8);
+        unit.funcs[0].sig.as_mut().expect("a signature").params[0].spot = slot(-8);
         unit.funcs[0].locals =
-            vec![Local { name: "total".to_owned(), ty: Some(0), decl: None, at: -16 }];
+            vec![Local { name: "total".to_owned(), ty: Some(0), decl: None, spot: fixed(-16) }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &spot()), "a location nothing can resolve");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
