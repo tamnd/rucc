@@ -311,10 +311,11 @@ fn consider(
 
 /// Whether anything outside the loop reads a value defined inside it.
 ///
-/// [`crate::loop_delete`] asks the same question for a different reason, and asks one more of
-/// its own about the edge out, which this does not look at because a copy keeps that edge.
+/// [`crate::loop_delete`] wants the same values and works them out for itself, because it needs
+/// which ones rather than whether there are any. This is the cheaper question and the one
+/// unrolling has.
 ///
-/// After [`crate::canon`] there is no such value, because loop closed form has already routed every
+/// Right after [`crate::canon`] there is no such value, because loop closed form has routed every
 /// one of them through a parameter of the block the loop leaves to. Where there is one, the copies
 /// would leave it reading the first iteration's value instead of the last, so this is refused
 /// rather than repaired.
