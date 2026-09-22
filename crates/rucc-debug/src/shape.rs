@@ -216,13 +216,13 @@ pub struct Param {
     pub name: Option<String>,
     /// Which of the unit's [`types`](crate::Unit::types) it is.
     pub ty: usize,
-    /// How far below the function's frame base the parameter is, for a parameter lowering gave a
-    /// frame slot, and [`None`] for one held in a value and for every function type.
+    /// Where the parameter is, and [`None`] where this compiler cannot yet say and for every
+    /// function type.
     ///
     /// A parameter is a local that happened to arrive in a register, so where it ends up is decided
-    /// the same way every other local's place is. One that has a slot is one `DW_OP_fbreg` away for
-    /// the whole of the function. See [`Local`].
-    pub at: Option<i64>,
+    /// the same way every other local's place is. See [`Local::spot`]. A function type never has
+    /// one, since a type is not a piece of code and has no frame or registers to be in.
+    pub spot: Option<Spot>,
 }
 
 /// One variable the unit defines at file scope.
@@ -253,18 +253,11 @@ pub struct Global {
     pub external: bool,
 }
 
-/// One local the program declared that lowering gave a frame slot.
+/// One local the program declared.
 ///
-/// Not every local. A scalar whose address is never taken is put in an SSA value rather than a
-/// slot, at every optimization level, so where it is depends on what the register allocator did and
-/// changes from one program counter to the next. Those need a location list and are the rest of
-/// tamnd/rucc#1645. The ones here are the ones with a fixed place: every aggregate, every local
-/// whose address is taken, every `volatile` and `_Atomic` one, and all of them in a function that
-/// saves a place with `__builtin_setjmp`.
-///
-/// A parameter is not here even when it has a slot. It is already a child of the subprogram, from
+/// A parameter is not here even when it has a place. It is already a child of the subprogram, from
 /// the signature, and a second entry for it would be a second variable of the same name. What it
-/// gets instead is [`Param::at`].
+/// gets instead is [`Param::spot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Local {
     /// Its name, as the C program spelled it.
@@ -274,9 +267,54 @@ pub struct Local {
     pub ty: Option<usize>,
     /// Where it was declared, and nothing when that is not known.
     pub decl: Option<Place>,
-    /// How far below the function's frame base it is, which is a negative number, since the frame
-    /// base is the stack pointer the caller had and a frame is below that.
-    pub at: i64,
+    /// Where in the machine it is, over the addresses of the function it is in.
+    pub spot: Spot,
+}
+
+/// Where a local is over the addresses of the function it is in.
+///
+/// Which of the two a local gets is decided by what lowering did with it rather than by the
+/// optimization level. A local with a frame slot is in that slot from the first instruction of the
+/// function to the last, because the frame layout hands the slot out once and nothing moves it
+/// afterwards, and one expression says so. A scalar whose address is never taken is put in an SSA
+/// value instead, at every optimization level including `-O0`, and where the register allocator put
+/// that value changes from one program counter to the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spot {
+    /// In one place at every address in the function.
+    Always(Held),
+    /// In a place that depends on where the program counter is, said stretch by stretch.
+    ///
+    /// The stretches do not have to cover the function, and an address none of them covers is an
+    /// address the local is nowhere. That is the honest answer rather than a gap: a value that has
+    /// not been computed yet, or whose last reader is already behind, is somewhere for part of a
+    /// function and nowhere for the rest, and a debugger stopped in the rest should say the
+    /// variable is not available rather than print whatever is in the register now.
+    Over(Vec<Span>),
+}
+
+/// One stretch of a function's addresses and where a local is over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// How far into the function the stretch starts, in bytes.
+    pub from: u64,
+    /// How long it is, in bytes. A stretch of no length covers nothing and is refused.
+    pub len: u64,
+    /// Where the local is over it.
+    pub held: Held,
+}
+
+/// A place in the machine something can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// This far from the function's frame base, which is a negative number for anything in the
+    /// frame, since the frame base is the stack pointer the caller had and a frame is below that.
+    Frame(i64),
+    /// In this register, by the number this target's DWARF register numbering gives it.
+    ///
+    /// Not the register number the back end uses. The two agree on some targets and not on others,
+    /// and the translation is the caller's, because the caller is what knows which target this is.
+    Reg(u16),
 }
 
 /// Where in the source something was declared.

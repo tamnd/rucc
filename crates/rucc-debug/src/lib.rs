@@ -13,7 +13,11 @@
 //! argument types in it, enough for one to print a global, and enough for one to print a local that
 //! is in memory. It is not enough for a local held in an SSA value, because one of those has to be
 //! said where it is at the program counter that is asking, which is a list of places rather than
-//! one. That last part is the rest of M8 and of tamnd/rucc#9.
+//! one. The shape of that list is here and nothing fills it in yet: a local can be said to be in a
+//! register over one stretch of a function's addresses and somewhere else over the next, and a
+//! `.debug_loclists` saying so comes out, but what the driver hands over is still one place for the
+//! whole of a function. Working out the stretches needs the register allocator's output and is the
+//! rest of M8 and of tamnd/rucc#9.
 //!
 //! The reason that part came first is tamnd/rucc#1558. A report from the safety monitor carries a
 //! program counter and deliberately carries no source location, because
@@ -51,7 +55,8 @@ mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, write};
 pub use crate::shape::{
-    Bits, Constant, Encoding, Global, Local, Member, Param, Place, Qualifier, Shape, Sig,
+    Bits, Constant, Encoding, Global, Held, Local, Member, Param, Place, Qualifier, Shape, Sig,
+    Span, Spot,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

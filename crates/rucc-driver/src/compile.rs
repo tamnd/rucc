@@ -1085,7 +1085,8 @@ fn describe(
             for (param, decl) in sig.params.iter_mut().zip(&known.params) {
                 let Some(decl) = *decl else { continue };
                 let Some(which) = placed.iter().position(|&(at, _)| at == decl) else { continue };
-                param.at = Some(i64::from(placed.remove(which).1));
+                let at = rucc_debug::Held::Frame(i64::from(placed.remove(which).1));
+                param.spot = Some(rucc_debug::Spot::Always(at));
             }
         }
         // Whatever is left, which is the locals that are not parameters, in the order the slots
@@ -1101,7 +1102,7 @@ fn describe(
                     file: interned(&mut files, rewrite(&named.file)),
                     line: named.line,
                 }),
-                at: i64::from(at),
+                spot: rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))),
             });
         }
         funcs.push(rucc_debug::Function {
