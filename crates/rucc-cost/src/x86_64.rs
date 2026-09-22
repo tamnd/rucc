@@ -92,6 +92,13 @@ static SPEED: LazyLock<CostTable> = LazyLock::new(|| {
         // real difference is that a load whose address uses an index does not qualify for the
         // fast path Intel calls simple addressing, and pays a cycle for it.
         .addr([Cycles::ZERO, Cycles::ZERO, Cycles::ONE, Cycles::ONE, Cycles::ONE])
+        // One ALU operation. It fuses with the jump it feeds on every core in range, so it costs
+        // no latency, and it is still an instruction to decode and issue, so the loop that does
+        // without it is the shorter loop.
+        .compare_reg(Cycles::ONE)
+        // Nothing. `sub` and `dec` set the flags `jne` reads, so a loop counting down to zero has
+        // no comparison in it at all rather than a cheaper one.
+        .compare_zero(Cycles::ZERO)
         // What an unpredictable branch costs. Not the mispredict penalty, which is below: this is
         // what the branch is worth to remove before the penalty is weighed, and three is the
         // compare, the jump, and the fetch bubble.
@@ -144,6 +151,12 @@ static SIZE: LazyLock<CostTable> = LazyLock::new(|| {
         // the sib is there. Costed as one byte for a short displacement rather than four, because
         // the addresses a pass is choosing between are mostly frame offsets.
         .addr([Cycles::ZERO, bytes(1), bytes(1), bytes(1), bytes(2)])
+        // Two bytes, an opcode and a modrm, encoded like the add above it. Three with a REX
+        // prefix, and the same three the add pays, so the tie is the part worth keeping.
+        .compare_reg(bytes(2))
+        // The same nothing as the speed table, and for the same reason: the instruction is absent
+        // rather than short, and an absent instruction is no bytes in either currency.
+        .compare_zero(Cycles::ZERO)
         // Section 40.5's number, taken from the same place the speed table's is not.
         .branch_cost(heuristics::BRANCH_COST_FOR_SIZE)
         // Identical to the speed table, and it should be. How long the pipeline is does not depend
@@ -318,6 +331,17 @@ mod tests {
         // what is being counted is bytes and the branch predictor does not change how many there
         // are.
         assert_eq!(COSTS.branch_cost(Goal::Size, true), COSTS.branch_cost(Goal::Size, false));
+    }
+
+    #[test]
+    fn a_countdown_saves_the_comparison_rather_than_making_it_cheaper() {
+        // Section 28.4's reason for wanting a countdown at all, in both currencies. A comparison
+        // against zero is not a cheap comparison here, it is no comparison, because the decrement
+        // that produced the value set the flags the branch reads.
+        assert_eq!(SPEED.compare_zero, Cycles::ZERO);
+        assert_eq!(SIZE.compare_zero, Cycles::ZERO);
+        assert_eq!(SPEED.compare_reg, SPEED.add, "a comparison is an ALU operation like any other");
+        assert_eq!(SIZE.compare_reg, SIZE.add, "and is encoded like one");
     }
 
     #[test]
