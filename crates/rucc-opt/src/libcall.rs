@@ -537,7 +537,17 @@ impl Site<'_> {
             return None;
         }
         let wanted = self.character(args[1])?;
-        let text = self.one(args[0])?;
+        let Some(text) = self.one(args[0]) else {
+            // A string has one terminator in it, so looking for that one from the right finds the
+            // same place as looking for it from the left, and which end the walk started at stops
+            // mattering. That is an answer even where nothing at all is known about the string.
+            return match (wanted, side) {
+                (0, Side::Last) => {
+                    self.call("strchr", vec![Argument::Have(args[0]), Argument::Char(0)])
+                }
+                _ => None,
+            };
+        };
         let found = match (wanted, side) {
             (0, _) => Some(text.len()),
             (_, Side::First) => text.iter().position(|&byte| byte == wanted),
@@ -2203,6 +2213,45 @@ block0:
         assert!(!out.contains("call @rindex("), "{out}");
         assert!(out.contains("iconst.i64 4"), "the first o, {out}");
         assert!(out.contains("iconst.i64 7"), "the last o, {out}");
+    }
+
+    /// A search from the right for the terminator is a search from the left for it, because a
+    /// string has one terminator and both walks find that one.
+    #[test]
+    fn a_strrchr_of_the_terminator_is_a_strchr_of_it() {
+        let out = folded(
+            r#"
+func @strrchr(ptr, i32) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 0
+    %2 = call @strrchr(%0, %1) : (ptr, i32) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(!out.contains("call @strrchr("), "{out}");
+        assert!(out.contains("call @strchr(%0, "), "{out}");
+    }
+
+    /// A search from the right for anything else needs the string, since where the last one is
+    /// depends on what is in it.
+    #[test]
+    fn a_strrchr_of_another_character_needs_the_string() {
+        let out = folded(
+            r#"
+func @strrchr(ptr, i32) -> ptr, linkage(external);
+
+func @g(ptr) -> ptr, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 111
+    %2 = call @strrchr(%0, %1) : (ptr, i32) -> ptr
+    return %2
+}
+"#,
+        );
+        assert!(out.contains("call @strrchr("), "{out}");
     }
 
     /// A declaration of the wrong shape is a function of the program's own, whatever it is called.

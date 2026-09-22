@@ -95,8 +95,10 @@ beside the modern names. Three of them have a shape rule that does not need the 
 nothing is inside an empty set, so `strspn(s, "")` is zero, `strcspn(s, "")` is `strlen(s)`, and
 `strpbrk(s, "")` is a null pointer whatever `s` is, and a set of one character makes
 `strpbrk(s, "c")` a `strchr(s, 'c')` the same way a needle of one character does for `strstr`. A
-comparison answers one of minus one, zero and one, because the sign is what the standard promises and
-the magnitude is not, and that is what gcc leaves behind as well.
+fourth is that a string has one terminator in it, so `strrchr(s, 0)` is `strchr(s, 0)` and which end
+the walk started at stops mattering. A comparison answers one of minus one, zero and one, because the
+sign is what the standard promises and the magnitude is not, and that is what gcc leaves behind as
+well.
 
 **Two of them read a count rather than a terminator.** `memchr` and `strnlen` are told how many
 bytes they may look at, so they read the object rather than the string in it, and `memchr` finds a
