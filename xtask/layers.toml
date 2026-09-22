@@ -24,6 +24,13 @@ rucc-tuple = 0
 # driver would have been the one that drifted. It is also why the interface takes a flavour rather
 # than a target, since rucc-tuple is at rank 0 too and a crate cannot depend on its own rank.
 rucc-archive = 0
+# rucc-unpack is beside it and depends on nothing either. The same argument puts them both here: a
+# container format is bytes in and bytes out, it knows nothing about a target or a type system, and
+# a reader for one belongs where everything above it can reach it. rucc-archive writes the one
+# container a linker reads and rucc-unpack reads the ones a Windows SDK arrives in, so the pair of
+# them is this workspace's answer to "somebody has to know this format", and neither ends up as a
+# module inside whichever crate happened to need it first.
+rucc-unpack = 0
 rucc-diag = 1
 # rucc-abi describes what a target's types look like and how its calls are made, over the ten
 # field tuple and nothing else. It was beside rucc-target for as long as neither depended on the

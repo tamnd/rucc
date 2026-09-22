@@ -1,0 +1,19 @@
+[package]
+name = "rucc-unpack"
+description = "Reads the container formats Microsoft's Windows SDK payloads arrive in, deflate and zip and cabinet and compound file, for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0, beside rucc-archive, and it depends on nothing at all. xtask/layers.toml says why.
+[dependencies]
