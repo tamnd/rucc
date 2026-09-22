@@ -36,6 +36,12 @@
 ;; runtime, and a call is not a term.
 (semantics (value.f128 v) v)
 
+;; And the other one, at the far end of the same story. A half is kept in a vector register too
+;; and the machine computes nothing in it either, so its entries are the moves and the two
+;; reinterpretations and nothing else, with every add and every comparison done a format wider
+;; and rounded back by a call.
+(semantics (value.f16 v) v)
+
 ;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
 (semantics (add.i8 l r) (bvadd l r))
 (semantics (add.i16 l r) (bvadd l r))
@@ -185,8 +191,10 @@
 (semantics (sitofp.i32.f64 v) (float_from_signed 32 64 v))
 (semantics (sitofp.i64.f32 v) (float_from_signed 64 32 v))
 (semantics (sitofp.i64.f64 v) (float_from_signed 64 64 v))
+(semantics (bitcast.f16.i16 v) (bits_from_float 16 v))
 (semantics (bitcast.f32.i32 v) (bits_from_float 32 v))
 (semantics (bitcast.f64.i64 v) (bits_from_float 64 v))
+(semantics (bitcast.i16.f16 v) (float_from_bits 16 v))
 (semantics (bitcast.i32.f32 v) (float_from_bits 32 v))
 (semantics (bitcast.i64.f64 v) (float_from_bits 64 v))
 
@@ -284,6 +292,7 @@
 (semantics (ret.i16 v) v)
 (semantics (ret.i32 v) v)
 (semantics (ret.i64 v) v)
+(semantics (ret.f16 v) v)
 (semantics (ret.f32 v) v)
 (semantics (ret.f64 v) v)
 (semantics (ret.f128 v) v)

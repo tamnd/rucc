@@ -91,7 +91,7 @@ impl Kind {
             Arg::Xmm(_) => Kind::Vec,
             Arg::Stack(_) => Kind::Stack,
             Arg::Mem => Kind::Mem,
-            Arg::Imm => Kind::Imm,
+            Arg::Imm | Arg::Lit(_) => Kind::Imm,
             Arg::Symbol | Arg::Label => Kind::Dest,
         }
     }
@@ -480,6 +480,11 @@ static VM: [Kind; 2] = [Kind::Vec, Kind::Mem];
 static RV: [Kind; 2] = [Kind::Reg, Kind::Vec];
 static VR: [Kind; 2] = [Kind::Vec, Kind::Reg];
 static IV: [Kind; 2] = [Kind::Imm, Kind::Vec];
+// The three with an immediate naming which part of a vector register is meant, which is how the
+// sixteen bit lane a `_Float16` lives in is reached.
+static IMV: [Kind; 3] = [Kind::Imm, Kind::Mem, Kind::Vec];
+static IRV: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Vec];
+static IVR: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Reg];
 // The x87 stack positions, which are one argument or two and are never anything else. There is no
 // row here mixing one with a register or with an address, because no instruction on this machine
 // names a stack position and a register in the same breath.
@@ -1575,6 +1580,18 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movq", &RV, WordQuad, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
     bytes("movd", &VR, Word, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
     bytes("movq", &VR, WordQuad, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    // Sixteen bits of a vector register, named by an immediate that says which sixteen. That is
+    // the one width the moves above do not have, and it is the width a `_Float16` is, so these
+    // three are how a half gets into a vector register and back out of it. The immediate is always
+    // zero here, since the low sixteen bits are where the psABI puts a half and where every
+    // runtime routine that takes one looks, but it is an operand of the instruction rather than
+    // part of the opcode and the assembler takes any of the eight a person writes.
+    bytes("pinsrw", &IMV, Word, &[0x0F, 0xC4], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrw", &IRV, Word, &[0x0F, 0xC4], pair(1, 2), ImmSize::Ib),
+    // The way back is to a general purpose register and never to memory, because the form that
+    // writes memory is `0x3A 0x15` and is SSE4.1, which is above the baseline of this target. A
+    // program storing a half therefore writes two instructions, which is what gcc writes as well.
+    bytes("pextrw", &IVR, Word, &[0x0F, 0xC5], pair(1, 2), ImmSize::Ib),
     // Comparing two floats and setting the flags, which is one opcode with the prefix saying which
     // format is read: no prefix for a `float` and `0x66` for a `double`, which is the pairing the
     // moves at the top of this group have and not the one the arithmetic has. The register beside

@@ -128,6 +128,12 @@ fn main() {
                                     values.push(Value::Imm(imm));
                                     text.push(format!("${imm}"));
                                 }
+                                // An immediate the table wrote, which is one number rather than
+                                // the four the loop tries, because it is part of the instruction.
+                                Arg::Lit(lane) => {
+                                    values.push(Value::Imm(i64::from(lane)));
+                                    text.push(format!("${lane}"));
+                                }
                                 Arg::Mem => {
                                     values.push(Value::Mem(*addr));
                                     text.push(addr_text.clone());

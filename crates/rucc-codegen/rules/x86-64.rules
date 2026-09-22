@@ -1237,6 +1237,10 @@
 ;; is a fact about the target in the same way: it is `xmm0` on both conventions, and the test
 ;; that says so is in `rucc_target::x86_64` where the conventions are.
 
+(rule (lower (ret.f16 (value.f16 v)))
+      (x64.ret_val_f16 v)
+      (spec (= v (result))))
+
 (rule (lower (ret.f32 (value.f32 v)))
       (x64.ret_val_f32 v)
       (spec (= v (result))))
@@ -1360,6 +1364,26 @@
 ;; `crates/rucc-abi/src/layout.rs` gives it, and the frame gives a local of it the same alignment.
 ;; The model says nothing about alignment either way, so what makes this the right instruction is
 ;; the language rule above it rather than anything the proof checks.
+
+;; And the half, which is two bytes into the low lane of a vector register. `pinsrw` is the only
+;; instruction at this baseline that reads sixteen bits into one, and it is what gcc writes here
+;; too. There is no rule for the store, because the form of `pextrw` that writes memory is SSE4.1:
+;; a store of a half is the bits out into a general purpose register and a sixteen bit store after
+;; them, which is two instructions and therefore `crates/rucc-codegen/src/half.rs`'s work rather
+;; than a rule's.
+
+(rule (lower (load.f16 (value.i64 a)))
+      (x64.pinsrw_rm (amode_base a))
+      (spec (= (float_from_bits 16
+                       (concat (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.pinsrw_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 16
+                       (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
 
 (rule (lower (load.f128 (value.i64 a)))
       (x64.movaps_rm (amode_base a))
@@ -1512,6 +1536,25 @@
 (rule (lower (bitcast.f64.i64 (value.f64 x)))
       (x64.movq_from_xmm x)
       (spec (= (bits_from_float 64 x) (result))))
+
+;; And the same move sixteen bits wide, which is the whole of what this machine does with a
+;; `_Float16` on top of reading one out of memory. `pinsrw` puts the low half of a general purpose
+;; register into the low lane of a vector one and `pextrw` takes it back out, and neither of them
+;; looks at what it moves, so a half precision value and the two bytes spelling it are the same
+;; thing here in exactly the way a `float` and its four bytes are above.
+;;
+;; These two are what `crates/rucc-codegen/src/half.rs` writes a store of a half and a constant of
+;; one as. A store is the bits out through a general purpose register and an ordinary sixteen bit
+;; store after them, and a constant is an immediate of the bits and the move in, which is two
+;; instructions each and is what gcc emits at this baseline as well.
+
+(rule (lower (bitcast.i16.f16 (value.i16 x)))
+      (x64.pinsrw_rr x)
+      (spec (= (float_from_bits 16 x) (result))))
+
+(rule (lower (bitcast.f16.i16 (value.f16 x)))
+      (x64.pextrw_rr x)
+      (spec (= (bits_from_float 16 x) (result))))
 
 
 ;; Comparing two floats. A `ucomisd` and the byte a condition sets, which is one term for the

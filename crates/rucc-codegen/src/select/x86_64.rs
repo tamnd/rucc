@@ -163,6 +163,7 @@ mod tests {
         "arg_val_16",
         "arg_val_32",
         "arg_val_64",
+        "arg_val_f16",
         "arg_val_f32",
         "arg_val_f64",
         "arg_val_f128",
@@ -170,6 +171,7 @@ mod tests {
         "ret_val2_16",
         "ret_val2_32",
         "ret_val2_64",
+        "ret_val2_f16",
         "ret_val2_f32",
         "ret_val2_f64",
         "ret_val2_f128",
@@ -698,7 +700,7 @@ mod tests {
     fn every_instruction_exempt_from_a_rule_is_one_the_convention_really_writes() {
         // An exemption list that nothing checks is a hole, since an opcode dropped into it stops
         // being covered by either direction of the pinning. These are the ones `crate::abi` can
-        // name, at the four integer widths and the two float formats it has names for an
+        // name, at the four integer widths and the four float formats it has names for an
         // argument in, and no others.
         let strip = |head: &'static str| head.strip_prefix(PREFIX).expect("an x86-64 term");
         let named = |ty| strip(crate::abi::head_of(ty).expect("every width the pseudos cover"));
@@ -707,8 +709,13 @@ mod tests {
         let second = |ty| strip(crate::abi::ret_of(ty, 1).expect("every width the pseudos cover"));
         let widths = || {
             [8, 16, 32, 64].into_iter().map(rucc_ir::Type::int).chain(
-                [rucc_ir::Float::F32, rucc_ir::Float::F64, rucc_ir::Float::F128]
-                    .map(rucc_ir::Type::float),
+                [
+                    rucc_ir::Float::F16,
+                    rucc_ir::Float::F32,
+                    rucc_ir::Float::F64,
+                    rucc_ir::Float::F128,
+                ]
+                .map(rucc_ir::Type::float),
             )
         };
         let written: Vec<&str> = widths()

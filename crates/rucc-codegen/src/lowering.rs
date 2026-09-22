@@ -60,7 +60,7 @@ use rucc_base::Interner;
 use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
-use crate::{expand, quad, retry, switch, varargs, wide, widths};
+use crate::{expand, half, quad, retry, switch, varargs, wide, widths};
 
 /// One member of the group.
 ///
@@ -91,6 +91,15 @@ pub enum Step {
     /// lost by running it this early: the widths it is written for are the widths the machine has,
     /// so a check at any other width is refused by name either way round.
     Overflows,
+    /// Anything at all at the half float format, as the work at a wider one.
+    ///
+    /// Above the two that rewrite an integer and above the quad, because what it leaves behind is
+    /// a conversion at a wider format and a call, and each of those three is written about one of
+    /// those. A `__int128` becoming a `_Float16` is a conversion to a `double` and a narrowing
+    /// after it once this has run, and the conversion is then the splitting's work in the ordinary
+    /// way rather than a shape it has never seen. A `_Float128` becoming one is a call this writes
+    /// and the quad step never sees, which is what keeps the narrowing a single rounding.
+    HalfFloats,
     /// An integer wider than a register, as the two halves of one.
     ///
     /// Ahead of the width legalisation and not part of it, because the two go in opposite
@@ -135,6 +144,7 @@ impl Step {
         Self::Retries,
         Self::Orderings,
         Self::Overflows,
+        Self::HalfFloats,
         Self::Halves,
         Self::Widths,
         Self::Bytes,
@@ -154,6 +164,7 @@ impl Step {
             Self::Retries => "retries",
             Self::Orderings => "orderings",
             Self::Overflows => "overflows",
+            Self::HalfFloats => "half-floats",
             Self::Halves => "halves",
             Self::Widths => "widths",
             Self::Bytes => "bytes",
@@ -174,6 +185,7 @@ impl Step {
             Self::Retries => "a read modify write with no instruction behind it",
             Self::Orderings => "an ordered load or store",
             Self::Overflows => "arithmetic that reports whether it overflowed",
+            Self::HalfFloats => "the half float format",
             Self::Halves => "an integer wider than a register",
             Self::Widths => "an integer at a width the machine does not have",
             Self::Bytes => "a byte reversal",
@@ -195,9 +207,9 @@ impl Step {
     /// dump which of those happened.
     ///
     /// Empty for [`Step::Rounds`], which rewrites an operand rather than taking an instruction out,
-    /// and empty for the three that work by type rather than by opcode: an integer of forty bits,
-    /// one of a hundred and twenty eight and a quad float are all spelled with the same opcodes as
-    /// anything else, and what makes them the construct is the type on the values.
+    /// and empty for the four that work by type rather than by opcode: an integer of forty bits,
+    /// one of a hundred and twenty eight, a quad float and a half float are all spelled with the
+    /// same opcodes as anything else, and what makes them the construct is the type on the values.
     #[must_use]
     pub const fn opcodes(self) -> &'static [Opcode] {
         match self {
@@ -212,7 +224,7 @@ impl Step {
                 Opcode::UMulOverflow,
                 Opcode::SMulOverflow,
             ],
-            Self::Halves | Self::Widths | Self::Rounds => &[],
+            Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
             Self::Bytes => &[Opcode::Bswap],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
             Self::Quads => &[],
@@ -254,6 +266,7 @@ impl Step {
             Self::Retries => retry::loops(func),
             Self::Orderings => expand::orderings(func, conv.word),
             Self::Overflows => expand::overflows(func),
+            Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func),
             Self::Bytes => expand::bytes(func),
@@ -503,6 +516,9 @@ mod tests {
                 "retries",
                 "orderings",
                 "overflows",
+                // Ahead of the integer splitting, because the calls it writes take and give back
+                // whole words that the splitting then has nothing left to say about.
+                "half-floats",
                 "halves",
                 "widths",
                 "bytes",

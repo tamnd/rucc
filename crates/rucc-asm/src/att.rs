@@ -389,6 +389,7 @@ impl Writer<'_> {
                     // of the stack as `%st` on its own as well, and this writes `%st(0)` for it,
                     // because one spelling for all eight is one thing fewer to know.
                     Arg::Stack(depth) => format!("%st({depth})"),
+                    Arg::Lit(lane) => format!("${lane}"),
                     // The first operand read, which is where a call puts the address it goes
                     // through. Everything in front of it is a register the call writes.
                     Arg::Through => {

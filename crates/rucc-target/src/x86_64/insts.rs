@@ -1729,14 +1729,15 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val_32", RetVal),
     ("ret_val_64", RetVal),
     // The same job for a float, which is a separate opcode rather than a wider one because the
-    // register it names is in the other file. A `float` and a `double` are both `xmm0` and are
-    // still two opcodes, so that the type a function returns survives as far as the machine IR
-    // and a listing says which of the two the program meant.
+    // register it names is in the other file. A `_Float16`, a `float` and a `double` are all three
+    // `xmm0` and are still three opcodes, so that the type a function returns survives as far as
+    // the machine IR and a listing says which of them the program meant.
+    ("ret_val_f16", RetValVec),
     ("ret_val_f32", RetValVec),
     ("ret_val_f64", RetValVec),
-    // And the whole of `xmm0` for the format that fills it, which is a third opcode for the same
-    // reason the first two are two: the register is the same one and how much of it the value is
-    // is not.
+    // And the whole of `xmm0` for the format that fills it, which is a fourth opcode for the same
+    // reason the first three are three: the register is the same one and how much of it the value
+    // is is not.
     ("ret_val_f128", RetValVec),
     // The second half of a structure that comes back in two registers, at every width a half can
     // be. The narrow ones are not a rounding of the wide one: the second eightbyte of a nine byte
@@ -1746,6 +1747,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val2_16", RetVal2),
     ("ret_val2_32", RetVal2),
     ("ret_val2_64", RetVal2),
+    ("ret_val2_f16", RetVal2Vec),
     ("ret_val2_f32", RetVal2Vec),
     ("ret_val2_f64", RetVal2Vec),
     ("ret_val2_f128", RetVal2Vec),
@@ -1756,6 +1758,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("arg_val_16", ArgVal),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
+    ("arg_val_f16", ArgValVec),
     ("arg_val_f32", ArgValVec),
     ("arg_val_f64", ArgValVec),
     ("arg_val_f128", ArgValVec),
@@ -1983,6 +1986,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movq_to_xmm", ConvertToVec),
     ("movd_from_xmm", ConvertFromVec),
     ("movq_from_xmm", ConvertFromVec),
+    // The same crossing at sixteen bits, which the moves above do not have and which is the width
+    // of a `_Float16`. The load form is here rather than beside the other loads because what it
+    // does is the crossing: it reads two bytes of memory and leaves them in the lane the psABI
+    // puts a half in, and nothing else on this machine reaches that lane.
+    ("pinsrw_rm", LoadVec),
+    ("pinsrw_rr", ConvertToVec),
+    ("pextrw_rr", ConvertFromVec),
     // Comparing two floats, which is one instruction that writes flags and one that reads them,
     // the same pair the integer comparisons above are. Ten per format rather than one per
     // predicate, because the machine has four answers and a C program has sixteen questions: the
@@ -2164,7 +2174,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 613);
+        assert_eq!(described, 619);
     }
 
     #[test]

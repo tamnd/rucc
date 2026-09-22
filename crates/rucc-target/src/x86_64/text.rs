@@ -42,7 +42,7 @@
 use crate::operand::Constraint;
 use crate::regs::PhysReg;
 
-use Arg::{Imm, Label, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
+use Arg::{Imm, Label, Lit, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -144,6 +144,19 @@ pub enum Arg {
     Stack(u8),
     /// The immediate the instruction carries.
     Imm,
+    /// An immediate this table writes itself, which is one no operand carries.
+    ///
+    /// The same idea as [`Arg::Stack`], and there for the same reason: the number is part of what
+    /// the instruction is rather than part of what the program asked, so nothing upstream has a
+    /// value to put in it and the selector would have to invent a constant to fill an operand
+    /// with. The three that take one are the sixteen bit lane moves, where the immediate names
+    /// which of the eight lanes is meant and the answer is always the first, because the first is
+    /// where the psABI puts a `_Float16` and where every runtime routine that takes one looks.
+    ///
+    /// It is a byte because every immediate of this kind on this machine is, and an instruction
+    /// that carries one this way carries no other, which is what keeps it from colliding with
+    /// [`Arg::Imm`] on a row that has both.
+    Lit(u8),
     /// The addressing mode the instruction carries.
     Mem,
     /// The symbol the instruction names, which is what a call goes to.
@@ -801,6 +814,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ret_val_16", &[]),
     ("ret_val_32", &[]),
     ("ret_val_64", &[]),
+    ("ret_val_f16", &[]),
     ("ret_val_f32", &[]),
     ("ret_val_f64", &[]),
     ("ret_val_f128", &[]),
@@ -808,6 +822,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ret_val2_16", &[]),
     ("ret_val2_32", &[]),
     ("ret_val2_64", &[]),
+    ("ret_val2_f16", &[]),
     ("ret_val2_f32", &[]),
     ("ret_val2_f64", &[]),
     ("ret_val2_f128", &[]),
@@ -815,6 +830,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("arg_val_16", &[]),
     ("arg_val_32", &[]),
     ("arg_val_64", &[]),
+    ("arg_val_f16", &[]),
     ("arg_val_f32", &[]),
     ("arg_val_f64", &[]),
     ("arg_val_f128", &[]),
@@ -1027,6 +1043,16 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movq_to_xmm", &[spell("movq", &[Reg(1, Quad), Xmm(0)])]),
     ("movd_from_xmm", &[spell("movd", &[Xmm(1), Reg(0, Long)])]),
     ("movq_from_xmm", &[spell("movq", &[Xmm(1), Reg(0, Quad)])]),
+    // The sixteen bit lane, which is where a `_Float16` lives. The immediate says which of the
+    // eight lanes is meant and it is always the first, so none of these three carries one of its
+    // own and all three come out with the `$0` an instruction with no immediate is written with.
+    // That is a convention this table now leans on rather than an accident: `Arg::Imm` with
+    // nothing behind it prints `$0` and encodes a zero byte, which the address and the symbol
+    // arguments do the same thing for, and it is what makes a fixed immediate a row here rather
+    // than an operand the selector would have to invent a constant for.
+    ("pinsrw_rm", &[spell("pinsrw", &[Lit(0), Mem, Xmm(0)])]),
+    ("pinsrw_rr", &[spell("pinsrw", &[Lit(0), Reg(1, Long), Xmm(0)])]),
+    ("pextrw_rr", &[spell("pextrw", &[Lit(0), Xmm(1), Reg(0, Long)])]),
     // Comparing two floats, which is a `ucomiss` or a `ucomisd` and the byte a condition sets,
     // the same two instructions the integer comparisons above are. The compare is written with
     // the second source first, the way every AT&T instruction is, so the register the machine
@@ -1300,7 +1326,10 @@ pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
 fn shape_of(arg: Arg) -> Option<Shape> {
     match arg {
         Reg(..) => Some(Shape::Reg),
-        Imm => Some(Shape::Imm),
+        // An immediate the table wrote is still an immediate to look the opcode up by, because a
+        // template that names this instruction has to write the number out the way the table has
+        // it, and [`super::read`] refuses it when the number is a different one.
+        Imm | Lit(_) => Some(Shape::Imm),
         Mem => Some(Shape::Mem),
         Xmm(_) | Named(_) | Stack(_) | Symbol | Through | Label => None,
     }
@@ -1502,6 +1531,12 @@ mod tests {
                     Stack(depth) => assert!(
                         usize::from(depth) < REGS.len(crate::x86_64::X87),
                         "{name} names a position the x87 stack does not have"
+                    ),
+                    // An immediate the table wrote, which is not one the instruction carries, so
+                    // it says nothing about whether the form takes one and is checked on its own.
+                    Lit(lane) => assert!(
+                        usize::from(lane) < 8,
+                        "{name} names a lane a vector register does not have"
                     ),
                     Imm => imm = true,
                     Mem => mem = true,

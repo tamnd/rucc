@@ -619,6 +619,10 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
                 *operands.get_mut(usize::from(index))? = Some(Piece::Reg { reg, width });
             }
             (Arg::Imm, Given::Imm(value)) => imm = Some(value),
+            // An immediate the table wrote is part of the instruction, so a template matches it
+            // only by writing the same number, and writing a different one is a different
+            // instruction that this row is not.
+            (Arg::Lit(lane), Given::Imm(value)) if value == i64::from(lane) => {}
             (Arg::Mem, Given::Mem(address)) => at = Some(address),
             _ => return None,
         }

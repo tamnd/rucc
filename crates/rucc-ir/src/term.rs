@@ -421,6 +421,7 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
         Type::int(64),
         Type::int(128),
         Type::PTR,
+        Type::float(Float::F16),
         Type::float(Float::F32),
         Type::float(Float::F64),
         Type::float(Float::F80),
@@ -528,6 +529,29 @@ pub fn float_slot(ty: Type) -> Option<usize> {
     }
 }
 
+/// Whether a type is the float the machine moves but does not compute in at the narrow end.
+///
+/// Sixteen bits, which is `_Float16`. It is not one of [`float_slot`]'s two for the same reason
+/// [`is_quad`] is not: the answer is a width no arithmetic on this machine is written at, so an
+/// entry in that table would hand every rule reading it an index the list of two names does not
+/// have.
+///
+/// What the machine does have for it is the moves, and only barely. SSE2 puts sixteen bits into a
+/// vector register with `pinsrw` and takes them out with `pextrw`, both through the low lane, which
+/// is where the psABI says a value of this format lives. Everything else is a call: there is no
+/// half precision addition, comparison or conversion below `-mavx512fp16`, which is above this
+/// target's baseline, so `crate::half`'s pass turns each of those into the work at a wider format
+/// with a runtime call on each side of it. gcc 16 does exactly the same thing at the same baseline.
+///
+/// The one asymmetry worth knowing about is the store. A load of one is a single `pinsrw` from
+/// memory, and a store of one is not a single instruction, because the form of `pextrw` that writes
+/// memory is SSE4.1. So the pass rewrites the store into a sixteen bit integer store of the bits
+/// and the rule set answers the load, which is the split gcc's output has as well.
+#[must_use]
+pub fn is_half(ty: Type) -> bool {
+    ty.is_scalar() && ty.is_float() && ty.bits() == 16
+}
+
 /// Whether a type is the float the machine moves and does not compute in.
 ///
 /// A hundred and twenty eight bits of float, which is `_Float128` and is `long double` on the
@@ -558,7 +582,7 @@ pub fn is_quad(ty: Type) -> bool {
 /// touches it is the wrong instruction for.
 #[must_use]
 pub fn in_vector_file(ty: Type) -> bool {
-    float_slot(ty).is_some() || is_quad(ty)
+    float_slot(ty).is_some() || is_quad(ty) || is_half(ty)
 }
 
 /// Whether a type is the one bit a truth value comes in.
@@ -590,6 +614,9 @@ fn value_head(ty: Type) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("value.f128");
     }
+    if is_half(ty) {
+        return Some("value.f16");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["value.f32", "value.f64"][at]);
     }
@@ -615,6 +642,9 @@ fn iconst_head(ty: Type) -> Option<&'static str> {
 fn load_head(ty: Type) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("load.f128");
+    }
+    if is_half(ty) {
+        return Some("load.f16");
     }
     if let Some(at) = float_slot(ty) {
         return Some(["load.f32", "load.f64"][at]);
@@ -644,6 +674,9 @@ fn store_head(ty: Type) -> Option<&'static str> {
 fn ret_head(ty: Type) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("ret.f128");
+    }
+    if is_half(ty) {
+        return Some("ret.f16");
     }
     if let Some(at) = float_slot(ty) {
         return Some(["ret.f32", "ret.f64"][at]);
@@ -810,15 +843,28 @@ fn cross_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
         // the one conversion here that changes no bit. Between two integers or between two floats
         // it is nothing at all, since the IR keeps the width the same, so the four that cross the
         // files are the four with a name.
-        Opcode::Bitcast => match (float_slot(from), float_slot(to)) {
-            (Some(at), None) if paired_int(to, at) => {
-                Some(["bitcast.f32.i32", "bitcast.f64.i64"][at])
+        Opcode::Bitcast => {
+            // The half is a third pair and not a third entry in the two lists below, because it is
+            // not one of [`float_slot`]'s widths. It is here rather than left out because these
+            // two are the whole of what this machine does with the format: `crate::half`'s pass
+            // rewrites a store of one and a constant of one into the bits and one of these, and a
+            // rule turns each of them into the lane move the machine has.
+            if is_half(from) && to.is_scalar() && to.is_int() && to.bits() == 16 {
+                return Some("bitcast.f16.i16");
             }
-            (None, Some(at)) if paired_int(from, at) => {
-                Some(["bitcast.i32.f32", "bitcast.i64.f64"][at])
+            if is_half(to) && from.is_scalar() && from.is_int() && from.bits() == 16 {
+                return Some("bitcast.i16.f16");
             }
-            _ => None,
-        },
+            match (float_slot(from), float_slot(to)) {
+                (Some(at), None) if paired_int(to, at) => {
+                    Some(["bitcast.f32.i32", "bitcast.f64.i64"][at])
+                }
+                (None, Some(at)) if paired_int(from, at) => {
+                    Some(["bitcast.i32.f32", "bitcast.i64.f64"][at])
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

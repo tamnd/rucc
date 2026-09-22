@@ -904,6 +904,13 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some("x64.arg_val_f128");
     }
+    // The half, which arrives in the low sixteen bits of a vector register the same way a `float`
+    // arrives in the low thirty two. It is a name of its own rather than the `f32` one for the
+    // reason every other width here has a name of its own: what arrived is two bytes, and a
+    // listing that said four would be saying something the convention does not.
+    if crate::term::is_half(ty) {
+        return Some("x64.arg_val_f16");
+    }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.arg_val_f32", "x64.arg_val_f64"][at]);
     }
@@ -932,6 +939,11 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some("x64.movaps_rm");
     }
+    // Two bytes out of the argument area and into the low lane of a vector register, which is one
+    // instruction and is the same one a rule writes for a program's own read of a `_Float16`.
+    if crate::term::is_half(ty) {
+        return Some("x64.pinsrw_rm");
+    }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
     }
@@ -954,6 +966,20 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
 pub fn store_of(ty: Type) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some("x64.movaps_mr");
+    }
+    // The half goes out four bytes wide, which is the one place here where the instruction is not
+    // the width of the value. SSE2 has no store of sixteen bits out of a vector register: the form
+    // of `pextrw` that writes memory arrived with SSE4.1 and is above this target's baseline, so
+    // the choices are a four byte store or a pair of instructions through a general purpose
+    // register, and a pair is not something one name can be.
+    //
+    // Four bytes is safe here and would not be everywhere. An argument on the stack sits in an
+    // eightbyte of its own, the paragraph above says the convention promises nothing about the
+    // part of it above the value, and [`load_of`] reads back exactly the two bytes that mean
+    // anything. What lands in the two bytes beside them is whatever was in the register, which is
+    // no more than any other narrow argument leaves behind.
+    if crate::term::is_half(ty) {
+        return Some("x64.movss_mr");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["x64.movss_mr", "x64.movsd_mr"][at]);
@@ -978,6 +1004,9 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
 pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some(*["x64.ret_val_f128", "x64.ret_val2_f128"].get(at)?);
+    }
+    if crate::term::is_half(ty) {
+        return Some(*["x64.ret_val_f16", "x64.ret_val2_f16"].get(at)?);
     }
     if let Some(width) = crate::term::float_slot(ty) {
         let names =
