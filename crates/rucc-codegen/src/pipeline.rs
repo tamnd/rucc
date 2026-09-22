@@ -377,6 +377,10 @@ pub fn compile_recording(
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.record(&called, ran);
     }
+    // The function the program said it writes the whole of itself, which is what decides most of
+    // the frame below rather than being one more thing in it. Read here rather than beside the rest
+    // of the layout because the refusal a few lines down is the earliest thing that asks.
+    let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
     let lowered = lower::func(source, names, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
@@ -389,6 +393,13 @@ pub fn compile_recording(
     // The one thing a frame that grows while it runs cannot be asked for, which is a refusal rather
     // than wrong code.
     if let Some(inst) = stack.grown_at {
+        // And the one thing a naked function cannot be asked for either, from the other side of the
+        // same fact. A frame that grows is reached from a frame pointer the prologue establishes,
+        // and there is no prologue here, so the address the array hands out would be counted from a
+        // register holding whatever the caller left in it.
+        if naked {
+            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Naked });
+        }
         // The lowering refuses a variable length array that asks for more alignment than a call
         // leaves the stack pointer on. A fixed local asking for it in the same function is the same
         // refusal arrived at from the other side: the prologue would force the alignment, and
@@ -434,7 +445,10 @@ pub fn compile_recording(
     // here. What the machine does about it is this crate's answer, and a target with nowhere to
     // keep the word a canary is copied from does nothing, which is what the driver refuses a
     // command line over before any of this runs.
-    let protect = source.attrs.set.contains(ir::AttrSet::STACK_PROTECT);
+    // Not in a naked function, whatever the command line asked of every function. The canary is a
+    // word the prologue copies into the frame and the check at the end reads back, so a function
+    // with neither has nowhere to put it and nowhere to read it from. gcc leaves one out too.
+    let protect = source.attrs.set.contains(ir::AttrSet::STACK_PROTECT) && !naked;
     let guard = protect.then_some(machine.conv.guard.as_ref()).flatten();
     // Nothing at all on a target with no hook to call, which is the same answer the protector gives
     // on a target with nowhere to keep its word, and the driver refuses the command line over it
@@ -449,12 +463,24 @@ pub fn compile_recording(
         // function that calls it is given one whether or not anything else asked. A function that
         // asked where its own frame is has the same claim on one, and for a plainer reason: the
         // register is the answer.
-        frame_pointer: flags.frame_pointer
-            || profile == Profile::Late
-            || stack.walks_frames
-            || stack.saves_place,
-        red_zone: flags.red_zone,
+        //
+        // And not at all in a naked function, whatever any of that says. Establishing one is two
+        // instructions of a prologue there is none of, and a function that saves the machine state
+        // by hand is usually saving the frame pointer among it, which is what micropython's
+        // `nlr_push` does on its third line.
+        frame_pointer: !naked
+            && (flags.frame_pointer
+                || profile == Profile::Late
+                || stack.walks_frames
+                || stack.saves_place),
+        // And not in a naked function either, which is not about what the red zone costs but about
+        // what the refusal below has to be able to see. A local small enough to live below the
+        // stack pointer takes no bytes off it, so the frame comes out empty and a function that
+        // wanted somewhere to keep something would be told it asked for nothing. Taking the red
+        // zone away makes every local show up as bytes, and bytes are what gets refused.
+        red_zone: flags.red_zone && !naked,
         protect: guard.is_some(),
+        naked,
         // A protected function calls the one that does not come back, on the arm where the check
         // failed, so it is not a leaf however few calls the program wrote in it. That is what
         // takes the red zone away from it and what makes its frame leave the stack pointer where
@@ -517,6 +543,13 @@ pub fn compile_recording(
     let share = Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths);
     let layout = Layout { share: Some(&share), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
+    // The one thing a naked function cannot be given. Everything else the attribute asks for is
+    // something left out, and leaving something out always works; bytes are the one thing the body
+    // may want that only a prologue provides. A local, a spilled value and the arguments of a call
+    // are the three ways to want them, and the answer to all three is the same sentence.
+    if naked && frame.size() > 0 {
+        return Err(Unsupported::Naked { bytes: frame.size() });
+    }
 
     // Here because this is where the two halves of the answer are both in hand: which local is
     // which declaration came down from selection, and where a local is was settled a line ago.

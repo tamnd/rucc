@@ -347,7 +347,8 @@ mod tests {
 
     use super::*;
     use crate::decl::{
-        Decl, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup, StorageDuration,
+        Decl, DeclFlags, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+        StorageDuration,
     };
     use crate::print::Printer;
 
@@ -386,16 +387,12 @@ mod tests {
                     duration: StorageDuration::Automatic,
                     state: Definition::Defined,
                     alignment: None,
-                    constant: false,
-                    retained: false,
+                    flags: DeclFlags::NONE,
                     asm_label: None,
                     alias: None,
                     inline: Emission::Silent,
-                    gnu_inline: false,
-                    noreturn: false,
                     effects: Effects::Any,
                     visibility: None,
-                    weak: false,
                     startup: Startup::default(),
                     init: None,
                     cleanup: None,

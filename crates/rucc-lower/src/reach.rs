@@ -31,12 +31,14 @@
 //! A function with external linkage, since another translation unit may call it. Every object
 //! with static storage, since those are all emitted and a reference from one is a reference. And
 //! anything a `used`, `retain`, `constructor`, `destructor` or `alias` attribute asks to be kept,
-//! which is [`Decl::retained`] and is the answer for the definitions that are reached from
+//! which is [`DeclFlags::RETAINED`] and is the answer for the definitions that are reached from
 //! somewhere no C file says.
 
 use std::collections::HashSet;
 
-use rucc_sema::{Decl, DeclId, DeclKind, ExprId, ExprKind, InitList, Linkage, Stmt, StmtId, Tast};
+use rucc_sema::{
+    Decl, DeclFlags, DeclId, DeclKind, ExprId, ExprKind, InitList, Linkage, Stmt, StmtId, Tast,
+};
 
 /// The declarations something in the file reaches, given the file.
 ///
@@ -61,7 +63,7 @@ pub(crate) fn reachable(tast: &Tast) -> HashSet<DeclId> {
 
 /// Whether the file has a reason to emit this declaration without anything having named it.
 fn is_root(node: &Decl) -> bool {
-    if node.retained {
+    if node.flags.contains(DeclFlags::RETAINED) {
         return true;
     }
     match node.kind {

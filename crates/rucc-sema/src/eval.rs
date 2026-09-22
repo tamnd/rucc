@@ -73,7 +73,7 @@ use rucc_types::{
     IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, real_part, spell,
 };
 
-use crate::decl::{DeclId, StorageDuration};
+use crate::decl::{DeclFlags, DeclId, StorageDuration};
 use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
@@ -729,7 +729,7 @@ impl<'a> Eval<'a> {
     fn named_constant(&mut self, expr: ExprId) -> Option<Const> {
         let (decl, offset) = self.designation(expr)?;
         let node = &self.tast[decl];
-        if !node.constant {
+        if !node.flags.contains(DeclFlags::CONSTANT) {
             return None;
         }
         let entries = self.tast[node.init?].to_vec();

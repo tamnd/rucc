@@ -36,9 +36,9 @@ use rucc_ir::{
     Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
-    Address, Base, Const, Conversion, DeclId, DeclKind, Definition, Effects, Eval, ExprId,
-    ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId, Tast,
-    Visibility,
+    Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Eval,
+    ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId,
+    Tast, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
@@ -648,7 +648,8 @@ impl Unit<'_> {
         let tast = self.tast;
         let node = &tast[decl];
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
-        let noreturn = node.noreturn;
+        let noreturn = node.flags.contains(DeclFlags::NORETURN);
+        let naked = node.flags.contains(DeclFlags::NAKED);
         let effects = node.effects;
         let startup = node.startup;
         let span = tast.decl_span(decl);
@@ -688,6 +689,13 @@ impl Unit<'_> {
         // nothing to look at, so the claim has to travel on the declaration or not at all.
         if noreturn {
             func.attrs.set |= AttrSet::NORETURN;
+        }
+        // Which is not a claim about what a call to it does but a fact about how the function
+        // itself is written, so unlike the two around it there is nothing here for a declaration
+        // alone to be useful for. It travels the same way because the attribute is written in the
+        // same places. See [`rucc_codegen`] for what reads it, which is the frame.
+        if naked {
+            func.attrs.set |= AttrSet::NAKED;
         }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
@@ -976,7 +984,7 @@ impl Unit<'_> {
     /// how a library offers a hook and why zstd's thirty files link at all.
     fn told(&self, decl: DeclId, linkage: Linkage) -> IrLinkage {
         match linkage {
-            Linkage::External if self.tast[decl].weak => IrLinkage::Weak,
+            Linkage::External if self.tast[decl].flags.contains(DeclFlags::WEAK) => IrLinkage::Weak,
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
         }

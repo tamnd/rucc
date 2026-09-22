@@ -51,7 +51,8 @@ use rucc_types::{TypeKind, Types, spell};
 
 use crate::asm::{AsmId, AsmOperandList};
 use crate::decl::{
-    DeclId, DeclKind, Definition, Effects, Linkage, Priority, StorageDuration, Visibility,
+    DeclFlags, DeclId, DeclKind, Definition, Effects, Linkage, Priority, StorageDuration,
+    Visibility,
 };
 use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk, JumpAsk};
 use crate::stmt::{CaseId, Stmt, StmtId};
@@ -130,7 +131,7 @@ impl<'a> Printer<'a> {
             Definition::Tentative => " tentative",
             Definition::Defined => " defined",
         });
-        if node.constant {
+        if node.flags.contains(DeclFlags::CONSTANT) {
             head.push_str(" constexpr");
         }
         if let Some(align) = node.alignment {
@@ -147,8 +148,11 @@ impl<'a> Printer<'a> {
         if !node.inline.emits() {
             head.push_str(" inline-definition");
         }
-        if node.noreturn {
+        if node.flags.contains(DeclFlags::NORETURN) {
             head.push_str(" noreturn");
+        }
+        if node.flags.contains(DeclFlags::NAKED) {
+            head.push_str(" naked");
         }
         // Written under the name the attribute was written under rather than the name of the
         // bit it becomes, because what a dump of the tree shows is what the source said.
@@ -183,7 +187,7 @@ impl<'a> Printer<'a> {
         }
         // Written where it was asked for and not otherwise, since nothing gives a name this that
         // a declaration did not write.
-        if node.weak {
+        if node.flags.contains(DeclFlags::WEAK) {
             head.push_str(" weak");
         }
         self.line(&head);
@@ -667,7 +671,7 @@ mod tests {
     use rucc_types::{ArrayLen, IntKind};
 
     use super::*;
-    use crate::decl::{Decl, DeclList, Emission, InitEntry, Startup};
+    use crate::decl::{Decl, DeclFlags, DeclList, Emission, InitEntry, Startup};
     use crate::expr::{Conversion, Expr};
     use crate::stmt::Case;
     use crate::tast::Label;
@@ -901,16 +905,12 @@ decl #0 : int[2] object automatic defined
             duration: StorageDuration::Automatic,
             state: Definition::Defined,
             alignment: None,
-            constant: false,
-            retained: false,
+            flags: DeclFlags::NONE,
             asm_label: None,
             alias: None,
             inline: Emission::Silent,
-            gnu_inline: false,
-            noreturn: false,
             effects: Effects::Any,
             visibility: None,
-            weak: false,
             startup: Startup::default(),
             init: None,
             cleanup: None,

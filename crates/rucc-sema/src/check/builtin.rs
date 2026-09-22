@@ -49,7 +49,7 @@ use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, TypeKind,
 
 use crate::check::Checker;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+    Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
     StorageDuration,
 };
 use crate::expr::{ExprId, ExprKind};
@@ -186,16 +186,12 @@ impl Checker<'_> {
                 duration: StorageDuration::Static,
                 state: Definition::Declared,
                 alignment: None,
-                constant: false,
-                retained: false,
+                flags: DeclFlags::NONE,
                 asm_label: None,
                 alias: None,
                 inline: Emission::Silent,
-                gnu_inline: false,
-                noreturn: false,
                 effects: Effects::Any,
                 visibility: None,
-                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,

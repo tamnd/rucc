@@ -24,6 +24,13 @@
 //! One question. At every instruction, does each register the instruction reads hold the value the
 //! operand said it wanted.
 //!
+//! It is asked only of the values the allocator placed. An operand that named a physical register
+//! before the rewrite named it for its own reasons, which are the calling convention, the frame, or
+//! the text of an `asm` statement the program wrote, and what is in that register is whatever those
+//! reasons put there. There is no value under it for a transcription to lose, so reading one is
+//! nothing this can be wrong about. Writing one is still followed, because a value the allocator
+//! did put in that register is gone once it happens.
+//!
 //! That is asked by walking the function with a note of which value is in each place, starting
 //! from nothing at the entry block. An instruction writing an operand puts that value in the place
 //! the operand ended up naming. A move puts what is in one place into another, or takes the note
@@ -184,7 +191,11 @@ pub fn trace(func: &Func, shape: &Shape, assignment: &Assignment, edits: &[Edit]
     let mut entry: Vec<Option<State>> = vec![None; func.block_count()];
     let Some(start) = func.entry() else { return Vec::new() };
 
-    entry[start.index()] = Some(arrived(shape));
+    // The entry block starts out knowing nothing, because nothing has run to put a value anywhere
+    // yet. A value the allocator placed and the function reads before writing is the assignment
+    // checker's question rather than this one's, and a register the function names itself is not
+    // read as a value at all.
+    entry[start.index()] = Some(State::new());
     let mut queue = vec![start];
     let mut ignored = Vec::new();
     while let Some(block) = queue.pop() {
@@ -226,32 +237,6 @@ pub fn report(faults: &[Fault]) -> String {
         report.push_str(&fault.to_string());
     }
     report
-}
-
-/// What is already in place on the way into the function.
-///
-/// A value the allocator placed arrives nowhere, since nothing has run to write it, and a value
-/// read before it is written is the assignment checker's question rather than this one's. What
-/// does arrive is every physical register the function names without the allocator having handed
-/// it out: the stack pointer, the frame pointer, and whatever else the calling convention leaves
-/// standing. Nothing defines those, so without this every instruction reaching the frame through
-/// the frame pointer would be read as reading a register nothing had written.
-///
-/// Each of them starts out holding itself, which is the only name it has. That still catches an
-/// instruction or a move that writes over one of them, because writing over it puts a different
-/// value there and the next read of it says so.
-fn arrived(shape: &Shape) -> State {
-    let mut state = State::new();
-    for operands in &shape.operands {
-        for operand in operands {
-            if operand.role == Role::Use && operand.reg.phys().is_some() {
-                state
-                    .entry(spot(operand.class, Place::Reg(operand.reg.phys().expect("physical"))))
-                    .or_insert(operand.reg);
-            }
-        }
-    }
-    state
 }
 
 /// Which value is in which place, as far as anything is known.
@@ -330,9 +315,19 @@ fn body(
         // Every read first and every write afterwards, because an instruction reads its operands
         // before it writes its answer. A write that lands on something the same instruction still
         // wants to read is the assignment checker's question and it has already asked it.
+        //
+        // A read of a register the function named itself is skipped, because it is not reading a
+        // value the allocator placed. It is reading whatever the machine has in that register, put
+        // there by the calling convention, by the frame, or by the program's own `asm` text, and
+        // none of that is something a transcription can lose. A write of one is still recorded,
+        // since a value the allocator did place into that register is gone once it happens and a
+        // later read of it should say so.
         for (operand, place) in was.iter().zip(now.iter()) {
             let Some(at) = landed(place) else { continue };
             if operand.role != Role::Use {
+                continue;
+            }
+            if operand.reg.phys().is_some() {
                 continue;
             }
             let found = state.get(&spot(operand.class, at)).copied();
@@ -720,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_register_the_function_arrives_holding_is_one_it_may_read_without_writing_it_first() {
+    fn a_register_the_function_names_itself_is_one_it_may_read_without_writing_it_first() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let opcode = Opcode::new(names.intern("x64.nop"));
@@ -728,8 +723,31 @@ mod tests {
         func.build(block, opcode).operand(Operand::read(Reg::physical(RSP), GPR)).finish();
 
         // The stack pointer is not the allocator's to hand out and nothing in the function writes
-        // it, so a walk that started from nothing at all would read every frame reference as a
-        // read of a register nobody had written.
+        // it, so a checker that asked the same question of it as of a value would read every frame
+        // reference as a read of a register nobody had written.
+        let (taken, assignment, edits) = allocate(&mut func, &env());
+        assert_eq!(said(&func, &taken, &assignment, &edits), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_register_the_function_names_itself_is_readable_after_a_value_has_been_put_in_it() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let argument = func.new_vreg(GPR);
+        func.build(block, opcode)
+            .operand(Operand::write(argument, GPR).with(Constraint::Fixed(SYSV.int_order[0])))
+            .finish();
+        func.build(block, opcode)
+            .operand(Operand::read(Reg::physical(SYSV.int_order[0]), GPR))
+            .finish();
+
+        // This is a function whose argument arrives in a register and whose body is an `asm`
+        // statement naming that same register in its own text. The argument is the allocator's
+        // value and the register is the program's name for the machine, and the two meeting in
+        // one place is the ordinary way an `asm` statement reads what it was passed rather than
+        // anything having gone wrong.
         let (taken, assignment, edits) = allocate(&mut func, &env());
         assert_eq!(said(&func, &taken, &assignment, &edits), Vec::<String>::new());
     }

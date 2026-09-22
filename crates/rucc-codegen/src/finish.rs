@@ -307,12 +307,39 @@ pub fn finish(
         }
     }
 
-    let prologue = writer.prologue(frame, protect, probe, landing, trace, pad);
+    // Almost nothing of either in a naked function, which is the whole of what the attribute asks
+    // for and the only place in this file that knows the word. The frame is empty by the time one
+    // gets here, since [`crate::pipeline`] refuses a naked function that wanted bytes, so what is
+    // left to leave out is the part of the prologue that is written on somebody's instruction
+    // rather than on the frame's: the room a patcher was promised and the profiler's hook, both of
+    // which are a call or a run of bytes in front of a body that said it is the whole of the
+    // function. The protector and the probe are already off, the first because the pipeline turned
+    // it off and the second because it only fires on a frame there is none of.
+    //
+    // The landing pad stays. It is not the compiler adding something to the function, it is the
+    // address of the function being made one an indirect branch may arrive at, and gcc writes it
+    // in a naked function too.
+    //
+    // The epilogue is the one that matters. It is what writes the `ret`, and a naked function ends
+    // where its own text ends, which for micropython's `nlr_push` is a jump somewhere else and for
+    // everything else is the `ud2` the lowering put there.
+    let bare = frame.naked();
+    let prologue = writer.prologue(
+        frame,
+        protect,
+        probe.filter(|_| !bare),
+        landing,
+        trace.filter(|_| !bare),
+        pad.filter(|_| !bare),
+    );
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
     }
-    let returns: Vec<Block> =
-        writer.func.blocks().filter(|&block| writer.func[block].succs.is_empty()).collect();
+    let returns: Vec<Block> = if bare {
+        Vec::new()
+    } else {
+        writer.func.blocks().filter(|&block| writer.func[block].succs.is_empty()).collect()
+    };
     for block in returns {
         // The check goes in front of the epilogue and takes the return with it. What is left in
         // the block the function used to return from is the check, and the block the epilogue then

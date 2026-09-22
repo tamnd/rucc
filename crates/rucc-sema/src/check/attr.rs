@@ -645,6 +645,19 @@ impl Checker<'_> {
         })
     }
 
+    /// Whether an attribute list says the function is written without a prologue or an epilogue.
+    ///
+    /// `__attribute__((naked))`, under the namespace test [`Self::never_returns`] is under and
+    /// through the same unarmouring, so `__naked__` in a header and `[[gnu::naked]]` are both read.
+    /// There is no standard spelling of this one, so unlike `noreturn` the bare form is gcc's as
+    /// well.
+    pub(in crate::check) fn is_naked(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| {
+            !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                && rucc_gnu::unarmour(self.text(attr.name)) == "naked"
+        })
+    }
+
     /// What an attribute list promises a call to this function does.
     ///
     /// `__attribute__((const))` and `__attribute__((pure))`, under the namespace test

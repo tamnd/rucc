@@ -201,6 +201,15 @@ pub struct Layout<'a> {
     /// end of it calls when it fails. The caller sets `leaf` accordingly rather than this working
     /// it out, so that there is one place a frame learns whether it owes an aligned stack pointer.
     pub protect: bool,
+    /// Whether the function is written without a prologue or an epilogue, which
+    /// `__attribute__((naked))` asks for.
+    ///
+    /// A frame like this is empty and nothing is written around the body. No register is put away,
+    /// because the program said it would do that itself and the first thing one of these usually
+    /// does is read something the saving would have moved. No bytes are taken, because taking them
+    /// is the prologue's job and there is no prologue, which is why a naked function that wants any
+    /// is refused rather than given a frame nothing sets up. See [`Frame::of`].
+    pub naked: bool,
     /// Which locals and spill slots share their bytes with which, or `None` for a frame where
     /// every one of them gets a run of its own.
     ///
@@ -226,6 +235,7 @@ impl<'a> Layout<'a> {
             grows: false,
             red_zone: true,
             protect: false,
+            naked: false,
             share: None,
         }
     }
@@ -247,6 +257,7 @@ pub struct Frame {
     frame_pointer: bool,
     late: bool,
     grows: bool,
+    naked: bool,
 }
 
 impl Frame {
@@ -453,6 +464,7 @@ impl Frame {
             frame_pointer,
             late,
             grows: layout.grows,
+            naked: layout.naked,
         }
     }
 
@@ -573,6 +585,19 @@ impl Frame {
         self.frame_pointer
     }
 
+    /// Whether nothing at all is to be written around the body, which `__attribute__((naked))`
+    /// asks for. See [`Layout::naked`].
+    ///
+    /// Such a frame is empty, since [`crate::pipeline`] refuses a naked function that wanted any
+    /// bytes rather than handing it a frame no prologue sets up. What is left for this to say is
+    /// that the prologue and the epilogue are not to be written, and the epilogue is the point:
+    /// the `ret` at the end of a function is written there, and a naked function ends where its
+    /// own text ends.
+    #[must_use]
+    pub fn naked(&self) -> bool {
+        self.naked
+    }
+
     /// Whether the prologue points the frame pointer at the frame after taking it rather than
     /// before, which is [`rucc_target::CallRegs::late_frame_pointer`] and the one frame that cannot
     /// have it whatever the platform says. See `Late` in the module documentation.
@@ -588,11 +613,19 @@ impl Frame {
 /// The rewritten function is what is read here rather than the assignment, because a spilled value
 /// is reloaded into a scratch register that no assignment mentions, and a scratch register the
 /// convention preserves is one this has to find.
+///
+/// Nothing at all in a naked function, which is the whole of what the attribute asks for. Such a
+/// function names `%rbx` and `%rbp` in its own text and means the registers rather than places to
+/// keep something, and putting them away in front of it would be the compiler answering a question
+/// the program did not ask. See [`Layout::naked`].
 fn saved(
     func: &Func,
     allocation: &Allocation,
     layout: &Layout<'_>,
 ) -> (Vec<PhysReg>, Vec<PhysReg>) {
+    if layout.naked {
+        return (Vec::new(), Vec::new());
+    }
     let mut used: Vec<(RegClass, PhysReg)> = Vec::new();
     let mut note = |class: RegClass, at: PhysReg| {
         if !used.contains(&(class, at)) {

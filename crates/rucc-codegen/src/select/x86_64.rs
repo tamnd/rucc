@@ -440,6 +440,17 @@ mod tests {
     /// what libgmp does in `gmp-impl.h` to put a limb the other way round.
     const SWAP: &[&str] = &["bswap_32", "bswap_64"];
 
+    /// The jump out of the function a template may end with, which a template asks for and nothing
+    /// else could.
+    ///
+    /// Unselected for a reason none of the lists above give, and the plainest reason of the lot:
+    /// there is no term in the IR for it to be the answer to. A tail jump is not a computation and
+    /// it is not a branch between this function's blocks either, it is the function ending
+    /// somewhere other than at its own `ret`, and the only thing that says a function ends that way
+    /// is a program writing `jmp` at the end of a template in a function that is `naked`. See
+    /// [`rucc_target::x86_64::Step::Away`].
+    const AWAY: &[&str] = &["jmp_away"];
+
     /// The multiply that keeps both halves of its product and the division that reads both halves
     /// of its dividend, which a template asks for and nothing else does.
     ///
@@ -804,6 +815,9 @@ mod tests {
                 continue;
             }
             if SEARCH.contains(&opcode) || SWAP.contains(&opcode) || WIDE.contains(&opcode) {
+                continue;
+            }
+            if AWAY.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {

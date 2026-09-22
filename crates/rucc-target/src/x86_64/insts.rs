@@ -42,10 +42,10 @@ use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
     ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
     CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpReg, Landing,
-    Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87, Prefetch, Push,
-    PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set, ShiftCl, ShiftRi, Spin,
-    Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
+    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
+    Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
+    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, Test, TestCmov, Trap, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -419,6 +419,22 @@ pub enum Form {
     /// [`Form::Call`]: a call through an address has an operand vector nothing can write down,
     /// because a call passes arguments and this passes none.
     JmpReg,
+    /// A jump always taken whose target is a symbol rather than a block in this function.
+    ///
+    /// A tail jump out of the function. The name it goes to rides on the instruction the way a
+    /// direct call's callee does, which is what tells it apart from [`Form::Jmp`]: that one asks
+    /// the block where it goes, this one asks the linker.
+    ///
+    /// The block it ends has no successors, which is the same thing a `ret` leaves behind and is
+    /// why nothing downstream needs a new answer about it. What is not the same is that no
+    /// epilogue may be written into that block afterwards, and the only functions this appears in
+    /// are the ones that have no epilogue anyway: it is read out of an `asm` template only in a
+    /// function that is `naked`, which is micropython's `nlr_push` and nothing else so far.
+    ///
+    /// No operands, for [`Form::Jmp`]'s reason. A tail jump does pass the arguments of the
+    /// function it goes to, and every one of those is already where the convention put it, because
+    /// a naked function is the one kind whose incoming arguments nothing has moved.
+    JmpAway,
     /// A call, whose operand vector is not a fact about the instruction.
     ///
     /// Empty for a different reason than the jumps are. A jump has no operands because there is
@@ -1059,7 +1075,7 @@ impl Form {
             Test => &TEST,
             TestCmov => &TEST_CMOV,
             Cmov => &CMOV,
-            Jcc | Jmp => &JUMP,
+            Jcc | Jmp | JmpAway => &JUMP,
             JmpReg => &JUMP_REG,
             Move => &ONE_TO_ONE,
             Push => &PUSH,
@@ -1861,6 +1877,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("jcc_a", Jcc),
     ("jcc_ae", Jcc),
     ("jmp", Jmp),
+    ("jmp_away", JmpAway),
     // The same jump through a register, which is where a computed goto ends up. It is a separate
     // name for the reason `call_reg` is one: the assembler writes the register with a star in
     // front of it and the machine reads a different opcode byte, and both come from the target
@@ -2147,7 +2164,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 612);
+        assert_eq!(described, 613);
     }
 
     #[test]
@@ -2200,6 +2217,7 @@ mod tests {
                             | CmpMi
                             | Jcc
                             | Jmp
+                            | JmpAway
                             | JmpReg
                             | Push
                             | Ret
@@ -2383,6 +2401,7 @@ mod tests {
                         shape,
                         Call | Jcc
                             | Jmp
+                            | JmpAway
                             | Ret
                             | Barrier
                             | AluMi

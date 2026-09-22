@@ -43,8 +43,8 @@ use crate::asm::FileAsm;
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
 use crate::decl::{
-    Decl, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitList, Linkage, Startup,
-    StorageDuration, Visibility,
+    Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitList, Linkage,
+    Startup, StorageDuration, Visibility,
 };
 use crate::scope::Binding;
 use crate::tast::StrId;
@@ -84,6 +84,8 @@ struct Declared {
     gnu_inline: bool,
     /// Whether this declaration said control does not come back from a call to it.
     noreturn: bool,
+    /// Whether this declaration said the function is written without a prologue or an epilogue.
+    naked: bool,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
     /// Where this declaration asked for the function to go in the run-up to `main` and the
@@ -303,6 +305,10 @@ impl Checker<'_> {
             // definition goes on the specifiers as well since there is no declarator to hang it
             // off, so between them the two places cover everything a definition can say.
             noreturn: specs.func.has(FuncSpecs::NORETURN) || self.never_returns(specs.attrs),
+            // The specifiers only, for the reason `noreturn` above reads them only. This is the
+            // usual place for it: a naked function is written where its body is, since the body is
+            // the only part of it the compiler is being asked to keep.
+            naked: self.is_naked(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only, and read
             // on a definition at all because a promise made over a body is still a promise.
             // The analysis that reads the body keeps its own answer somewhere else, so the two
@@ -636,6 +642,10 @@ impl Checker<'_> {
             noreturn: specs.func.has(FuncSpecs::NORETURN)
                 || self.never_returns(specs.attrs)
                 || self.never_returns(item.attrs),
+            // Both places, for the reason `noreturn` above reads both. A declaration is not where
+            // a program usually writes this one, since the definition is, but a header that
+            // declares an interrupt handler and defines it elsewhere writes it here.
+            naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
             // Both places, for the reason `noreturn` above reads both. A header writing
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the
@@ -818,16 +828,12 @@ impl Checker<'_> {
                 duration: StorageDuration::Automatic,
                 state: Definition::Declared,
                 alignment: None,
-                constant: false,
-                retained: false,
+                flags: DeclFlags::NONE,
                 asm_label: None,
                 alias: None,
                 inline: Emission::Silent,
-                gnu_inline: false,
-                noreturn: false,
                 effects: Effects::Any,
                 visibility: None,
-                weak: false,
                 startup: Startup::default(),
                 init: None,
                 cleanup: None,
@@ -1214,7 +1220,39 @@ impl Checker<'_> {
         // asking for GNU's puts every declaration of it under GNU's, including the ones already
         // read. gcc refuses a name whose declarations disagree about that, and this takes the
         // reading the program asked for anywhere rather than reporting it.
-        let gnu = node.gnu_inline || declared.gnu_inline;
+        let gnu = node.flags.contains(DeclFlags::GNU_INLINE) || declared.gnu_inline;
+        // The flags are folded one at a time rather than as a set, because they do not fold the
+        // same way. Four of them are true when any declaration of the name says so, which is what
+        // `node` already carrying the answer from the declarations above and this only ever adding
+        // to it says. `constexpr` is not folded at all, since it is a fact about the declaration
+        // and `node` is the one being declared.
+        let mut flags = node.flags.with(DeclFlags::GNU_INLINE, gnu);
+        // One declaration of a name asking for it to be kept is enough, which is what lets a
+        // header write `used` on the declaration and the file define it without.
+        if declared.retained {
+            flags |= DeclFlags::RETAINED;
+        }
+        // One declaration saying it is enough, which is the rule `retained` above is under and
+        // is what lets a header say it and the file define the function without saying it
+        // again. gcc goes further and warns when the definition comes first, on the grounds
+        // that the calls above it were already compiled, and that warning is not here yet.
+        if declared.noreturn {
+            flags |= DeclFlags::NORETURN;
+        }
+        // One declaration saying it is enough, for the reason `noreturn` above is under that
+        // rule. Whether a function is naked has to be settled before its body is walked and
+        // the body is the last declaration of it, so a declaration above that says it is the
+        // one case where this changes an answer somebody has already been given.
+        if declared.naked {
+            flags |= DeclFlags::NAKED;
+        }
+        // One declaration of a name saying it is enough, which is the rule `retained` above
+        // is under and is there for the same reason: a library writes the attribute once, in
+        // the header, and the file that defines the name writes an ordinary definition. gcc
+        // takes the same reading and warns only when a reference was already compiled.
+        if declared.weak.is_some() {
+            flags |= DeclFlags::WEAK;
+        }
         let merged = Decl {
             ty,
             // `extern` after `static` keeps the internal linkage the first declaration gave the
@@ -1222,21 +1260,13 @@ impl Checker<'_> {
             linkage: if declared.takes_prior_linkage { node.linkage } else { declared.linkage },
             state: stronger(node.state, declared.state),
             alignment: node.alignment.max(declared.alignment),
-            // One declaration of a name asking for it to be kept is enough, which is what lets a
-            // header write `used` on the declaration and the file define it without.
-            retained: node.retained || declared.retained,
+            flags,
             asm_label: self.merged_label(&node, &declared, previous),
             // The first one written stands, which is the rule the assembler name above is under
             // and is there for the same reason: what a second one would rename is a symbol the
             // rest of the file has already been read against.
             alias: node.alias.or(declared.alias),
             inline: self.merged_emission(node.inline, self.emission(declared.written, gnu), gnu),
-            gnu_inline: gnu,
-            // One declaration saying it is enough, which is the rule `retained` above is under and
-            // is what lets a header say it and the file define the function without saying it
-            // again. gcc goes further and warns when the definition comes first, on the grounds
-            // that the calls above it were already compiled, and that warning is not here yet.
-            noreturn: node.noreturn || declared.noreturn,
             // The stronger promise stands, which is the same rule `noreturn` above is under
             // written for something that is not a flag. A header that says `const` and a
             // definition underneath that says nothing leave the name `const`.
@@ -1246,11 +1276,6 @@ impl Checker<'_> {
             // same grounds it warns about a late `noreturn`: the references above it were
             // already compiled against the answer the first one gave.
             visibility: node.visibility.or(declared.visibility),
-            // One declaration of a name saying it is enough, which is the rule `retained` above
-            // is under and is there for the same reason: a library writes the attribute once, in
-            // the header, and the file that defines the name writes an ordinary definition. gcc
-            // takes the same reading and warns only when a reference was already compiled.
-            weak: node.weak || declared.weak.is_some(),
             // The first one written stands, for the reason the visibility above does: the usual
             // place to write either attribute is a header and the definition below writes nothing,
             // so a later declaration saying nothing must not take the order away, and a later one
@@ -1459,16 +1484,18 @@ impl Checker<'_> {
             duration: declared.duration,
             state: declared.state,
             alignment: declared.alignment,
-            constant: declared.constant,
-            retained: declared.retained,
+            flags: DeclFlags::NONE
+                .with(DeclFlags::CONSTANT, declared.constant)
+                .with(DeclFlags::RETAINED, declared.retained)
+                .with(DeclFlags::GNU_INLINE, declared.gnu_inline)
+                .with(DeclFlags::NORETURN, declared.noreturn)
+                .with(DeclFlags::NAKED, declared.naked)
+                .with(DeclFlags::WEAK, declared.weak.is_some()),
             asm_label: declared.asm_label,
             alias: declared.alias,
             inline: self.emission(declared.written, declared.gnu_inline),
-            gnu_inline: declared.gnu_inline,
-            noreturn: declared.noreturn,
             effects: declared.effects,
             visibility: declared.visibility,
-            weak: declared.weak.is_some(),
             startup: declared.startup,
             init: None,
             cleanup: declared.cleanup,
@@ -2505,6 +2532,23 @@ mod tests {
         let id = only(&c, list);
 
         assert_eq!(dump(&c, id), "decl #0 die : int(void) function external declared noreturn\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn naked_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        // The armoured spelling again, since the one program that writes this writes it in a
+        // header beside a declaration and armours it for the reason anything there is armoured.
+        specs.attrs = f.attribute("__naked__");
+        let decl = f.var(specs, "nlr_push", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(dump(&c, id), "decl #0 nlr_push : int(void) function external declared naked\n");
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 
