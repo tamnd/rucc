@@ -237,6 +237,7 @@ const WORDS: &[&str] = &[
     "uint32_t",
     "uint64_t",
     "__builtin_va_list",
+    "FILE",
     "...",
 ];
 
@@ -276,6 +277,15 @@ fn check_signature(signature: &str, name: &str, line: usize) {
                     WORDS.join(", ")
                 );
             }
+        }
+        // `FILE` is the one word above that names nothing a program can hold a value of. It is
+        // the stream a stdio builtin is handed, the reader turns it into `void`, and the star is
+        // what makes the pair gcc's own type for one of these. Written without a star it would
+        // mean a parameter of type `void`, which the reader drops, so the prototype would
+        // quietly be one argument short of what the builtin takes.
+        let names_file = ty.split_whitespace().any(|word| word.trim_end_matches('*') == "FILE");
+        if names_file && !ty.contains('*') {
+            panic!("features.toml:{line}: `{name}` writes `FILE` with no `*` after it");
         }
     }
 }

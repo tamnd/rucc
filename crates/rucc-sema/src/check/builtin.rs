@@ -304,6 +304,14 @@ impl Checker<'_> {
             // `void *` instead would be right on the one target whose list is an array of one
             // and wrong on every other.
             "__builtin_va_list" => return Some(self.va_list_type()),
+            // The stream the stdio builtins are handed, which is always written with a star after
+            // it and which `build.rs` refuses without one. gcc has no `FILE` here either: its
+            // `fileptr_type_node` is a copy of `void *`, and `__typeof__(__builtin_fputs)` on
+            // 16.2.0 prints `int(const char *, void *)`. So the word is the table saying which
+            // pointer it means and the type is the one gcc gives, which is what lets a program
+            // hand over the `FILE *` its own `stdio.h` declared without a conversion it would
+            // have to be told about.
+            "FILE" => return Some(self.types.void()),
             "char" => IntKind::Char,
             "signed char" => IntKind::SChar,
             "unsigned char" => IntKind::UChar,
@@ -461,6 +469,32 @@ mod tests {
             let mut c = fixture.checker();
             let ty = c.signature_type("size_t(const char *)").expect("a type");
             assert_eq!(spelled(&c, ty), written, "on {triple}");
+        }
+    }
+
+    /// The stream a stdio builtin is handed is a `void *`, which is the type gcc gives one rather
+    /// than a stand-in for a type this cannot say.
+    ///
+    /// `extern __typeof__(__builtin_fputs) f;` beside `extern int f(const char *, FILE *);` is two
+    /// conflicting declarations on gcc 16.2.0, and the note it prints about the first of them says
+    /// `int(const char *, void *)`. So a program hands over the `FILE *` its own `stdio.h`
+    /// declared and the conversion is the one C already allows into a `void *`, with nothing to
+    /// warn about at either end.
+    #[test]
+    fn a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        let cases = [
+            ("int(const char *, FILE *)", "int(const char *, void *)"),
+            ("int(FILE *, const char *, ...)", "int(void *, const char *, ...)"),
+            (
+                "size_t(const void *, size_t, size_t, FILE *)",
+                "unsigned long(const void *, unsigned long, unsigned long, void *)",
+            ),
+        ];
+        for (signature, written) in cases {
+            let ty = c.signature_type(signature).expect("a type");
+            assert_eq!(spelled(&c, ty), written, "for {signature}");
         }
     }
 
