@@ -110,10 +110,11 @@ impl Wall {
             }
             Wall::Microsoft => {
                 "Build for the mingw-w64 environment instead, which is fully redistributable and \
-                 needs nothing installed, or install Visual Studio and the Windows SDK, which are \
-                 found without being named on a Windows machine and are what INCLUDE names \
-                 anywhere else, or point --sysroot=<dir> at a tree laid out with crt/include and \
-                 sdk/include"
+                 needs nothing installed, or run rucc --fetch-msvc-sdk <tuple>, which prints that \
+                 licence and downloads what is behind it once you have accepted it, or install \
+                 Visual Studio and the Windows SDK, which are found without being named on a \
+                 Windows machine and are what INCLUDE names anywhere else, or point \
+                 --sysroot=<dir> at a tree laid out with crt/include and sdk/include"
             }
         }
     }
@@ -126,8 +127,8 @@ impl Wall {
     pub fn no_headers(self, target: &str) -> String {
         format!(
             "{target} needs {} to compile against and none of it is on this machine. This compiler \
-             does not ship it and will not download it for you, because {}. {}, or pass -nostdinc \
-             for a program that includes none of the library",
+             does not ship it and never downloads it as part of a compile, because {}. {}, or pass \
+             -nostdinc for a program that includes none of the library",
             self.sdk(),
             self.licence(),
             self.ways()

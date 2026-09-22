@@ -38,6 +38,7 @@ pub mod install;
 pub mod library;
 pub mod link;
 mod map;
+pub mod msvc;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;
@@ -109,6 +110,22 @@ pub enum Action {
         /// The target, which names the directory under the cache the tree is installed at and is
         /// checked against the record inside the artifact.
         target: TargetTuple,
+        /// Where the cache is, read where everything else that needs it reads it.
+        cache: PathBuf,
+    },
+    /// `--fetch-msvc-sdk <tuple>`, which gets what is behind Microsoft's licence wall.
+    ///
+    /// The other action that may run another program to move bytes onto the machine, and the only
+    /// one that asks a person to accept somebody else's licence first.
+    /// `spec/cross-compile/13-distribution.md` section 13.4 is why it is a command of its own
+    /// rather than something `--fetch` does when it recognises the target: no release pins an
+    /// artifact for these, and nothing about this may ever happen because a compile wanted it to.
+    FetchMsvcSdk {
+        /// The target, which says which architecture's CRT library package is wanted.
+        target: TargetTuple,
+        /// Whether `--accept-licence` was on the command line. Without it the licence and the list
+        /// are printed and nothing is downloaded, which is the whole of what the flag is for.
+        accepted: bool,
         /// Where the cache is, read where everything else that needs it reads it.
         cache: PathBuf,
     },
@@ -263,6 +280,7 @@ options:
   -print-sysroot-provenance   every input under it, where it came from and its licence
   -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
   --fetch <tuple>        get the sysroot this release pins for <tuple> and install it in the cache
+  --fetch-msvc-sdk <tuple>   Microsoft's licence, then the SDK behind it with --accept-licence
   --offline              never download anything, which a compilation never does anyway
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
@@ -413,6 +431,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
     // because either can be written after the other.
     let mut fetch: Option<String> = None;
+    // The other fetch, kept apart from the one above because they are different commands with
+    // different rules, and weighed after the loop for the same reason that one is.
+    let mut fetch_msvc: Option<String> = None;
+    let mut accepted = false;
     let mut offline = false;
     let mut threads = false;
     // Which sanitizers are still asked for by the end of the command line. Accumulated across the
@@ -452,6 +474,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("--fetch=") => {
                 fetch = Some(arg["--fetch=".len()..].to_owned());
             }
+            // The other fetch, which is section 13.4's. Same two spellings for the same reason,
+            // and weighed after the loop so that `--offline` and `--accept-licence` written after
+            // it are read whichever order somebody put them in.
+            "--fetch-msvc-sdk" => {
+                let value = args.get(i).ok_or_else(|| {
+                    err("--fetch-msvc-sdk requires the target to get the SDK for")
+                })?;
+                i += 1;
+                fetch_msvc = Some(value.clone());
+            }
+            _ if arg.starts_with("--fetch-msvc-sdk=") => {
+                fetch_msvc = Some(arg["--fetch-msvc-sdk=".len()..].to_owned());
+            }
+            // Both spellings of the word, because the compiler's own prose uses one of them and
+            // most of the people typing this will reach for the other, and being told that a flag
+            // is not a flag over the letter in the middle of it is a puzzle rather than a message.
+            "--accept-licence" | "--accept-license" => accepted = true,
             // Accepted on any command line and only ever read by the fetch, because an ordinary
             // compile downloads nothing with or without it. So this flag takes nothing away today,
             // which is the property section 13.2 asks for rather than an omission: a build that
@@ -1831,7 +1870,26 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // two were written in, and it is before the refusals below so that a command line asking for a
     // sysroot is not told about a sanitizer.
     if let Some(named) = fetch {
+        if fetch_msvc.is_some() {
+            return Err(err(
+                "--fetch and --fetch-msvc-sdk are two different commands and this command line \
+                 asked for both. --fetch gets a sysroot this release pins by URL and by hash, and \
+                 --fetch-msvc-sdk gets what is behind Microsoft's licence wall, which no release \
+                 pins and which nobody may republish. Run whichever one you meant",
+            ));
+        }
         return fetch_action(&named, offline, &inputs);
+    }
+    if let Some(named) = fetch_msvc {
+        return fetch_msvc_action(&named, offline, accepted, &inputs);
+    }
+    if accepted {
+        return Err(err(
+            "--accept-licence says that Microsoft's Visual Studio Build Tools licence is accepted, \
+             and nothing on this command line asked for anything that licence covers. \
+             --fetch-msvc-sdk <tuple> is the command it belongs to, and an ordinary compile \
+             downloads nothing with it or without it",
+        ));
     }
 
     // Last, so that it lands after every `-isystem` the command line gave. That is GCC's
@@ -1996,7 +2054,8 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
         return Err(err(
             "--fetch asks for a download and --offline forbids every download, so this command \
              line asks for two opposite things. Drop one of them: --offline is how a build says it \
-             will not reach the network, and --fetch is the only thing in this compiler that does",
+             will not reach the network, and --fetch is one of the two things in this compiler \
+             that reaches it",
         ));
     }
     if let Some(first) = inputs.first() {
@@ -2022,6 +2081,44 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
         return Err(err(unpinned(&tuple)));
     };
     Ok(Action::Fetch { what, target, cache: cache::dir() })
+}
+
+/// What `--fetch-msvc-sdk <tuple>` asks for, weighed the same way the fetch above is.
+///
+/// The target is resolved here rather than where the work happens, so that a tuple this compiler
+/// does not know and a target that is not behind Microsoft's wall are refusals from the parser like
+/// every other thing a command line can ask for and not have. Whether the licence was accepted is
+/// carried rather than acted on, because what it changes is what the command does and not whether
+/// the command line made sense.
+///
+/// # Errors
+///
+/// [`CliError`] when `--offline` forbade it, when there are input files as well, and when the tuple
+/// is not a target this compiler knows.
+fn fetch_msvc_action(
+    named: &str,
+    offline: bool,
+    accepted: bool,
+    inputs: &[Input],
+) -> Result<Action, CliError> {
+    if offline {
+        return Err(err(
+            "--fetch-msvc-sdk asks for a download and --offline forbids every download, so this \
+             command line asks for two opposite things. Drop one of them: --offline is how a build \
+             says it will not reach the network",
+        ));
+    }
+    if let Some(first) = inputs.first() {
+        return Err(err(format!(
+            "--fetch-msvc-sdk gets an SDK and compiles nothing, so `{}` on the same command line \
+             is an input that nothing would read",
+            first.path
+        )));
+    }
+    let target: TargetTuple = named.parse().map_err(|why| {
+        err(format!("--fetch-msvc-sdk {named}: {why}, so there is no SDK to get"))
+    })?;
+    Ok(Action::FetchMsvcSdk { target, accepted, cache: cache::dir() })
 }
 
 /// Why there is nothing to fetch for a target, which is a different sentence when the table is
@@ -3067,6 +3164,9 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Ok(Action::Fetch { what, target, cache }) => fetch_sysroot(what, target, &cache),
+        Ok(Action::FetchMsvcSdk { target, accepted, cache }) => {
+            msvc::fetch_msvc_sdk(target, accepted, &cache)
+        }
         Ok(Action::Compile { opts, plan, link, jobs, verbose, notes }) => {
             {
                 let mut stderr = std::io::stderr().lock();
@@ -3364,6 +3464,73 @@ mod tests {
         let action = parse_args(&args(&["--fetch", "x86_64-windows-gnu"])).expect("it is pinned");
         let Action::Fetch { what, .. } = action else { panic!("{action:?}") };
         assert_eq!(what.tuple, "x86_64-windows-gnu");
+    }
+
+    #[test]
+    fn the_other_fetch_takes_a_target_behind_microsofts_wall_and_carries_the_acceptance() {
+        // Both spellings of the flag, because a flag that takes a tuple gets written both ways.
+        for line in [
+            vec!["--fetch-msvc-sdk", "x86_64-windows-msvc"],
+            vec!["--fetch-msvc-sdk=x86_64-windows-msvc"],
+        ] {
+            let action = parse_args(&args(&line)).expect("that is a target behind the wall");
+            let Action::FetchMsvcSdk { target, accepted, .. } = action else {
+                panic!("{action:?}")
+            };
+            assert_eq!(target.to_canonical_string(), "x86_64-windows-msvc");
+            // Nothing on the line accepted anything, so nothing did.
+            assert!(!accepted);
+        }
+
+        // And both spellings of the word, because the prose here uses one and most of the people
+        // typing this will reach for the other.
+        for word in ["--accept-licence", "--accept-license"] {
+            let action = parse_args(&args(&["--fetch-msvc-sdk", "aarch64-windows-msvc", word]))
+                .expect("that is a target behind the wall");
+            let Action::FetchMsvcSdk { target, accepted, .. } = action else {
+                panic!("{action:?}")
+            };
+            assert_eq!(target.to_canonical_string(), "aarch64-windows-msvc");
+            assert!(accepted, "{word} should have been read");
+        }
+    }
+
+    #[test]
+    fn the_other_fetch_refuses_the_command_lines_that_do_not_mean_anything() {
+        // A tuple is what it gets, so a flag with nothing after it is not a command.
+        let e = parse_args(&args(&["--fetch-msvc-sdk"])).unwrap_err();
+        assert!(e.message.contains("requires the target"), "{}", e.message);
+        let e = parse_args(&args(&["--fetch-msvc-sdk", "not-a-target"])).unwrap_err();
+        assert!(e.message.contains("there is no SDK to get"), "{}", e.message);
+
+        // `--offline` forbids every download and this one asks for one, whichever order they came
+        // in, which is the same answer `--fetch` gives.
+        for line in [
+            vec!["--offline", "--fetch-msvc-sdk", "x86_64-windows-msvc"],
+            vec!["--fetch-msvc-sdk", "x86_64-windows-msvc", "--offline"],
+        ] {
+            let e = parse_args(&args(&line)).unwrap_err();
+            assert!(e.message.contains("two opposite things"), "{}", e.message);
+        }
+
+        // It gets an SDK and compiles nothing, so a file on the same line would be read by nothing.
+        let e = parse_args(&args(&["--fetch-msvc-sdk", "x86_64-windows-msvc", "a.c"])).unwrap_err();
+        assert!(e.message.contains("compiles nothing"), "{}", e.message);
+
+        // The two fetches are two commands and a line that asked for both asked for neither.
+        let e = parse_args(&args(&[
+            "--fetch",
+            "x86_64-windows-gnu",
+            "--fetch-msvc-sdk",
+            "x86_64-windows-msvc",
+        ]))
+        .unwrap_err();
+        assert!(e.message.contains("two different commands"), "{}", e.message);
+
+        // And an acceptance with nothing to accept for is a command line that says something about
+        // a licence no part of it goes near.
+        let e = parse_args(&args(&["--accept-licence", "-c", "a.c"])).unwrap_err();
+        assert!(e.message.contains("--fetch-msvc-sdk <tuple> is the command"), "{}", e.message);
     }
 
     /// An Apple target on a machine with no SDK, which is section 8.6's other host.
@@ -5844,7 +6011,10 @@ mod tests {
         // is therefore the one a person wants to have read before they run it rather than after.
         // And the flag beside it that forbids every download, which earns its line by being what a
         // build in a sealed environment passes and by meaning something even though an ordinary
-        // compile downloads nothing either way.
-        assert!(USAGE.lines().count() < 72, "usage text has grown past one screen");
+        // compile downloads nothing either way. The one it went up by last is the other fetch, the
+        // one behind Microsoft's licence wall, which is a line rather than a paragraph because what
+        // a person needs from here is that the command exists and that it will not do anything
+        // until they have read a licence it prints for them.
+        assert!(USAGE.lines().count() < 73, "usage text has grown past one screen");
     }
 }
