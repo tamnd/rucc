@@ -85,6 +85,16 @@ pub struct Unit {
     pub globals: Vec<Global>,
     /// How many bytes an address is on this target.
     pub pointer: u8,
+    /// Whether this build writes a call frame table, which is what a frame base is resolved
+    /// through.
+    ///
+    /// A function's `DW_AT_frame_base` is `DW_OP_call_frame_cfa`, and what answers that operation
+    /// is the unwind table the build already writes for every function. A build that turns the
+    /// table off, which is a kernel or a freestanding image, leaves a reader with nothing to
+    /// evaluate the operation against, so the attribute is left off there rather than written as
+    /// something no debugger can follow. The locations that would be measured from it are left off
+    /// with it.
+    pub frames: bool,
 }
 
 /// One function: where each of its instructions came from, and what it is.
@@ -270,7 +280,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     root.set(gimli::DW_AT_comp_dir, gimli::write::AttributeValue::LineStringRef(held(dir)?));
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
     root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
-    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals)?;
+    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals, unit.frames)?;
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
     let mut info = Info::default();
@@ -369,6 +379,7 @@ mod tests {
             }],
             globals: Vec::new(),
             pointer: 8,
+            frames: true,
         }
     }
 
