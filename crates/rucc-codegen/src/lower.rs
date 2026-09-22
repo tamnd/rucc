@@ -359,6 +359,18 @@ pub enum Unsupported {
         /// What about it is not built here yet.
         refused: Written,
     },
+    /// A `register long x asm ("...")` naming something this machine has not got.
+    ///
+    /// Not an instruction no rule fires on. There is a rule's worth of instruction here and what
+    /// is wrong is the string beside it, which is a name rather than a term, so the message says
+    /// the name. Which names a machine has is the machine's own question and this is where it is
+    /// asked, at the table a clobber list is read against.
+    Register {
+        /// The `register_value`.
+        inst: Inst,
+        /// The name the program wrote, as it wrote it.
+        name: String,
+    },
     /// A naked function whose frame is not empty.
     ///
     /// Not an instruction no rule fires on, and there is nothing in the body to point at: the
@@ -461,7 +473,8 @@ impl Unsupported {
             | Unsupported::Call { inst, .. }
             | Unsupported::Returned { inst, .. }
             | Unsupported::Dynamic { inst, .. }
-            | Unsupported::Assembly { inst, .. } => Some(inst),
+            | Unsupported::Assembly { inst, .. }
+            | Unsupported::Register { inst, .. } => Some(inst),
             Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
                 None
             }
@@ -502,6 +515,12 @@ impl fmt::Display for Unsupported {
                 )
             }
             Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
+            Unsupported::Register { ref name, .. } => {
+                write!(
+                    f,
+                    "this object is kept in `{name}`, which is not a register this machine has"
+                )
+            }
             Unsupported::Naked { bytes } => write!(
                 f,
                 "this function is `naked` and wants {bytes} bytes of frame, which there is no prologue to take"
@@ -1055,6 +1074,15 @@ impl<'a> Lowering<'a> {
                 // library rather than any arithmetic.
                 Opcode::ThreadPointer => {
                     self.thread_pointer(inst)?;
+                    continue;
+                }
+                // What a named machine register holds, built here for the reason above written
+                // about any register rather than about one: which register it is is a string
+                // beside the instruction, and a rule matches on an opcode and a type and could
+                // not see it. There is nothing to prove either, since the answer is the register
+                // and the instruction is the move that reads it.
+                Opcode::RegisterValue => {
+                    self.register_value(inst)?;
                     continue;
                 }
                 // Where a frame is and what it returns to, built here for the same reason and one
@@ -2691,6 +2719,54 @@ impl<'a> Lowering<'a> {
         let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{GOT_LOAD}")));
         let at = mir::Mem::in_segment(Segment::Fs, 0);
         self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
+        Ok(())
+    }
+
+    /// What a named machine register holds, which is `register long x asm ("rbx");`.
+    ///
+    /// One move out of that register, with the register named as itself the way a register a
+    /// template wrote is named, which is [`Self::itself`] and is the thing #1653 built. What it
+    /// buys here is what it buys there: the register is part of the instruction the allocator
+    /// sees, so it is a use the allocator will not have written over first, and the value goes
+    /// into an ordinary one of its own that everything downstream reads.
+    ///
+    /// The whole sixty four bits are moved whatever the type is, because the register is that
+    /// wide and a narrower type reads the low end of the copy, which is the same low end. A type
+    /// wider than the register is refused, since there is no register holding it to read.
+    ///
+    /// A name the machine has not got is refused too, and is the only thing that can be wrong
+    /// with the string: which register a name means is this machine's question and this is where
+    /// the question is asked, at the same table `asm` asks about clobbers at. The sigil gcc
+    /// allows in front of it is taken off here, because what the name is written with is syntax.
+    fn register_value(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Extra::Symbol(symbol) = self.source[inst].extra else {
+            return Err(self.unsupported(inst));
+        };
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let ty = self.source[result].ty;
+        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        if bits > ADDRESS_BITS {
+            return Err(self.unsupported(inst));
+        }
+        let spelled = self.names.resolve(symbol).to_owned();
+        let named = x86_64::gpr_named(spelled.strip_prefix('%').unwrap_or(&spelled));
+        let Some((held, _)) = named else {
+            return Err(Unsupported::Register { inst, name: spelled });
+        };
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let mov = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move").mov;
+        let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mov}")));
+        let into = self.new_reg(result);
+        self.out
+            .build(block, mov)
+            .at(span)
+            .operand(mir::Operand::write(into, self.gpr))
+            .operand(
+                mir::Operand::read(mir::Reg::physical(held), self.gpr)
+                    .with(Constraint::Fixed(held)),
+            )
+            .finish();
         Ok(())
     }
 
@@ -6282,6 +6358,57 @@ mod tests {
         assert_eq!(
             lower(&mut names, &source),
             "mfunc @f {\nblock0:\n    x64.mov_mr_64 $r12($r12), [$rdi + 48]\n}\n"
+        );
+    }
+
+    /// A local kept in a named register, which is the same register named as itself and reached
+    /// from the other side. micropython's collector writes six of these and reads them with
+    /// ordinary C rather than with a template.
+    #[test]
+    fn a_local_kept_in_a_named_register_is_one_move_out_of_it() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let held = names.intern("rbx");
+        let value = Builder::new(&mut source, block).value(
+            InstData { extra: Extra::Symbol(held), ..InstData::new(Opcode::RegisterValue) },
+            Type::int(64),
+        );
+        Builder::new(&mut source, block).ret(&[value]);
+
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rr_64 $rbx($rbx)\n    \
+             x64.ret_val_64 %0($rax)\n}\n"
+        );
+    }
+
+    /// The sigil gcc allows in front of the name is syntax and comes off, and a name that is not
+    /// a register of this machine is refused in words that say which name it was.
+    #[test]
+    fn a_register_name_is_read_with_or_without_its_sigil_and_refused_when_there_is_no_such_one() {
+        for written in ["%r12", "r12"] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            let held = names.intern(written);
+            let value = Builder::new(&mut source, block).value(
+                InstData { extra: Extra::Symbol(held), ..InstData::new(Opcode::RegisterValue) },
+                Type::int(64),
+            );
+            Builder::new(&mut source, block).ret(&[value]);
+            assert!(lower(&mut names, &source).contains("$r12($r12)"), "{written} is not read");
+        }
+
+        let (mut names, mut source, block, _) = blank(&[]);
+        let held = names.intern("nowhere");
+        let value = Builder::new(&mut source, block).value(
+            InstData { extra: Extra::Symbol(held), ..InstData::new(Opcode::RegisterValue) },
+            Type::int(64),
+        );
+        Builder::new(&mut source, block).ret(&[value]);
+
+        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect_err("there is no such register");
+        assert_eq!(
+            failed.to_string(),
+            "this object is kept in `nowhere`, which is not a register this machine has"
         );
     }
 

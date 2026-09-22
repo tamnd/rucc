@@ -1707,6 +1707,10 @@ impl<'u> Body<'_, 'u> {
                     // it are evaluated, whether it declares an object, a pointer to one or a
                     // name for the type.
                     self.variable_length(decl);
+                    // Before the initializer, because a declaration that writes one is asking
+                    // for the register's value to be replaced by it rather than the other way
+                    // around, and a declaration with no initializer keeps what the register had.
+                    self.seed_register(decl);
                     self.init(decl);
                     // After the initializer, because the handler runs on the object the
                     // declaration made and a declaration that was never reached made none.
@@ -2119,6 +2123,24 @@ impl<'u> Body<'_, 'u> {
             return;
         }
 
+        // An operand that names a local kept in a machine register. gcc puts such an operand in
+        // the register the declaration named, whatever the constraint would otherwise have
+        // allowed, and a program that writes one is counting on that: tcc's `tests/tcctest.c`
+        // declares one in `%eax` and hands it to a template that reads `%eax` by name. Here the
+        // operand would go wherever the allocator put the variable, which is a different register
+        // on most days, so it is turned down rather than assembled into a program that reads
+        // something else.
+        for list in [node.outputs, node.inputs] {
+            for index in 0..tast[list].len() {
+                let operand = tast[list][index];
+                if self.in_a_named_register(operand.value) {
+                    let at = tast.expr_span(operand.value);
+                    self.unsupported("an `asm` operand kept in a named register", at);
+                    return;
+                }
+            }
+        }
+
         // The constraints of every operand, in the order the template counts them, which is
         // also the order the operands below are built in.
         let mut written = Vec::new();
@@ -2220,6 +2242,22 @@ impl<'u> Body<'_, 'u> {
                 }
             }
         }
+    }
+
+    /// Whether an operand of an assembly statement names a local kept in a named register.
+    ///
+    /// The name and the read of it and nothing else. An output operand is the object itself and
+    /// an input operand is the object with a read on top, so the read is looked through, and an
+    /// expression with anything else on top is a value computed from the object rather than the
+    /// object, which is what gcc makes of one too.
+    fn in_a_named_register(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let named = match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => tast[operand].kind,
+            kind => kind,
+        };
+        let ExprKind::Decl(decl) = named else { return false };
+        tast[decl].register.is_some()
     }
 
     /// The integer one structure or union in a register constraint travels as.
@@ -2890,6 +2928,57 @@ impl<'u> Body<'_, 'u> {
         // undefined, so there is nothing to return and nothing to invent.
         self.build(span).unreachable();
         self.at = None;
+    }
+
+    /// What a local kept in a named machine register starts out holding, which is whatever that
+    /// register holds where the declaration stands.
+    ///
+    /// That is the whole of what `register long x asm ("rbx");` is for. A garbage collector
+    /// written in C has to find the roots that live only in callee saved registers, since a walk
+    /// of the stack finds none of those, and the way it reads them is to declare one of these for
+    /// each and copy it somewhere it can walk. micropython's `gc_helper_get_regs` declares six.
+    ///
+    /// It is read here and not where the variable is made because the value belongs to the point
+    /// the declaration is at, the same as an initializer does: anything above may have written
+    /// the register. A declaration with an initializer as well is seeded first and then written
+    /// over, which costs nothing and keeps the two in the order the program wrote them.
+    ///
+    /// Writing to one of these is an ordinary write to an ordinary variable rather than a write to
+    /// the machine register. Nothing in C can tell the difference, because reading the variable
+    /// again reads what was written either way, and the one thing that could tell is an `asm`
+    /// statement naming the register, which is refused where the operands are read.
+    fn seed_register(&mut self, decl: DeclId) {
+        let tast = self.tast();
+        let node = &tast[decl];
+        let Some(register) = node.register else { return };
+        let ty = node.ty;
+        // A `static` one is a global and has no register, which the checking has already said.
+        if node.duration != StorageDuration::Automatic {
+            return;
+        }
+        let span = tast.decl_span(decl);
+        let place = match self.vars.get(&decl).copied() {
+            Some(Local::Value(var)) => Place::new(Where::Var(var), ty),
+            Some(Local::Slot(slot)) => Place::new(Where::Addr(slot), ty),
+            None => return,
+        };
+        // A register holds a word, so a number or an address is what can come out of one. A
+        // structure or a floating type asks for something else and is refused rather than quietly
+        // started with nothing, since a program that writes one of these is counting on the value.
+        let value = repr::value_type(self.types(), self.target(), ty)
+            .filter(|value| value.is_ptr() || (value.is_int() && value.is_scalar()));
+        let Some(value) = value else {
+            self.unsupported("an object of this type kept in a named register", span);
+            return;
+        };
+        let spelling: String =
+            tast[register].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+        let symbol = self.unit.names.intern(&spelling);
+        let held = self.build(span).value(
+            InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::RegisterValue) },
+            value,
+        );
+        self.write(place, held, span);
     }
 
     /// The initializer of one declaration in a declaration statement.

@@ -63,6 +63,24 @@ pub struct Decl {
     /// about the name rather than about one declaration of it, so it is kept where the
     /// declarations of a name are merged, and the first one written is the one that stands.
     pub asm_label: Option<StrId>,
+    /// The machine register this object lives in, when `register long x asm ("rbx");` said so.
+    ///
+    /// The other reading of the syntax above, and a separate field because it is a separate
+    /// thing: an object of automatic storage has no symbol, so the string after `asm` on one
+    /// cannot be a name the linker sees, and GNU C reads it as the name of a register instead.
+    /// The object then has no slot in the frame and what it holds to begin with is whatever the
+    /// register holds where the declaration stands.
+    ///
+    /// A garbage collector written in C is what writes one. A root that lives only in a callee
+    /// saved register is a root no walk of the stack finds, so micropython declares six of these
+    /// and copies them into a buffer it can walk.
+    ///
+    /// The name as the program wrote it, with the `%` gcc allows in front of it left on, because
+    /// which register a name means is the target's question and this crate has no targets in it.
+    /// It is a fact about this declaration rather than about the name, like
+    /// [`Self::cleanup`] and for the same reason: the syntax is only read this way on an object
+    /// with automatic storage, and such an object is declared once.
+    pub register: Option<StrId>,
     /// The symbol this name is a second spelling of, when `__attribute__((alias("target")))` was
     /// written on a declaration of it.
     ///

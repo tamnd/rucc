@@ -574,11 +574,19 @@ mod tests {
     /// eight one byte fields filling two words exactly, so the seventh yes or no question about a
     /// declaration and several after it now cost nothing at all, which is most of what an attribute
     /// is and is the reason the fold was worth more than the four bytes it gave back.
+    ///
+    /// Sixty eight to seventy two again for the machine register a local is kept in, which is four
+    /// bytes and none of them padding for the reason the handler above is: it is one index and it
+    /// lands where the fields of that width already are. It is a fact about the declaration rather
+    /// than about the name, the same as the handler, and for the same reason: the string after
+    /// `asm` is read as a register only on an object with automatic storage and such an object is
+    /// declared once. A side table was not taken either, and this time the argument is the
+    /// stronger of the two: the lowering asks about it at every local in the program.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 68);
+        assert_eq!(size_of::<Decl>(), 72);
         assert_eq!(size_of::<Case>(), 48);
     }
 
@@ -623,6 +631,7 @@ mod tests {
                 alignment: None,
                 flags: DeclFlags::NONE,
                 asm_label: None,
+                register: None,
                 alias: None,
                 inline: Emission::Silent,
                 effects: Effects::Any,

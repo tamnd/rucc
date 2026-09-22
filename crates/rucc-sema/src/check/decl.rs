@@ -76,6 +76,9 @@ struct Declared {
     retained: bool,
     /// The assembler name this declaration wrote, which is the symbol the name stands for.
     asm_label: Option<StrId>,
+    /// The machine register this declaration wrote, which is the other reading of the same
+    /// syntax and is the one an object of automatic storage gets.
+    register: Option<StrId>,
     /// The symbol an `alias` attribute on this declaration made the name a second spelling of.
     alias: Option<StrId>,
     /// What this declaration wrote that decides whether a definition of the name is emitted.
@@ -291,6 +294,7 @@ impl Checker<'_> {
             // the grammar rather than of this compiler: gcc stops at the brace as well. The
             // declaration above the definition is where one goes and the merge keeps it.
             asm_label: None,
+            register: None,
             // A definition is the thing itself, so an `alias` on one is a name that is both a
             // second spelling of something else and a body of its own. gcc refuses that, and
             // the specifiers are not where one is written anyway.
@@ -615,6 +619,8 @@ impl Checker<'_> {
         };
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty));
         let gnu_inline = self.gnu_inlined(specs.attrs) || self.gnu_inlined(item.attrs);
+        // One string with two readings, so one call answers both and the string is looked at once.
+        let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         let mut declared = Declared {
             name,
             ty,
@@ -629,7 +635,8 @@ impl Checker<'_> {
             // written after the declarator it is this declaration's alone. Either place asks for
             // the same thing, so either place is read.
             retained: self.retains(specs.attrs) || self.retains(item.attrs),
-            asm_label: self.declared_label(item, &specs, duration, name, span),
+            asm_label,
+            register,
             // Read from both places for the same reason `retained` above is.
             alias: self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs)),
             // A declaration with no body under it, which C's reading of `inline` listens to and
@@ -830,6 +837,7 @@ impl Checker<'_> {
                 alignment: None,
                 flags: DeclFlags::NONE,
                 asm_label: None,
+                register: None,
                 alias: None,
                 inline: Emission::Silent,
                 effects: Effects::Any,
@@ -1288,39 +1296,42 @@ impl Checker<'_> {
         previous
     }
 
-    /// The assembler name one declarator wrote, where there is a symbol for it to name.
+    /// The two readings of the string one declarator wrote after `asm`, which are the assembler
+    /// name of a symbol and the name of the machine register an object is kept in.
     ///
-    /// An object that lives on the stack has none. It is a slot at an offset rather than
-    /// something with a name, so gcc warns and carries on and this says what gcc says. A
-    /// `register` one is gcc's other reading of the same syntax, where the string is a machine
-    /// register rather than a symbol and the object is kept in it. That is a feature of its own
-    /// and is not here yet, so it is warned about in its own words rather than passed off as the
-    /// first case: a program that writes one is writing assembly around it and would otherwise
-    /// be told nothing at all.
-    fn declared_label(
+    /// Which of the two it is depends on the object and not on the string. Something the linker
+    /// knows about gets the first, because the string is then what the linker is told to call it.
+    /// An object on the stack has no symbol at all, it is a slot at an offset, so GNU C reads the
+    /// string as the name of a register and keeps the object there, which is what a program that
+    /// writes assembly around a variable depends on. Only `register` asks for that, and a local
+    /// without it is warned about and its string dropped, which is what gcc does.
+    fn declared_asm(
         &mut self,
         item: ast::InitDeclarator,
         specs: &ast::DeclSpecs,
         duration: StorageDuration,
         name: Symbol,
         span: Span,
-    ) -> Option<StrId> {
-        let label = self.asm_label(item.asm_label?, span);
+    ) -> (Option<StrId>, Option<StrId>) {
+        let Some(id) = item.asm_label else {
+            return (None, None);
+        };
+        let written = self.asm_label(id, span);
         if duration != StorageDuration::Automatic {
-            return Some(label);
+            return (Some(written), None);
+        }
+        if specs.storage == Some(StorageClass::Register) {
+            return (None, Some(written));
         }
         let spelled = self.text(name).to_owned();
-        let (what, code) = match specs.storage {
-            Some(StorageClass::Register) => {
-                (format!("'asm' specifier for register variable '{spelled}' ignored"), "E0692")
-            }
-            _ => (
+        self.report(
+            Diagnostic::warning(
                 format!("ignoring 'asm' specifier for non-static local variable '{spelled}'"),
-                "E0693",
-            ),
-        };
-        self.report(Diagnostic::warning(what, span).with_code(code));
-        None
+                span,
+            )
+            .with_code("E0693"),
+        );
+        (None, None)
     }
 
     /// What one declaration wrote about `inline`, before it is known which of the two readings of
@@ -1492,6 +1503,7 @@ impl Checker<'_> {
                 .with(DeclFlags::NAKED, declared.naked)
                 .with(DeclFlags::WEAK, declared.weak.is_some()),
             asm_label: declared.asm_label,
+            register: declared.register,
             alias: declared.alias,
             inline: self.emission(declared.written, declared.gnu_inline),
             effects: declared.effects,
@@ -2398,7 +2410,7 @@ mod tests {
     }
 
     #[test]
-    fn a_local_kept_in_a_named_register_says_that_the_register_is_not_honoured() {
+    fn a_local_kept_in_a_named_register_records_the_register() {
         let mut f = Fixture::new();
         let mut specs = f.int_specs();
         specs.storage = Some(StorageClass::Register);
@@ -2406,14 +2418,15 @@ mod tests {
 
         let mut c = f.checker();
         c.scopes.push();
-        c.check_decl(decl);
+        let list = c.check_decl(decl);
 
         // Which is gcc's other reading of this syntax: the string is a machine register and the
-        // object is kept in it, which programs that write assembly around a variable depend on.
-        // It is a feature of its own and is not here, and saying so is the least that is owed to
-        // a program whose next line hands that register to an `asm` statement.
-        assert_eq!(severities(&c), [Severity::Warning]);
-        assert_eq!(messages(&c)[0], "'asm' specifier for register variable 'x' ignored");
+        // object is kept in it, which is what a program that writes assembly around a variable
+        // depends on. There is no symbol here for the string to have renamed, so nothing is lost
+        // by reading it the other way and nothing is warned about.
+        let id = only(&c, list);
+        assert_eq!(dump(&c, id), "decl #0 x : int object automatic defined register \"r12\"\n");
+        assert!(severities(&c).is_empty());
     }
 
     #[test]
