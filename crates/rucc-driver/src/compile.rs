@@ -1109,6 +1109,10 @@ fn describe(
         funcs,
         globals,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
+        // Whether a function can say where its frame base is, which it can when the build writes
+        // the unwind table that answers the question. The same request decides both, so the two
+        // cannot disagree about whether the table a frame base is read through is there.
+        frames: opts.unwinds(),
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())
 }

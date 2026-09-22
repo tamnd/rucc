@@ -58,6 +58,7 @@ pub(crate) fn describe(
     files: &[FileId],
     funcs: &[Function],
     globals: &[Global],
+    frames: bool,
 ) -> Result<(), Error> {
     let ids = kinds(dwarf, shapes);
     for (shape, &id) in shapes.iter().zip(&ids) {
@@ -65,7 +66,7 @@ pub(crate) fn describe(
     }
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
-        defined(dwarf, func, sig, index, files, &ids)?;
+        defined(dwarf, func, sig, index, files, &ids, frames)?;
     }
     for (index, global) in globals.iter().enumerate() {
         held_at(dwarf, global, funcs.len() + index, files, &ids)?;
@@ -161,12 +162,25 @@ fn fill(
 /// for it does and against the same symbol. `DW_AT_high_pc` is a length rather than an address,
 /// which is DWARF 4 and later and is what lets one relocation do for both.
 ///
-/// No `DW_AT_frame_base`, because nothing here needs one yet. A frame base is what a local's
-/// location is measured from, there are no locals yet, and the two answers worth having are the
-/// call frame address, which needs the unwind tables this compiler does not write, and a register,
-/// which is only right if the frame really is laid out that way. That choice belongs with the
-/// locations it would be read through rather than here. A file-scope variable needs none of it: its
-/// address is its own symbol and the linker knows where that went.
+/// `DW_AT_frame_base` is `DW_OP_call_frame_cfa`, the call frame address, which is the stack pointer
+/// the caller had at the call. The other answer available is a named register, and the register it
+/// would have to be is the frame pointer, which this compiler leaves out of every function it can,
+/// so most functions would have no right answer to give. Even the ones that keep it would be
+/// described wrongly over their first few instructions, since a frame pointer is not a frame pointer
+/// until the prologue has set it up, and the front of a function is exactly where a breakpoint on
+/// the function lands. The call frame address has neither problem: it is the same value at every
+/// program counter in the function, prologue and epilogue included, and it is already written down
+/// for every function on every target, since the unwind table says what it is at each address and
+/// this compiler writes one for every function including the leaves. It costs a reader having to
+/// read that table, which is a thing every debugger does before it prints a frame at all.
+///
+/// A build that asked for no unwind table gets no frame base, because there would then be nothing to
+/// resolve the operation against and an expression a reader cannot evaluate is worse than an
+/// attribute that is not there. gcc's answer for that case is to write the same table into
+/// `.debug_frame` instead, which this compiler does not write yet.
+///
+/// A file-scope variable needs none of it: its address is its own symbol and the linker knows where
+/// that went.
 fn defined(
     dwarf: &mut gimli::write::DwarfUnit,
     func: &Function,
@@ -174,6 +188,7 @@ fn defined(
     index: usize,
     files: &[FileId],
     ids: &[UnitEntryId],
+    frames: bool,
 ) -> Result<(), Error> {
     let root = dwarf.unit.root();
     let at = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
@@ -186,6 +201,11 @@ fn defined(
     let start = gimli::write::Address::Symbol { symbol: index, addend: 0 };
     entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(start));
     entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(func.len));
+    if frames {
+        let mut expr = gimli::write::Expression::new();
+        expr.op(gimli::DW_OP_call_frame_cfa);
+        entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
+    }
     takes(dwarf, at, sig, ids)
 }
 
@@ -424,6 +444,7 @@ mod tests {
             }],
             globals: Vec::new(),
             pointer: 8,
+            frames: true,
         }
     }
 
@@ -472,6 +493,46 @@ mod tests {
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(held.relocs.iter().all(|reloc| reloc.symbol != "f"));
         assert!(named(&info).is_empty());
+    }
+
+    /// Whether a section holds these bytes, in this order, somewhere in it.
+    fn holds(info: &Info, name: &str, want: &[u8]) -> bool {
+        let Some(chunk) = info.chunks.iter().find(|chunk| chunk.name == name) else {
+            return false;
+        };
+        chunk.bytes.windows(want.len()).any(|seen| seen == want)
+    }
+
+    /// The attribute and the form a frame base is written as, which is what the abbreviation says.
+    fn base() -> [u8; 2] {
+        [
+            u8::try_from(gimli::DW_AT_frame_base.0).expect("a one byte attribute"),
+            u8::try_from(gimli::DW_FORM_exprloc.0).expect("a one byte form"),
+        ]
+    }
+
+    /// A function says what its locals are measured from, and the answer is the call frame address.
+    ///
+    /// The abbreviation is what is read here rather than the entry, because the pair in it is the
+    /// attribute and its form together and two bytes in that order are not something the table holds
+    /// by accident. The expression in the unit is checked after it and is a length of one followed
+    /// by the one operation, which on its own would be a byte pair a search could find anywhere.
+    #[test]
+    fn a_function_says_its_frame_base_is_the_call_frame_address() {
+        let info = write(&one()).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &base()), "no frame base on the subprogram");
+        let expr = [1, gimli::DW_OP_call_frame_cfa.0];
+        assert!(holds(&info, ".debug_info", &expr), "the frame base is not the call frame address");
+    }
+
+    /// A build with no unwind table gets no frame base, because there is nothing to resolve it
+    /// against.
+    #[test]
+    fn a_build_that_writes_no_unwind_table_gets_no_frame_base() {
+        let mut unit = one();
+        unit.frames = false;
+        let info = write(&unit).expect("sections");
+        assert!(!holds(&info, ".debug_abbrev", &base()), "a frame base nothing answers");
     }
 
     /// A record holding a pointer to itself is one entry and terminates.
