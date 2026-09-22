@@ -53,8 +53,8 @@ pub(crate) enum Around {
 /// that is a number is read through [`crate::scev::Bound::under_undefined_overflow`] and the
 /// reasoning behind that is written there.
 ///
-/// A count that is an expression is read here instead, because it is allowed one assumption that
-/// accessor refuses. [`Assumption::Approaching`] says the counter starts on the near side of its
+/// A count that is an expression is read here instead, because it is allowed assumptions that
+/// accessor refuses. [`Assumption::Entered`] says the counter starts on the near side of its
 /// limit, and [`covered`] discharges it rather than believing it, by clamping the count at zero. A
 /// count that comes out negative is a loop whose test failed the first time it ran, which for a
 /// bottom tested loop is a loop that went round no times, and zero is what that loop's extent is
@@ -83,7 +83,13 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
     // either the condition discharged or a check written that stands in for it. See #782.
     for rests_on in assumptions {
         match rests_on {
-            Assumption::StrictOverflow | Assumption::Approaching => {}
+            // The clamp in [`covered`] is what pays for the first two. It does not pay for
+            // [`Assumption::Approaching`], which is about a loop ending on `!=` coming back at
+            // all rather than about which number the count is, and a loop that runs until its
+            // counter wraps reads far past the extent worked out here. Taken as it stands rather
+            // than tightened, because tightening it withdraws checks this already writes and that
+            // is a measurement rather than an edit. See tamnd/rucc#1661.
+            Assumption::StrictOverflow | Assumption::Entered | Assumption::Approaching => {}
             Assumption::NoWrap(_) => return Err(RESTS_ON_NO_WRAP),
         }
     }

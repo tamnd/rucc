@@ -111,6 +111,10 @@ analysis, and the trip count analysis's `assumptions` field (document 07.5) is w
 land. rucc does the same: the rewrite is performed only when the trip count is a `Bound` rather than
 an `Estimate`, and when the derived limit provably does not overflow.
 
+The neighbouring transformation is 28.9, final value replacement, and the two are worth reading
+together because one of them needs the overflow proof above and the other looks like it does and
+does not.
+
 The second half of the same transformation is the **countdown form**: rewriting `i = 0; i < n; i++`
 as `j = n; j != 0; j--`, so the exit test is a comparison against zero, which most targets get for
 free from the decrement's flags. GCC's ivopts does this as part of doloop support
@@ -222,3 +226,81 @@ The measurement in document 42, and there are three worth having:
 - How often the greedy selection differs from the original variable set, which tells whether the pass
   is doing anything.
 - The straight-line strength reduction check from 28.5, testing the document 12 thesis directly.
+
+## 28.9 Final value replacement
+
+The value a variable holds after the loop, written down in front of the loop instead of being
+arrived at by running it. GCC does it in `scev_const_prop` in `gcc/tree-scalar-evolution.cc`, and
+it is the transformation that makes loop deletion apply to loops anybody actually writes, because
+a loop whose result nothing reads is rare and a loop whose result is read once afterwards is
+everywhere.
+
+`for (i = 0; i < 1000000; i++) total += seed;` followed by a use of `total`. The value the loop
+hands over is the sum computed in the body, which is `seed` the first time round and goes up by
+`seed` every time after, so it is `{seed, +, seed}`. The trip count is 999,999. The closed form is
+`seed + seed * 999999`, which folds to `seed * 1000000`. GCC emits the one multiply,
+`imull $1000000, seed_in(%rip), %esi`, and no loop at all. Once that is written down, nothing
+outside the loop reads anything the loop computes, and the loop goes by 17.1.
+
+**The off-by-one is the part to get right.** The count is the iteration at which the exit test
+first fails, which is how many times the back edge is taken, and it is one less than how many
+times a block in front of that test runs. The closed form of a chrec at the count is the value it
+has on entry to the iteration that leaves, so a caller wants either `base + step * count` or the
+same thing at `count + 1`, depending on where in the loop the value it asks about is defined.
+Taking the chrec of the value that is actually handed over, rather than of the one the header
+carries, is what puts the `seed +` on the front above. Getting this wrong is a wrong answer on
+every input rather than on some of them, which is the one mercy of it.
+
+**It needs no overflow proof, and 28.4 does.** This reads like the same correctness problem and it
+is not. A value that steps by a fixed amount evolves in its own type, which is to say modulo two
+to the width, and addition modulo two to the width is associative, so adding `step` to `base`
+`count` times and working out `base + step * count` in the same width are the same number whatever
+either of them does to the top bit. 28.4's claim is a different one: that one comparison holds
+exactly where another does, and a limit that wraps makes that false. So the arithmetic written
+down here carries neither `nsw` nor `nuw`, and the promise the loop's own increment carried is not
+copied onto it, because that promise is about the sequence and says nothing about the closed form.
+
+**What the trip count has to be.** Two different answers for two different questions, and
+conflating them is the mistake this section exists to prevent.
+
+Deleting the loop needs only that the loop comes back. `for (i = 0; i < n; i++)` comes back
+whatever `n` is: the counter either reaches `n` or is already past it, and both are a finite
+number of steps. So a count that is an expression rather than a number is enough, and document
+07.5's assumption for this case, that the loop is entered at all, is about which number the count
+is rather than about whether there is one.
+
+Writing the final value down needs the count to be the right number, because it is multiplied by.
+A symbolic count is usable there too, but only with the entry assumption discharged, which means
+clamping it at zero, and with the widening the exit test's reading calls for. 07.7 is the warning
+about the second of those: a limit past the middle of a thirty two bit type is a large number to
+an unsigned test and a negative one to a signed test, and a closed form computed from the wrong
+reading turns a loop over three billion elements into one that runs no times.
+
+A loop ending on `!=` is neither of those. It stops on the one iteration where the counter is the
+limit, so a counter that starts past the limit, or that steps over it, goes round until it wraps.
+That is a loop that may not come back, and 17.2 says rucc does not delete one of those. The
+assumption is separate for exactly this reason.
+
+**When it is worth doing.** Only when it lets the loop go. Writing the closed form down in front
+of a loop that stays costs a multiply and saves nothing, because the loop still carries the value
+round its own back edge. That is a cost rule rather than a correctness one, and it should be
+reconsidered when there is a pass that removes a block parameter whose only reader is the argument
+it passes to itself, which 17.1 already names as a transformation worth having.
+
+**Where it goes in the pipeline.** Last, after everything that might make a loop empty. That has a
+consequence worth writing down: loop closed form is gone by then. `canon` puts a block in the way
+of every exit edge so a value leaving a loop leaves through a block parameter, and `simplify-cfg`
+has every reason to fold that block away again, so by the end of the pipeline a value defined in a
+loop is named directly in the block after it. A pass doing this has to handle both roads out, and
+a pass that handles only the loop closed form one deletes nothing in a real program.
+
+**rucc's position.** Both halves are in `crates/rucc-opt/src/loop_delete.rs`, one pass rather than
+two, because the value question is only asked to make the loop question answerable and a pass that
+answered it on its own would be writing multiplies nobody wanted. The closed form is worked out on
+the invariant representation before anything is written down, since this is the last pass and
+there is no later fold, so a loop adding one a million times leaves a constant behind and a loop
+adding an invariant leaves one multiply.
+
+Symbolic counts are taken for the deletion question and not yet for the value question. What that
+costs is visible in the corpus: `loop-deletion` at a million iterations with an unknown bound and
+its total read afterwards is the row where rucc still runs the loop.
