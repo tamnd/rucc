@@ -128,14 +128,16 @@ const DEPTH: u32 = 4;
 const REPLACEMENTS: [&str; 7] = ["fputc", "fputs", "fwrite", "putchar", "puts", "strchr", "strlen"];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 17] = [
+const SOURCES: [&str; 19] = [
     "fprintf",
     "fprintf_unlocked",
     "fputs",
     "fputs_unlocked",
+    "index",
     "memchr",
     "printf",
     "printf_unlocked",
+    "rindex",
     "strchr",
     "strcmp",
     "strcspn",
@@ -459,8 +461,10 @@ impl Site<'_> {
             "fputs" if ignored => self.fputs(&args, false),
             "fputs_unlocked" if ignored => self.fputs(&args, true),
             "strstr" => self.strstr(data, &args),
-            "strchr" => self.strchr(data, &args, Side::First),
-            "strrchr" => self.strchr(data, &args, Side::Last),
+            // `index` and `rindex` are the older spellings of the same two searches, and a
+            // program that wrote one of them is asking for the same answer.
+            "strchr" | "index" => self.strchr(data, &args, Side::First),
+            "strrchr" | "rindex" => self.strchr(data, &args, Side::Last),
             "memchr" => self.memchr(data, &args),
             "strlen" => self.strlen(data, &args),
             "strnlen" => self.strnlen(data, &args),
@@ -2171,6 +2175,34 @@ block0:
         assert!(!out.contains("call @strpbrk("), "{out}");
         assert!(out.contains("iconst.i64 6"), "the w is six bytes along, {out}");
         assert!(out.contains("inttoptr.ptr "), "there is neither a q nor a z in it, {out}");
+    }
+
+    /// `index` and `rindex` are the same two searches under their older names.
+    #[test]
+    fn the_older_spellings_of_the_two_searches_are_folded_as_well() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @index(ptr, i32) -> ptr, linkage(external);
+func @rindex(ptr, i32) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i32 111
+    %2 = call @index(%0, %1) : (ptr, i32) -> ptr
+    %3 = call @rindex(%0, %1) : (ptr, i32) -> ptr
+    call @use(%2, %3) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @index("), "{out}");
+        assert!(!out.contains("call @rindex("), "{out}");
+        assert!(out.contains("iconst.i64 4"), "the first o, {out}");
+        assert!(out.contains("iconst.i64 7"), "the last o, {out}");
     }
 
     /// A declaration of the wrong shape is a function of the program's own, whatever it is called.

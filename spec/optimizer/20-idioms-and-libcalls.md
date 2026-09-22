@@ -88,13 +88,15 @@ read is left alone, and a `strstr` is folded whether its result is read or not.
 
 **The rest of the family that answers.** `strchr`, `strrchr`, `strlen`, `strnlen`, `strcmp`,
 `strncmp`, `strspn`, `strcspn`, `strpbrk` and `memchr` over strings the module holds are each a
-number or a place in one of their arguments, worked out the way the library would work it out. Three
-of them have a shape rule that does not need the string at all: nothing is inside an empty set, so
-`strspn(s, "")` is zero, `strcspn(s, "")` is `strlen(s)`, and `strpbrk(s, "")` is a null pointer
-whatever `s` is, and a set of one character makes `strpbrk(s, "c")` a `strchr(s, 'c')` the same way
-a needle of one character does for `strstr`. A comparison answers one of minus one, zero and one,
-because the sign is what the standard promises and the magnitude is not, and that is what gcc leaves
-behind as well.
+number or a place in one of their arguments, worked out the way the library would work it out.
+`index` and `rindex` are the older spellings of the first two and are folded as the same two
+searches, which is what `gcc.c-torture/execute/builtins/strchr.c` and its `strrchr` companion ask for
+beside the modern names. Three of them have a shape rule that does not need the string at all:
+nothing is inside an empty set, so `strspn(s, "")` is zero, `strcspn(s, "")` is `strlen(s)`, and
+`strpbrk(s, "")` is a null pointer whatever `s` is, and a set of one character makes
+`strpbrk(s, "c")` a `strchr(s, 'c')` the same way a needle of one character does for `strstr`. A
+comparison answers one of minus one, zero and one, because the sign is what the standard promises and
+the magnitude is not, and that is what gcc leaves behind as well.
 
 **Two of them read a count rather than a terminator.** `memchr` and `strnlen` are told how many
 bytes they may look at, so they read the object rather than the string in it, and `memchr` finds a
