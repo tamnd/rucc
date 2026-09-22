@@ -111,7 +111,7 @@ pub(crate) fn counted(scev: &mut Scev<'_>, id: LoopId) -> Result<Around, &'stati
 ///
 /// `max(scale * value + offset, 0) * step + reach`, in the order it reads. The widening is the one
 /// the exit test the count came from asks for where there is one to do, a sign extension for a
-/// signed test and a zero extension for an unsigned one. The clamp is [`Assumption::Approaching`]
+/// signed test and a zero extension for an unsigned one. The clamp is [`Assumption::Entered`]
 /// paid for rather than assumed, and it is a `select` rather than a branch because the whole of this
 /// has to be straight line code in a preheader.
 ///

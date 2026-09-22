@@ -301,6 +301,11 @@ the invariant representation before anything is written down, since this is the 
 there is no later fold, so a loop adding one a million times leaves a constant behind and a loop
 adding an invariant leaves one multiply.
 
-Symbolic counts are taken for the deletion question and not yet for the value question. What that
-costs is visible in the corpus: `loop-deletion` at a million iterations with an unknown bound and
-its total read afterwards is the row where rucc still runs the loop.
+Symbolic counts are taken for both questions. The count is clamped at zero in front of the loop,
+which is the entry assumption paid for rather than leaned on, and it is read the way the exit test
+read it, a sign extension for an ordering on signed values and a zero extension for one on
+unsigned. The clamp is done in sixty four bits and the product is cut back to the type the value
+evolved in, which loses nothing, since cutting a product and multiplying a cut are the same number
+modulo two to the width. On the corpus `loop-deletion` at a million iterations with an unknown
+bound and its total read afterwards went from 5,826,206 instructions to 835,834, where gcc 16
+pays 804,628.
