@@ -440,7 +440,13 @@ mod tests {
     ///
     /// So the only thing that reaches one is a program that wrote the name in a template, which is
     /// what libgmp does in `gmp-impl.h` to put a limb the other way round.
-    const SWAP: &[&str] = &["bswap_32", "bswap_64"];
+    ///
+    /// The third is the same thing at a width `bswap` does not reach. Turning a sixteen bit number
+    /// round is exchanging its two bytes with each other, and this machine says that by naming the
+    /// high byte of a register, which only the first four registers have. femtolisp writes one in
+    /// `llt/utils.h`, which is how a C library older than `__builtin_bswap16` said it, and that
+    /// header is the one every other file of the library includes.
+    const SWAP: &[&str] = &["bswap_32", "bswap_64", "xchg_high_16"];
 
     /// The jump out of the function a template may end with, which a template asks for and nothing
     /// else could.
@@ -949,7 +955,14 @@ mod tests {
         let written = heads();
         for &opcode in SWAP {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
-            assert_eq!(form, x86_64::Form::Swap, "{opcode} is not a byte reversal");
+            // Two forms and one job. The wide reversals are one shape and the sixteen bit one is
+            // another, because the narrow one is an exchange between the halves of a register and
+            // has to say which register, so what they share is the answer they compute rather than
+            // the operands they compute it from.
+            assert!(
+                matches!(form, x86_64::Form::Swap | x86_64::Form::SwapHalves),
+                "{opcode} is not a byte reversal"
+            );
             assert!(
                 !(x86_64::FLAGS.writes)(opcode),
                 "{opcode} writes the condition state, so it is a unary operation after all"
@@ -961,7 +974,7 @@ mod tests {
             );
         }
         for &(opcode, form) in x86_64::INSTS {
-            if form == x86_64::Form::Swap {
+            if matches!(form, x86_64::Form::Swap | x86_64::Form::SwapHalves) {
                 assert!(SWAP.contains(&opcode), "{opcode} is a reversal and is not on the list");
             }
         }

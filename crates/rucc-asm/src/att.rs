@@ -383,6 +383,24 @@ impl Writer<'_> {
                         let operand = operands[usize::from(at)];
                         self.reg(operand, Width::Quad, func_name, spelled)?
                     }
+                    // The two halves of one word, which is the one instruction that names part of
+                    // a register rather than an amount of it. The low half is the byte the name
+                    // above would give it and the high half is the one only four registers have,
+                    // which is why the operand is fixed to one of the four where it is described.
+                    Arg::Low(at) => {
+                        let operand = operands[usize::from(at)];
+                        self.reg(operand, Width::Byte, func_name, spelled)?
+                    }
+                    Arg::High(at) => {
+                        let operand = operands[usize::from(at)];
+                        let Some(phys) = operand.reg.phys() else {
+                            return Err(Error::Virtual {
+                                func: func_name.to_owned(),
+                                opcode: spelled.to_owned(),
+                            });
+                        };
+                        format!("%{}", x86_64::gpr_high(phys).unwrap_or("?"))
+                    }
                     Arg::Named(register) => format!("%{register}"),
                     // A depth on the x87 stack rather than a register, which is why the number
                     // comes from the table and not from an operand. The assembler writes the top

@@ -87,7 +87,7 @@ impl Kind {
     #[must_use]
     pub fn of(arg: Arg) -> Self {
         match arg {
-            Arg::Reg(_, _) | Arg::Named(_) | Arg::Through => Kind::Reg,
+            Arg::Reg(_, _) | Arg::Low(_) | Arg::High(_) | Arg::Named(_) | Arg::Through => Kind::Reg,
             Arg::Xmm(_) => Kind::Vec,
             Arg::Stack(_) => Kind::Stack,
             Arg::Mem => Kind::Mem,
@@ -2773,6 +2773,18 @@ mod tests {
         assert_eq!(hex("xaddq", &[quad(RCX), Value::Mem(at)]), "48 0f c1 08");
         // The byte form reaching the second half of the register file, for the reason above.
         assert_eq!(hex("xchgb", &[byte(RSI), Value::Mem(at)]), "40 86 30");
+    }
+
+    /// The two bytes of a word exchanged with each other, which is the same instruction with both
+    /// of its arguments in one register and is the only way this machine says a sixteen bit byte
+    /// swap. The high byte is numbered as the low one plus four, which is the whole of the
+    /// difference between them in the bytes and is also why only the first four registers have one.
+    #[test]
+    fn the_high_byte_of_a_register_is_the_low_one_four_places_along() {
+        assert_eq!(hex("xchgb", &[byte(RAX), Value::High(RAX)]), "86 c4");
+        assert_eq!(hex("xchgb", &[byte(RCX), Value::High(RCX)]), "86 cd");
+        assert_eq!(hex("xchgb", &[byte(RDX), Value::High(RDX)]), "86 d6");
+        assert_eq!(hex("xchgb", &[byte(RBX), Value::High(RBX)]), "86 df");
     }
 
     #[test]

@@ -116,6 +116,11 @@ fn plain(form: Form) -> Timing {
         // writes the whole register and there is no carry between any two bytes of it, so the
         // machine does it in the same cycle an addition takes.
         Swap => (1, Unit::Int),
+        // Turning the two bytes of a word round, which is an exchange rather than a reversal and
+        // costs what an exchange costs. Every core in this family takes three operations for one,
+        // because the machine has no single operation that writes two places, and the answer is
+        // ready two cycles after the word arrives.
+        SwapHalves => (2, Unit::Int),
         // A comparison and the byte behind it, which is two instructions written as one name. The
         // byte cannot start until the comparison has set the bits it reads, so the pair costs the
         // two of them one after the other rather than the slower of the two.

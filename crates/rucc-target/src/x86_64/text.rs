@@ -42,7 +42,7 @@
 use crate::operand::Constraint;
 use crate::regs::PhysReg;
 
-use Arg::{Imm, Label, Lit, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
+use Arg::{High, Imm, Label, Lit, Low, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -121,6 +121,26 @@ pub enum Arg {
     /// register, which is what the register file holds, so there is nothing for a width to pick
     /// between.
     Xmm(u8),
+    /// The low byte of the word in the operand at that index, which is `al` for `rax`.
+    ///
+    /// The same register [`Arg::Reg`] at [`Width::Byte`] names, and a variant of its own because
+    /// the operand is a word and not a byte. An instruction that names both halves of a word works
+    /// on the whole of it, so what is live across it and what the bit tracking has to be told is
+    /// sixteen bits, and saying `Reg(n, Byte)` would say eight. There is one instruction here that
+    /// names the two halves and it is the one below.
+    Low(u8),
+    /// The high byte of the word in the operand at that index, which is `ah` for `rax`.
+    ///
+    /// The other half of [`Arg::Low`], and the one part of a register nothing else on this machine
+    /// can name. Only the first four registers have one, which is why an operand an instruction
+    /// spells this way is fixed to one of them by its description rather than handed out: the
+    /// allocator has no notion of half a register, and the way to keep it from putting a value
+    /// somewhere with no high byte is to say which register the value goes in.
+    ///
+    /// femtolisp is what asks. `llt/utils.h` swaps the two bytes of a sixteen bit number with
+    /// `xchgb %b0,%h0`, which is the ordinary way a C library written before `__builtin_bswap16`
+    /// said it, and that line is in the first header every other file of the library includes.
+    High(u8),
     /// A register the instruction names itself, which is one no operand could name.
     ///
     /// There is one, which is `ah`. It is the high byte of the remainder an eight bit division
@@ -254,6 +274,14 @@ static EXCHANGED: [Arg; 1] = [Reg(1, Byte)];
 // value that was there before is left in the register the operand arrived in, and the allocator has
 // already made those two the same by the time this is read. The one written down is the destination
 // at index zero, which is what every other two-address instruction here names.
+// The two halves of one word, which is the whole of what the one instruction that names a high byte
+// is given. The low half is the word coming out and the high half is the word going in, which is
+// two operands naming the same register because both of them are fixed to it. Writing it that way
+// round rather than naming one operand twice is what keeps the spelling honest: each end of the
+// instruction is named once, and the register the two of them print is the one the description
+// pinned rather than the one an allocator happened to choose.
+static SWAP_BYTES: [Arg; 2] = [Low(0), High(1)];
+
 static RMW_8: [Arg; 2] = [Reg(0, Byte), Mem];
 static RMW_16: [Arg; 2] = [Reg(0, Word), Mem];
 static RMW_32: [Arg; 2] = [Reg(0, Long), Mem];
@@ -1000,6 +1028,11 @@ static TEXT: &[(&str, &[Written])] = &[
     ("xchg_16", &[spell("xchgw", &RMW_16)]),
     ("xchg_32", &[spell("xchgl", &RMW_32)]),
     ("xchg_64", &[spell("xchgq", &RMW_64)]),
+    // The two bytes of a word exchanged with each other, which is the same instruction with both
+    // of its arguments in one register. It is a byte swap of a sixteen bit number and it is the
+    // only way this machine has of saying one, since `bswap` is thirty two bits and up. Nothing
+    // selects it: it is here because a template can write it and `llt/utils.h` does.
+    ("xchg_high_16", &[spell("xchgb", &SWAP_BYTES)]),
     ("xadd_8", &[spell("lock", &[]), spell("xaddb", &RMW_8)]),
     ("xadd_16", &[spell("lock", &[]), spell("xaddw", &RMW_16)]),
     ("xadd_32", &[spell("lock", &[]), spell("xaddl", &RMW_32)]),
@@ -1325,7 +1358,10 @@ pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
 /// the x87 stack, a symbol, and the block a jump goes to.
 fn shape_of(arg: Arg) -> Option<Shape> {
     match arg {
-        Reg(..) => Some(Shape::Reg),
+        // The two halves of a word are each a register as far as a template writing one is
+        // concerned, since `%h0` and `%b0` are both a register argument and what tells them apart
+        // is which part of one they name.
+        Reg(..) | Low(_) | High(_) => Some(Shape::Reg),
         // An immediate the table wrote is still an immediate to look the opcode up by, because a
         // template that names this instruction has to write the number out the way the table has
         // it, and [`super::read`] refuses it when the number is a different one.
@@ -1352,7 +1388,7 @@ fn names_every_operand(name: &str, args: &[Arg]) -> bool {
     let described = form.operands();
     let named = |index: usize| {
         let Ok(index) = u8::try_from(index) else { return false };
-        args.iter().any(|&arg| matches!(arg, Reg(at, _) if at == index))
+        args.iter().any(|&arg| matches!(arg, Reg(at, _) | Low(at) | High(at) if at == index))
     };
     described.iter().enumerate().all(|(index, desc)| {
         if matches!(desc.constraint, Constraint::Fixed(_)) || named(index) {
@@ -1422,6 +1458,12 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
                     let bits = 8 << width.index();
                     found = Some(found.map_or(bits, |had: u32| had.max(bits)));
                 }
+                // Half of a word each, so the operand an instruction names this way is a word: the
+                // two halves together are every bit of it, and an instruction that exchanges them
+                // reads and writes all sixteen.
+                Low(at) | High(at) if at == operand => {
+                    found = Some(found.map_or(16, |had: u32| had.max(16)));
+                }
                 Xmm(at) if at == operand => return None,
                 _ => {}
             }
@@ -1466,6 +1508,19 @@ pub fn gpr_name(reg: PhysReg, width: Width) -> Option<&'static str> {
     GPR_TEXT.get(usize::from(reg.number())).map(|names| names[width.index()])
 }
 
+/// What the byte above the low one is called, for the four registers that have a name for it.
+///
+/// `None` for the other twelve, which is most of them: the eight x86-64 added have no high byte at
+/// all, and `rsp`, `rbp`, `rsi` and `rdi` have the bits but no way to name them, because the four
+/// numbers that would say so are the four these names use. That is the whole reason an instruction
+/// naming one has its register fixed rather than handed out. See [`Arg::High`].
+///
+/// In the register file's order, which is the encoding's, so `rcx` is second and `rbx` is fourth.
+#[must_use]
+pub fn gpr_high(reg: PhysReg) -> Option<&'static str> {
+    ["ah", "ch", "dh", "bh"].get(usize::from(reg.number())).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,7 +1534,9 @@ mod tests {
             .iter()
             .flat_map(|inst| inst.args)
             .filter_map(|arg| match *arg {
-                Reg(at, _) | Xmm(at) => Some(at),
+                // Half of a word names the operand the word is, since which half is wanted says
+                // nothing about which operand holds it.
+                Reg(at, _) | Xmm(at) | Low(at) | High(at) => Some(at),
                 _ => None,
             })
             .collect();
@@ -1512,7 +1569,7 @@ mod tests {
             let mut through = false;
             for arg in insts.iter().flat_map(|inst| inst.args) {
                 match *arg {
-                    Reg(at, _) | Xmm(at) => assert!(
+                    Reg(at, _) | Xmm(at) | Low(at) | High(at) => assert!(
                         usize::from(at) < operands.len(),
                         "{name} names operand {at} and has {} of them",
                         operands.len()

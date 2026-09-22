@@ -527,3 +527,30 @@ fn an_output_a_template_also_reads_is_read_as_a_zero() {
     assert!(body.contains("sbbq"), "the subtract with borrow never reached the listing:\n{body}");
     assert!(zeroed(&body), "the operand it reads was never given a value:\n{body}");
 }
+
+#[test]
+fn the_two_halves_of_a_word_are_exchanged_in_the_register_that_has_both() {
+    // `ByteSwap16` in femtolisp's `llt/utils.h`, which is how a C library written before
+    // `__builtin_bswap16` turned a sixteen bit number round. It is the only template in the corpus
+    // that names half a register rather than an amount of one, and the half it names is the byte
+    // above the low one, which only the first four registers of this machine have. So the operand
+    // is in `rax` because the description of the instruction says so, and the value the statement
+    // handed it is carried there first.
+    let source = "unsigned short f(unsigned short x) { \
+                  __asm(\"xchgb %b0,%h0\" : \"=Q\" (x) : \"0\" (x)); return x; }\n";
+    let body = body(&asm("byte-swap", source), "f");
+    assert!(body.contains("xchgb\t%al, %ah"), "the exchange never reached the listing:\n{body}");
+}
+
+#[test]
+fn a_high_byte_of_one_word_and_a_low_byte_of_another_is_refused() {
+    // There is no instruction here that exchanges a byte of one register with a byte of another, so
+    // a template asking for one is told rather than being read as the exchange within a register
+    // that it resembles. Getting this wrong would be a program that builds and swaps the wrong two
+    // bytes, which is the one outcome worth refusing a template to avoid.
+    let source = "void f(unsigned short a, unsigned short b) { \
+                  __asm(\"xchgb %b0,%h1\" : \"+Q\" (a), \"+Q\" (b)); }\n";
+    let (ok, _, said) = run("byte-swap-across", source);
+    assert!(!ok, "a byte of one register exchanged with a byte of another was accepted");
+    assert!(said.contains("which nothing here assembles"), "{said}");
+}
