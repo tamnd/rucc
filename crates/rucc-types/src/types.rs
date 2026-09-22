@@ -80,6 +80,16 @@ pub struct RecordInfo {
     /// compatible with a parameter of any member's type, and a value assigned to it is put into
     /// whichever member it fits. Both are in `spec/13-gnu-compat.md`.
     pub transparent: bool,
+    /// Whether the scalars in it are stored in the byte order the target does not have.
+    ///
+    /// What `__attribute__((scalar_storage_order("big-endian")))` on a little-endian target asks
+    /// for, and what the same attribute written with the target's own order does not. It changes
+    /// nothing about where the members sit: the record is the size and the alignment it would
+    /// otherwise be and every member is at the offset it would otherwise be at. What it changes
+    /// is the order of the bytes inside each scalar, which is a byte swap on every load and
+    /// store, and the end of a storage unit a bit-field is allocated from. Both are in
+    /// `spec/13-gnu-compat.md`.
+    pub reverse: bool,
 }
 
 /// What is known about one `enum` declaration.
@@ -334,6 +344,7 @@ impl Types {
             variable: None,
             fields: Vec::new(),
             transparent: false,
+            reverse: false,
         });
         id
     }
@@ -351,6 +362,21 @@ impl Types {
     /// Panics if `id` came from a different table.
     pub fn make_transparent(&mut self, id: RecordId) {
         self.records[id.0 as usize].transparent = true;
+    }
+
+    /// Records that a record holds its scalars in the byte order the target does not have.
+    ///
+    /// Which order the attribute asked for and which one the target has are both known where the
+    /// attribute is read, so what arrives here is the answer to the one question the rest of the
+    /// compiler asks. It is a fact about the declaration rather than about one spelling of it, for
+    /// the reason [`Types::make_transparent`] gives, and it is set after the members are laid out
+    /// because it changes nothing about the layout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    pub fn make_reverse_order(&mut self, id: RecordId) {
+        self.records[id.0 as usize].reverse = true;
     }
 
     /// The type of a declared record.

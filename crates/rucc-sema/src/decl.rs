@@ -426,13 +426,20 @@ pub struct InitEntry {
     /// The width in bits, for a bit-field, and zero for everything else. A bit-field of width
     /// zero has no name and cannot be initialized, so zero is free to mean this instead.
     pub bit_width: u32,
+    /// Whether the record this value lands in stores its scalars in the reverse byte order.
+    ///
+    /// The offsets here are from the start of the whole object, so the record a value belongs to
+    /// is no longer in sight by the time the entry is written out. This is the one thing about
+    /// that record the writing needs, and it is answered where the walk still knows which member
+    /// it is on.
+    pub reverse: bool,
 }
 
 impl InitEntry {
     /// A value at a byte offset, which is what everything that is not a bit-field is.
     #[must_use]
     pub const fn at(offset: u64, value: ExprId) -> InitEntry {
-        InitEntry { offset, value, bit_offset: 0, bit_width: 0 }
+        InitEntry { offset, value, bit_offset: 0, bit_width: 0, reverse: false }
     }
 
     /// Whether this entry writes part of a byte rather than whole bytes.

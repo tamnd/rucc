@@ -41,7 +41,7 @@ use rucc_sema::{
     Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
-use rucc_types::{TypeId, TypeKind, Types, compatible};
+use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
 
 use crate::abi::{self, Plan};
 use crate::aliasing;
@@ -1201,6 +1201,11 @@ impl Unit<'_> {
         if let Some(literal) = self.literal_read(entry.value) {
             return self.literal_image(literal, self.tast.expr_span(entry.value));
         }
+        if entry.reverse {
+            if let Some(reversed) = self.reversed_datum(entry) {
+                return reversed;
+            }
+        }
         // How much room is left in the object, which is what a string literal longer than the
         // array it initializes is cut down to. An entry that begins where the object ends is the
         // initializer of a flexible array member, and there the object grows to hold what was
@@ -1308,19 +1313,77 @@ impl Unit<'_> {
             };
             let width = entry.bit_width;
             let ones = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
-            let mut mask = ones << entry.bit_offset;
-            let mut placed = ((number as u128) & ones) << entry.bit_offset;
-            let mut at = entry.offset;
-            while mask != 0 && at < size {
-                let (bits, keep) = ((placed & 0xff) as u8, !((mask & 0xff) as u8));
-                let byte = bytes.entry(at).or_insert(0);
-                *byte = (*byte & keep) | bits;
+            // Which bytes the field lies in and where in them it sits. A reversed field lies in
+            // the same bytes and is counted from the top of them, and the byte at its address is
+            // then the most significant of the ones the value is assembled in rather than the
+            // least, which is why the walk below runs the other way as well.
+            let span = u64::from((entry.bit_offset + width).div_ceil(8));
+            let start = if entry.reverse {
+                u32::try_from(span * 8).unwrap_or(u32::MAX) - entry.bit_offset - width
+            } else {
+                entry.bit_offset
+            };
+            let mut mask = ones << start;
+            let mut placed = ((number as u128) & ones) << start;
+            let mut step = 0;
+            while mask != 0 && step < span {
+                let at = if entry.reverse {
+                    entry.offset + span - 1 - step
+                } else {
+                    entry.offset + step
+                };
+                if at < size {
+                    let (bits, keep) = ((placed & 0xff) as u8, !((mask & 0xff) as u8));
+                    let byte = bytes.entry(at).or_insert(0);
+                    *byte = (*byte & keep) | bits;
+                }
                 mask >>= 8;
                 placed >>= 8;
-                at += 1;
+                step += 1;
             }
         }
         bytes
+    }
+
+    /// What one entry of a record whose scalars are stored the other way round puts in the image.
+    ///
+    /// The bytes of the value, written in the order opposite to the target's, which is the whole of
+    /// what the attribute asks for. It answers with nothing where the ordinary path is already
+    /// right: a value one byte wide has only one order, and an aggregate is bytes its own members
+    /// put there in whatever order each of them is stored in.
+    ///
+    /// Two things are refused rather than written the wrong way. A complex value is two scalars and
+    /// this is one, and an address is a number the linker fills in later and there is nowhere to
+    /// say it goes in backwards. Both are worth an answer one day and neither is worth a wrong one.
+    fn reversed_datum(&mut self, entry: InitEntry) -> Option<Vec<Datum>> {
+        let ty = self.tast[entry.value].ty;
+        let span = self.tast.expr_span(entry.value);
+        if is_complex(self.types, ty) {
+            let what = "a complex member of a record whose scalars are stored the other way round";
+            self.unsupported(what, span);
+            return Some(Vec::new());
+        }
+        let size = repr::size_of(self.types, self.target, ty);
+        if size < 2 || !is_scalar(self.types, ty) {
+            return None;
+        }
+        let bits = match self.fold(entry.value) {
+            Some(Const::Int(number)) => number as u128,
+            Some(Const::Float(number)) => number.to_bits(),
+            Some(Const::Address(Address { base: Base::Absolute, offset })) => offset as u128,
+            Some(_) => {
+                let what = "an address in a record whose scalars are stored the other way round";
+                self.unsupported(what, span);
+                return Some(Vec::new());
+            }
+            None => return Some(Vec::new()),
+        };
+        let take = cap(size).min(16);
+        let mut bytes = bits.to_le_bytes()[..take].to_vec();
+        if self.target.little_endian {
+            bytes.reverse();
+        }
+        Some(vec![Datum::Bytes(self.module.push_bytes(&bytes))])
     }
 
     /// One entry of an image, given how many bytes are left in the object it goes in.

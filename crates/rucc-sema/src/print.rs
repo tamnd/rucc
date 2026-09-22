@@ -858,7 +858,7 @@ switch
         let one = f.constant(1, int);
         let entries = f.tast.add_init_entries(&[
             InitEntry::at(0, one),
-            InitEntry { offset: 4, value: one, bit_offset: 3, bit_width: 5 },
+            InitEntry { offset: 4, value: one, bit_offset: 3, bit_width: 5, reverse: false },
         ]);
         let mut decl = object_decl(array);
         decl.init = Some(entries);

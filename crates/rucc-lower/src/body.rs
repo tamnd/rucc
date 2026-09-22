@@ -435,13 +435,20 @@ struct Place {
     /// Worked out from the names the place was written with, which is what
     /// [`restrict`](mod@crate::restrict) does, and read by layer 5 of the alias analysis.
     restrict: Restrict,
+    /// Whether the bytes of a scalar here are stored the other way round from the target's order.
+    ///
+    /// True for a member of a record carrying `scalar_storage_order` and for an element of an
+    /// array that is such a member, which is what [`rucc_sema::reverse_ordered`] answers. A read
+    /// of one swaps the bytes it loaded and a write swaps the bytes before it stores them, and a
+    /// bit-field carries the same answer in its [`Run`] instead.
+    reverse: bool,
 }
 
 impl Place {
     /// A place that is not a member of a union, which is every place but the ones [`Body::member`]
     /// builds out of one.
     const fn new(at: Where, ty: TypeId) -> Self {
-        Self { at, ty, punned: false, owns: 0, restrict: Restrict::NONE }
+        Self { at, ty, punned: false, owns: 0, restrict: Restrict::NONE, reverse: false }
     }
 }
 
@@ -2945,7 +2952,8 @@ impl<'u> Body<'_, 'u> {
             // Everything this leaves of the bytes it writes was zeroed above, since a
             // bit-field entry counts as covering none of the object.
             let align = repr::align_of(self.types(), self.target(), place.ty);
-            let run = Run::at(align, entry.offset, entry.bit_offset, entry.bit_width);
+            let run = Run::at(align, entry.offset, entry.bit_offset, entry.bit_width)
+                .reversed(entry.reverse);
             if let Some(value) = self.eval(value) {
                 self.store_bits(addr, run, ty, value, span);
             }
@@ -2975,6 +2983,7 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         let Some(value) = self.eval(value) else { return };
+        let value = self.swapped(value, entry.reverse, span);
         let info = self.access(ty);
         // The object's qualifiers as well as the entry's, because what makes a write volatile is
         // the object written rather than the value written to it. The entry of
@@ -3118,7 +3127,10 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Subscript { base, index } => {
                 let addr = self.element(base, index, ty, span);
                 let through = self.through(base);
-                Place { restrict: through, ..Place::new(Where::Addr(addr), ty) }
+                // An array is not a type the attribute can be written on, so an element of one
+                // is stored the way the record the array is a member of stores everything.
+                let reverse = rucc_sema::reverse_ordered(self.tast(), self.types(), expr);
+                Place { restrict: through, reverse, ..Place::new(Where::Addr(addr), ty) }
             }
             // An aggregate is read by address rather than by value, so the conversion that
             // reads one is the identity and the place under it is the answer. Unless the object
@@ -4086,16 +4098,21 @@ impl<'u> Body<'_, 'u> {
                 ..Place::new(Where::Addr(addr), ty)
             };
         };
-        let (kind, found) = {
+        let (kind, reverse, found) = {
             let info = self.types().record_info(id);
-            (info.kind, info.fields.get(field as usize).copied())
+            (info.kind, info.reverse, info.fields.get(field as usize).copied())
         };
         // A member of something that is punned is punned too. `u.s.x` names bytes that another
         // member of `u` may have been written through, and how deep in the nesting the name went
         // does not change which bytes they are.
         let punned = place.punned || kind == RecordKind::Union;
         let Some(member) = found else {
-            return Place { punned, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) };
+            return Place {
+                punned,
+                restrict: place.restrict,
+                reverse,
+                ..Place::new(Where::Addr(addr), ty)
+            };
         };
         let byte = member.offset;
         let owns = self.owned(id, record, kind, byte, place.owns);
@@ -4113,11 +4130,12 @@ impl<'u> Body<'_, 'u> {
             // byte offset four is aligned to four, which is what the run needs to know to say
             // how the loads under it are aligned.
             let addr = self.offset(addr, byte, span);
-            let run = Run::at(base, byte, member.bit, width);
+            let run = Run::at(base, byte, member.bit, width).reversed(reverse);
             return Place {
                 punned,
                 owns,
                 restrict: place.restrict,
+                reverse,
                 ..Place::new(Where::Bits(addr, run), ty)
             };
         }
@@ -4141,10 +4159,22 @@ impl<'u> Body<'_, 'u> {
             let placed = u32::try_from(member.align).unwrap_or(u32::MAX);
             self.aligns(moved, base.min(placed));
             let where_ = Where::Addr(moved);
-            return Place { punned, owns, restrict: place.restrict, ..Place::new(where_, ty) };
+            return Place {
+                punned,
+                owns,
+                restrict: place.restrict,
+                reverse,
+                ..Place::new(where_, ty)
+            };
         }
         let addr = self.offset(addr, byte, span);
-        Place { punned, owns, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) }
+        Place {
+            punned,
+            owns,
+            restrict: place.restrict,
+            reverse,
+            ..Place::new(Where::Addr(addr), ty)
+        }
     }
 
     /// How many bytes of its record a member at `byte` owns, counting the padding after it.
@@ -4354,16 +4384,15 @@ impl<'u> Body<'_, 'u> {
                 // number on an instruction that would never look at it.
                 let mut info = MemInfo { owns: 0, ..self.info_of(place) };
                 let flags = self.flags(place.ty);
-                match ordered {
-                    Ordered::No => Some(self.build(span).load(ty, addr, info, flags)),
+                let loaded = match ordered {
+                    Ordered::No => self.build(span).load(ty, addr, info, flags),
                     Ordered::Instruction => {
                         info.order = MemOrder::SeqCst;
-                        Some(self.build(span).atomic_load(ty, addr, info, flags))
+                        self.build(span).atomic_load(ty, addr, info, flags)
                     }
-                    Ordered::Call => {
-                        Some(self.library_load(addr, place.ty, ty, MemOrder::SeqCst, span))
-                    }
-                }
+                    Ordered::Call => self.library_load(addr, place.ty, ty, MemOrder::SeqCst, span),
+                };
+                Some(self.swapped(loaded, place.reverse, span))
             }
             Where::Bits(addr, run) => Some(self.read_bits(addr, run, place.ty, ty, span)),
         }
@@ -4384,6 +4413,7 @@ impl<'u> Body<'_, 'u> {
             Where::Addr(addr) => {
                 let mut info = self.info_of(place);
                 let flags = self.flags(place.ty);
+                let value = self.swapped(value, place.reverse, span);
                 match ordered {
                     Ordered::No => {
                         self.build(span).store(value, addr, info, flags);
@@ -4419,6 +4449,36 @@ impl<'u> Body<'_, 'u> {
         self.widen(back, signed, self.func[value].ty, span)
     }
 
+    /// A value on its way to or from a place whose scalars are stored the other way round.
+    ///
+    /// The same operation in both directions, because reversing bytes is its own inverse, which is
+    /// why one function serves the load and the store. Anything one byte wide is already in the
+    /// only order one byte has, and anything wider than a byte goes through the same [`Opcode::Bswap`]
+    /// `__builtin_bswap64` goes through, so the backends that have a byte swap instruction use it
+    /// and the ones that do not get the shifts and masks `rucc_codegen::expand` writes.
+    ///
+    /// A floating value and a pointer are swapped as the integer of their own width, since a byte
+    /// order is a fact about bytes and neither of those is an integer the instruction takes. The
+    /// bit pattern comes back unchanged apart from the order, which is what the attribute asks for:
+    /// a `double` member of one of these records is eight bytes read the other way round and not a
+    /// different number.
+    fn swapped(&mut self, value: Value, reverse: bool, span: Span) -> Value {
+        let ty = self.func[value].ty;
+        if !reverse || ty.bits() <= 8 {
+            return value;
+        }
+        let bits = Type::int(ty.bits());
+        if ty == bits {
+            return self.build(span).unary(Opcode::Bswap, value, ty);
+        }
+        let mut build = self.build(span);
+        let opcode = if ty.is_ptr() { Opcode::PtrToInt } else { Opcode::Bitcast };
+        let number = build.unary(opcode, value, bits);
+        let swapped = build.unary(Opcode::Bswap, number, bits);
+        let back = if ty.is_ptr() { Opcode::IntToPtr } else { Opcode::Bitcast };
+        build.unary(back, swapped, ty)
+    }
+
     // Bit-fields.
 
     /// Reads a run of bits as a value of the type the member was declared with.
@@ -4430,9 +4490,9 @@ impl<'u> Body<'_, 'u> {
         let flags = self.flags(ty);
         let mut whole = None;
         for piece in run.pieces() {
-            let part = self.load_piece(addr, piece, flags, span);
+            let part = self.load_piece(addr, piece, run.reverse, flags, span);
             let part = self.widen(part, false, unit, span);
-            let part = self.shift(Opcode::Shl, part, piece.offset as u32 * 8, span);
+            let part = self.shift(Opcode::Shl, part, piece.shift, span);
             whole = Some(match whole {
                 None => part,
                 Some(sofar) => self.build(span).binary(Opcode::Or, sofar, part, Flags::NONE),
@@ -4440,7 +4500,7 @@ impl<'u> Body<'_, 'u> {
         }
         let whole = whole.expect("a run of at least one bit lies in at least one byte");
         let signed = repr::is_signed(self.types(), self.target(), ty);
-        let value = self.narrow(whole, run.start, run.width, signed, span);
+        let value = self.narrow(whole, run.field(), run.width, signed, span);
         self.widen(value, signed, into, span)
     }
 
@@ -4467,21 +4527,21 @@ impl<'u> Body<'_, 'u> {
         // extended, because those bits belong to whatever else lives in these bytes.
         let wide = self.widen(value, signed, unit, span);
         let kept = self.narrow(wide, 0, run.width, false, span);
-        let placed = self.shift(Opcode::Shl, kept, run.start, span);
+        let placed = self.shift(Opcode::Shl, kept, run.field(), span);
         for piece in run.pieces() {
-            let part = self.shift(Opcode::LShr, placed, piece.offset as u32 * 8, span);
+            let part = self.shift(Opcode::LShr, placed, piece.shift, span);
             let part = self.widen(part, false, Type::int(piece.size * 8), span);
             let stored = if piece.whole() {
                 // Nothing but the field is in this piece, so what was there does not matter.
                 part
             } else {
-                let old = self.load_piece(addr, piece, flags, span);
+                let old = self.load_piece(addr, piece, run.reverse, flags, span);
                 let ty = self.func[old].ty;
                 let keep = self.build(span).iconst(ty, !piece.mask() as i128);
                 let old = self.build(span).binary(Opcode::And, old, keep, Flags::NONE);
                 self.build(span).binary(Opcode::Or, old, part, Flags::NONE)
             };
-            self.store_piece(addr, piece, stored, flags, span);
+            self.store_piece(addr, piece, stored, run.reverse, flags, span);
         }
         Some(kept)
     }
@@ -4502,7 +4562,18 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// One of the loads the bytes under a run are read by.
-    fn load_piece(&mut self, addr: Value, piece: Piece, flags: Flags, span: Span) -> Value {
+    ///
+    /// Reversed, the piece comes back with its bytes the other way round from how they lie, which
+    /// is the order the assembled integer is put together in and the order the mask on it is
+    /// written for.
+    fn load_piece(
+        &mut self,
+        addr: Value,
+        piece: Piece,
+        reverse: bool,
+        flags: Flags,
+        span: Span,
+    ) -> Value {
         let addr = self.offset(addr, piece.offset, span);
         let info = MemInfo {
             size: 0,
@@ -4512,11 +4583,30 @@ impl<'u> Body<'_, 'u> {
             owns: 0,
             restrict: Restrict::NONE,
         };
-        self.build(span).load(Type::int(piece.size * 8), addr, info, flags)
+        let ty = Type::int(piece.size * 8);
+        let loaded = self.build(span).load(ty, addr, info, flags);
+        if reverse && piece.size > 1 {
+            return self.build(span).unary(Opcode::Bswap, loaded, ty);
+        }
+        loaded
     }
 
     /// One of the stores the bytes under a run are written by.
-    fn store_piece(&mut self, addr: Value, piece: Piece, value: Value, flags: Flags, span: Span) {
+    fn store_piece(
+        &mut self,
+        addr: Value,
+        piece: Piece,
+        value: Value,
+        reverse: bool,
+        flags: Flags,
+        span: Span,
+    ) {
+        let value = if reverse && piece.size > 1 {
+            let ty = self.func[value].ty;
+            self.build(span).unary(Opcode::Bswap, value, ty)
+        } else {
+            value
+        };
         let addr = self.offset(addr, piece.offset, span);
         let info = MemInfo {
             size: 0,

@@ -208,6 +208,14 @@ impl Checker<'_> {
         if let Some(at) = self.transparent_union(attrs) {
             self.make_transparent(id, at);
         }
+        // After the layout and not before it, because the order the scalars are stored in changes
+        // nothing about where they sit: the record is the size and the alignment it would be
+        // without the attribute and so is every member of it. Measured against gcc 16.2.0 on
+        // x86-64 over both of the shapes that could have said otherwise, an ordinary member and a
+        // run of bit-fields.
+        if self.storage_order(attrs) == Some(self.cx.target.little_endian) {
+            self.types.make_reverse_order(id);
+        }
     }
 
     /// `transparent_union` on a union, checked against the union it was written on.

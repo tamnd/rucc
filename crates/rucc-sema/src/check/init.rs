@@ -87,6 +87,11 @@ struct Place {
     bit_offset: u32,
     /// The width in bits, for a bit-field, and zero for everything else.
     bit_width: u32,
+    /// Whether the record this sub-object is a member of stores its scalars in the reverse byte
+    /// order. Carried down through an array, since an element of one is stored the way the record
+    /// the array is in stores everything, and asked again at every record, since a record nested
+    /// inside another one keeps its own order.
+    reverse: bool,
     /// How it was reached from the level above, for the note that names it.
     part: Part,
 }
@@ -214,6 +219,7 @@ impl Walk {
             value,
             bit_offset: place.bit_offset,
             bit_width: place.bit_width,
+            reverse: place.reverse,
         });
     }
 }
@@ -253,7 +259,8 @@ impl<'a> Checker<'a> {
             }
         }
         let mut w = Walk::new(name, is_static, constant);
-        let place = Place { ty, offset: 0, bit_offset: 0, bit_width: 0, part: Part::Root };
+        let place =
+            Place { ty, offset: 0, bit_offset: 0, bit_width: 0, reverse: false, part: Part::Root };
         let reached = match self.ast[init] {
             ast::Init::List(list) => self.braced(&mut w, place, list, span, true),
             ast::Init::Expr(expr) => self.whole(&mut w, place, expr, span),
@@ -294,7 +301,8 @@ impl<'a> Checker<'a> {
         let deduced = self.tast[value].ty;
         let ty = self.qualify(deduced, quals, span);
         let mut w = Walk::new(name, is_static, constant);
-        let place = Place { ty, offset: 0, bit_offset: 0, bit_width: 0, part: Part::Root };
+        let place =
+            Place { ty, offset: 0, bit_offset: 0, bit_width: 0, reverse: false, part: Part::Root };
         self.store_scalar(&mut w, place, value, span);
         if w.poisoned {
             return None;
@@ -1107,16 +1115,19 @@ impl<'a> Checker<'a> {
                 offset: place.offset + index * size,
                 bit_offset: 0,
                 bit_width: 0,
+                reverse: place.reverse,
                 part: Part::Index(index),
             }),
             Kind::Record { record, .. } => {
-                let field =
-                    *self.types.record_info(record).fields.get(usize::try_from(index).ok()?)?;
+                let info = self.types.record_info(record);
+                let reverse = info.reverse;
+                let field = *info.fields.get(usize::try_from(index).ok()?)?;
                 Some(Place {
                     ty: field.ty,
                     offset: place.offset + field.offset,
                     bit_offset: field.bit,
                     bit_width: field.bits.unwrap_or(0),
+                    reverse,
                     part: Part::Field(field.name),
                 })
             }

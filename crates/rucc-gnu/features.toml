@@ -319,11 +319,11 @@ notes = "On a record and on one member of a record, in both the bare and the arm
 name = "scalar_storage_order"
 kind = "attribute"
 gcc_version = "6.1"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = []
-tests = ["rucc-driver::a_record_that_asks_for_the_other_byte_order_is_refused_rather_than_laid_out_in_this_one"]
-notes = "Reverses the byte order of every scalar in a record, which is what a program reading a wire format or a disk image on the other endianness writes it for. Ignoring it lays the record out in the host order and hands back every field with its bytes the wrong way round, so it is refused."
+tests = ["rucc-driver::a_record_that_asks_for_the_other_byte_order_swaps_every_scalar_it_holds", "rucc-driver::a_bit_field_in_one_of_those_records_is_counted_from_the_top_of_its_bytes", "rucc-driver::the_address_of_a_scalar_stored_the_other_way_round_is_refused", "rucc-driver::a_storage_order_that_names_neither_end_is_refused_with_the_two_words_that_are_taken"]
+notes = "Reverses the byte order of every scalar in a record, which is what a program reading a wire format or a disk image on the other endianness writes it for. The layout is untouched and only the numbering of the bits changes, from the bottom of the record's bytes to the top of them, so a scalar comes out byte swapped and a bit-field is counted from the other end of the bytes it lies in. Taking the address of one of those scalars is refused under E0712 the way gcc refuses it. A complex member, an address a relocation fills in and a copy between two records of different orders are reported as unsupported rather than written wrong."
 
 [[feature]]
 name = "section"
