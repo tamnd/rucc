@@ -18,6 +18,25 @@
 //! and is worth doing wherever the haystack came from. `strstr` of two strings this module holds is
 //! the answer itself, which is a place in the haystack or a null pointer, and nothing is called.
 //!
+//! `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strrchr`, `memchr`, `strspn`, `strcspn` and
+//! `strpbrk` of strings this module holds are the answer itself in the same way, which is a number
+//! for the first four and the last two of the six that search, and a place in the first argument or
+//! a null pointer for the other ones. The number goes in with the width the call was declared to
+//! give back, because a program that declared `strlen` as something returning an `int` is a program
+//! whose reader of that answer reads an `int`.
+//!
+//! Three of them have a rule about the shape rather than about the bytes. `strpbrk(s, "")` is a
+//! null pointer and `strspn(s, "")` is zero, since nothing at all is in an empty set, and
+//! `strcspn(s, "")` is `strlen(s)` for the same reason read the other way. `strpbrk(s, "c")` is
+//! `strchr(s, 'c')`, which is the `strstr` rule again for a set of one character instead of a
+//! needle of one.
+//!
+//! Two of them are told how far to read rather than going looking for a terminator, and those two
+//! read the object's bytes rather than the string in it. `memchr(s, c, n)` needs the object to have
+//! `n` bytes from `s` on, and it is refused where it does not, since a call reading past the end of
+//! what the compiler can see is a call whose answer the compiler does not know. `strnlen(s, n)` is
+//! the count where nothing terminated the string inside it.
+//!
 //! `printf` with the format alone: nothing at all when it is empty, `putchar` when it is one
 //! character, and `puts` of the format without its last character when the format holds no `%` and
 //! ends in a newline. `printf("%s\n", p)` is `puts(p)` and `printf("%c", c)` is `putchar(c)`,
@@ -41,9 +60,13 @@
 //!
 //! For the printf family, its result has to be read by nothing. `printf` answers the number of
 //! characters written and `puts` answers a non-negative number that is not that count, so a program
-//! looking at the answer is a program this may not touch. `strstr` is the other way round: the
-//! answer is the whole point of the call and the fold produces it, so a program reading it is the
-//! ordinary case.
+//! looking at the answer is a program this may not touch. The str and mem families are the other
+//! way round: the answer is the whole point of the call and the fold produces it, so a program
+//! reading it is the ordinary case.
+//!
+//! It has to give back one value of the kind its name says it does. A program that declared
+//! `strchr` as something returning two values, or a number, declared a function of its own and a
+//! pointer into a string literal is not what it answers.
 //!
 //! The name has to be the one the source spelled rather than the one the object file will carry.
 //! `extern char *strstr (const char *, const char *) __asm ("my_strstr");` is a declaration of
@@ -102,16 +125,26 @@ pub const NAME: &str = "libcall";
 const DEPTH: u32 = 4;
 
 /// The names a fold may leave behind, sorted.
-const REPLACEMENTS: [&str; 6] = ["fputc", "fputs", "fwrite", "putchar", "puts", "strchr"];
+const REPLACEMENTS: [&str; 7] = ["fputc", "fputs", "fwrite", "putchar", "puts", "strchr", "strlen"];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 7] = [
+const SOURCES: [&str; 17] = [
     "fprintf",
     "fprintf_unlocked",
     "fputs",
     "fputs_unlocked",
+    "memchr",
     "printf",
     "printf_unlocked",
+    "strchr",
+    "strcmp",
+    "strcspn",
+    "strlen",
+    "strncmp",
+    "strnlen",
+    "strpbrk",
+    "strrchr",
+    "strspn",
     "strstr",
 ];
 
@@ -134,13 +167,37 @@ enum Plan {
     },
 }
 
-/// What a search for a string found.
+/// What a call that answers rather than writes was going to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     /// That many bytes along from a value the call was handed.
     Along(Value, u64),
     /// Nowhere in it, which is a null pointer.
     Nowhere,
+    /// That number, in whatever type the call was declared to give back.
+    ///
+    /// The type is read off the call rather than worked out from the name, because a program that
+    /// declared `strlen` as something returning an `int` gets an `int`, and a constant of the
+    /// width the call already had is the only one that can take its place.
+    Number(i128),
+}
+
+/// Which of the places a character appears in a string a search wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// `strchr`.
+    First,
+    /// `strrchr`.
+    Last,
+}
+
+/// Which way round the test in a span is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Set {
+    /// `strspn`, which walks while the character is one of the set.
+    Inside,
+    /// `strcspn`, which walks while it is not.
+    Outside,
 }
 
 /// One argument of a replacement call.
@@ -223,6 +280,7 @@ fn canonical(module: &Module, name: &str) -> Signature {
         "fputc" => Signature::new().with_params(&[int, Type::PTR]).with_returns(&[int]),
         "fputs" => Signature::new().with_params(&[Type::PTR, Type::PTR]).with_returns(&[int]),
         "strchr" => Signature::new().with_params(&[Type::PTR, int]).with_returns(&[Type::PTR]),
+        "strlen" => Signature::new().with_params(&[Type::PTR]).with_returns(&[size]),
         // `fwrite`, the one that is told how many bytes to write rather than going looking for a
         // terminator, and the only one of the five whose types are the target's rather than fixed.
         _ => {
@@ -401,7 +459,256 @@ impl Site<'_> {
             "fputs" if ignored => self.fputs(&args, false),
             "fputs_unlocked" if ignored => self.fputs(&args, true),
             "strstr" => self.strstr(data, &args),
+            "strchr" => self.strchr(data, &args, Side::First),
+            "strrchr" => self.strchr(data, &args, Side::Last),
+            "memchr" => self.memchr(data, &args),
+            "strlen" => self.strlen(data, &args),
+            "strnlen" => self.strnlen(data, &args),
+            "strcmp" => self.strcmp(data, &args),
+            "strncmp" => self.strncmp(data, &args),
+            "strcspn" => self.span(data, &args, Set::Outside),
+            "strspn" => self.span(data, &args, Set::Inside),
+            "strpbrk" => self.strpbrk(data, &args),
             _ => None,
+        }
+    }
+
+    /// The type this call's one result has, where it has one and it is an integer.
+    ///
+    /// A declaration of another shape is a function of the program's own, and a number is not what
+    /// it answers.
+    fn answers(&self, data: &InstData) -> Option<Type> {
+        let mut results = data.results();
+        let ty = self.func[results.next()?].ty;
+        (results.next().is_none() && ty.is_int() && !ty.is_vector()).then_some(ty)
+    }
+
+    /// Whether this call's one result is a pointer, which every search for a place gives back.
+    fn places(&self, data: &InstData) -> bool {
+        let mut results = data.results();
+        results.next().is_some_and(|result| self.func[result].ty == Type::PTR)
+            && results.next().is_none()
+    }
+
+    /// The character a search was told to look for, which the call carries as an `int` and the
+    /// library reads as a `char`.
+    fn character(&self, value: Value) -> Option<u8> {
+        let (imm, ty) = crate::fold::constant(self.func, value)?;
+        u8::try_from(imm.signed(ty).rem_euclid(256)).ok()
+    }
+
+    /// A count of bytes the call was given, which has to be a constant that fits a `usize`.
+    ///
+    /// The source writes a small count as an `int` and the call takes a `size_t`, so what the
+    /// argument holds is a widening of the constant rather than the constant, and reading only the
+    /// argument would miss every count anyone actually writes.
+    fn count(&self, value: Value) -> Option<usize> {
+        let narrow = self.widened(value);
+        let (imm, ty) = crate::fold::constant(self.func, narrow)?;
+        // A count the source wrote as a negative number is not a count, whatever the conversion
+        // makes of it, and folding on one would be reading an object that is not there.
+        (narrow == value || imm.signed(ty) >= 0).then_some(())?;
+        usize::try_from(imm.unsigned()).ok()
+    }
+
+    /// What this value is a widening of, or the value itself where it is not one.
+    ///
+    /// Both conversions leave a non negative constant alone, so which one it was only matters for
+    /// refusing a negative one, and the caller is the one that does that.
+    fn widened(&self, value: Value) -> Value {
+        let Def::Result { inst, .. } = self.func[value].def else { return value };
+        if !matches!(self.func[inst].opcode, Opcode::SExt | Opcode::ZExt) {
+            return value;
+        }
+        self.func[self.func[inst].args].first().copied().unwrap_or(value)
+    }
+
+    /// Where a `strchr` or a `strrchr` finds its character.
+    ///
+    /// A terminator is found at the end of the string rather than not at all, which is what makes
+    /// `strchr(s, 0)` the address of the terminator and is the one place the bytes this reads and
+    /// the string it is searching are not the same length.
+    fn strchr(&self, data: &InstData, args: &[Value], side: Side) -> Option<Plan> {
+        if args.len() != 2 || self.func[args[0]].ty != Type::PTR || !self.places(data) {
+            return None;
+        }
+        let wanted = self.character(args[1])?;
+        let text = self.one(args[0])?;
+        let found = match (wanted, side) {
+            (0, _) => Some(text.len()),
+            (_, Side::First) => text.iter().position(|&byte| byte == wanted),
+            (_, Side::Last) => text.iter().rposition(|&byte| byte == wanted),
+        };
+        Some(Plan::Answer(match found {
+            Some(at) => Answer::Along(args[0], u64::try_from(at).ok()?),
+            None => Answer::Nowhere,
+        }))
+    }
+
+    /// Where a `memchr` finds its character, which is a search over a count rather than up to a
+    /// terminator.
+    ///
+    /// So this reads the object's bytes rather than the string in it, and it refuses a count the
+    /// object does not have that many bytes for, since a call that reads past the end of what the
+    /// compiler can see is a call whose answer the compiler does not know.
+    fn memchr(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if args.len() != 3 || self.func[args[0]].ty != Type::PTR || !self.places(data) {
+            return None;
+        }
+        let wanted = self.character(args[1])?;
+        let count = self.count(args[2])?;
+        let bytes = self.raw(args[0])?;
+        let window = bytes.get(..count)?;
+        Some(Plan::Answer(match window.iter().position(|&byte| byte == wanted) {
+            Some(at) => Answer::Along(args[0], u64::try_from(at).ok()?),
+            None => Answer::Nowhere,
+        }))
+    }
+
+    /// How long a string this module holds is.
+    fn strlen(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if args.len() != 1 || self.func[args[0]].ty != Type::PTR {
+            return None;
+        }
+        self.answers(data)?;
+        let text = self.one(args[0])?;
+        Some(Plan::Answer(Answer::Number(i128::try_from(text.len()).ok()?)))
+    }
+
+    /// The same, stopping at a count.
+    ///
+    /// A string with no terminator inside the count is the count, and that needs the object's bytes
+    /// rather than the string in it, because there may be no string in it at all.
+    fn strnlen(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if args.len() != 2 || self.func[args[0]].ty != Type::PTR {
+            return None;
+        }
+        self.answers(data)?;
+        let count = self.count(args[1])?;
+        let bytes = self.raw(args[0])?;
+        let window = bytes.get(..count.min(bytes.len()))?;
+        let len = match window.iter().position(|&byte| byte == 0) {
+            Some(at) => at,
+            // Nothing terminated it inside the window, so the answer is the count only where the
+            // window was the whole count.
+            None if window.len() == count => count,
+            None => return None,
+        };
+        Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)))
+    }
+
+    /// How two strings this module holds compare.
+    fn strcmp(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        (args.len() == 2).then_some(())?;
+        self.compared(data, args, usize::MAX)
+    }
+
+    /// The same over a count the call was given, which has to be a constant.
+    fn strncmp(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        (args.len() == 3).then_some(())?;
+        let count = self.count(args[2])?;
+        self.compared(data, args, count)
+    }
+
+    /// The comparison both of them are, over however many bytes each is allowed to read.
+    ///
+    /// The sign is what the standard promises and the magnitude is not, so this answers one of
+    /// minus one, zero and one, which is what gcc leaves behind as well.
+    fn compared(&self, data: &InstData, args: &[Value], bound: usize) -> Option<Plan> {
+        if self.func[args[0]].ty != Type::PTR || self.func[args[1]].ty != Type::PTR {
+            return None;
+        }
+        self.answers(data)?;
+        let (mut left, mut right) = (self.one(args[0])?, self.one(args[1])?);
+        // The terminator is part of the comparison, since it is what stops one string before the
+        // other and it is smaller than every byte that could be opposite it.
+        left.push(0);
+        right.push(0);
+        let mut answer = 0;
+        for at in 0..bound.min(left.len()).min(right.len()) {
+            if left[at] != right[at] {
+                answer = if left[at] < right[at] { -1 } else { 1 };
+                break;
+            }
+            if left[at] == 0 {
+                break;
+            }
+        }
+        Some(Plan::Answer(Answer::Number(answer)))
+    }
+
+    /// How far into the first string the second one's characters start, or stop.
+    ///
+    /// `strcspn` walks while the character is outside the set and `strspn` walks while it is
+    /// inside, which is one walk with the test turned round, and the shape rules fall out of it:
+    /// nothing is outside an empty set, so `strspn(s, "")` is zero, and everything is, so
+    /// `strcspn(s, "")` is the length of `s`.
+    fn span(&self, data: &InstData, args: &[Value], set: Set) -> Option<Plan> {
+        if args.len() != 2
+            || self.func[args[0]].ty != Type::PTR
+            || self.func[args[1]].ty != Type::PTR
+        {
+            return None;
+        }
+        let ty = self.answers(data)?;
+        // An empty first string is no bytes to walk over, whatever the set is, and that is the
+        // answer `strcspn("", s)` wants where nothing is known about `s`.
+        if let Some(text) = self.one(args[0])
+            && text.is_empty()
+        {
+            return Some(Plan::Answer(Answer::Number(0)));
+        }
+        let accept = self.one(args[1])?;
+        // Both walks are the same walk with the test turned round, and an empty set needs no arm of
+        // its own here, because nothing is inside one and so the walk stops at once or not at all.
+        if let Some(text) = self.one(args[0]) {
+            let len = text
+                .iter()
+                .position(|byte| accept.contains(byte) != matches!(set, Set::Inside))
+                .unwrap_or(text.len());
+            return Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)));
+        }
+        // Nothing is known about the string, so only the shape rules are left.
+        accept.is_empty().then_some(())?;
+        match set {
+            Set::Inside => Some(Plan::Answer(Answer::Number(0))),
+            // A number the call gives back and a number `strlen` gives back have to be the same
+            // width, since what reads the first is going to read the second and nothing here writes
+            // a conversion.
+            Set::Outside => {
+                let (_, signature) = self.shapes.get("strlen")?;
+                signature.return_types().eq([ty]).then_some(())?;
+                self.call("strlen", vec![Argument::Have(args[0])])
+            }
+        }
+    }
+
+    /// Where the first character of one string that is in the other is.
+    fn strpbrk(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if args.len() != 2 || self.func[args[0]].ty != Type::PTR || !self.places(data) {
+            return None;
+        }
+        if self.func[args[1]].ty != Type::PTR {
+            return None;
+        }
+        let accept = self.one(args[1])?;
+        // Nothing is in an empty set, so the search runs off the end of any string at all.
+        if accept.is_empty() {
+            return Some(Plan::Answer(Answer::Nowhere));
+        }
+        match self.one(args[0]) {
+            Some(text) => {
+                Some(Plan::Answer(match text.iter().position(|byte| accept.contains(byte)) {
+                    Some(at) => Answer::Along(args[0], u64::try_from(at).ok()?),
+                    None => Answer::Nowhere,
+                }))
+            }
+            // A set of one character is a search for that character, which is the same fold
+            // `strstr` of a needle of one character gets.
+            None => match accept.as_slice() {
+                [one] => self.call("strchr", vec![Argument::Have(args[0]), Argument::Char(*one)]),
+                _ => None,
+            },
         }
     }
 
@@ -634,6 +941,17 @@ impl Site<'_> {
     /// The bytes up to the first terminator at the address this value is, where that address is
     /// inside a read only object this module vouches for.
     fn literal(&self, value: Value) -> Option<Vec<u8>> {
+        let bytes = self.raw(value)?;
+        let end = bytes.iter().position(|&byte| byte == 0)?;
+        Some(bytes[..end].to_vec())
+    }
+
+    /// Every byte from the address this value is to the end of the object it is in.
+    ///
+    /// The same walk as above with nothing stopping it at a terminator, because `memchr` is told
+    /// how far to read rather than going looking for one, and `strnlen` may be told to stop before
+    /// there is one. A caller that wants a string wants [`Self::literal`] instead.
+    fn raw(&self, value: Value) -> Option<Vec<u8>> {
         let (base, offset) = self.address(value)?;
         let Def::Result { inst, .. } = self.func[base].def else { return None };
         if self.func[inst].opcode != Opcode::GlobalAddr {
@@ -658,9 +976,13 @@ impl Site<'_> {
                 Datum::Scalar { .. } | Datum::Addr(_) | Datum::Away(_) => return None,
             }
         }
-        let rest = bytes.get(usize::try_from(offset).ok()?..)?;
-        let end = rest.iter().position(|&byte| byte == 0)?;
-        Some(rest[..end].to_vec())
+        // An object whose image stops short of its size is zero from there on, which is what an
+        // array with fewer initializers than members is and is a byte a search may reach.
+        let size = usize::try_from(global.size).ok()?;
+        if bytes.len() < size {
+            bytes.resize(size, 0);
+        }
+        Some(bytes.get(usize::try_from(offset).ok()?..)?.to_vec())
     }
 
     /// The address this value is, as something it was computed from and a distance in bytes from
@@ -806,6 +1128,14 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
             let made = func.create_inst(data, &[Type::PTR], span);
             func.insert_before(made, inst);
             func[made].results().next().expect("a null pointer is one value")
+        }
+        Answer::Number(number) => {
+            let ty = func[inst]
+                .results()
+                .next()
+                .map(|result| func[result].ty)
+                .expect("a call whose answer is a number has one");
+            constant(func, inst, ty, number)
         }
     };
     let forward: HashMap<Value, Value> =
@@ -1500,5 +1830,366 @@ block0(%0: ptr):
 "#;
         let out = run(body, &["strstr".to_owned()], &mut Fuel::unlimited());
         assert!(out.contains("call @strstr("), "{out}");
+    }
+
+    /// `strlen` of a string this module holds is its length, and of a place inside one is the rest.
+    #[test]
+    fn strlen_of_a_string_this_module_holds_is_a_number() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = call @strlen(%0) : (ptr) -> i64
+    %2 = iconst.i64 6
+    %3 = ptr_add %0, %2
+    %4 = call @strlen(%3) : (ptr) -> i64
+    call @use(%1, %4) : (i64, i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strlen("), "{out}");
+        assert!(out.contains("iconst.i64 11"), "{out}");
+        assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// `strnlen` stops at its count, and the count is what the answer is where nothing terminated
+    /// the string inside it.
+    #[test]
+    fn strnlen_answers_the_count_where_the_string_runs_past_it() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strnlen(ptr, i64) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i64 3
+    %2 = call @strnlen(%0, %1) : (ptr, i64) -> i64
+    %3 = iconst.i64 40
+    %4 = call @strnlen(%0, %3) : (ptr, i64) -> i64
+    call @use(%2, %4) : (i64, i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strnlen("), "{out}");
+        assert!(out.contains("iconst.i64 3"), "the count came first, {out}");
+        assert!(out.contains("iconst.i64 11"), "the terminator came first, {out}");
+    }
+
+    /// A count the source wrote as an `int` reaches the call widened, and the constant is under the
+    /// widening rather than in the argument.
+    #[test]
+    fn a_count_that_was_widened_on_the_way_in_is_still_a_count() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strnlen(ptr, i64) -> i64, linkage(external);
+
+func @g() -> i64, linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i32 4
+    %2 = sext.i64 %1
+    %3 = call @strnlen(%0, %2) : (ptr, i64) -> i64
+    return %3
+}
+"#,
+        );
+        assert!(!out.contains("call @strnlen("), "{out}");
+        assert!(out.contains("iconst.i64 4"), "{out}");
+    }
+
+    /// `memchr` reads a count rather than a string, so it finds a byte past the terminator, and it
+    /// answers nowhere where the byte is outside the count.
+    #[test]
+    fn memchr_searches_the_object_rather_than_the_string_in_it() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @memchr(ptr, i32, i64) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i32 0
+    %2 = iconst.i64 12
+    %3 = call @memchr(%0, %1, %2) : (ptr, i32, i64) -> ptr
+    %4 = iconst.i32 100
+    %5 = iconst.i64 10
+    %6 = call @memchr(%0, %4, %5) : (ptr, i32, i64) -> ptr
+    call @use(%3, %6) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @memchr("), "{out}");
+        assert!(out.contains("iconst.i64 11"), "the terminator is inside the count, {out}");
+        assert!(out.contains("inttoptr.ptr "), "the d is one byte past the count, {out}");
+    }
+
+    /// A count the object does not have that many bytes for is a read the compiler cannot see the
+    /// end of, so the call stays.
+    #[test]
+    fn a_memchr_that_runs_off_the_object_is_left_alone() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @memchr(ptr, i32, i64) -> ptr, linkage(external);
+
+func @g() -> ptr, linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i32 122
+    %2 = iconst.i64 13
+    %3 = call @memchr(%0, %1, %2) : (ptr, i32, i64) -> ptr
+    return %3
+}
+"#,
+        );
+        assert!(out.contains("call @memchr("), "{out}");
+    }
+
+    /// `strchr` finds the first, `strrchr` the last, and a search for the terminator finds it at the
+    /// end rather than not at all.
+    #[test]
+    fn the_two_character_searches_answer_from_either_end() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strchr(ptr, i32) -> ptr, linkage(external);
+func @strrchr(ptr, i32) -> ptr, linkage(external);
+func @use(ptr, ptr, ptr, ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i32 111
+    %2 = call @strchr(%0, %1) : (ptr, i32) -> ptr
+    %3 = call @strrchr(%0, %1) : (ptr, i32) -> ptr
+    %4 = iconst.i32 0
+    %5 = call @strchr(%0, %4) : (ptr, i32) -> ptr
+    %6 = iconst.i32 122
+    %7 = call @strchr(%0, %6) : (ptr, i32) -> ptr
+    call @use(%2, %3, %5, %7) : (ptr, ptr, ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strchr("), "{out}");
+        assert!(!out.contains("call @strrchr("), "{out}");
+        assert!(out.contains("iconst.i64 4"), "the first o, {out}");
+        assert!(out.contains("iconst.i64 7"), "the last o, {out}");
+        assert!(out.contains("iconst.i64 11"), "the terminator, {out}");
+        assert!(out.contains("inttoptr.ptr "), "there is no z in it, {out}");
+    }
+
+    /// The two comparisons answer one of minus one, zero and one, which is the sign the standard
+    /// promises and nothing more.
+    #[test]
+    fn the_two_comparisons_answer_a_sign() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 6 = { bytes "hello\00" }, align 1, linkage(internal), constant
+
+func @strcmp(ptr, ptr) -> i32, linkage(external);
+func @strncmp(ptr, ptr, i64) -> i32, linkage(external);
+func @use(i32, i32, i32), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = global_addr @.Lstr.1
+    %2 = call @strcmp(%0, %1) : (ptr, ptr) -> i32
+    %3 = call @strcmp(%1, %0) : (ptr, ptr) -> i32
+    %4 = iconst.i64 5
+    %5 = call @strncmp(%0, %1, %4) : (ptr, ptr, i64) -> i32
+    call @use(%2, %3, %5) : (i32, i32, i32)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strcmp("), "{out}");
+        assert!(!out.contains("call @strncmp("), "{out}");
+        assert!(out.contains("iconst.i32 1"), "the longer one is the greater, {out}");
+        assert!(out.contains("iconst.i32 -1"), "and the other way round, {out}");
+        assert!(out.contains("iconst.i32 0"), "five bytes of each are the same, {out}");
+    }
+
+    /// The two spans walk the same string with the test turned round.
+    #[test]
+    fn the_two_spans_are_one_walk_each_way() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "hel\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 3 = { bytes "wz\00" }, align 1, linkage(internal), constant
+
+func @strspn(ptr, ptr) -> i64, linkage(external);
+func @strcspn(ptr, ptr) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = global_addr @.Lstr.1
+    %2 = call @strspn(%0, %1) : (ptr, ptr) -> i64
+    %3 = global_addr @.Lstr.2
+    %4 = call @strcspn(%0, %3) : (ptr, ptr) -> i64
+    call @use(%2, %4) : (i64, i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strspn("), "{out}");
+        assert!(!out.contains("call @strcspn("), "{out}");
+        assert!(out.contains("iconst.i64 4"), "hello stops at the o, {out}");
+        assert!(out.contains("iconst.i64 6"), "the w is six bytes along, {out}");
+    }
+
+    /// Nothing is inside an empty set, so `strspn(s, "")` is zero and `strcspn(s, "")` is the length
+    /// of `s`, whatever `s` is.
+    #[test]
+    fn an_empty_set_is_a_span_of_nothing_or_of_all_of_it() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strspn(ptr, ptr) -> i64, linkage(external);
+func @strcspn(ptr, ptr) -> i64, linkage(external);
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strspn(%0, %1) : (ptr, ptr) -> i64
+    %3 = call @strcspn(%0, %1) : (ptr, ptr) -> i64
+    call @use(%2, %3) : (i64, i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strspn("), "{out}");
+        assert!(!out.contains("call @strcspn("), "{out}");
+        assert!(out.contains("call @strlen(%0)"), "{out}");
+        assert!(out.contains("iconst.i64 0"), "{out}");
+    }
+
+    /// A `strcspn` answering a width `strlen` does not answer is a fold that would leave a reader
+    /// holding a number of the wrong size, so it does not happen.
+    #[test]
+    fn a_strcspn_of_another_width_than_strlen_is_left_alone() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strcspn(ptr, ptr) -> i32, linkage(external);
+func @strlen(ptr) -> i64, linkage(external);
+
+func @g(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strcspn(%0, %1) : (ptr, ptr) -> i32
+    return %2
+}
+"#,
+        );
+        assert!(out.contains("call @strcspn("), "{out}");
+    }
+
+    /// `strpbrk` of a set of one character is a search for that character, and of an empty set is
+    /// nowhere at all.
+    #[test]
+    fn strpbrk_of_a_short_set_is_a_search_or_an_answer() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 2 = { bytes "w\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strpbrk(ptr, ptr) -> ptr, linkage(external);
+func @strchr(ptr, i32) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strpbrk(%0, %1) : (ptr, ptr) -> ptr
+    %3 = global_addr @.Lstr.1
+    %4 = call @strpbrk(%0, %3) : (ptr, ptr) -> ptr
+    call @use(%2, %4) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strpbrk("), "{out}");
+        assert!(out.contains("call @strchr(%0, "), "{out}");
+        assert!(out.contains("iconst.i32 119"), "{out}");
+        assert!(out.contains("inttoptr.ptr "), "the empty set is nowhere, {out}");
+    }
+
+    /// Two strings this module holds answer `strpbrk` without either call.
+    #[test]
+    fn strpbrk_over_two_strings_this_module_holds_is_a_place() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 3 = { bytes "wz\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 3 = { bytes "qz\00" }, align 1, linkage(internal), constant
+
+func @strpbrk(ptr, ptr) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = global_addr @.Lstr.1
+    %2 = call @strpbrk(%0, %1) : (ptr, ptr) -> ptr
+    %3 = global_addr @.Lstr.2
+    %4 = call @strpbrk(%0, %3) : (ptr, ptr) -> ptr
+    call @use(%2, %4) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strpbrk("), "{out}");
+        assert!(out.contains("iconst.i64 6"), "the w is six bytes along, {out}");
+        assert!(out.contains("inttoptr.ptr "), "there is neither a q nor a z in it, {out}");
+    }
+
+    /// A declaration of the wrong shape is a function of the program's own, whatever it is called.
+    #[test]
+    fn a_strlen_that_answers_nothing_is_not_the_one_the_library_has() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strlen(ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    call @strlen(%0) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @strlen("), "{out}");
     }
 }
