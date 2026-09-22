@@ -1087,18 +1087,26 @@ fn describe(
         // one name in one scope is a debugger's problem rather than a reader's.
         let mut sig = known.and_then(|known| known.sig.clone());
         let mut placed: Vec<(u32, i32)> = built.locals.clone();
+        let mut spots = stretches(extent, rows, built, target);
         if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
             for (param, decl) in sig.params.iter_mut().zip(&known.params) {
                 let Some(decl) = *decl else { continue };
-                let Some(which) = placed.iter().position(|&(at, _)| at == decl) else { continue };
-                let at = rucc_debug::Held::Frame(i64::from(placed.remove(which).1));
-                param.spot = Some(rucc_debug::Spot::Always(at));
+                if let Some(which) = placed.iter().position(|&(at, _)| at == decl) {
+                    let at = rucc_debug::Held::Frame(i64::from(placed.remove(which).1));
+                    param.spot = Some(rucc_debug::Spot::Always(at));
+                    continue;
+                }
+                // Or the stretches, for a parameter the front end kept in a value rather than in
+                // the frame, which is what a scalar parameter whose address is never taken is at
+                // every optimization level including this one.
+                let Some(which) = spots.iter().position(|(at, _)| *at == decl) else { continue };
+                param.spot = Some(rucc_debug::Spot::Over(spots.remove(which).1));
             }
         }
         // Whatever is left, which is the locals that are not parameters, in the order the slots
         // were asked for. A number with nothing to look up is one whose declaration had no name,
         // which is a compound literal rather than anything the program can ask the value of.
-        let mut locals = Vec::with_capacity(placed.len());
+        let mut locals = Vec::with_capacity(placed.len() + spots.len());
         for (decl, at) in placed {
             let Some(named) = origin.meaning.locals.get(&decl) else { continue };
             locals.push(rucc_debug::Local {
@@ -1109,6 +1117,22 @@ fn describe(
                     line: named.line,
                 }),
                 spot: rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))),
+            });
+        }
+        // And the ones with no slot at all, which are the locals the front end kept in a value.
+        // Sorted by declaration, which is the order the program declared them in, so that what
+        // comes out does not depend on the order the back end happened to hand registers out in.
+        spots.sort_by_key(|(decl, _)| *decl);
+        for (decl, spans) in spots {
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+            locals.push(rucc_debug::Local {
+                name: named.name.clone(),
+                ty: named.ty,
+                decl: Some(rucc_debug::Place {
+                    file: interned(&mut files, rewrite(&named.file)),
+                    line: named.line,
+                }),
+                spot: rucc_debug::Spot::Over(spans),
             });
         }
         funcs.push(rucc_debug::Function {
@@ -1157,6 +1181,125 @@ fn describe(
         frames: opts.unwinds(),
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())
+}
+
+/// Where each local the back end kept in a register is, as stretches of the function's addresses.
+///
+/// The back end names a stretch by the instruction at either end of it, because a machine
+/// instruction has no length until something encodes it. This is where it gets one: the assembler
+/// writes a row per instruction for the line table and the row says how far into the function the
+/// instruction begins, so the row after it is where it ends. The last instruction of a function
+/// ends where the function does.
+///
+/// Grouped by declaration on the way out, since one local is in one place over one stretch and
+/// somewhere else over the next, and that is the shape the debugging information wants.
+fn stretches(
+    extent: &rucc_object::Extent,
+    rows: &[rucc_asm::Row],
+    built: &rucc_mir::Func,
+    target: &TargetInfo,
+) -> Vec<(u32, Vec<rucc_debug::Span>)> {
+    // A target nobody has written a calling convention down for has no DWARF numbering either, so
+    // there is no way to name the register a local is in and nothing to say.
+    let (false, Some(regs)) = (built.kept.is_empty(), target.call_regs) else {
+        return Vec::new();
+    };
+    let mut bounds = vec![None; built.inst_count()];
+    for (which, row) in rows.iter().enumerate() {
+        let Some(inst) = row.inst else { continue };
+        let at = row.at as u64;
+        // The next row that is at a different address, rather than simply the next row, because an
+        // instruction that encodes to nothing leaves two rows on one byte and the one in front of
+        // it is not where anything ends.
+        let end = rows[which + 1..]
+            .iter()
+            .map(|next| next.at as u64)
+            .find(|&next| next > at)
+            .unwrap_or(extent.len as u64);
+        bounds[inst.index()] = Some((at, end));
+    }
+    let mut spots: Vec<(u32, Vec<rucc_debug::Span>)> = Vec::new();
+    for kept in &built.kept {
+        let (Some((from, _)), Some((_, to))) = (bounds[kept.from.index()], bounds[kept.to.index()])
+        else {
+            continue;
+        };
+        if to <= from {
+            continue;
+        }
+        let held = match kept.at {
+            // A register is named by the number this target's DWARF numbering gives it, which is a
+            // fact about the class and the register together rather than about either alone.
+            rucc_mir::Where::Reg { reg, class } => match regs.dwarf(class, reg) {
+                Some(number) => rucc_debug::Held::Reg(number),
+                None => continue,
+            },
+            rucc_mir::Where::Frame(at) => rucc_debug::Held::Frame(i64::from(at)),
+        };
+        let span = rucc_debug::Span { from, len: to - from, held };
+        match spots.iter_mut().find(|(decl, _)| *decl == kept.decl) {
+            Some((_, spans)) => spans.push(span),
+            None => spots.push((kept.decl, vec![span])),
+        }
+    }
+    for (_, spans) in &mut spots {
+        *spans = settle(std::mem::take(spans));
+    }
+    spots.retain(|(_, spans)| !spans.is_empty());
+    spots
+}
+
+/// One declaration's stretches with the disagreements taken out and the neighbours joined up.
+///
+/// Two stretches of one declaration can cover the same address. That is what a program that assigns
+/// to a local from something already live looks like: both values are live across the assignment
+/// and nothing this far down knows which side of it an address is on, because what the back end was
+/// handed is which values a declaration is behind and not where it started being behind each of
+/// them. Where the two agree the answer is the same either way and they become one stretch, and
+/// where they disagree the address is left out, so a debugger says the variable is unavailable
+/// there rather than printing whichever register this walk reached first. A wrong answer is worse
+/// than none.
+fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
+    spans.sort_by_key(|span| (span.from, span.len));
+    // Every address a stretch begins or ends at, which cuts the function into pieces no stretch is
+    // partly over: a piece is inside a stretch or outside it and never half of each.
+    let mut edges: Vec<u64> =
+        spans.iter().flat_map(|span| [span.from, span.from + span.len]).collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut out: Vec<rucc_debug::Span> = Vec::new();
+    let mut first = 0;
+    for pair in edges.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        // Nothing before this can cover this piece or any piece after it, since the pieces only
+        // ever move forward. The list is in the order the stretches start in, so the walk below
+        // stops at the first one that starts too late as well.
+        while spans.get(first).is_some_and(|span| span.from + span.len <= from) {
+            first += 1;
+        }
+        let mut held = None;
+        let mut agreed = true;
+        for span in &spans[first..] {
+            if span.from >= to {
+                break;
+            }
+            if span.from > from || span.from + span.len < to {
+                continue;
+            }
+            match held {
+                None => held = Some(span.held),
+                Some(seen) => agreed &= seen == span.held,
+            }
+        }
+        let (Some(held), true) = (held, agreed) else { continue };
+        match out.last_mut() {
+            Some(last) if last.from + last.len == from && last.held == held => {
+                last.len += to - from
+            }
+            _ => out.push(rucc_debug::Span { from, len: to - from, held }),
+        }
+    }
+    out
 }
 
 /// Where a file name is in the table, putting it there if it is not there yet.
@@ -8491,5 +8634,44 @@ away:
         let result = run(&opts, "int a;\n");
         assert!(result.temps.preprocessed.is_some());
         assert_eq!(result.temps.assembly, None);
+    }
+
+    /// A stretch of a local's life, written short because these tests are about nothing else.
+    fn span(from: u64, len: u64, held: rucc_debug::Held) -> rucc_debug::Span {
+        rucc_debug::Span { from, len, held }
+    }
+
+    #[test]
+    fn two_stretches_that_meet_and_agree_come_out_as_one() {
+        let one = span(0, 4, rucc_debug::Held::Reg(3));
+        let two = span(4, 4, rucc_debug::Held::Reg(3));
+        assert_eq!(settle(vec![two, one]), vec![span(0, 8, rucc_debug::Held::Reg(3))]);
+    }
+
+    #[test]
+    fn two_stretches_that_disagree_leave_the_addresses_they_share_unanswered() {
+        let one = span(0, 8, rucc_debug::Held::Reg(3));
+        let two = span(4, 8, rucc_debug::Held::Reg(4));
+        // The four bytes in the middle are the ones neither can speak for, and what is left is
+        // each stretch over the part of itself the other does not reach.
+        let settled = settle(vec![one, two]);
+        assert_eq!(
+            settled,
+            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(8, 4, rucc_debug::Held::Reg(4))]
+        );
+    }
+
+    #[test]
+    fn a_stretch_two_others_disagree_over_the_whole_of_says_nothing_at_all() {
+        let one = span(0, 8, rucc_debug::Held::Reg(3));
+        let two = span(0, 8, rucc_debug::Held::Frame(-16));
+        assert_eq!(settle(vec![one, two]), Vec::new());
+    }
+
+    #[test]
+    fn stretches_with_a_gap_between_them_keep_the_gap() {
+        let one = span(0, 4, rucc_debug::Held::Reg(3));
+        let two = span(16, 4, rucc_debug::Held::Reg(3));
+        assert_eq!(settle(vec![one, two]), vec![one, two]);
     }
 }

@@ -153,7 +153,7 @@ fn fill(
             points(dwarf, at, *of, ids)?;
         }
         Shape::Qualified { of, .. } => points(dwarf, at, *of, ids)?,
-        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, None)?,
+        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, None, false)?,
     }
     Ok(())
 }
@@ -214,24 +214,17 @@ fn defined(
         expr.op(gimli::DW_OP_call_frame_cfa);
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
     }
-    // Which function a location is measured into, for the ones that are a list of stretches, and
-    // nothing at all in a build with no frame base to measure the other kind from.
-    let held = frames.then_some(index);
-    takes(dwarf, at, sig, ids, held)?;
+    takes(dwarf, at, sig, ids, Some(index), frames)?;
     for local in &func.locals {
-        kept(dwarf, at, local, files, ids, held)?;
+        kept(dwarf, at, local, files, ids, index, frames)?;
     }
     Ok(())
 }
 
 /// One local the program declared, as a child of its function.
 ///
-/// Nothing at all in a build with no frame base, which is a build that asked for no unwind table.
-/// An offset would be from an attribute that is not there, and a name with an unreadable location
-/// is worse than a name a debugger says it cannot find: one of them is a wrong answer and the other
-/// is an honest one. That is why `which` is the function's index and not a plain flag: it is both
-/// the answer to whether anything can be said and the thing a stretch of addresses is measured
-/// into, and a caller cannot have one without the other.
+/// Nothing at all for a local a build with no frame base has nothing to say about, which is a
+/// local in the frame of a build that asked for no unwind table. See [`sayable`].
 ///
 /// A local with no type still gets an entry, for the reason [`held_at`] gives.
 fn kept(
@@ -240,14 +233,38 @@ fn kept(
     local: &Local,
     files: &[FileId],
     ids: &[UnitEntryId],
-    which: Option<usize>,
+    which: usize,
+    frames: bool,
 ) -> Result<(), Error> {
-    let Some(which) = which else { return Ok(()) };
+    if !sayable(&local.spot, frames) {
+        return Ok(());
+    }
     let child = dwarf.unit.add(at, gimli::DW_TAG_variable);
     title(dwarf, child, &local.name);
     came_from(dwarf, child, &local.name, local.decl, files)?;
     points(dwarf, child, local.ty, ids)?;
-    somewhere(dwarf, child, &local.name, &local.spot, which)
+    somewhere(dwarf, child, &local.name, &local.spot, which, frames)
+}
+
+/// Whether anything can be said about where a local is in this build.
+///
+/// A place in the frame is an offset from `DW_AT_frame_base`, and a build that writes no call frame
+/// table has no frame base for it to be an offset from. A name with an unreadable location is worse
+/// than a name a debugger says it cannot find: one of them is a wrong answer and the other is an
+/// honest one, so the entry is left off rather than written with a location nothing can evaluate.
+///
+/// A place in a register is not measured from anything, so it is as good in a build with no frame
+/// base as in any other, and that is the whole of the difference. A local that is in a register
+/// over part of a function and in the frame over the rest keeps the part that can be said and
+/// loses the rest, which leaves a debugger telling the truth at both kinds of address.
+fn sayable(spot: &Spot, frames: bool) -> bool {
+    if frames {
+        return true;
+    }
+    match spot {
+        Spot::Always(held) => matches!(held, Held::Reg(_)),
+        Spot::Over(spans) => spans.iter().any(|span| matches!(span.held, Held::Reg(_))),
+    }
 }
 
 /// `DW_AT_location`, which is one expression where the place never changes and a reference into
@@ -275,8 +292,10 @@ fn somewhere(
     name: &str,
     spot: &Spot,
     which: usize,
+    frames: bool,
 ) -> Result<(), Error> {
     let value = match spot {
+        Spot::Always(held) if !frames && matches!(held, Held::Frame(_)) => return Ok(()),
         Spot::Always(held) => AttributeValue::Exprloc(saying(*held)),
         // A list of nothing is a local that is nowhere at every address, and the attribute is left
         // off rather than written empty. Both say the same thing to a reader and one of them is
@@ -285,6 +304,12 @@ fn somewhere(
         Spot::Over(spans) => {
             let mut list = Vec::with_capacity(spans.len());
             for span in spans {
+                // A stretch this build cannot measure is left out of the list rather than left in
+                // with a location nothing can read, which leaves the addresses it covers as
+                // addresses no stretch does, and a debugger says unavailable there. See [`sayable`].
+                if !frames && matches!(span.held, Held::Frame(_)) {
+                    continue;
+                }
                 let Ok(addend) = i64::try_from(span.from) else {
                     let why = format!("{name} is somewhere {} bytes into its function", span.from);
                     return Err(Error::Refused { why });
@@ -298,6 +323,9 @@ fn somewhere(
                     length: span.len,
                     data: saying(span.held),
                 });
+            }
+            if list.is_empty() {
+                return Ok(());
             }
             let id = dwarf.unit.locations.add(gimli::write::LocationList(list));
             AttributeValue::LocationListRef(id)
@@ -386,6 +414,7 @@ fn takes(
     sig: &Sig,
     ids: &[UnitEntryId],
     which: Option<usize>,
+    frames: bool,
 ) -> Result<(), Error> {
     if sig.prototyped {
         flag(dwarf, at, gimli::DW_AT_prototyped);
@@ -399,7 +428,7 @@ fn takes(
         }
         points(dwarf, child, Some(param.ty), ids)?;
         if let (Some(spot), Some(which)) = (param.spot.as_ref(), which) {
-            somewhere(dwarf, child, &name, spot, which)?;
+            somewhere(dwarf, child, &name, spot, which, frames)?;
         }
     }
     if sig.variadic {
@@ -826,6 +855,70 @@ mod tests {
             vec![Local { name: "total".to_owned(), ty: Some(0), decl: None, spot: fixed(-16) }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &spot()), "a location nothing can resolve");
+        assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
+    }
+
+    /// A register is not measured from anything, so a build with no unwind table still says so.
+    ///
+    /// The frame base is what an offset into the frame is counted from and a register location
+    /// counts from nothing, which is the whole of the difference. A build that drops the unwind
+    /// table loses the answers that needed one and keeps the rest.
+    #[test]
+    fn a_build_with_no_frame_base_still_says_which_register_a_local_is_in() {
+        let mut unit = one();
+        unit.frames = false;
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Reg(3) }]),
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &listed()), "the register went with the frame base");
+        assert!(named(&info).contains(&"total".to_owned()), "the local lost its name");
+    }
+
+    /// And a local that is in a register over part of a function and in the frame over the rest
+    /// keeps the part that can be said.
+    ///
+    /// The addresses the dropped stretch covered become addresses no stretch does, which is a
+    /// debugger saying the variable is unavailable there. That is the honest answer, and it beats
+    /// both of the others: a location nothing can evaluate is a wrong answer, and leaving the name
+    /// off altogether throws away the half of the function that was fine.
+    #[test]
+    fn a_build_with_no_frame_base_keeps_the_stretches_that_do_not_need_one() {
+        let mut unit = one();
+        unit.frames = false;
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![
+                Span { from: 0, len: 8, held: Held::Reg(3) },
+                Span { from: 8, len: 8, held: Held::Frame(-16) },
+            ]),
+        }];
+        let info = write(&unit).expect("sections");
+        let start = gimli::DW_LLE_start_length.0;
+        let reg = [start, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, gimli::DW_OP_reg3.0];
+        assert!(holds(&info, ".debug_loclists", &reg), "the register stretch went too");
+        let mem = [start, 0, 0, 0, 0, 0, 0, 0, 0, 8, 2, gimli::DW_OP_fbreg.0, 0x70];
+        assert!(!holds(&info, ".debug_loclists", &mem), "an offset from nothing");
+    }
+
+    /// A local that is only ever in the frame in such a build gets no location and no name, which
+    /// is the whole entry gone rather than an empty list.
+    #[test]
+    fn a_build_with_no_frame_base_drops_a_local_that_is_only_ever_in_the_frame() {
+        let mut unit = one();
+        unit.frames = false;
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Frame(-16) }]),
+        }];
+        let info = write(&unit).expect("sections");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
     }
 

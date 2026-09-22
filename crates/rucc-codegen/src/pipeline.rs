@@ -772,7 +772,7 @@ mod tests {
         // the stretch is one instruction long and it is the move rather than the addition.
         assert_eq!(out.kept.len(), 1, "one stretch: {:?}", out.kept);
         assert_eq!(out.kept[0].decl, 5);
-        assert!(matches!(out.kept[0].at, mir::Where::Reg(_)), "in a register: {:?}", out.kept[0]);
+        assert!(matches!(out.kept[0].at, mir::Where::Reg { .. }), "a register: {:?}", out.kept[0]);
         assert!(out.locals.is_empty(), "nothing in the frame: {:?}", out.locals);
     }
 

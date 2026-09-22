@@ -68,6 +68,15 @@ pub struct Row {
     pub at: usize,
     /// What the machine IR said this instruction was for.
     pub span: Span,
+    /// Which instruction of the machine function it is, or `None` for the row the prologue gets,
+    /// which is the one row here that no instruction wrote.
+    ///
+    /// The line table has no use for it and the locations do: a local the allocator kept in a
+    /// register is somewhere over a stretch the back end named by an instruction at each end,
+    /// because a machine instruction has no length until something encodes it, and this is where
+    /// it gets one. Carried on the row rather than as a second list because the two are the same
+    /// walk and a second list is a thing that can come to disagree with the first.
+    pub inst: Option<Inst>,
 }
 
 /// A text section and, when the build asked for it, where each instruction in it came from.
@@ -249,7 +258,7 @@ impl Assembler<'_> {
         // covers, and a program counter in there gets no answer at all rather than a slightly
         // early one. Where the function was declared is what gcc says over those bytes.
         if self.wants && !self.func.declared.is_dummy() {
-            self.lines.push(Row { at: 0, span: self.func.declared });
+            self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
         }
         let end = self.func.cfi_end();
         for block in self.func.blocks() {
@@ -276,7 +285,7 @@ impl Assembler<'_> {
                 // the frame looked like at a return address.
                 if self.wants {
                     let at = self.text.bytes.len() - self.start;
-                    self.lines.push(Row { at, span: self.func.span(inst) });
+                    self.lines.push(Row { at, span: self.func.span(inst), inst: Some(inst) });
                 }
                 self.inst(block, inst)?;
                 if Some(inst) == end {
@@ -913,12 +922,16 @@ mod tests {
                 .finish();
         }
 
+        // And which instruction each row is for, which the line table has no use for and the
+        // locations do, since a stretch a local is somewhere over is named by an instruction at
+        // each end and this is where one gets an address.
+        let line: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
         assert_eq!(
             out.lines,
             vec![vec![
-                Row { at: 0, span: Span::new(0, 3) },
-                Row { at: 2, span: Span::new(10, 13) },
+                Row { at: 0, span: Span::new(0, 3), inst: Some(line[0]) },
+                Row { at: 2, span: Span::new(10, 13), inst: Some(line[1]) },
             ]]
         );
     }
@@ -945,13 +958,16 @@ mod tests {
                 .finish();
         }
 
+        // The row for the declaration is the one row here no instruction wrote, which is what
+        // says the bytes it covers are the prologue's.
+        let line: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
         assert_eq!(
             out.lines,
             vec![vec![
-                Row { at: 0, span: Span::new(100, 104) },
-                Row { at: 0, span: Span::DUMMY },
-                Row { at: 2, span: Span::new(10, 13) },
+                Row { at: 0, span: Span::new(100, 104), inst: None },
+                Row { at: 0, span: Span::DUMMY, inst: Some(line[0]) },
+                Row { at: 2, span: Span::new(10, 13), inst: Some(line[1]) },
             ]]
         );
     }

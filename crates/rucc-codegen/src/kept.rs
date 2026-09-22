@@ -12,24 +12,29 @@
 //! disagree, and the one the machine runs is the allocator's.
 //!
 //! A stretch runs from the instruction after the one that wrote the value to the last instruction
-//! that reads it, both ends included. The front is one instruction along because a register does
-//! not hold a value until the instruction writing it has run, and the back is where it is because
-//! nothing reads the value afterwards, so whatever the allocator puts in the register next cannot
-//! be seen by anybody asking. A value nothing reads at all gets no stretch, which is the same
-//! sentence read the other way: the two ends cross.
+//! that reads it, both ends included, and it stops at the end of the block either way. The front is
+//! one instruction along because a register does not hold a value until the instruction writing it
+//! has run, and the back is where it is because nothing reads the value afterwards, so whatever the
+//! allocator puts in the register next cannot be seen by anybody asking. A value nothing reads at
+//! all gets no stretch, which is the same sentence read the other way: the two ends cross.
+//!
+//! The block is where it stops because the pass that lays the blocks out runs after the allocator
+//! and can put them in any order it likes. Inside a block nothing has moved, so a run of
+//! instructions there is a run of addresses to come, and a value live from one block into the next
+//! gets a stretch in each of them rather than one stretch that would cover whatever the layout
+//! happened to put in between.
 //!
 //! # What is left out
 //!
-//! A function whose instructions moved after it was allocated gets nothing. The liveness is
-//! counted along the order the allocator laid the function out in, and a pass that reorders blocks
-//! or schedules instructions makes that order no longer the order the function is in, so a stretch
-//! worked out from it would name two instructions that are no longer either side of the value. The
-//! check is the walk below, which notices the moment a surviving instruction is out of order.
+//! A function whose instructions moved about inside a block after it was allocated gets nothing.
+//! The liveness is counted along the order the allocator laid the function out in, and a scheduler
+//! makes that order no longer the order the block is in, so a stretch worked out from it would name
+//! two instructions that are no longer either side of the value. The check is the walk below, which
+//! notices the moment a surviving instruction is out of order.
 //!
-//! That is the optimized builds, where nothing here says anything yet, and `-O0` is what M8 is
-//! about. Carrying the liveness across a reordering is what would lift it, and the register
-//! allocator of M4 will want the same thing, since one that splits a live range has to say where
-//! the pieces went too.
+//! That is `-O2` and above, where the scheduler runs, and `-O0` is what M8 is about. Carrying the
+//! liveness across a schedule is what would lift it, and the register allocator of M4 will want the
+//! same thing, since one that splits a live range has to say where the pieces went too.
 //!
 //! A value the allocator spilled is in the frame over its stretch rather than in a register, which
 //! is as much an answer as the other and is written the same way. A value it spilled in a function
@@ -65,8 +70,9 @@ pub fn of(func: &Func, before: &[Inst], allocation: &Allocation, frame: &Frame) 
     let Some(line) = line(func, before, allocation) else { return Vec::new() };
     let mut out = Vec::new();
     for &(decl, reg) in &func.named {
+        let Some(class) = func.class_of(reg) else { continue };
         let at = match allocation.assignment.place(reg) {
-            Some(Place::Reg(reg)) => Where::Reg(reg),
+            Some(Place::Reg(reg)) => Where::Reg { reg, class },
             Some(Place::Slot(slot)) => match frame.slot_from_frame_base(slot) {
                 Some(at) => Where::Frame(at),
                 None => continue,
@@ -75,42 +81,57 @@ pub fn of(func: &Func, before: &[Inst], allocation: &Allocation, frame: &Frame) 
         };
         let Some(area) = allocation.live.area(reg) else { continue };
         for piece in area.pieces() {
-            // Strictly after where the value is written and up to and including where it is last
-            // read. Both ends of a piece are points the value is live at, and the front one is the
-            // instruction writing it, which is the one instruction in the piece the register does
-            // not hold the value at the start of.
-            let lo = line.partition_point(|&(point, _)| point <= piece.start);
-            let hi = line.partition_point(|&(point, _)| point <= piece.end);
-            if lo >= hi {
-                continue;
+            for run in &line {
+                // Strictly after where the value is written and up to and including where it is
+                // last read. Both ends of a piece are points the value is live at, and the front
+                // one is the instruction writing it, which is the one instruction in the piece the
+                // register does not hold the value at the start of.
+                let lo = run.partition_point(|&(point, _)| point <= piece.start);
+                let hi = run.partition_point(|&(point, _)| point <= piece.end);
+                if lo >= hi {
+                    continue;
+                }
+                out.push(Kept { decl, at, from: run[lo].1, to: run[hi - 1].1 });
             }
-            out.push(Kept { decl, at, from: line[lo].1, to: line[hi - 1].1 });
         }
     }
     out
 }
 
-/// The instructions the function still has that the liveness knows a point for, in the order they
-/// are in and paired with that point, or `None` if that is no longer the order the allocator saw.
+/// The instructions the function still has that the liveness knows a point for, one list per block
+/// and each in the order that block is in, or `None` if a block is no longer in the order the
+/// allocator saw it in.
 ///
-/// The point is where the instruction reads its operands, which is the smaller of its two, so the
+/// The point is where the instruction reads its operands, which is the smaller of its two, so each
 /// list is sorted by it and can be searched rather than scanned.
-fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Option<Vec<(Point, Inst)>> {
+///
+/// A block at a time rather than the whole function at once, because the pass that lays the blocks
+/// out runs between the allocator and here and is free to put them in any order it likes. A block
+/// it moved is still a block whose instructions are in the order they were and are contiguous in
+/// the addresses to come, so the question the liveness answers is still answerable about each of
+/// them on its own. What is not answerable is a stretch that runs from one block into another,
+/// which is why a piece of a live range turns into a stretch per block rather than into one
+/// stretch.
+fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Option<Vec<Vec<(Point, Inst)>>> {
     let mut known = vec![false; func.inst_count()];
     for &inst in before {
         known[inst.index()] = true;
     }
-    let mut out = Vec::with_capacity(before.len());
+    let mut out = Vec::with_capacity(func.block_count());
     for block in func.blocks() {
+        let mut run: Vec<(Point, Inst)> = Vec::new();
         for inst in func.insts(block) {
             if !known[inst.index()] {
                 continue;
             }
             let point = allocation.order.early(inst);
-            if out.last().is_some_and(|&(last, _)| last >= point) {
+            if run.last().is_some_and(|&(last, _)| last >= point) {
                 return None;
             }
-            out.push((point, inst));
+            run.push((point, inst));
+        }
+        if !run.is_empty() {
+            out.push(run);
         }
     }
     Some(out)
@@ -119,7 +140,7 @@ fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Option<Vec<(Po
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{Func, Opcode, Reg};
+    use rucc_mir::{BlockCall, Func, Opcode, Reg};
     use rucc_regalloc::assign::Env;
     use rucc_target::x86_64::{GPR, REGS, SYSV};
 
@@ -166,7 +187,7 @@ mod tests {
         assert_eq!(kept[0].decl, 41);
         assert_eq!(kept[0].from, line[1], "from the instruction after the one that wrote it");
         assert_eq!(kept[0].to, line[2], "to the last one that reads it");
-        assert!(matches!(kept[0].at, Where::Reg(_)), "in a register: {:?}", kept[0].at);
+        assert!(matches!(kept[0].at, Where::Reg { .. }), "in a register: {:?}", kept[0].at);
     }
 
     #[test]
@@ -189,6 +210,29 @@ mod tests {
     }
 
     #[test]
+    fn a_local_live_from_one_block_into_the_next_gets_a_stretch_in_each_of_them() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let tail = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(head, opcode).def(value, GPR).finish();
+        let across = func.build(head, opcode).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(tail)];
+        let read = func.build(tail, opcode).uses(value, GPR).finish();
+        func.named = vec![(41, value)];
+        let line = before(&func);
+        let kept = about(&mut func, &line);
+
+        // Live from where it is written to where it is read, and a stretch in each of the two
+        // blocks rather than one that would cover whatever the layout later puts in between.
+        assert_eq!(kept.len(), 2, "one stretch per block: {kept:?}");
+        assert_eq!((kept[0].from, kept[0].to), (across, across), "the rest of the first block");
+        assert_eq!((kept[1].from, kept[1].to), (read, read), "and into the second");
+    }
+
+    #[test]
     fn a_function_the_front_end_named_nothing_in_says_nothing() {
         let (mut func, line) = three(&[]);
         let kept = about(&mut func, &line);
@@ -196,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn a_function_whose_instructions_moved_after_it_was_allocated_says_nothing() {
+    fn a_function_whose_instructions_moved_inside_a_block_after_allocation_says_nothing() {
         let (mut func, line) = three(&[(41, 0)]);
         let env = Env::new().with(GPR, &SYSV.int_order[..4], &SYSV.int_order[4..]);
         let allocation = rucc_regalloc::run(&mut func, &env, "test", true);
