@@ -156,6 +156,10 @@ const OUT_OF_REACH: &str =
     "not rewritten, what the group is measured from is not available before the loop";
 const OUT_OF_FUEL: &str = "not rewritten, the fuel for this compilation ran out first";
 const RETARGETED: &str = "exit test asked of the pointer the loop walks, so the counter goes";
+const COUNTED: &str =
+    "loop given a variable counting down to zero, so the exit test is against zero";
+const COUNT_TOO_FAR: &str =
+    "not counted down, the number of turns does not fit in the type the loop counts in";
 const COUNTER_WANTED: &str =
     "exit test left alone, something else in the loop still wants the counter";
 const LIMIT_TOO_FAR: &str =
@@ -213,12 +217,16 @@ impl Pass for Ivopts {
         // borrows the function for a while and the rewriting borrows it mutably afterwards,
         // which the two phases make plain rather than fight.
         let mut plans = Vec::new();
+        let mut tallies = Vec::new();
         {
             let mut scev = Scev::new(func, cfg, loops);
             let it = Loop { func, loops, doms, machine, table };
             for id in loops.all() {
-                consider(&it, &mut scev, id, &mut stats, &mut plans);
+                consider(&it, &mut scev, id, &mut stats, &mut plans, &mut tallies);
             }
+        }
+        for tally in &tallies {
+            count_down(func, cfg, loops, tally, fuel, &mut stats);
         }
         for plan in plans {
             // The exit test is asked of the pointer, so there is no exit test to rewrite until
@@ -367,6 +375,23 @@ struct Plan {
     aim: Option<Aim>,
 }
 
+/// Section 28.4's countdown, once the search has said the loop is better off with one.
+///
+/// There is no list of uses in it, which is the whole difference between this and a [`Plan`]. A
+/// countdown serves nothing in the body, so there is nothing in the body to rewrite, and all of it
+/// is the variable and the test at the end.
+#[derive(Debug)]
+struct Tally {
+    /// The loop it goes round.
+    id: LoopId,
+    /// The type it counts in, which is the one the candidate was priced in.
+    ty: Type,
+    /// How many turns the loop takes, which is one less than where the variable starts.
+    count: i128,
+    /// The exit test to ask of it.
+    aim: Aim,
+}
+
 /// The comparison a loop leaves on, read into the pieces section 28.4's rewrite needs.
 #[derive(Clone, Copy, Debug)]
 struct Aim {
@@ -403,6 +428,7 @@ fn consider(
     id: LoopId,
     stats: &mut Stats,
     plans: &mut Vec<Plan>,
+    tallies: &mut Vec<Tally>,
 ) {
     let Loop { func, loops, doms, machine, table } = *it;
     let wants = collect(func, loops, scev, id);
@@ -471,9 +497,13 @@ fn consider(
             plans.push(Plan { id, chrec: one.chrec, uses: one.uses.clone(), aim: None });
         }
     }
-    if walks == 0 {
-        // Nothing walks, so there is no pointer for the exit test to be asked of and nothing to
-        // report about it either. Section 28.4's rewrite is only ever on top of section 28.3's.
+    // The other thing the exit test can be asked of, which the search takes when the test is the
+    // last thing in the loop still asking for a variable.
+    let counting = chosen.iter().find(|&&at| cands[at].origin == Origin::Countdown);
+    if walks == 0 && counting.is_none() {
+        // Nothing walks and nothing counts down, so there is no variable for the exit test to be
+        // asked of and nothing to report about it either. Section 28.4's rewrite is only ever on
+        // top of a variable this pass put in the loop.
         return;
     }
 
@@ -490,12 +520,34 @@ fn consider(
             .any(|&had| cands[had].origin == Origin::Original && counts(counter, &cands[had]));
         if wanted { Err(COUNTER_WANTED) } else { Ok(at) }
     });
-    match aimed {
-        Ok(at) => {
+    let at = match aimed {
+        Ok(at) => at,
+        Err(why) => {
+            stats.missed(why);
+            return;
+        }
+    };
+    // A countdown wins the test when the search kept one, because it was priced against the walk
+    // and against the counter and came out ahead of both. A walk gets it otherwise.
+    match counting {
+        Some(&had) => {
+            let cand = &cands[had];
+            let count = cand.chrec.base.as_number().expect("a countdown starts at a number");
+            // The variable counts in the type the candidate was priced in, so the number it
+            // starts at has to be a number that type holds, and it starts one above the number of
+            // turns. A loop taking more turns than its own counter can count is not a loop, so
+            // this is a guard rather than a case.
+            let most = 1i128 << (cand.chrec.ty.bits() - 1);
+            if count + 1 >= most {
+                stats.missed(COUNT_TOO_FAR);
+                return;
+            }
+            tallies.push(Tally { id, ty: cand.chrec.ty, count, aim: at });
+        }
+        None => {
             let first = plans.len() - walks;
             plans[first].aim = Some(at);
         }
-        Err(why) => stats.missed(why),
     }
 }
 
@@ -968,11 +1020,19 @@ fn width(_rest: Plain) -> Width {
 /// is a cycle where the two meet. So the raw three was already three increments at `-O2` and at
 /// `-Os`, by coincidence rather than by construction, and the next table anybody writes is where
 /// the difference shows up.
+///
+/// Section 28.4's countdown does not pay it. What the preference is for is a variable the pass
+/// invents to serve uses, which is one more thing in a register than the program asked for, and a
+/// countdown serves no use at all: the only reason to have one is to take the exit test off the
+/// counter, and the pass refuses to rewrite the test while anything else still wants the counter.
+/// So it is a variable that replaces one rather than one that joins one, the set it is in is the
+/// size the set was, and charging it the preference would be charging it for a register it does
+/// not take.
 fn upkeep(table: &CostTable, cand: &Cand) -> Cost {
     let step = Cost::cycles(table.add);
     match cand.origin {
-        Origin::Original => step,
-        Origin::Derived | Origin::Countdown => {
+        Origin::Original | Origin::Countdown => step,
+        Origin::Derived => {
             step + Cost::cycles(table.add * i64::from(heuristics::IVOPTS_NEW_VARIABLE_BIAS))
         }
     }
@@ -1234,6 +1294,127 @@ fn rewrite(
     Some(Walk { pre, param, start, step })
 }
 
+/// Writes section 28.4's countdown into a loop and asks the exit test of it.
+///
+/// The mirror of [`rewrite`] and [`retarget`] together, and much the shorter of the two, because a
+/// countdown serves no use: there is nothing in the body to repoint, so the whole of it is a
+/// variable that starts at the number of turns, goes down by one on every one of them, and is
+/// tested against zero at the end.
+///
+/// There is no overflow proof here, which is the difference worth naming between this and the
+/// walk. The walk multiplies a count by a step and has to show the product is a number, and this
+/// counts the turns out one at a time, so the variable reaches zero after the loop's own number of
+/// turns by construction. What the number is came from the same `Bound` the walk reads and is
+/// checked to fit the type before this is called.
+///
+/// # Where the decrement goes
+///
+/// In the header, in front of the test, rather than in the latch behind it. The two are the same
+/// arithmetic and they are not the same code, because the whole saving section 28.4 claims is that
+/// the decrement leaves the flags the branch reads and so the comparison is no instruction at all.
+/// `crate::compare` in the back end is what collects that saving, and what it will take out is a
+/// comparison against zero of a register the instruction in front of it just wrote, in the same
+/// block, with nothing in between. A decrement in the latch is in another block and reaches the
+/// test round a back edge, so the comparison stays and the loop has paid for a second variable and
+/// bought nothing.
+///
+/// It costs one on the number the variable starts at. The test is now on the decremented value, so
+/// the header runs out one turn earlier than it would have, and starting at one more than the
+/// number of turns puts it back. The header runs one more time than the latch does, which is the
+/// turn the test refuses on, and that is the turn the extra one pays for.
+///
+/// Nothing is deleted. The new comparison goes in front of the old one and the branch is repointed
+/// at it, so the counter is dead if nothing else reads it and `crate::dce` is what takes it.
+fn count_down(
+    func: &mut Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    tally: &Tally,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) {
+    // Section 28.7's last entry, for the same reason the walk gives: no preheader means the loop
+    // is not in the shape section 26.2 asks for, and there is nowhere to start the count from.
+    let Some(pre) = loops.preheader(cfg, tally.id) else {
+        stats.missed(NO_PREHEADER);
+        return;
+    };
+    if !fuel.take() {
+        stats.missed(OUT_OF_FUEL);
+        return;
+    }
+
+    let header = loops.header(tally.id);
+    let term = func.terminator(pre).expect("a preheader ends in a jump to the header");
+    let start = number(func, term, tally.ty, tally.count + 1);
+
+    let param = func.append_param(header, tally.ty);
+    let next = fewer(func, tally.aim.at, param, tally.ty);
+    let mut preds: Vec<Block> = cfg.predecessors(header).to_vec();
+    preds.sort_unstable();
+    preds.dedup();
+    for block in preds {
+        let term = func.terminator(block).expect("a block with a successor ends in a branch");
+        // From outside the loop there are all of the turns left to take and one over. From inside
+        // there is what the decrement in the header worked out, which the header dominates every
+        // one of these blocks from, so it is a value each of them can name.
+        let carry = if block == pre { start } else { next };
+        for at in func.target_list(term).iter() {
+            let call = func[at];
+            if call.block != header {
+                continue;
+            }
+            let args = func.append_arg(call.args, carry);
+            func.set_block_call(at, BlockCall { args, ..call });
+        }
+    }
+
+    // Not an ordering, so there is no signedness to change and nothing to get wrong at the ends,
+    // which is the same choice [`retarget`] makes for the same reason. It is also the only shape
+    // the back end can take the comparison out of: a subtraction says whether its answer was zero
+    // and a comparison of that answer against zero would agree, and it says whether the
+    // subtraction overflowed where the comparison would have said it did not, so `rucc_target`
+    // marks it good for equality and for nothing else. An ordering here would leave the test
+    // standing and the saving on the floor.
+    let pred = if tally.aim.stays { IntPred::Ne } else { IntPred::Eq };
+    let zero = number(func, tally.aim.at, tally.ty, 0);
+    let span = func.span(tally.aim.at);
+    let args = func.push_values(&[next, zero]);
+    let data = InstData { args, extra: Extra::IntPred(pred), ..InstData::new(Opcode::ICmp) };
+    let ty = tally.ty.with_lane(Type::I1);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, tally.aim.at);
+    let cond = func[inst].first_result.expect("one result was asked for");
+    set_arg(func, tally.aim.branch, 0, cond);
+    stats.optimized(COUNTED);
+}
+
+/// One less than a value, worked out in front of an instruction.
+///
+/// It carries the promise that it does not overflow, which is a promise this pass is in a position
+/// to make and nothing reading the function afterwards would be. The variable starts one above the
+/// number of turns and the loop only comes back round when this subtraction gave something other
+/// than zero, so it only ever runs on something that is at least one and only ever gives back
+/// something that is at least zero. Without the promise `crate::scev` has to allow for a variable
+/// that wrapped, and a loop it cannot put a number of turns on is a loop the passes after this one
+/// leave alone.
+///
+/// Both readings of it, because the test the exit ends up with has no sign in it. `crate::scev`
+/// reads an unsigned test unsigned and looks for the unsigned promise, and reads a signed one
+/// signed and looks for the other, and `!=` is neither, so a variable carrying only one of the two
+/// comes back with a count resting on an assumption nothing downstream discharges. The argument
+/// above is about a value between zero and the number of turns, which is a range that reaches
+/// neither end of the type, so both promises are the same promise here.
+fn fewer(func: &mut Func, before: Inst, from: Value, ty: Type) -> Value {
+    let one = number(func, before, ty, 1);
+    let args = func.push_values(&[from, one]);
+    let data = InstData { args, flags: Flags::NSW | Flags::NUW, ..InstData::new(Opcode::Sub) };
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
+}
+
 /// A pointer this pass gave a loop, which is what section 28.4's rewrite is written against.
 #[derive(Clone, Copy, Debug)]
 struct Walk {
@@ -1431,11 +1612,11 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTER_WANTED, Cand, Chrec, Cost, Cycles,
-        GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET, NOT_A_WALK,
-        NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, PRICED, Plain, RETARGETED, REWRITTEN,
-        USE_ADDRESS, USE_COMPARE, USE_GENERIC, Use, Width, address_cost, heuristics, select, serve,
-        total, upkeep, value_cost, width,
+        ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTED, COUNTER_WANTED, Cand, Chrec, Cost,
+        Cycles, GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
+        NOT_A_WALK, NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, PRICED, Plain, RETARGETED,
+        REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, Use, Width, address_cost, heuristics,
+        select, serve, total, upkeep, value_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -1697,6 +1878,7 @@ mod tests {
                         })
                     }
                     Opcode::Add | Opcode::PtrAdd => args[0] + args[1],
+                    Opcode::Sub => args[0] - args[1],
                     Opcode::Mul => args[0] * args[1],
                     Opcode::Select => {
                         if args[0] == 0 {
@@ -1908,22 +2090,22 @@ mod tests {
         );
         assert_eq!(
             upkeep(table, &counting(Origin::Countdown)),
-            upkeep(table, &counting(Origin::Derived))
+            upkeep(table, &counting(Origin::Original)),
+            "a countdown replaces the counter rather than joining it, so it pays no preference",
         );
     }
 
     #[test]
     fn a_countdown_replaces_the_counter_in_one_move_because_neither_half_is_one() {
         // Section 28.4's shape, and the reason [`select`] considers an exchange rather than only
-        // an addition and a removal. The loop here has one group, the test it leaves on, with
-        // four uses in it. Counting up, each of those uses is a comparison against a register and
-        // the counter is an increment a turn, which is five. Counting down, the comparisons cost
-        // nothing because the decrement in front of them already set the flags, and the made up
-        // variable costs its own step and the bias, which is four.
+        // an addition and a removal. The loop here has one group, the test it leaves on. Counting
+        // up, that is a comparison against a register and an increment a turn, which is two.
+        // Counting down, the comparison costs nothing because the decrement in front of it
+        // already set the flags the branch reads, and the variable costs its step, which is one.
         //
         // What the two lines below say is that neither half of getting from the first to the
         // second is an improvement on its own. Putting the countdown next to the counter buys the
-        // comparisons and pays for both variables, which is five again, and taking the counter
+        // comparison and pays for a second variable, which is two again, and taking the counter
         // away first leaves a set that serves no use at all. So a search moving one candidate at
         // a time stops on the set it started with, however much cheaper the other one is.
         let machine = priced();
@@ -1935,7 +2117,7 @@ mod tests {
             flags: Flags::NONE,
         };
         let at = |n| rucc_ir::Inst::new(n);
-        let uses = (0..4u32).map(|n| Use { at: at(n), position: 0, offset: 0 }).collect();
+        let uses = (0..1u32).map(|n| Use { at: at(n), position: 0, offset: 0 }).collect();
         let groups = [Group { kind: super::Kind::Compare, chrec: moving(1), uses, exit: true }];
         let cands = [
             Cand { chrec: moving(1), origin: Origin::Original },
@@ -2142,16 +2324,27 @@ mod tests {
         close(&mut func, &it, it.body);
         Builder::new(&mut func, it.out).ret(&[]);
 
+        let before = stores(&func);
+
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 0);
         // The exit test still reads the counter, which is a use, so the loop is in the population.
         // What it has no address use for is the point.
         assert_eq!(stats.count(Kind::Note, USE_COMPARE), 1);
         assert_eq!(stats.count(Kind::Note, POPULATION), 1);
-        // Its own counter serves the only use it has, so this is the shape that gets left alone.
-        assert_eq!(stats.count(Kind::Note, KEPT), 1);
+        // The exit test is the only use it has, which is section 28.4's countdown exactly: the
+        // loop gets a variable counting down to zero and the counter is left for `crate::dce`.
+        assert_eq!(stats.count(Kind::Note, CHANGED), 1);
         assert_eq!(stats.count(Kind::Note, CHOSEN), 1);
-        assert!(!stats.changed(), "a loop with nothing to rewrite is not rewritten");
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(
+            leaves_on(&func, it.head),
+            IntPred::Ne,
+            "the loop keeps going while there are turns left to take"
+        );
+        assert_eq!(stores(&func), before, "the same hundred writes, in the same order");
+        assert_eq!(before.len(), 100, "and the loop under test really did run a hundred times");
+        sound(&func, &mut names);
     }
 
     /// Section 28.2's claim, and the one thing in this pass that is a fact about the machine.
