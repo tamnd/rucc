@@ -37,7 +37,7 @@
 //! and then drops the parameters and the arguments that went with them. One pass over the
 //! function rather than one walk per removal, and no use lists to keep in step.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::Idx;
 use rucc_diag::Span;
@@ -109,6 +109,9 @@ pub struct Ssa {
     named: HashMap<Var, u32>,
     /// Every value a named variable was given, in the order they were recorded.
     holds: Vec<(Value, u32)>,
+    /// Which values a named variable has already been given, so that the second variable to be
+    /// written the same value is not given it again. See [`Ssa::write`].
+    owned: HashSet<Value>,
 }
 
 impl Ssa {
@@ -132,6 +135,7 @@ impl Ssa {
             zero: Vec::new(),
             named: HashMap::new(),
             holds: Vec::new(),
+            owned: HashSet::new(),
         }
     }
 
@@ -146,9 +150,20 @@ impl Ssa {
     }
 
     /// Records that a variable holds a value from here to the end of the block.
+    ///
+    /// The name goes on the value only the first time a named variable is written it, which is the
+    /// rule that keeps `int m = a;` from making the whole of `a` answer to `m` as well. An
+    /// assignment from something already live writes no new value, so both names would be behind
+    /// the one value and everything downstream would have to say the two variables are in the same
+    /// register everywhere either of them is, which is wrong wherever the program has since written
+    /// one of them. The value belongs to the name that was written it first, and the copy says
+    /// nothing rather than something wrong. It gets an answer again at the next assignment that
+    /// computes anything, which is where a value of its own comes from.
     pub fn write(&mut self, var: Var, block: Block, value: Value) {
         if let Some(&decl) = self.named.get(&var) {
-            self.holds.push((value, decl));
+            if self.owned.insert(value) {
+                self.holds.push((value, decl));
+            }
         }
         self.defs.insert((var, block), value);
     }
@@ -700,6 +715,30 @@ mod tests {
         ssa.seal(&mut func, join);
         let read = ssa.read(&mut func, x, join, I32);
         Builder::new(&mut func, join).ret(&[read]);
+        ssa.finish(&mut func);
+
+        assert_eq!(named(&func), vec![(one.index(), vec![41])]);
+    }
+
+    /// A second variable written a value the first one already holds takes no name from it.
+    ///
+    /// What `int m = a;` looks like from here. The assignment writes no new value, so without this
+    /// both names would be behind the one value and everything downstream would have to say the
+    /// two are in the same register everywhere either of them is, which is wrong the moment the
+    /// program writes one of them again. The value belongs to the name it was written into first.
+    #[test]
+    fn a_variable_written_a_value_another_one_already_holds_takes_no_name_from_it() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, _) = start(&mut names);
+        let (a, m) = (Var::new(0), Var::new(1));
+        ssa.stands_for(a, 41);
+        ssa.stands_for(m, 42);
+
+        let one = Builder::new(&mut func, entry).iconst(I32, 1);
+        ssa.write(a, entry, one);
+        let read = ssa.read(&mut func, a, entry, I32);
+        ssa.write(m, entry, read);
+        Builder::new(&mut func, entry).ret(&[read]);
         ssa.finish(&mut func);
 
         assert_eq!(named(&func), vec![(one.index(), vec![41])]);

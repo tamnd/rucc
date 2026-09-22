@@ -864,7 +864,33 @@ impl<'a> Lowering<'a> {
         let labels: Vec<(mir::Block, Symbol)> =
             named.into_iter().map(|(block, name)| (self.out_block(block), name)).collect();
         self.out.labels = labels;
+        self.naming();
         Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired, blocks: self.blocks })
+    }
+
+    /// Which register each declaration the front end kept in a value ended up in, as far as this
+    /// walk can say, which is the other half of what [`Lowering::new_reg`] writes down as it goes.
+    ///
+    /// Two halves because there are two ways a value gets a register here. Most of them ask for a
+    /// fresh one and that is where `new_reg` catches them, and the rest are put in a register
+    /// something else chose: a parameter arrives in whichever one the convention handed it, a block
+    /// parameter in whichever one the edge agreed on, and a result of a rule that names its own
+    /// registers in the one the rule named. None of those goes past the mint, so this is the map at
+    /// the end read off the other side, and the two together are every value a declaration is
+    /// behind.
+    ///
+    /// The map on its own would not do, which is why `new_reg` writes down what it writes down: the
+    /// entry for a constant is cleared every time the walk leaves the block that wrote it, so a
+    /// local a constant holds is in the map for one block of the function and nowhere else.
+    fn naming(&mut self) {
+        let mut named = std::mem::take(&mut self.out.named);
+        for value in self.source.values() {
+            let Some(reg) = self.regs[value.index()] else { continue };
+            named.extend(self.source.value_decls(value).map(|decl| (decl, reg)));
+        }
+        named.sort_unstable();
+        named.dedup();
+        self.out.named = named;
     }
 
     /// The order the blocks are filled in, which is not the order they are written in.
@@ -5749,6 +5775,27 @@ mod tests {
         assert_eq!(held.len(), 2, "one register per block that wanted the seven: {held:?}");
         assert!(held.iter().all(|&(decl, _)| decl == 41), "{held:?}");
         assert_ne!(held[0].1, held[1].1, "the same register in two blocks: {held:?}");
+    }
+
+    /// A parameter the program declared comes out named too, in the register it arrived in.
+    ///
+    /// The case the walk over the map at the end is for. A parameter is put in a register the
+    /// convention chose rather than in a fresh one, so nothing asks the mint for it and the pair
+    /// would otherwise never be written down.
+    #[test]
+    fn a_parameter_the_program_declared_says_which_register_it_arrived_in() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let mut build = Builder::new(&mut source, block);
+        build.func().declare_value(args[0], 41);
+        build.ret(&[args[0]]);
+
+        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+
+        let held = &lowered.func.named;
+        assert_eq!(held.len(), 1, "one pair for the one parameter: {held:?}");
+        assert_eq!(held[0].0, 41);
     }
 
     /// A function with nothing declared in it says nothing, which is every function compiled

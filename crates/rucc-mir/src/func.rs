@@ -193,7 +193,14 @@ pub struct Kept {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Where {
     /// In a register, which is the answer a value the allocator found room for gets.
-    Reg(PhysReg),
+    Reg {
+        /// The register itself.
+        reg: PhysReg,
+        /// Which class it was drawn from, which is carried because a register number means
+        /// nothing without one: what a debugger is told is the number DWARF gave the register,
+        /// and that is a fact about the pair rather than about the number here.
+        class: RegClass,
+    },
     /// That far from the call frame address, which is what a value it had to spill gets. Negative,
     /// for the reason the distances in [`Func::locals`] are.
     Frame(i32),
