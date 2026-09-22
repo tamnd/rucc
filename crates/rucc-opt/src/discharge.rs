@@ -505,6 +505,10 @@ const MIDWAY_OVER: &str =
 const COMPUTED_EXTENT: &str =
     "bounds check left alone, how many bytes it covers is a number only the program has";
 
+/// Recorded for a plane check about a range the program worked out.
+const COMPUTED_EXTENT_PLANE: &str =
+    "plane check left alone, how many bytes it covers is a number only the program has";
+
 /// Recorded for a lifetime check whose operands this pass cannot read.
 const UNKNOWN_SHAPE_LIVE: &str =
     "lifetime check left alone, its pointer is not a base and a constant";
@@ -1049,6 +1053,10 @@ impl Pass for Discharge {
                         going.push((inst, why));
                     }
                     Opcode::CheckInit => {
+                        if func[func[inst].args].len() > 2 {
+                            stats.missed(COMPUTED_EXTENT_PLANE);
+                            continue;
+                        }
                         let Some(asked) = about(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE_INIT);
                             continue;
@@ -1070,6 +1078,10 @@ impl Pass for Discharge {
                         going.push((inst, REMOVED_INIT));
                     }
                     Opcode::CheckType => {
+                        if func[func[inst].args].len() > 2 {
+                            stats.missed(COMPUTED_EXTENT_PLANE);
+                            continue;
+                        }
                         let Some((node, asked)) = holding(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE_TYPE);
                             continue;

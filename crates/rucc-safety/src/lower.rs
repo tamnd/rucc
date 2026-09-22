@@ -447,6 +447,11 @@ fn partner(func: &Func, check: Inst) -> Option<Inst> {
 /// `__rucc_check_typed_init` instead, with the same four arguments, and that check is taken out.
 /// The two rows are identical, so the one descriptor recorded here serves both, and the runtime
 /// asks the type plane first, which is the order the two calls ran in.
+///
+/// A third operand is how many bytes to ask about, which is [`bounds`]'s arrangement and is what
+/// `rucc_opt::hoist` writes when one check stands for a loop's worth. The size in the row goes to
+/// zero there for the reason given in [`bounds`]: what a report would name is the width of an access
+/// the program wrote, and a check covering a whole walk is not one of those.
 fn typed(
     func: &mut Func,
     names: &mut Interner,
@@ -456,7 +461,12 @@ fn typed(
     inst: Inst,
     partner: Option<Inst>,
 ) {
-    let [_capability, pointer] = func[func[inst].args] else { return };
+    let args = &func[func[inst].args];
+    let (Some(&_capability), Some(&pointer), computed) =
+        (args.first(), args.get(1), args.get(2).copied())
+    else {
+        return;
+    };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
     let Some(node) = func[mem].tbaa else { return };
@@ -466,10 +476,13 @@ fn typed(
         judgement: ACCESS,
         class: 0,
         // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
-        size: u16::try_from(size).unwrap_or(u16::MAX),
+        size: if computed.is_some() { 0 } else { u16::try_from(size).unwrap_or(u16::MAX) },
     };
     let desc = record(func, names, table, inst, row);
-    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let bytes = match computed {
+        Some(value) => fitted(func, inst, value, word),
+        None => konst(func, inst, Imm::int(i128::from(size), word), word),
+    };
     let small = Type::int(32);
     let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
     let params = &[Type::PTR, word, small, Type::PTR];
@@ -492,6 +505,8 @@ fn typed(
 /// The descriptor says J1, as the type plane's does. The init plane is one of the planes document
 /// 04 section 4.4's first judgement names, so a read the plane refused is an access the planes did
 /// not permit, and that is already the sentence the reporter prints.
+///
+/// A third operand is how many bytes to ask about, as on [`typed`] and [`bounds`].
 fn began(
     func: &mut Func,
     names: &mut Interner,
@@ -499,7 +514,12 @@ fn began(
     table: &mut Vec<Descriptor>,
     inst: Inst,
 ) {
-    let [_capability, pointer] = func[func[inst].args] else { return };
+    let args = &func[func[inst].args];
+    let (Some(&_capability), Some(&pointer), computed) =
+        (args.first(), args.get(1), args.get(2).copied())
+    else {
+        return;
+    };
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
 
@@ -507,10 +527,13 @@ fn began(
         judgement: ACCESS,
         class: 0,
         // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
-        size: u16::try_from(size).unwrap_or(u16::MAX),
+        size: if computed.is_some() { 0 } else { u16::try_from(size).unwrap_or(u16::MAX) },
     };
     let desc = record(func, names, table, inst, row);
-    let bytes = konst(func, inst, Imm::int(i128::from(size), word), word);
+    let bytes = match computed {
+        Some(value) => fitted(func, inst, value, word),
+        None => konst(func, inst, Imm::int(i128::from(size), word), word),
+    };
     let params = &[Type::PTR, word, Type::PTR];
     call(func, names, inst, "__rucc_check_init", params, &[], &[pointer, bytes, desc]);
 }
