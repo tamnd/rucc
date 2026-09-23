@@ -6,7 +6,7 @@
 //! # Why this crate exists
 //!
 //! Because the headers and libraries an MSVC target needs are four formats deep. `rucc-sysroot`
-//! reads Microsoft's manifests and says which fourteen files a compiler needs, the driver downloads
+//! reads Microsoft's manifests and says which files a compiler needs, the driver downloads
 //! them, and what lands on disk is vsix archives and MSIs. A vsix is a zip. An MSI is a compound
 //! file holding a small relational database, and the database says which cabinet each of its files
 //! is in and what it is called there. A cabinet is its own container again, and its contents are
