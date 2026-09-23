@@ -61,9 +61,11 @@ const ROWS: &[(&str, How)] = &[
     ),
     (
         "libc descriptions",
-        How::Absent(
-            "the abilist blob of spec/cross-compile/09-libc-stubs.md is what would write it",
-        ),
+        How::Tree {
+            under: "crates/rucc-stub/glibc",
+            note: "glibc's libc, libm and librt for eight architectures, compiled into the binary \
+                   with include_bytes!, so these bytes are inside the first row too",
+        },
     ),
     (
         "librucc_builtins.a",
