@@ -128,9 +128,16 @@ fewer instructions). A benchmark of two such loops runs 20% fewer instructions a
 SQLite amalgamation at `-O2` grows by 251 instructions over 51 functions, most of them a few
 instructions each: the walks the search chose are now written, and each costs a widening and an add in
 front of its loop. A SQLite workload runs 0.1% more instructions with the same output, and its time
-is within noise. What is left is the exit test. The counter is still read by the index the walk
-replaces, so the test stays on the counter and the loop keeps both until that read is known to be
-dead when the test is decided.
+is within noise.
+
+That first version left the counter in beside the walk, and the reason was not the exit test. The
+walk made for such a group could not serve the group it was made for: the difference of the two
+bases is `sext(k)` at a scale of nothing, and the price refused it for the widening on a symbol
+that is not there. So no set served every use, and the search fell back to the set it started
+with, which is the counter and the walk. Dropping a symbol that cancelled, and its widening with it,
+lets the search price the walk on its own, and the exit test moves onto it. The benchmark then runs
+12.5% fewer instructions again, the corpus does not change, and SQLite moves by 5 instructions with
+the workload running the same number of instructions.
 
 *Rewriting*, then document 17's DCE removes the now-dead original variables. The pass does not delete
 anything itself, which keeps it simpler and follows the general discipline of one job per pass.
