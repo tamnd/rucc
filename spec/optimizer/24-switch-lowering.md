@@ -137,6 +137,8 @@ which can turn a sparse switch into a dense one and change the lowering decision
 cheap, it uses machinery that exists, and it belongs in the same pass as the range-based branch
 simplification of document 21.
 
+It is written, in `crates/rucc-opt/src/prune.rs`, and so is its mirror: removing a default the cases leave nothing for. If the operand's range is `[0, 3]` and 0, 1, 2 and 3 are all cases, no value reaches the default. A `switch` always has a default, so the edge cannot simply go. The place the most cases go to becomes the default instead, and every case going there leaves the case list. The check is a count, because the cases left are all in the range and no two are the same, so they cover it exactly when there are as many of them as it has values. On a switch the lookup table conversion below has already run on, every case goes to the one load, so all of them leave and the switch is a jump. That removes the range check in front of the table, which is what gcc leaves out when it can see the same thing. tamnd/rucc#400.
+
 **Switch conversion to a lookup table** is a middle-end transformation, not a lowering one, because
 its output is ordinary loads and arithmetic that later passes optimize. It runs at `-O2` and above,
 after inlining and constant propagation have made the arms' constancy visible. It requires emitting a
@@ -214,6 +216,7 @@ default edge in the CFG until something proves it unreachable, and deleting it p
 failing to delete it when the range analysis proves it dead, are respectively a missed optimization
 and a wrong CFG. The second is worse: an unreachable default block that is still an edge target keeps
 its contents alive, which is merely wasteful; an edge deleted while reachable is a miscompilation.
+rucc drops the default only when the count in 24.4 says the cases cover the operand's range, and the default's place is taken by a case rather than left empty, so every value still has somewhere to go.
 
 **Switch conversion changes the value on the default path.** The lookup table covers `[min, max]`.
 An operand outside that range must reach the default, and an operand *inside* the range that has no

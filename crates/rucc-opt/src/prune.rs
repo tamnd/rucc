@@ -60,6 +60,27 @@
 //! A switch every one of whose cases is ruled out becomes a jump to its default, which is the
 //! same thing happening to the whole node rather than to one arm of it.
 //!
+//! # The default the cases cover
+//!
+//! The mirror of the case the ranges rule out. Where the cases that are left name every value the
+//! operand can hold, nothing is left over for the default, and its edge is one nothing takes.
+//!
+//! ```c
+//! switch (x & 3) { case 0: ...; case 1: ...; case 2: ...; case 3: ...; default: ...; }
+//! ```
+//!
+//! The operand is in `[0, 3]` and all four are cases, so the default is dead code with an edge
+//! into it. The edge cannot simply go, because a `switch` always has a default, so one of the cases
+//! becomes the default instead and leaves the case list. The one picked is the place the most cases
+//! go, and every case going there leaves with it, so the switch that is left is as short as it can
+//! be. The check costs nothing: the cases that are left are all in the range and no two are the
+//! same, so they cover it exactly when there are as many of them as the range has values.
+//!
+//! What that buys depends on what the cases were. A switch whose arms do work loses a compare and
+//! the default's block. A switch [`crate::switch_conv`] made a table of has every case going to the
+//! one load, so all of them leave, the switch is a jump to the load, and the range check in front of
+//! the table goes too. That is the check gcc leaves out when it can see the default is unreachable.
+//!
 //! # Answers first, then rewrites
 //!
 //! [`Ranges`] borrows the function, so nothing can be changed while it is alive. The walk
@@ -102,6 +123,8 @@
 //! verifier holds every pass to it. So the walk that takes them out is called from here, and it is
 //! [`crate::simplify_cfg`]'s walk rather than a second one written next door.
 
+use std::collections::HashMap;
+
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, IntPred, Opcode, SwitchInfo, Value};
 
 use crate::fold::constant;
@@ -121,6 +144,10 @@ const CASE_REMOVED: &str =
 /// Recorded once for a switch none of whose cases can be reached.
 const SWITCH_REMOVED: &str =
     "switch none of whose cases the switched value can reach replaced by a jump to its default";
+
+/// Recorded once for a switch whose cases cover every value the switched value can hold.
+const DEFAULT_REMOVED: &str =
+    "default no value can reach replaced by the place the most cases go to";
 
 /// Recorded once for each branch the ranges were asked about and could not settle.
 const BRANCH_UNDECIDED: &str = "branch kept, the value ranges do not settle which way it goes";
@@ -166,16 +193,18 @@ impl Pass for Prune {
                 simplify_cfg::jump_to(func, term, call);
                 stats.optimized(BRANCH_DECIDED);
             }
-            for (term, keeping) in plan.switches {
+            for (term, keep) in plan.switches {
                 if !fuel.take() {
                     stats.missed(NO_FUEL);
                     break 'apply;
                 }
-                let removed = shrink(func, term, &keeping);
+                let removed = shrink(func, term, &keep);
                 for _ in 0..removed {
                     stats.optimized(CASE_REMOVED);
                 }
-                if keeping.is_empty() {
+                if keep.covered {
+                    stats.optimized(DEFAULT_REMOVED);
+                } else if keep.cases.is_empty() {
                     stats.optimized(SWITCH_REMOVED);
                 }
             }
@@ -198,8 +227,18 @@ impl Pass for Prune {
 struct Plan {
     /// The branches that only go one way, and the edge each of them goes by.
     branches: Vec<(Inst, BlockCall)>,
-    /// The switches that lose a case, and which of their cases each of them keeps.
-    switches: Vec<(Inst, Vec<usize>)>,
+    /// The switches that lose a case or their default, and what each of them keeps.
+    switches: Vec<(Inst, Keep)>,
+}
+
+/// What is left of a switch the ranges say something about.
+#[derive(Debug)]
+struct Keep {
+    /// The places the surviving cases are in, in the order they were in.
+    cases: Vec<usize>,
+    /// Whether those cases are every value the switched value can hold, which leaves nothing for
+    /// the default.
+    covered: bool,
 }
 
 /// Everything the ranges license, worked out against the function as it stands.
@@ -318,50 +357,90 @@ fn comparison(func: &Func, value: Value) -> Option<(IntPred, Value, Value)> {
     Some((pred, lhs, rhs))
 }
 
-/// Which of a switch's cases the switched value can still hold, when that is not all of them.
+/// Which of a switch's cases the switched value can still hold, and whether the default can be
+/// reached, when either says something.
 ///
-/// The answer is the places the surviving cases are in, in the order they were in, and `None` is
-/// the switch that keeps every case rather than the switch that keeps none. An empty list is the
+/// `None` is the switch that keeps every case and its default. An empty list of cases is the
 /// switch none of whose cases can be reached, which becomes a jump to its default.
-fn reachable(func: &Func, ranges: &mut Ranges<'_>, block: Block, term: Inst) -> Option<Vec<usize>> {
+fn reachable(func: &Func, ranges: &mut Ranges<'_>, block: Block, term: Inst) -> Option<Keep> {
     let Extra::Switch(at) = func[term].extra else { return None };
     let info = func[at];
     let arg = *func[func[term].args].first()?;
     let range = ranges.at(arg, block);
-    if range.is_full() {
-        return None;
-    }
     let cases = &func[info.cases];
     let keeping: Vec<usize> =
         (0..cases.len()).filter(|&at| range.contains(cases[at].unsigned())).collect();
-    (keeping.len() < cases.len()).then_some(keeping)
+    // Every case left is in the range and no two are the same, so they are all of it exactly when
+    // there are as many of them as it has values. Saturating, because the full range of a 128 bit
+    // value has one more value than a `u128` can count.
+    let values = range
+        .pairs()
+        .iter()
+        .fold(0u128, |sum, &(lo, hi)| sum.saturating_add((hi - lo).saturating_add(1)));
+    let covered = !keeping.is_empty() && values == keeping.len() as u128;
+    (keeping.len() < cases.len() || covered).then_some(Keep { cases: keeping, covered })
 }
 
-/// Rewrites a switch to the cases in that list, and says how many it dropped.
+/// Rewrites a switch to what it keeps, and says how many cases the ranges ruled out.
 ///
-/// A switch left with no cases is a jump to its default, because a decision tree over nothing is
-/// the default arm and document 24's lowering would rather not be handed one.
-fn shrink(func: &mut Func, term: Inst, keeping: &[usize]) -> usize {
+/// A switch whose default nothing reaches takes the place the most cases go to as its default,
+/// and those cases leave. A switch left with no cases is a jump to its default, because a decision
+/// tree over nothing is the default arm and document 24's lowering would rather not be handed one.
+fn shrink(func: &mut Func, term: Inst, keep: &Keep) -> usize {
     let Extra::Switch(at) = func[term].extra else { return 0 };
     let info = func[at];
     let all = func[info.targets].to_vec();
     let values = func[info.cases].to_vec();
-    let removed = values.len() - keeping.len();
+    let removed = values.len() - keep.cases.len();
     // The default is the first target and the cases follow it in the order their values are in,
     // so the target for the case in place `at` is one past it.
-    let default = all[0];
-    if keeping.is_empty() {
+    let mut arms: Vec<(Imm, BlockCall)> =
+        keep.cases.iter().map(|&at| (values[at], all[at + 1])).collect();
+    let default = if keep.covered {
+        let most = busiest(func, &arms);
+        arms.retain(|&(_, call)| !same(func, call, most));
+        most
+    } else {
+        all[0]
+    };
+    if arms.is_empty() {
         simplify_cfg::jump_to(func, term, default);
         return removed;
     }
     let targets: Vec<BlockCall> =
-        std::iter::once(default).chain(keeping.iter().map(|&at| all[at + 1])).collect();
-    let cases: Vec<Imm> = keeping.iter().map(|&at| values[at]).collect();
+        std::iter::once(default).chain(arms.iter().map(|&(_, call)| call)).collect();
+    let cases: Vec<Imm> = arms.iter().map(|&(value, _)| value).collect();
     let targets = func.push_block_calls(&targets);
     let cases = func.push_imms(&cases);
     let fresh = func.add_switch(SwitchInfo { targets, cases });
     func[term].extra = Extra::Switch(fresh);
     removed
+}
+
+/// The place the most of these cases go to, the first of them where two tie.
+///
+/// A place is a block and what is passed to it, because two edges into one block passing
+/// different values are two places and only one of them can be the default.
+fn busiest(func: &Func, arms: &[(Imm, BlockCall)]) -> BlockCall {
+    let mut counts: HashMap<(Block, &[Value]), usize> = HashMap::new();
+    for &(_, call) in arms {
+        *counts.entry((call.block, &func[call.args])).or_default() += 1;
+    }
+    let mut best = arms[0].1;
+    let mut most = 0;
+    for &(_, call) in arms {
+        let count = counts[&(call.block, &func[call.args])];
+        if count > most {
+            best = call;
+            most = count;
+        }
+    }
+    best
+}
+
+/// Whether two edges go to the same block with the same values.
+fn same(func: &Func, a: BlockCall, b: BlockCall) -> bool {
+    a.block == b.block && func[a.args] == func[b.args]
 }
 
 #[cfg(test)]
@@ -480,18 +559,27 @@ mod tests {
 
     /// A switch on `x & mask`, with those case values and a default.
     fn masked(mask: i128, cases: &[i128]) -> Func {
+        let places: Vec<usize> = (0..cases.len()).collect();
+        onto(mask, cases, &places)
+    }
+
+    /// A switch on `x & mask` whose case in place `i` goes to arm `places[i]`.
+    ///
+    /// Block 0 is the entry, block 1 the default, and the arms are blocks 2 onwards.
+    fn onto(mask: i128, cases: &[i128], places: &[usize]) -> Func {
         let mut names = Interner::new();
         let ty = Type::int(32);
         let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[ty]));
         let entry = func.create_block();
         let default = func.create_block();
-        let arms: Vec<Block> = cases.iter().map(|_| func.create_block()).collect();
+        let count = places.iter().max().map_or(0, |&last| last + 1);
+        let arms: Vec<Block> = (0..count).map(|_| func.create_block()).collect();
         let x = func.append_param(entry, ty);
         let mut build = Builder::new(&mut func, entry);
         let bits = build.iconst(ty, mask);
         let narrowed = build.binary(Opcode::And, x, bits, Flags::NONE);
         let pairs: Vec<(i128, Block)> =
-            cases.iter().copied().zip(arms.iter().copied()).collect::<Vec<_>>();
+            cases.iter().copied().zip(places.iter().map(|&at| arms[at])).collect::<Vec<_>>();
         build.switch(narrowed, default, &pairs);
         for block in std::iter::once(default).chain(arms) {
             let mut build = Builder::new(&mut func, block);
@@ -524,6 +612,59 @@ mod tests {
         assert_eq!(terminator(&func, 0), Opcode::Jump);
         assert_eq!(goes_to(&func, 0), [1]);
         assert_eq!(stats.count(Kind::Optimized, super::SWITCH_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_default_the_cases_cover_gives_way_to_the_first_case() {
+        // `switch (x & 3)` with all four values as cases. Nothing is left for the default, so the
+        // first case takes its place and leaves the case list, and three compares are left of four.
+        let mut func = masked(3, &[0, 1, 2, 3]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
+        assert_eq!(goes_to(&func, 0), [2, 3, 4, 5]);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CASE_REMOVED), 0);
+    }
+
+    #[test]
+    fn a_default_the_cases_cover_gives_way_to_the_place_most_of_them_go() {
+        // Cases 1 and 2 share an arm, so that arm is the default and both of them leave.
+        let mut func = onto(3, &[0, 1, 2, 3], &[0, 1, 1, 2]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(goes_to(&func, 0), [3, 2, 4]);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_switch_whose_cases_all_go_one_way_and_cover_the_range_is_a_jump() {
+        // What `switch_conv` leaves for a table: every case at the one load. With the default gone
+        // there is nothing to decide, and the range check in front of the table goes with it.
+        let mut func = onto(3, &[0, 1, 2, 3], &[0, 0, 0, 0]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Jump);
+        assert_eq!(goes_to(&func, 0), [2]);
+        assert_eq!(stats.count(Kind::Optimized, super::SWITCH_REMOVED), 0);
+    }
+
+    #[test]
+    fn a_default_is_covered_once_the_cases_outside_the_range_are_gone() {
+        // Case 9 is ruled out and the four left cover `[0, 3]`, so both happen to one switch.
+        let mut func = masked(3, &[0, 1, 9, 2, 3]);
+        let stats = prune(&mut func);
+        assert_eq!(goes_to(&func, 0), [2, 3, 5, 6]);
+        assert_eq!(stats.count(Kind::Optimized, super::CASE_REMOVED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_default_one_value_can_still_reach_is_kept() {
+        let mut func = masked(3, &[0, 1, 3]);
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(goes_to(&func, 0), [1, 2, 3, 4]);
     }
 
     #[test]

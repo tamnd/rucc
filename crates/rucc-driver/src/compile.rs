@@ -3331,6 +3331,23 @@ decl #0 x : int object external static defined
         assert!(text.contains("\tmovsbl\t"), "{text}");
     }
 
+    /// A table whose labels are every value the switched value can hold, which is the range check
+    /// `rucc_opt::prune` takes out.
+    ///
+    /// The operand is `x & 3` and all four values are cases, so the `return -1` is dead. With the
+    /// default out of the switch every case goes to the load, the switch is a jump, and what is
+    /// left is the mask and the load with no compare in front of it.
+    #[test]
+    fn a_table_that_covers_its_operand_has_no_range_check() {
+        let text = optimized(
+            "int f(unsigned x) { switch (x & 3) { case 0: return 5; case 1: return 9; \
+             case 2: return 2; case 3: return 7; } return -1; }\n",
+        );
+        assert!(text.contains("leaq\tCSWTCH.0(%rip)"), "{text}");
+        assert!(!text.contains("\tcmp"), "{text}");
+        assert!(!text.contains("$-1"), "{text}");
+    }
+
     /// A conversion whose operand the optimizer turned into a constant, which is the whole of what
     /// `rucc_opt::fold` does with floating point.
     ///
