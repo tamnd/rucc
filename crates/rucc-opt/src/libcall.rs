@@ -289,7 +289,7 @@ impl Plan {
         };
         let value = match answer {
             Some(Answer::Along(value, _) | Answer::Least { count: value, .. }) => value,
-            Some(Answer::Byte { of, .. }) => of,
+            Some(Answer::Byte { of, .. } | Answer::Less { step: of, .. }) => of,
             Some(Answer::Nowhere | Answer::Number(_)) | None => return,
         };
         *value = renamed.get(value).copied().unwrap_or(*value);
@@ -316,6 +316,15 @@ enum Answer {
         count: Value,
         /// The length of the string, up to its terminator.
         len: u64,
+    },
+    /// A length the compiler knows less a step nothing is known about but how large it can be,
+    /// which is what `strlen` of a string the module holds answers at a place inside it that the
+    /// program worked out.
+    Less {
+        /// The length of the string from where the step is taken, up to its terminator.
+        len: u64,
+        /// How far along the string the call was handed a pointer to, in bytes.
+        step: Value,
     },
     /// One byte of a string the call was given against a byte the compiler knows.
     ///
@@ -828,8 +837,59 @@ impl Site<'_> {
             return None;
         }
         self.answers(data)?;
-        let text = self.one(args[0])?;
-        Some(Plan::Answer(Answer::Number(i128::try_from(text.len()).ok()?)))
+        // A pointer that may be any of several strings still has one length where they all have
+        // it, as `foo` does in `builtins/strlen-3.c` after a loop that picks one of four.
+        if let Some(texts) = self.strings(args[0]) {
+            let len = texts.first()?.len();
+            texts.iter().all(|text| text.len() == len).then_some(())?;
+            return Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)));
+        }
+        // `strlen("hello world" + (x & 7))` is eleven less the step, because a step of no more than
+        // the length lands on a byte of the string or on its terminator and there is no other
+        // terminator before the end. gcc 16 folds it the same way.
+        let Def::Result { inst, .. } = self.func[args[0]].def else { return None };
+        if self.func[inst].opcode != Opcode::PtrAdd {
+            return None;
+        }
+        let &[base, step] = &self.func[self.func[inst].args] else { return None };
+        let len = u64::try_from(self.literal(base)?.len()).ok()?;
+        if self.most(step, DEPTH)? > len {
+            return None;
+        }
+        Some(Plan::Answer(Answer::Less { len, step }))
+    }
+
+    /// The largest this value can be, read as an unsigned number, where the arithmetic that made it
+    /// says. A mask, a remainder and a widening of either are what an index worked out to stay
+    /// inside an array looks like, and nothing else is looked at.
+    fn most(&self, value: Value, depth: u32) -> Option<u64> {
+        if let Some((imm, _)) = crate::fold::evaluated(self.func, value, DEPTH) {
+            return u64::try_from(imm.unsigned()).ok();
+        }
+        let depth = depth.checked_sub(1)?;
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        let args = &self.func[self.func[inst].args];
+        match self.func[inst].opcode {
+            Opcode::And => {
+                let constant = |value| crate::fold::evaluated(self.func, value, DEPTH);
+                let mask = constant(*args.first()?).or_else(|| constant(*args.get(1)?))?.0;
+                u64::try_from(mask.unsigned()).ok()
+            }
+            Opcode::URem => {
+                let (imm, _) = crate::fold::evaluated(self.func, *args.get(1)?, DEPTH)?;
+                u64::try_from(imm.unsigned()).ok()?.checked_sub(1)
+            }
+            Opcode::ZExt => self.most(*args.first()?, depth),
+            // A widening that copies the sign keeps the bound only where the sign bit cannot be
+            // set, which is a bound below the top bit of the narrower type.
+            Opcode::SExt => {
+                let narrow = self.func[*args.first()?].ty.bits();
+                let most = self.most(*args.first()?, depth)?;
+                let top = 1u64.checked_shl(narrow.checked_sub(1)?)?;
+                (most < top).then_some(most)
+            }
+            _ => None,
+        }
     }
 
     /// The same, stopping at a count.
@@ -1819,6 +1879,20 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) -> HashMap
             func.insert_before(made, inst);
             func[made].results().next().expect("a choice is one value")
         }
+        Answer::Less { len, step } => {
+            let ty = func[inst]
+                .results()
+                .next()
+                .map(|result| func[result].ty)
+                .expect("a call whose answer is a length has one");
+            let step = resize(func, inst, step, ty);
+            let len = constant(func, inst, ty, i128::from(len));
+            let args = func.push_values(&[len, step]);
+            let data = InstData { args, ..InstData::new(Opcode::Sub) };
+            let made = func.create_inst(data, &[ty], span);
+            func.insert_before(made, inst);
+            func[made].results().next().expect("a difference is one value")
+        }
         Answer::Byte { of, against, leading } => {
             let ty = func[inst]
                 .results()
@@ -1890,6 +1964,21 @@ fn read(func: &mut Func, before: Inst, from: Value) -> Value {
     let made = func.create_inst(data, &[Type::int(8)], span);
     func.insert_before(made, before);
     func[made].results().next().expect("a load is one value")
+}
+
+/// That value in an integer type of another width, put in front of the call being replaced. The
+/// value is known not to be negative, so a wider type takes it without its sign.
+fn resize(func: &mut Func, before: Inst, value: Value, ty: Type) -> Value {
+    let opcode = match func[value].ty.bits().cmp(&ty.bits()) {
+        std::cmp::Ordering::Equal => return value,
+        std::cmp::Ordering::Less => Opcode::ZExt,
+        std::cmp::Ordering::Greater => Opcode::Trunc,
+    };
+    let span = func.span(before);
+    let args = func.push_values(&[value]);
+    let made = func.create_inst(InstData { args, ..InstData::new(opcode) }, &[ty], span);
+    func.insert_before(made, before);
+    func[made].results().next().expect("a conversion is one value")
 }
 
 /// An integer constant of that type, put in front of the call being replaced.
@@ -2616,6 +2705,72 @@ block0:
         assert!(!out.contains("call @strlen("), "{out}");
         assert!(out.contains("iconst.i64 11"), "{out}");
         assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// `strlen` of a pointer that may be either of two strings is their length where they share
+    /// one, and stays a call where they do not.
+    #[test]
+    fn strlen_of_a_choice_between_literals_of_one_length_is_that_length() {
+        let text = r#"
+global @.Lstr.0 : bytes 4 = { bytes "abc\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "xyz\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 3 = { bytes "ab\00" }, align 1, linkage(internal), constant
+
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64), linkage(external);
+
+func @g(i1), linkage(external) {
+block0(%0: i1):
+    %1 = global_addr @.LEFT
+    %2 = global_addr @.Lstr.1
+    br_if %0, block1(%1), block1(%2)
+block1(%3: ptr):
+    %4 = call @strlen(%3) : (ptr) -> i64
+    call @use(%4) : (i64)
+    return
+}
+"#;
+        let same = folded(&text.replace(".LEFT", ".Lstr.0"));
+        assert!(!same.contains("call @strlen("), "{same}");
+        assert!(same.contains("iconst.i64 3"), "{same}");
+
+        let differing = folded(&text.replace(".LEFT", ".Lstr.2"));
+        assert!(differing.contains("call @strlen("), "{differing}");
+    }
+
+    /// `strlen` at a place inside a held string the program worked out is the length less the step,
+    /// where the step cannot go past the terminator. A mask of seven fits inside eleven and a mask
+    /// of fifteen does not, so only the first call goes.
+    #[test]
+    fn strlen_at_a_bounded_step_into_a_held_string_is_the_rest() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+
+func @g(i32), linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @.Lstr.0
+    %2 = iconst.i32 7
+    %3 = and %0, %2
+    %4 = sext.i64 %3
+    %5 = ptr_add %1, %4
+    %6 = call @strlen(%5) : (ptr) -> i64
+    %7 = iconst.i32 15
+    %8 = and %0, %7
+    %9 = sext.i64 %8
+    %10 = ptr_add %1, %9
+    %11 = call @strlen(%10) : (ptr) -> i64
+    call @use(%6, %11) : (i64, i64)
+    return
+}
+"#,
+        );
+        assert_eq!(out.matches("call @strlen(").count(), 1, "{out}");
+        assert!(out.contains("sub %6, %4"), "eleven less the step, {out}");
+        assert!(out.contains("iconst.i64 11"), "{out}");
     }
 
     /// `strnlen` stops at its count, and the count is what the answer is where nothing terminated

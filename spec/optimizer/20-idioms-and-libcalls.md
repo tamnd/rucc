@@ -96,7 +96,13 @@ nothing is inside an empty set, so `strspn(s, "")` is zero, `strcspn(s, "")` is 
 `strpbrk(s, "")` is a null pointer whatever `s` is, and a set of one character makes
 `strpbrk(s, "c")` a `strchr(s, 'c')` the same way a needle of one character does for `strstr`. A
 fourth is that a string has one terminator in it, so `strrchr(s, 0)` is `strchr(s, 0)` and which end
-the walk started at stops mattering. A comparison answers one of minus one, zero and one, because the
+the walk started at stops mattering. `strlen` answers two more shapes gcc 16 answers. A pointer that
+may be any of several held strings is their length where they all have the same one, which is what
+`foo` in `builtins/strlen-3.c` is after a loop that picks one of four. A held string stepped into by
+an amount the program works out is its length less the step, where the arithmetic that made the step
+says it is no more than the length: a mask, a remainder by a constant and a widening of either are
+read for how large they can be, so `strlen("hello world" + (x & 7))` is `11 - (x & 7)`. A step that
+can pass the terminator is left as a call, since past it the compiler knows nothing. A comparison answers one of minus one, zero and one, because the
 sign is what the standard promises and the magnitude is not, and that is what gcc leaves behind as
 well.
 
