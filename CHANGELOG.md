@@ -12,6 +12,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A check after a join or at the top of a loop is no longer taken as answered by a check in front of the branch when something on the other path could have changed the answer. The discharge walked the dominator tree and handed a join the facts its dominator ended with, never looking at the arms, so `if (argc > 1) free (p); int b = *p;` read freed storage at `-O2` while `-O0` refused it. Each block now gets the kills of every block on a path from its dominator to it, which is the arms of a branch and the body of a loop alike. A call flagged as freeing nothing also no longer keeps the type and init facts, since freeing nothing is not writing nothing, unless the callee is known to write no memory at all. Tracked in tamnd/rucc#1755.
 
+- Four programs in `tests/safety` hold that fix in place: a read after an `if` that freed in one arm, a read at the top of a loop whose body freed, and a callee that frees nothing but stores another type or copies unwritten bytes over what the caller read. Each is refused at `-O0`, and each ran to the end at `-O2` before the fix, so `cargo xtask accounting` reports a divergence if the discharge ever loses track of those paths again.
+
 ## 0.11.0
 
 ### Added
