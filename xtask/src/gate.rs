@@ -23,6 +23,12 @@
 //! place this trades space for time, and it is worth saying out loud rather than discovering from
 //! a full disk.
 //!
+//! The check with the oldest Rust the workspace says it builds with is the other exception, for a
+//! different reason: a second compiler cannot use the first one's artefacts at all, so it has a
+//! target directory of its own whatever lane it is in, and it runs in the documentation's lane.
+//! It is there because most merges go in on this gate rather than on CI, and the `msrv` job in CI
+//! was the only thing that asked. See tamnd/rucc#1782.
+//!
 //! # A compiler to run programs through
 //!
 //! The ten checks that compile C and run it all want `target/release/rucc`, so they cannot start
@@ -387,7 +393,7 @@ pub(crate) fn ci() -> Result<()> {
     let head = head();
     let tail = tail();
     let programs = programs()?;
-    let docs = [docs()];
+    let docs = [docs(), Step::task("msrv", &[])?];
     let mut done: Vec<Done> = Vec::new();
 
     // Four lanes. The documentation and the checks that read the tree need nothing and start at
