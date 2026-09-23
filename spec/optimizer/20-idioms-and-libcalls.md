@@ -109,7 +109,18 @@ constant byte stored at each place in the array, and stops at a call, at a store
 and at a store through anything that is not a local, since each of those could have written the
 array some other way. A store into another local is passed over, because two locals are two objects.
 The answer is the length only where the bytes it kept reach a terminator from the place asked about
-without a gap. A comparison answers one of minus one, zero and one, because the
+without a gap. `strcpy` takes the same length a choice of strings of one length has, so the loop in
+`builtins/strcpy-2.c` that leaves one of four seven character strings behind is a `memcpy` of eight
+bytes.
+
+**Moves that cannot overlap.** `memmove` of nothing is its destination, and `memmove` is `memcpy`
+where the two sides cannot overlap. That is so for a single byte, which is read before it is written;
+for a read only source whose definition the link cannot swap, since the destination is written and
+the source cannot be; and for two different objects of which one is a local, since a local overlaps
+nothing else. A local and a pointer loaded from somewhere are not two objects, because the pointer
+may hold the local's address, and two places in one global are not either. `bcopy` is the same move
+with its addresses the other way round and no answer, so a `bcopy` that moves nothing goes and one
+that cannot overlap is a `memcpy` whose answer nothing reads. A comparison answers one of minus one, zero and one, because the
 sign is what the standard promises and the magnitude is not, and that is what gcc leaves behind as
 well.
 

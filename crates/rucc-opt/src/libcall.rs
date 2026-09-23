@@ -187,7 +187,7 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 45] = [
+const SOURCES: [&str; 47] = [
     "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
@@ -206,12 +206,14 @@ const SOURCES: [&str; 45] = [
     "__vprintf_chk",
     "__vsnprintf_chk",
     "__vsprintf_chk",
+    "bcopy",
     "fprintf",
     "fprintf_unlocked",
     "fputs",
     "fputs_unlocked",
     "index",
     "memchr",
+    "memmove",
     "mempcpy",
     "printf",
     "printf_unlocked",
@@ -714,6 +716,18 @@ impl Site<'_> {
             "strcat" => self.strcat(data, &args, None),
             "strncat" => self.strncat(data, &args),
             "mempcpy" => self.mempcpy(data, &args, ignored),
+            "memmove" => self.memmove(data, &args),
+            // `bcopy` is `memmove` with the two addresses the other way round and no answer.
+            "bcopy" => {
+                let [source, dest, count] = *args else { return None };
+                if data.results().next().is_some() {
+                    return None;
+                }
+                self.moved(dest, source, count).map(|plan| match plan {
+                    Plan::Answer(_) => Plan::Drop,
+                    plan => plan,
+                })
+            }
             "sprintf" => self.sprintf(data, &args, ignored),
             "__memcpy_chk" | "__memmove_chk" | "__mempcpy_chk" | "__memset_chk" => {
                 self.memory_chk(data, name, &args, ignored)
@@ -837,11 +851,7 @@ impl Site<'_> {
             return None;
         }
         self.answers(data)?;
-        // A pointer that may be any of several strings still has one length where they all have
-        // it, as `foo` does in `builtins/strlen-3.c` after a loop that picks one of four.
-        if let Some(texts) = self.strings(args[0]) {
-            let len = texts.first()?.len();
-            texts.iter().all(|text| text.len() == len).then_some(())?;
+        if let Some(len) = self.length(args[0]) {
             return Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)));
         }
         if let Some(text) = self.stored(inst, args[0]) {
@@ -856,7 +866,7 @@ impl Site<'_> {
         }
         let &[base, step] = &self.func[self.func[inst].args] else { return None };
         let len = u64::try_from(self.literal(base)?.len()).ok()?;
-        if self.most(step, DEPTH)? > len {
+        if self.largest(step)? > u128::from(len) {
             return None;
         }
         Some(Plan::Answer(Answer::Less { len, step }))
@@ -872,11 +882,7 @@ impl Site<'_> {
     /// it has then is enough only where it reaches a stored terminator without a gap.
     fn stored(&self, call: Inst, value: Value) -> Option<Vec<u8>> {
         let (base, offset) = self.address(value)?;
-        let local = |value: Value| match self.func[value].def {
-            Def::Result { inst, .. } => self.func[inst].opcode == Opcode::Alloca,
-            _ => false,
-        };
-        if !local(base) {
+        if !self.local(base) {
             return None;
         }
         let block = self.func.block_of(call)?;
@@ -893,7 +899,7 @@ impl Site<'_> {
             let Some((root, at)) = self.address(to) else { break };
             if root != base {
                 // Two locals are two objects, so a store into another one leaves this one alone.
-                if local(root) {
+                if self.local(root) {
                     continue;
                 }
                 break;
@@ -913,39 +919,6 @@ impl Site<'_> {
             }
         }
         None
-    }
-
-    /// The largest this value can be, read as an unsigned number, where the arithmetic that made it
-    /// says. A mask, a remainder and a widening of either are what an index worked out to stay
-    /// inside an array looks like, and nothing else is looked at.
-    fn most(&self, value: Value, depth: u32) -> Option<u64> {
-        if let Some((imm, _)) = crate::fold::evaluated(self.func, value, DEPTH) {
-            return u64::try_from(imm.unsigned()).ok();
-        }
-        let depth = depth.checked_sub(1)?;
-        let Def::Result { inst, .. } = self.func[value].def else { return None };
-        let args = &self.func[self.func[inst].args];
-        match self.func[inst].opcode {
-            Opcode::And => {
-                let constant = |value| crate::fold::evaluated(self.func, value, DEPTH);
-                let mask = constant(*args.first()?).or_else(|| constant(*args.get(1)?))?.0;
-                u64::try_from(mask.unsigned()).ok()
-            }
-            Opcode::URem => {
-                let (imm, _) = crate::fold::evaluated(self.func, *args.get(1)?, DEPTH)?;
-                u64::try_from(imm.unsigned()).ok()?.checked_sub(1)
-            }
-            Opcode::ZExt => self.most(*args.first()?, depth),
-            // A widening that copies the sign keeps the bound only where the sign bit cannot be
-            // set, which is a bound below the top bit of the narrower type.
-            Opcode::SExt => {
-                let narrow = self.func[*args.first()?].ty.bits();
-                let most = self.most(*args.first()?, depth)?;
-                let top = 1u64.checked_shl(narrow.checked_sub(1)?)?;
-                (most < top).then_some(most)
-            }
-            _ => None,
-        }
     }
 
     /// The same, stopping at a count.
@@ -1310,7 +1283,7 @@ impl Site<'_> {
         if end && ignored {
             return self.unchecked(data, "strcpy", &[]);
         }
-        let len = self.one(source)?.len();
+        let len = self.length(source)?;
         let (callee, signature) = self.shapes.get("memcpy")?;
         let args =
             vec![Argument::Have(dest), Argument::Have(source), Argument::Count(len as u64 + 1)];
@@ -1337,6 +1310,69 @@ impl Site<'_> {
         }
         let len = self.one(source)?.len() as u128;
         (self.number(count)? >= len).then(|| self.unchecked(data, "strcat", &[2]))?
+    }
+
+    /// `memmove`, which copies nothing where the count is zero and is `memcpy` where the two
+    /// places cannot overlap.
+    fn memmove(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        let [dest, source, count] = *args else { return None };
+        if !self.places(data) {
+            return None;
+        }
+        self.moved(dest, source, count)
+    }
+
+    /// What a move of that many bytes from the source to the destination is, where it is anything
+    /// but itself.
+    ///
+    /// A move that cannot overlap is a copy. That is so where it is one byte, since one byte is
+    /// read before it is written; where the source is a read only object, since the destination is
+    /// written and a read only object is not; and where either side is a local the other is not,
+    /// since two objects do not overlap. `builtins/memmove.c` and `builtins/memmove-2.c` are all
+    /// three, and gcc 16 makes a `memcpy` or plain loads and stores of each. A local and a pointer
+    /// read from somewhere are not two objects, since the pointer may be the local's address.
+    fn moved(&self, dest: Value, source: Value, count: Value) -> Option<Plan> {
+        if self.number(count) == Some(0) {
+            return Some(Plan::Answer(Answer::Along(dest, 0)));
+        }
+        let (to, _) = self.address(dest)?;
+        let (from, _) = self.address(source)?;
+        let apart = self.largest(count).is_some_and(|count| count <= 1)
+            || self.fixed(from)
+            || (to != from && self.object(to) && self.object(from))
+                && (self.local(to) || self.local(from));
+        apart.then(|| self.copy(dest, source, count))?
+    }
+
+    /// A `memcpy` of that many bytes, answering the destination.
+    fn copy(&self, dest: Value, source: Value, count: Value) -> Option<Plan> {
+        let (callee, signature) = self.shapes.get("memcpy")?;
+        let args = vec![Argument::Have(dest), Argument::Have(source), Argument::Have(count)];
+        Some(Plan::Swap { callee, signature, args, answer: None })
+    }
+
+    /// Whether this is the address of an object rather than a pointer that could be anywhere.
+    fn object(&self, value: Value) -> bool {
+        self.local(value)
+            || matches!(self.func[value].def, Def::Result { inst, .. } if self.func[inst].opcode == Opcode::GlobalAddr)
+    }
+
+    /// Whether this is the address of a local array, which no other object overlaps.
+    fn local(&self, value: Value) -> bool {
+        matches!(self.func[value].def, Def::Result { inst, .. } if self.func[inst].opcode == Opcode::Alloca)
+    }
+
+    /// Whether this is the address of a read only object whose definition the link cannot swap for
+    /// one that is not.
+    fn fixed(&self, value: Value) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        if self.func[inst].opcode != Opcode::GlobalAddr {
+            return false;
+        }
+        let Extra::Symbol(name) = self.func[inst].extra else { return false };
+        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return false };
+        let global = &self.module[id];
+        global.constant && vouched(global, self.pic)
     }
 
     /// `mempcpy`, which is `memcpy` answering the end of the copy rather than the start.
@@ -1592,8 +1628,38 @@ impl Site<'_> {
                 let then = self.largest_on(then, depth - 1, on)?;
                 Some(then.max(self.largest_on(other, depth - 1, on)?))
             }
-            _ => self.number(value),
+            _ => self.number(value).or_else(|| self.bounded(value, depth, on)),
         }
+    }
+
+    /// The largest the arithmetic that made this value says it can be. A mask, a remainder by a
+    /// constant and a widening of either are what an index worked out to stay inside an array
+    /// looks like, as `x++ & 7` is in `builtins/strlen.c`, and nothing else is looked at.
+    fn bounded(&self, value: Value, depth: u32, on: &mut Vec<Value>) -> Option<u128> {
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        let args = &self.func[self.func[inst].args];
+        let narrow = *args.first()?;
+        match self.func[inst].opcode {
+            Opcode::And => self.number(narrow).or_else(|| self.number(*args.get(1)?)),
+            Opcode::URem => self.number(*args.get(1)?)?.checked_sub(1),
+            Opcode::ZExt => self.largest_on(narrow, depth - 1, on),
+            // A widening that copies the sign keeps the bound only where the sign bit cannot be
+            // set, which is a bound below the top bit of the narrower type.
+            Opcode::SExt => {
+                let most = self.largest_on(narrow, depth - 1, on)?;
+                let top = 1u128.checked_shl(self.func[narrow].ty.bits().checked_sub(1)?)?;
+                (most < top).then_some(most)
+            }
+            _ => None,
+        }
+    }
+
+    /// The one length every string this value may point at has, as `foo` has in
+    /// `builtins/strlen-3.c` after a loop that picks one of four strings of thirteen characters.
+    fn length(&self, value: Value) -> Option<usize> {
+        let texts = self.strings(value)?;
+        let len = texts.first()?.len();
+        texts.iter().all(|text| text.len() == len).then_some(len)
     }
 
     /// The number this value works out to, read as an unsigned one.
@@ -2761,6 +2827,79 @@ block0:
         assert!(!out.contains("call @strlen("), "{out}");
         assert!(out.contains("iconst.i64 11"), "{out}");
         assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// `memmove` is `memcpy` where the two sides cannot overlap and the destination where it moves
+    /// nothing, and `bcopy` is the same with its addresses the other way round.
+    #[test]
+    fn a_move_that_cannot_overlap_is_a_copy() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 6 = { bytes "abcde\00" }, align 1, linkage(internal), constant
+global @p : bytes 32 = { zero 32 }, align 16, linkage(external)
+
+func @memmove(ptr, ptr, i64) -> ptr, linkage(external);
+func @bcopy(ptr, ptr, i64), linkage(external);
+func @use(ptr, ptr, ptr, ptr), linkage(external);
+
+func @g(ptr, i64), linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = global_addr @p
+    %3 = global_addr @.Lstr.0
+    %4 = iconst.i64 6
+    %5 = call @memmove(%2, %3, %4) : (ptr, ptr, i64) -> ptr
+    %6 = iconst.i64 2
+    %7 = ptr_add %2, %6
+    %8 = iconst.i64 3
+    %9 = ptr_add %2, %8
+    %10 = iconst.i64 1
+    %11 = call @memmove(%7, %9, %10) : (ptr, ptr, i64) -> ptr
+    %12 = iconst.i64 0
+    %13 = call @memmove(%7, %0, %12) : (ptr, ptr, i64) -> ptr
+    call @bcopy(%9, %7, %10) : (ptr, ptr, i64)
+    %14 = alloca, size 8, align 8
+    %15 = call @memmove(%14, %0, %1) : (ptr, ptr, i64) -> ptr
+    %16 = call @memmove(%7, %9, %1) : (ptr, ptr, i64) -> ptr
+    call @use(%5, %11, %13, %16) : (ptr, ptr, ptr, ptr)
+    return
+}
+"#,
+        );
+        assert_eq!(out.matches("call @memcpy(").count(), 3, "{out}");
+        assert!(!out.contains("call @bcopy("), "{out}");
+        assert_eq!(
+            out.matches("call @memmove(").count(),
+            2,
+            "a local and a pointer from outside, and two places in one object, stay moves, {out}"
+        );
+    }
+
+    /// `strcpy` of a pointer that may be any of several strings of one length is a copy of that
+    /// many bytes and a terminator.
+    #[test]
+    fn strcpy_of_a_choice_of_one_length_is_a_copy() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 4 = { bytes "abc\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "xyz\00" }, align 1, linkage(internal), constant
+
+func @strcpy(ptr, ptr) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr, i1), linkage(external) {
+block0(%0: ptr, %1: i1):
+    %2 = global_addr @.Lstr.0
+    %3 = global_addr @.Lstr.1
+    br_if %1, block1(%2), block1(%3)
+block1(%4: ptr):
+    %5 = call @strcpy(%0, %4) : (ptr, ptr) -> ptr
+    call @use(%5) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @memcpy("), "{out}");
+        assert!(out.contains("iconst.i64 4"), "{out}");
     }
 
     /// `strlen` of a local array the block has just written a string into is that string's length,

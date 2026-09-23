@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `memmove` and `bcopy` are folded as gcc 16 folds them. A move of nothing is its destination, and a move that cannot overlap is a `memcpy`, which is so for one byte, for a read only source and for two different objects where one is a local. `strcpy` of a pointer that may be any of several strings of one length is a `memcpy` of that length and a terminator. `execute/builtins/memmove.c`, `memmove-2.c` and `strcpy-2.c` pass at every level. The bound walk added for `strlen` is folded into the one the fortify checks already had, so there is one walk for how large a count or a step can be. Part of tamnd/rucc#1677.
+
 - `strlen` of a local array the same block has just written a string into, one constant byte at a time, is the length of that string, from the front or from part way along. The walk back from the call stops at a call, a wider store or a store through a pointer that is not a local, so nothing that could have changed the array is looked past. `execute/builtins/strlen.c` passes at every level. Part of tamnd/rucc#1677.
 
 - `strlen` of a held string stepped into by an amount no larger than its length is the length less the step, so `strlen ("hello world" + (x++ & 7))` is `11 - (x & 7)` with `x` still stepped, and `strlen` of a pointer that may be any of several held strings is their length where they all share it. The step's largest value comes from the mask, remainder or widening that made it. `execute/builtins/strlen-2.c` and `execute/builtins/strlen-3.c` pass at every level. Part of tamnd/rucc#1677.
