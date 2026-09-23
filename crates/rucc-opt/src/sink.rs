@@ -31,10 +31,12 @@
 //! which is the exit block or a block put on the edge to it, so nothing runs between the last store
 //! and the write that stands for it but the rest of the last iteration.
 //!
-//! That leaves out the loop that most needs this, which is a copy: `to[i] = from[i]` reads the
-//! init plane over `from` and writes it over `to`, and the pass cannot tell the two apart. That
-//! needs a fact nothing here has, which is that two ranges do not overlap, and it is tracked on
-//! tamnd/rucc#1617.
+//! A copy, `to[i] = from[i]`, reads the init plane over `from` and writes it over `to`, and this
+//! pass cannot tell the two apart. It does not have to. `crate::hoist` can, when the two came out
+//! of two calls to `malloc`, and takes the checks on `from` out in front of the loop, and after
+//! that nothing in the loop reads a plane. That is why the pipeline runs this pass straight after
+//! `hoist` as well as near the end: see `crate::pipeline`'s `-O2` list for what `split` does to a
+//! loop in between.
 //!
 //! # What the range is
 //!

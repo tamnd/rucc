@@ -311,6 +311,15 @@ const O1: &[&str] = &[
 /// those out ran seven passes ago. `spec/safe-memory/13-performance.md` section 13.1 measured the
 /// cost and tamnd/rucc#893 is the rest of it.
 ///
+/// `plane-sink` runs twice, once between `hoist` and `split` and once near the end. The first one
+/// is there for the loops `split` is about to cut in two. What `split` hands back is a run of
+/// iterations with no checks in it that can leave at its own test or at the guard into the rest,
+/// and a loop with two ways out is one `plane-sink` does not take, so on a copy whose checks came
+/// out the plane writes stayed in the half that runs every iteration and went only from the half
+/// that almost never does. `a-byte-at-a-time-copy` went from 2545314219 instructions to 282430669
+/// on that alone. The second run is for what the passes in between leave in a shape the first one
+/// could not take, and it finds nothing to do on a loop the first run already emptied.
+///
 /// `ivopts` goes last of the loop passes, because it is the one that decides what the loop's
 /// variables finally are and everything above it is still moving code around. It is followed by
 /// `simplify-cfg` and the pair cannot be separated. Section 28.4 has a loop stop asking its counter
@@ -345,6 +354,7 @@ const O2: &[&str] = &[
     "fold",
     "simplify",
     "hoist",
+    "plane-sink",
     "split",
     "canon",
     "licm",
@@ -385,6 +395,7 @@ const O3: &[&str] = &[
     "fold",
     "simplify",
     "hoist",
+    "plane-sink",
     "split",
     "canon",
     "licm",
