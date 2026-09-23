@@ -169,6 +169,11 @@ true whatever `x` is, `x > inf` is false, and `x != x` is `uno x, x`. This one c
 since the unordered predicates accept the bucket a NaN leaves. gcc 16 folds all of these without
 `-ffast-math`, and `ieee/fp-cmp-6.c`, `fp-cmp-7.c` and `fp-cmp-9.c` assert it by calling a function
 they never define.
+The branches in front of the comparison narrow the same set. The walk goes back along edges that
+are the only way into their block, and a branch there on a comparison of the same pair, in either
+order, leaves the buckets its taken side accepts. So in `isunordered (x, y) || !isunordered (x, y)`
+kept as two branches, which is what `-O1`, `-Os` and `-Oz` do, the second test is only reached when
+the pair is ordered and folds to true.
 
 *Tier 6, select and control, roughly 20.* `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)`
 to a zero-extended condition, min and max recognition, absolute value recognition.
