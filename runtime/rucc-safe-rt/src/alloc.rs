@@ -489,7 +489,7 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
 /// what lets the compiler drop the fields a caller never looks at once this is inlined into it, and
 /// a check that asks two planes was loading all eight fields and throwing half of them away,
 /// because a relaxed load is one the compiler keeps. It is race free for the reason the relaxed
-/// loads were enough: [`publish`] stores every field of a slot once, under its lock, before the
+/// loads were enough: `publish` stores every field of a slot once, under its lock, before the
 /// release that makes the count cover it, and nothing stores to that slot again.
 #[must_use]
 pub fn covering(addr: usize) -> Option<Region> {

@@ -498,6 +498,15 @@ pub const IVOPTS_SET_PENALTY: u32 = 10;
 /// heuristic can tell apart anyway.
 pub const SCHEDULER_READY_LIST_BOUND: usize = 100;
 
+/// How many cells a switch conversion table may have for each label it replaces, per section 24.4.
+///
+/// Eight, which is gcc's `switch-conversion-max-branch-ratio`. `rucc_opt`'s switch conversion reads
+/// it as the most a table may span for its labels, so three labels may make a table of twenty four
+/// cells and not of twenty five. What it bounds is the data a `switch` costs, since the holes are
+/// cells nothing reads, and gcc's number is taken as it is because the cost it weighs is the same
+/// here.
+pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
+
 /// How many targets a switch needs before a jump table beats a chain of compares, per section 40.10.
 ///
 /// Not measured. The right answer depends on what a mispredicted indirect branch costs against
@@ -862,6 +871,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "38.8",
         gcc: "param_max_sched_ready_insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "SWITCH_CONVERSION_MAX_GROWTH",
+        value: 8,
+        unit: "cells per label",
+        document: "24.4",
+        gcc: "param_switch_conversion_branch_ratio",
         provenance: Provenance::Gcc,
     },
     Constant {

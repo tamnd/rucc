@@ -30,18 +30,18 @@
 //! What is left of the six is the part below: verify what changed, not everything, and say which
 //! function it was.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{FuncId, Module, Pic};
+use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
     heap, image, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside, params,
-    pass, purity, reload,
+    pass, purity, readonly, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -981,6 +981,15 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         }
         _ => Arc::default(),
     };
+    // Every name the module had before any pass ran, which is what a table a pass asks for has to
+    // stay clear of, and the number the next table's name is made from. See `crate::readonly`.
+    let taken: HashSet<Symbol> = module
+        .funcs()
+        .map(|id| module[id].name)
+        .chain(module.globals().map(|id| module[id].name))
+        .chain(module.aliases().map(|id| module[id].name))
+        .collect();
+    let mut tables = 0;
     for (index, pass) in passes.into_iter().enumerate() {
         let name = pass.name();
         if opts.dumps.wants_before(name) {
@@ -1015,7 +1024,13 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                     .calling(Arc::clone(&purity))
                     .touching(Arc::clone(&modref))
             });
-            let stats = pass.run(&mut module[id], an, &mut fuel);
+            let pointer_bits = module.datalayout.pointer_bits;
+            let mut data = readonly::ReadOnly::new(names, &taken, pointer_bits, tables);
+            let stats = pass.run_emitting(&mut module[id], an, &mut fuel, &mut data);
+            tables = data.next();
+            for table in data.into_tables() {
+                add_table(module, table);
+            }
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.
             // A pass that did change something is taken at its word, and in a checked build the
@@ -1072,6 +1087,28 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // here, and it is the one the pass would have given.
     constant_p::answer(module, true);
     report
+}
+
+/// Adds a table a pass asked for to the module, as the read only array its load expects.
+///
+/// Internal, so that it is in no other object's way, and constant, which is what puts it in
+/// `.rodata`. Aligned to its cell, which is all a load of one cell asks for.
+fn add_table(module: &mut Module, table: readonly::Table) {
+    let bytes = table.ty.bits() / 8;
+    let cells: Vec<Datum> = table
+        .cells
+        .iter()
+        .map(|&cell| Datum::Scalar {
+            ty: table.ty,
+            value: module.add_imm(Imm::int(cell, table.ty)),
+        })
+        .collect();
+    let init = module.push_data(&cells);
+    let mut global = Global::new(table.name, u64::from(bytes) * cells.len() as u64, bytes);
+    global.linkage = Linkage::Internal;
+    global.constant = true;
+    global.init = Some(init);
+    module.add_global(global);
 }
 
 /// The module written out, under a name that sorts in the order the passes ran.

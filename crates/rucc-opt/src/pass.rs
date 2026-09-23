@@ -2,7 +2,7 @@
 
 use rucc_ir::Func;
 
-use crate::{Analyses, Fuel, Preserved, Stats};
+use crate::{Analyses, Fuel, Preserved, ReadOnly, Stats};
 
 /// One transformation over one function.
 ///
@@ -56,6 +56,24 @@ pub trait Pass: Sync {
     /// as wasteful, and it is how two passes end up disagreeing about the same function, so a
     /// pass that wants a dominator tree asks for one here.
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats;
+
+    /// Transforms the function the way [`Pass::run`] does, with somewhere to put a read only
+    /// table the transformation needs.
+    ///
+    /// This is what the pipeline calls. Almost every pass writes code and nothing else, so the
+    /// default is `run` with the place for tables left empty. `crate::switch_conv` is the pass that
+    /// is not like that, and `crate::readonly` says why a table is asked for this way rather than
+    /// by handing the pass the module.
+    fn run_emitting(
+        &self,
+        func: &mut Func,
+        an: &mut Analyses,
+        fuel: &mut Fuel,
+        data: &mut ReadOnly<'_>,
+    ) -> Stats {
+        let _ = data;
+        self.run(func, an, fuel)
+    }
 
     /// Whether `-fno-<name>` is refused, because the pass is not one the compile can do without.
     ///
