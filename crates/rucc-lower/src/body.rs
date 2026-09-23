@@ -5529,8 +5529,11 @@ impl<'u> Body<'_, 'u> {
         if let Some(value) = self.checked_binary(opcode, lhs, rhs, signed, span) {
             return value;
         }
+        // Not a left shift. C99 leaves a bit shifted into or past the sign undefined, but gcc's
+        // manual says it does not use that, and `(long long)i << 61` is how tcc's test builds case
+        // values it then expects a `switch` to find.
         let flags = match opcode {
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Shl => self.signed_overflow(signed),
+            Opcode::Add | Opcode::Sub | Opcode::Mul => self.signed_overflow(signed),
             _ => Flags::NONE,
         };
         self.build(span).binary(opcode, lhs, rhs, flags)

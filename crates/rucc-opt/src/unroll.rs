@@ -114,6 +114,7 @@ const LATCHES: &str = "loop left as it was, it goes back to its header from more
 const ENTRIES: &str = "loop left as it was, it is reached somewhere other than at its header";
 const ESCAPES: &str = "loop left as it was, a value it defines is read outside it";
 const PAYLOAD: &str = "loop left as it was, something in it carries a side table this cannot copy";
+const ADDRESSED: &str = "loop left as it was, the address of a block in it is taken";
 const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
 
 /// Section 29's complete unrolling.
@@ -277,7 +278,11 @@ fn consider(
 
     let blocks = loops.blocks(id).to_vec();
     let inside: HashSet<Block> = blocks.iter().copied().collect();
+    let addressed = copy::addressed(func);
     for &block in &blocks {
+        if addressed.contains(&block) {
+            return Err(ADDRESSED);
+        }
         // The copy reaches every block of the loop from the copied header, so a block reached from
         // anywhere else would be reached from the original in the copy and from the copy in the
         // original. A natural loop has no such block and an irreducible one does.
@@ -475,7 +480,9 @@ mod tests {
     };
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{ESCAPES, EXITS, NO_COUNT, NO_FUEL, TOO_BIG, TOO_MANY, UNROLLED, Unroll};
+    use super::{
+        ADDRESSED, ESCAPES, EXITS, NO_COUNT, NO_FUEL, TOO_BIG, TOO_MANY, UNROLLED, Unroll,
+    };
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
 
@@ -567,6 +574,18 @@ mod tests {
         assert_eq!(tally(&it.func, Opcode::Add), 6);
         assert_eq!(tally(&it.func, Opcode::BrIf), 0);
         sound(&it.func, &mut it.names);
+    }
+
+    /// A table of label addresses names the block itself, so a copy of it is one no `goto *p` can
+    /// reach and the original would be the first iteration only.
+    #[test]
+    fn a_loop_holding_a_block_whose_address_is_taken_is_left_alone() {
+        let mut it = rotated(3);
+        let name = it.names.intern(".Llbl.0");
+        it.func.name_block(it.body, name);
+        let stats = unroll(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, ADDRESSED), 1);
+        assert_eq!(tally(&it.func, Opcode::BrIf), 1);
     }
 
     #[test]

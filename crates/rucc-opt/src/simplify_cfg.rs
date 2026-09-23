@@ -153,6 +153,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use rucc_base::Idx;
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, Opcode, Value};
 
+use crate::copy::addressed;
 use crate::fold::constant;
 use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
 
@@ -951,27 +952,6 @@ fn chains(func: &Func, an: &mut Analyses) -> Vec<Vec<Block>> {
             chain
         })
         .collect()
-}
-
-/// Every block some `block_addr` names, and every block an image names.
-///
-/// The second kind is the one with nothing in the function to find. An image is in another section
-/// and what it holds is a relocation, so the `goto *p` that arrives at the block can be in a
-/// function this one cannot see, and a block merged into the one above it would be a name pointing
-/// at the wrong instruction.
-fn addressed(func: &Func) -> HashSet<Block> {
-    let mut taken: HashSet<Block> = func.named_blocks().map(|(block, _)| block).collect();
-    for block in func.blocks() {
-        for inst in func.insts(block) {
-            if func[inst].opcode != Opcode::BlockAddr {
-                continue;
-            }
-            for call in func.successors(inst) {
-                taken.insert(call.block);
-            }
-        }
-    }
-    taken
 }
 
 /// Merges one block into the block above it, when that is the only way in, and says whether it did.

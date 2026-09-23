@@ -279,6 +279,9 @@ const ENDS_A_LIFETIME: &str = "loop left alone, something in it ends a lifetime"
 /// What is reported for a loop holding something the copier cannot copy.
 const NOT_COPYABLE: &str = "loop left alone, something in it carries a side table this cannot copy";
 
+/// What is reported for a loop holding a block whose address is taken, which a copy cannot keep.
+const ADDRESSED: &str = "loop left alone, the address of a block in it is taken";
+
 /// What is reported for a loop whose values are read after it without going through a parameter.
 const ESCAPES: &str = "loop left alone, a value it defines is read outside it";
 
@@ -632,7 +635,11 @@ fn shaped(
     let [latch] = loops.latches(id) else {
         return Err(MANY_LATCHES);
     };
+    let addressed = copy::addressed(func);
     for &block in body {
+        if addressed.contains(&block) {
+            return Err(ADDRESSED);
+        }
         for inst in func.insts(block) {
             match func[inst].opcode {
                 Opcode::Call | Opcode::CallIndirect | Opcode::TailCall

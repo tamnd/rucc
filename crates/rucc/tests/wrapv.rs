@@ -31,6 +31,7 @@ int neg(int a) { return -a; }
 int inc(int a) { return ++a; }
 unsigned plain(unsigned a, unsigned b) { return a + b; }
 int idx(int *p, int i) { return p[i]; }
+long long shl(long long a) { return a << 61; }
 ";
 
 /// A loop the optimizer can only work the trip count of out by assuming the counter does not turn
@@ -103,6 +104,17 @@ fn signed_arithmetic_says_it_does_not_overflow_unless_the_build_said_it_does() {
             assert!(!claims(&text, name), "{flag} left {name} claiming it does not wrap");
         }
     }
+}
+
+/// A left shift claims nothing, under any flag.
+///
+/// C99 leaves a bit shifted into the sign undefined, but gcc's manual says it does not use that,
+/// and `(long long)i << 61` is how tcc's test builds the case values of a `switch` it then expects
+/// to find. A shift that claimed it did not wrap let the ranges drop two of those cases.
+#[test]
+fn a_left_shift_claims_nothing() {
+    let text = ir("shift", &[]);
+    assert!(!claims(&text, "shl"), "{:?}", body(&text, "shl"));
 }
 
 /// And unsigned arithmetic is the same either way, because it never claimed anything.
