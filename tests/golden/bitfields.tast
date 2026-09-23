@@ -131,3 +131,30 @@ decl #17 twice : struct flags object external static defined
     +0 bit 1 width 5
       convert arithmetic : unsigned int
         const 5 : int
+decl #19 report : int(const char *, ...) function external declared
+decl #21 past_the_prototype : void(struct wide_fields *) function external defined
+  params
+    decl #20 w : struct wide_fields * object automatic defined
+  body
+    block
+      expr
+        call : int
+          convert function-decay : int (*)(const char *, ...)
+            decl #19 report : int(const char *, ...) function
+          convert pointer : const char *
+            convert array-decay : char *
+              string "%lld %lld" : char[10] lvalue
+          convert arithmetic : long long
+            convert arithmetic : _BitInt(45)
+              convert lvalue : long long
+                member #0 f1 : long long bit-field
+                  unary * : struct wide_fields lvalue
+                    convert lvalue : struct wide_fields *
+                      decl #20 w : struct wide_fields * lvalue
+          convert arithmetic : long long
+            convert arithmetic : _BitInt(35)
+              convert lvalue : long long
+                member #2 f2 : long long bit-field
+                  unary * : struct wide_fields lvalue
+                    convert lvalue : struct wide_fields *
+                      decl #20 w : struct wide_fields * lvalue
