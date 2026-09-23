@@ -152,6 +152,12 @@
 //! unordered. Unlike the sign rewrite this one can come out true, since the unordered predicates
 //! accept the one bucket a NaN leaves. gcc 16 folds all of these without `-ffast-math`.
 //!
+//! A branch in front narrows the pair as well. Walking back along edges that are the only way into
+//! their block, a branch on a comparison of the same two operands says which side was taken, and so
+//! which buckets are left. That is `isunordered (x, y) || !isunordered (x, y)` in `compare-fp-3.c`
+//! at the levels that keep the `||` as two branches, where the second test is only reached when the
+//! pair is ordered.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -180,6 +186,7 @@ use rucc_ir::{
     Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
 };
 
+use crate::cfg::Cfg;
 use crate::rules::{Match, Piece, Subject, Table, canonical, compare, identities, strength, width};
 use crate::uses::{count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -345,6 +352,9 @@ impl Pass for Simplify {
         // rewrite below only ever removes readers, so a value this says nothing reads is a value
         // nothing reads.
         let uses = count(func);
+        // The edges, for the comparisons a branch in front of them settles. Nothing here adds or
+        // removes an edge, so one built before the walk is the one the walk would build.
+        let cfg = Cfg::new(func);
         let dead = |func: &Func, inst: Inst| match func[inst].first_result {
             Some(result) => uses[result.index()] == 0,
             None => false,
@@ -389,7 +399,7 @@ impl Pass for Simplify {
                     stats.optimized(MAGNITUDE);
                     continue;
                 }
-                if let Some(settled) = bounded_comparison(func, inst) {
+                if let Some(settled) = bounded_comparison(func, &cfg, inst) {
                     if !fuel.take() {
                         stats.missed(NO_FUEL_BOUNDED);
                         continue;
@@ -1226,8 +1236,13 @@ fn magnitude_comparison(func: &Func, inst: Inst) -> Option<Composite> {
 /// It is the narrowing [`magnitude_comparison`] does, over what these operands allow rather than
 /// over what a magnitude does, and unlike that one it can come out true, since a NaN on either side
 /// leaves the one bucket `une` and the other unordered predicates accept.
-fn bounded_comparison(func: &Func, inst: Inst) -> Option<Composite> {
-    use bucket::{EQ, GT, LT, UN};
+///
+/// A branch in front of the comparison narrows it too, which is [`guarded`]. That is the seventh
+/// test of `gcc.c-torture/execute/ieee/compare-fp-3.c`, `isunordered (x, y) || !isunordered (x,
+/// y)`, at the levels that keep the `||` as two branches: the second comparison is only reached
+/// where the first was false, so the pair is ordered there and `ord` is true.
+fn bounded_comparison(func: &Func, cfg: &Cfg, inst: Inst) -> Option<Composite> {
+    use bucket::{ALL_FLOAT, EQ, GT, LT, UN};
     let data = &func[inst];
     let Extra::FloatPred(pred) = data.extra else { return None };
     if data.opcode != Opcode::FCmp {
@@ -1245,11 +1260,15 @@ fn bounded_comparison(func: &Func, inst: Inst) -> Option<Composite> {
             Ordering::Equal => EQ,
             Ordering::Greater => GT,
         },
-        (None, Some(bound)) => past(bound)?,
-        (Some(bound), None) => turned(past(bound)?),
+        (None, Some(bound)) => past(bound).unwrap_or(ALL_FLOAT),
+        (Some(bound), None) => turned(past(bound).unwrap_or(ALL_FLOAT)),
         (None, None) if lhs == rhs => EQ | UN,
-        (None, None) => return None,
+        (None, None) => ALL_FLOAT,
     };
+    let possible = possible & guarded(func, cfg, func.block_of(inst)?, lhs, rhs);
+    if possible == ALL_FLOAT {
+        return None;
+    }
     let asked = float_buckets(pred);
     let buckets = asked & possible;
     if buckets == 0 {
@@ -1268,6 +1287,64 @@ fn bounded_comparison(func: &Func, inst: Inst) -> Option<Composite> {
         lhs,
         rhs,
     }))
+}
+
+/// How many edges back [`guarded`] looks for a branch over the same pair.
+const GUARDS: u32 = 8;
+
+/// The buckets the branches in front of this block leave a pair of floating point operands in.
+///
+/// It walks back while the block has one predecessor, so every step is an edge the block can only
+/// be reached along, and a branch there on a comparison of the same two operands says which of its
+/// sides was taken. A block with one predecessor is never a loop header unless nothing reaches it,
+/// so the operands are the same values at the branch as they are here.
+fn guarded(func: &Func, cfg: &Cfg, block: Block, lhs: Value, rhs: Value) -> u8 {
+    let mut possible = bucket::ALL_FLOAT;
+    let mut at = block;
+    for _ in 0..GUARDS {
+        let &[from] = cfg.predecessors(at) else { break };
+        if let Some(buckets) = edge(func, from, at, lhs, rhs) {
+            possible &= buckets;
+        }
+        at = from;
+    }
+    possible
+}
+
+/// The buckets the edge from one block to the next leaves the pair in, when the first ends in a
+/// branch on a floating point comparison of the same two operands and the two sides go to different
+/// blocks.
+fn edge(func: &Func, from: Block, to: Block, lhs: Value, rhs: Value) -> Option<u8> {
+    let term = func.terminator(from)?;
+    if func[term].opcode != Opcode::BrIf {
+        return None;
+    }
+    let calls: Vec<_> = func.successors(term).collect();
+    let (then, other) = (calls.first()?, calls.get(1)?);
+    if then.block == other.block {
+        return None;
+    }
+    let cond = *func[func[term].args].first()?;
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    let data = &func[inst];
+    let Extra::FloatPred(pred) = data.extra else { return None };
+    if data.opcode != Opcode::FCmp {
+        return None;
+    }
+    let args = &func[data.args];
+    let (&left, &right) = (args.first()?, args.get(1)?);
+    let accepted = if then.block == to {
+        float_buckets(pred)
+    } else {
+        bucket::ALL_FLOAT & !float_buckets(pred)
+    };
+    if (left, right) == (lhs, rhs) {
+        Some(accepted)
+    } else if (left, right) == (rhs, lhs) {
+        Some(turned(accepted))
+    } else {
+        None
+    }
 }
 
 /// The buckets a pair with this constant on the right can be in, when the constant is an infinity.
@@ -3061,6 +3138,56 @@ mod tests {
         assert_eq!(number(&func, below), 0);
         assert_eq!(came_from(&func, differs).1, Extra::FloatPred(FloatPred::Uno));
         assert_eq!(came_from(&func, same).1, Extra::FloatPred(FloatPred::Oeq));
+    }
+
+    /// `isunordered (x, y) || !isunordered (x, y)` kept as two branches, which is the seventh test
+    /// of `gcc.c-torture/execute/ieee/compare-fp-3.c` at `-O1`, `-Os` and `-Oz`. The second
+    /// comparison is only reached where the first was false, so the pair is ordered there. On the
+    /// side where it was true nothing is settled, and `x < y` after `x >= y` was false is `x < y` or
+    /// unordered, which is shorter only as far as `ult` is.
+    #[test]
+    fn a_branch_in_front_settles_the_same_pair() {
+        let (mut func, entry, x, y) = a_float_pair();
+        let [then, other, join] = [(); 3].map(|()| func.create_block());
+        let mut build = Builder::new(&mut func, entry);
+        let neither = build.fcmp(FloatPred::Uno, x, y, Flags::NONE);
+        build.br_if(neither, then, &[], other, &[]);
+        let mut build = Builder::new(&mut func, other);
+        let ordered = build.fcmp(FloatPred::Ord, x, y, Flags::NONE);
+        let turned = build.fcmp(FloatPred::Ord, y, x, Flags::NONE);
+        let above = build.fcmp(FloatPred::Ogt, x, y, Flags::NONE);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, then);
+        let there = build.fcmp(FloatPred::Ord, x, y, Flags::NONE);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        let both = build.binary(Opcode::And, ordered, turned, Flags::NONE);
+        let all = build.binary(Opcode::And, both, above, Flags::NONE);
+        let all = build.binary(Opcode::And, all, there, Flags::NONE);
+        build.ret(&[all]);
+        assert!(simplify(&mut func));
+        assert_ne!(number(&func, ordered), 0);
+        assert_ne!(number(&func, turned), 0);
+        assert_eq!(came_from(&func, above).1, Extra::FloatPred(FloatPred::Ogt));
+        assert_eq!(number(&func, there), 0);
+    }
+
+    /// A join has two ways in, and what one branch said is not what the other did, so nothing is
+    /// settled past it.
+    #[test]
+    fn a_join_settles_nothing() {
+        let (mut func, entry, x, y) = a_float_pair();
+        let [then, other, join] = [(); 3].map(|()| func.create_block());
+        let mut build = Builder::new(&mut func, entry);
+        let neither = build.fcmp(FloatPred::Uno, x, y, Flags::NONE);
+        build.br_if(neither, then, &[], other, &[]);
+        Builder::new(&mut func, then).jump(join, &[]);
+        Builder::new(&mut func, other).jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        let ordered = build.fcmp(FloatPred::Ord, x, y, Flags::NONE);
+        build.ret(&[ordered]);
+        assert!(!simplify(&mut func));
+        assert_eq!(came_from(&func, ordered).1, Extra::FloatPred(FloatPred::Ord));
     }
 
     /// A number that is not an infinity says nothing about the other side on its own.
