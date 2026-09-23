@@ -219,6 +219,18 @@ fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
 }
 
 #[test]
+fn an_operand_read_at_less_than_its_width_is_the_bottom_of_it() {
+    // `memcpy1` in tcc's `tcctest.c`, which copies the odd bytes at the end of a buffer by testing
+    // the low bits of the count. The count is a `size_t` and the test reads one byte of it, and
+    // every bit of that byte is one the count put there.
+    let source = "int f(unsigned long n) { int r = 0; \
+                  asm (\"testb $2,%b1\\n\\tje 1f\\n\\tmovl $1,%0\\n1:\" \
+                  : \"+r\" (r) : \"q\" (n)); return r; }\n";
+    let body = body(&asm("read-narrow", source), "f");
+    assert!(body.contains("testb\t$2,"), "the byte test never reached the listing:\n{body}");
+}
+
+#[test]
 fn an_operand_written_by_more_of_the_register_than_its_type_fills_is_the_low_part_of_it() {
     // `count_trailing_zeros` out of libgmp's `longlong.h`, written the way `divis.c` reaches it
     // rather than the way the header's own comment shows it. The count goes into an `unsigned`,
@@ -635,6 +647,19 @@ fn the_two_halves_of_a_word_are_exchanged_in_the_register_that_has_both() {
                   __asm(\"xchgb %b0,%h0\" : \"=Q\" (x) : \"0\" (x)); return x; }\n";
     let body = body(&asm("byte-swap", source), "f");
     assert!(body.contains("xchgb\t%al, %ah"), "the exchange never reached the listing:\n{body}");
+}
+
+#[test]
+fn the_bytes_of_a_long_are_turned_round_in_the_register_that_holds_it() {
+    // `swab32` in tcc's `tcctest.c`, which swaps the low two bytes, rotates the halves past each
+    // other and swaps the low two again. The swaps write sixteen bits of a thirty two bit object,
+    // which is right because the object arrived in the register and the top half is left alone.
+    let source = "unsigned f(unsigned x) { \
+                  __asm__(\"xchgb %b0,%h0\\n\\trorl $16,%0\\n\\txchgb %b0,%h0\" \
+                  : \"=q\" (x) : \"0\" (x)); return x; }\n";
+    let body = body(&asm("byte-swap-long", source), "f");
+    assert!(body.contains("xchgb\t%al, %ah"), "the exchange never reached the listing:\n{body}");
+    assert!(body.contains("rorl\t$16, %eax"), "the rotate never reached the listing:\n{body}");
 }
 
 #[test]

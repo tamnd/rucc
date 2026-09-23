@@ -3798,14 +3798,29 @@ impl<'a> Lowering<'a> {
             // the whole register and the `unsigned` is the bottom of it, which is every bit of an
             // answer that cannot exceed sixty four anyway.
             //
-            // Only written, and only wider. A read of more of a register than its type fills is a
-            // program handing an instruction bits nothing ever put there. A write of less of one
-            // leaves the top of the object holding whatever the register held before, which is the
-            // same thing one instruction later. Both are refused, and an operand the template left
-            // plain is refused either way, because what gets spelled for that one is the register
-            // at the width of its type and no other instruction is the one written down.
+            // An operand read at a width the template wrote is the other way round: the object is
+            // in the register and the instruction looks at the bottom of it. tcc tests the low bits
+            // of a `size_t` count with `testb $2,%b4`, and every bit that test reads is one the
+            // object put there.
+            //
+            // A write of less of a register than the object fills is right in one case, which is
+            // an instruction that reads the register it writes and an operand that arrives with
+            // the object in it. The top of the register is then the top of the object, and the
+            // instruction leaves it alone. tcc swaps the bytes of an `unsigned` with `xchgb
+            // %b0,%h0` and a rotate between two of them, and the swap only ever touches the low
+            // half.
+            //
+            // The two that stay refused are a read of more of a register than its type fills,
+            // which hands an instruction bits nothing ever put there, and a write of less of one
+            // that nothing carried the object into, which leaves the top of the object holding
+            // whatever the register held before. An operand the template left plain is refused
+            // either way, because what gets spelled for that one is the register at the width of
+            // its type and no other instruction is the one written down.
+            let carried = matches!(desc.constraint, Constraint::Reuse(_) | Constraint::Fixed(_))
+                && read_as(list, index).is_some();
             let widened = stated && desc.role.is_def() && width.bits() > bits;
-            if bits != width.bits() && !widened {
+            let narrowed = stated && width.bits() < bits && (!desc.role.is_def() || carried);
+            if bits != width.bits() && !widened && !narrowed {
                 return Err(refused());
             }
         }

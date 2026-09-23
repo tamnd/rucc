@@ -327,6 +327,36 @@ mod tests {
     /// nothing for a rule to have said about a number a program handed the processor directly.
     const TEMPLATE: &[&str] = &["cpuid", "pause", "align", "byte"];
 
+    /// The rotates and the test against a constant, which a template writes and nothing else does.
+    ///
+    /// A rotate is a term the IR could have, and does not yet: C spells one as two shifts and an or,
+    /// and nothing puts those back together. A test against a constant is an and whose answer is
+    /// thrown away, and the layout writes a comparison for that rather than this. So what reaches
+    /// one of these is a program that wrote the name, which is what tcc's byte swap and its copy of
+    /// `memcpy` do.
+    const TEMPLATED: &[&str] = &[
+        "rol_ri_8",
+        "rol_ri_16",
+        "rol_ri_32",
+        "rol_ri_64",
+        "rol_rcl_8",
+        "rol_rcl_16",
+        "rol_rcl_32",
+        "rol_rcl_64",
+        "ror_ri_8",
+        "ror_ri_16",
+        "ror_ri_32",
+        "ror_ri_64",
+        "ror_rcl_8",
+        "ror_rcl_16",
+        "ror_rcl_32",
+        "ror_rcl_64",
+        "test_ri_8",
+        "test_ri_16",
+        "test_ri_32",
+        "test_ri_64",
+    ];
+
     /// The instructions a template asks for that are right because of the line above them.
     ///
     /// These are exempt for the reason the ten bytes in [`COMPARE`] are, one step further out. A
@@ -537,6 +567,21 @@ mod tests {
     /// fills the high half of the dividend itself and then throws one of the two answers away. A
     /// dividend the program filled both halves of is not a term the IR has, and `udiv_qrnnd` beside
     /// the multiply in the same header is how long division a limb at a time is written.
+    const WIDE: &[&str] = &[
+        "mul_wide_16",
+        "mul_wide_32",
+        "mul_wide_64",
+        "imul_wide_16",
+        "imul_wide_32",
+        "imul_wide_64",
+        "div_wide_16",
+        "div_wide_32",
+        "div_wide_64",
+        "idiv_wide_16",
+        "idiv_wide_32",
+        "idiv_wide_64",
+    ];
+
     /// The string instructions, which a template writes and nothing else does.
     ///
     /// Exempt for the reason `cpuid` is in [`TEMPLATE`]: every register one of them reaches is one
@@ -588,21 +633,6 @@ mod tests {
         "repne_cmps_16",
         "repne_cmps_32",
         "repne_cmps_64",
-    ];
-
-    const WIDE: &[&str] = &[
-        "mul_wide_16",
-        "mul_wide_32",
-        "mul_wide_64",
-        "imul_wide_16",
-        "imul_wide_32",
-        "imul_wide_64",
-        "div_wide_16",
-        "div_wide_32",
-        "div_wide_64",
-        "idiv_wide_16",
-        "idiv_wide_32",
-        "idiv_wide_64",
     ];
 
     /// The instructions that produce two values, which is one more than a rule can name.
@@ -941,6 +971,9 @@ mod tests {
                 continue;
             }
             if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
+                continue;
+            }
+            if TEMPLATED.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {
