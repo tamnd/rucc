@@ -375,6 +375,10 @@ const REMOVED_MIDWAY_LIVE: &str = "lifetime check removed, its walk was carried 
 /// been written.
 const REMOVED_INIT: &str = "initialization check removed, a dominating check covers the same bytes";
 
+/// Recorded once for each init check taken out because a store in front of it wrote those bytes.
+const REMOVED_STORED: &str =
+    "initialization check removed, a dominating store wrote every byte it reads";
+
 /// Recorded for an init check that would have gone if there had been fuel for it.
 const NO_FUEL_INIT: &str = "initialization check kept, the pass ran out of fuel";
 
@@ -1061,21 +1065,26 @@ impl Pass for Discharge {
                             stats.missed(UNKNOWN_SHAPE_INIT);
                             continue;
                         };
-                        if !(self.sources.dominance && scope.written.covers(&asked)) {
-                            stats.missed(if scope.written.covered_before(&asked) {
-                                PAST_A_CALL_INIT
-                            } else {
-                                NOTHING_WROTE_IT
-                            });
+                        let why = if scope.written.covers(&asked) {
+                            Some(REMOVED_INIT)
+                        } else if scope.stored.covers(&asked) {
+                            Some(REMOVED_STORED)
+                        } else {
+                            None
+                        };
+                        let Some(why) = why.filter(|_| self.sources.dominance) else {
+                            let before = scope.written.covered_before(&asked)
+                                || scope.stored.covered_before(&asked);
+                            stats.missed(if before { PAST_A_CALL_INIT } else { NOTHING_WROTE_IT });
                             scope.written.held.push(asked);
                             continue;
-                        }
+                        };
                         if !fuel.take() {
                             stats.missed(NO_FUEL_INIT);
                             scope.written.held.push(asked);
                             continue;
                         }
-                        going.push((inst, REMOVED_INIT));
+                        going.push((inst, why));
                     }
                     Opcode::CheckType => {
                         if func[func[inst].args].len() > 2 {
@@ -1111,11 +1120,24 @@ impl Pass for Discharge {
                     // lifetime, so neither goes through `opaque`.
                     Opcode::MetaBegin | Opcode::MetaInitCopy => {
                         scope.written.forget();
+                        scope.stored.forget();
                         // Only the first of the two touches the type plane. A lifetime starting is
                         // storage nobody has stored through yet, which holds no type, and a copy of
                         // the init plane moves init entries and nothing else.
                         if func[inst].opcode == Opcode::MetaBegin {
                             scope.retyped(None);
+                        }
+                    }
+                    // A store's write to the init plane, which says the bytes it covers have been
+                    // written as plainly as a `check_init` that passed over them does, and says it
+                    // without anything having to be asked. What kills a fact from a check kills
+                    // one from here, for the same reasons, since both are a claim about the plane
+                    // and nothing else. A width the reader cannot name is a write that may cover
+                    // anything, and it adds nothing rather than taking anything away, because
+                    // setting more bytes written never made a fact about written bytes false.
+                    Opcode::MetaInit => {
+                        if let Some(write) = crate::coalesce::read(func, inst, Opcode::MetaInit) {
+                            scope.stored.held.push(Fact::range(write.base, write.at, write.size));
                         }
                     }
                     // The type plane's copy, which carries whatever the source said and this pass
@@ -1304,6 +1326,12 @@ struct Scope {
     /// range being inside one instance, that instance being alive, and the bytes in it having been
     /// written are three claims, and a check that passes establishes exactly one of them.
     written: Known,
+    /// Ranges a `meta_init` wrote, the same claim as [`Scope::written`] reached another way.
+    ///
+    /// Apart only so that the report can say which of the two answered. A store and a check that
+    /// passed both leave the plane saying those bytes are written, and one is given up exactly
+    /// where the other is.
+    stored: Known,
     /// Ranges a `check_type` established agree with a type, one set of ranges per plane entry.
     ///
     /// A fact here is not quite what the check is named after. What a `check_type` that passes
@@ -1331,6 +1359,7 @@ impl Scope {
         self.bounds.forget();
         self.alive.forget();
         self.written.forget();
+        self.stored.forget();
         self.retyped(None);
     }
 
@@ -1383,6 +1412,7 @@ impl Scope {
         self.bounds.crossed();
         self.alive.forget();
         self.written.forget();
+        self.stored.forget();
         self.retyped(None);
     }
 }
@@ -2805,6 +2835,89 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(inits(&func), 2);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 0);
+    }
+
+    /// Puts the `meta_init` a store leaves behind over `size` bytes at `pointer` into a block.
+    fn stored(build: &mut Builder<'_>, pointer: Value, size: i128) {
+        let bytes = build.iconst(Type::int(64), size);
+        let args = build.func().push_values(&[pointer, bytes]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+    }
+
+    #[test]
+    fn an_init_check_over_bytes_a_store_wrote_goes() {
+        // Sixteen bytes were stored and four of them are read. The plane says they are written
+        // because the store is what said so, and a check asking it again can only hear yes.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        stored(&mut build, pointer, 16);
+        let inside = past(&mut build, pointer, 8);
+        began(&mut build, inside, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_STORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 0);
+    }
+
+    #[test]
+    fn an_init_check_past_what_a_store_wrote_stays() {
+        // Four bytes stored and eight read. The other four are the ones the check is there for.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        stored(&mut build, pointer, 4);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOTHING_WROTE_IT), 1);
+    }
+
+    #[test]
+    fn an_init_check_a_store_answered_before_a_call_stays_and_is_counted() {
+        // A call may free the storage and hand it back out fresh, which is what it does to a fact
+        // from a check, and a fact from a store is the same claim about the same plane.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        stored(&mut build, pointer, 8);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_INIT), 1);
+    }
+
+    #[test]
+    fn an_init_check_a_store_answered_before_a_lifetime_starting_stays() {
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        stored(&mut build, pointer, 8);
+        let size = build.iconst(Type::int(64), 8);
+        let args = build.func().push_values(&[pointer, size]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaBegin) }, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_STORED), 0);
+    }
+
+    #[test]
+    fn a_store_of_a_width_nobody_can_read_answers_nothing() {
+        // The width is a parameter, so the store may have written one byte or a thousand, and the
+        // check is left to find out which.
+        let (_, mut func, block, pointer) = blank();
+        let width = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let args = build.func().push_values(&[pointer, width]);
+        build.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        run(&mut func);
+        assert_eq!(inits(&func), 1);
     }
 
     #[test]
