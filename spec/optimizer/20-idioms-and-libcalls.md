@@ -104,14 +104,21 @@ says it is no more than the length: a mask, a remainder by a constant and a wide
 read for how large they can be, so `strlen("hello world" + (x & 7))` is `11 - (x & 7)`. A step that
 can pass the terminator is left as a call, since past it the compiler knows nothing. The third
 shape is a local array the program has just written a string into a byte at a time, as `str` in
-`builtins/strlen.c` is. The walk goes back from the call through its own block, keeps the last
-constant byte stored at each place in the array, and stops at a call, at a store wider than a byte
-and at a store through anything that is not a local, since each of those could have written the
-array some other way. A store into another local is passed over, because two locals are two objects.
-The answer is the length only where the bytes it kept reach a terminator from the place asked about
-without a gap. `strcpy` takes the same length a choice of strings of one length has, so the loop in
+`builtins/strlen.c` is. The walk goes back from the call through its own block and on into the
+block in front of it while there is only one, keeps the last constant byte written at each place in
+the array, and stops at a store wider than a byte, at a store through anything that is not a local
+and at any call but `memset` of a constant byte, `memcpy` from a constant string and `strcpy` of one
+string, since each of those could have written the array some other way. A write into another local
+is passed over, because two locals are two objects, and a write that runs past the end of the array
+stops the walk. The answer is the length only where the bytes it kept reach a terminator from the
+place asked about without a gap. `strcat` of a string of known length onto an array whose length
+this walk finds is a `memcpy` of the string and its terminator to where the old terminator was, which
+is how gcc 16 turns every `strcat` in `builtins/strcat.c` into stores. A chain of `strcat` onto
+`strcat` folds from the inside out, one call a round. `strcpy` takes the same length a choice of strings of one length has, so the loop in
 `builtins/strcpy-2.c` that leaves one of four seven character strings behind is a `memcpy` of eight
-bytes.
+bytes. `strncpy` of a count no larger than the source's length and its terminator pads with nothing,
+so it is a `memcpy` of the count, and a count of zero is the destination. A longer count fills the
+rest with zeros and stays a call.
 
 **Moves that cannot overlap.** `memmove` of nothing is its destination, and `memmove` is `memcpy`
 where the two sides cannot overlap. That is so for a single byte, which is read before it is written;
