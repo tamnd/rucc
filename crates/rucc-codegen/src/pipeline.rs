@@ -538,7 +538,12 @@ pub fn compile_recording(
     // reloads and edge moves in among them, so the list has to be taken before it runs. Only in a
     // function that named something, since a function that named nothing has no use for it. See
     // [`crate::kept`].
-    let line = (!func.named.is_empty()).then(|| kept::before(&func));
+    //
+    // Or where a local the program declared may share its bytes, which is only where there is a
+    // `reach`, since a local that shares is in the frame over part of the function and the part is
+    // asked about the same way.
+    let line = (!func.named.is_empty() || (reach.is_some() && !stack.declared.is_empty()))
+        .then(|| kept::before(&func));
 
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called, flags.verify);
@@ -567,11 +572,24 @@ pub fn compile_recording(
     // Whatever the command line said about debugging information, because the list is one entry
     // per local the program named and a function has tens of those at most. Asking the flags would
     // cost more to thread down here than the list costs to build.
+    //
+    // A local that went in beside something else is left off, because its bytes are its own only
+    // where it is wanted and an answer good at every address would have a debugger print whatever
+    // took its place. It gets stretches instead, at the end with the locals kept in values.
     func.locals = stack
         .declared
         .iter()
+        .filter(|&&(local, _)| share.shared(local).is_none())
         .filter_map(|&(local, decl)| Some((decl, frame.from_frame_base(local)?)))
         .collect();
+    let framed: Vec<(u32, i32, &[rucc_regalloc::live::Range])> = stack
+        .declared
+        .iter()
+        .filter_map(|&(local, decl)| {
+            Some((decl, frame.from_frame_base(local)?, share.shared(local)?))
+        })
+        .collect();
+    func.sharing = framed.iter().map(|&(decl, _, _)| decl).collect();
 
     let scratch = machine.env.scratch(machine.conv.int_class);
     let protect = guard.map(|guard| Protect {
@@ -663,7 +681,7 @@ pub fn compile_recording(
     // as above, since a value the allocator spilled is in the frame over its stretch rather than in
     // a register, and it is the same distance from the call frame address the locals were given.
     func.kept = match line {
-        Some(line) => kept::of(&func, &line, &allocation, &frame),
+        Some(line) => kept::of(&func, &line, &allocation, &frame, &framed),
         None => Vec::new(),
     };
     Ok(func)

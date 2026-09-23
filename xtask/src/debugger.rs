@@ -24,6 +24,11 @@
 //! [`DEAD`] holds that question the other way up: gcc has to print a value, which says the name is
 //! a real one, and this compiler has to refuse, which says a dead variable comes out marked rather
 //! than stale.
+//!
+//! The same is asked of a second shape, built at `-O1` because that is where it arises: two arrays
+//! the frame put in the same bytes, one of them dead at the breakpoint. The live one has to read
+//! back as gcc's does, and the dead one has to be unavailable rather than read out of bytes that
+//! now hold the other.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -42,7 +47,7 @@ const THEIRS: &str = "gcc";
 ///
 /// A table rather than a list, because a question that comes back wrong is only useful next to the
 /// reason it was asked, and the reason is the half that says which part of the compiler just broke.
-const ASKED: [(&str, &str); 5] = [
+const ASKED: [(&str, &str); 6] = [
     (
         "count",
         "a parameter, which is the one case where the entry the signature already wrote and the \
@@ -71,6 +76,11 @@ const ASKED: [(&str, &str); 5] = [
         "a read through a pointer parameter, which is the location and the type together, since a \
          wrong type reads the right address wrongly and still prints a number",
     ),
+    (
+        "later",
+        "an array built at `-O1` that shares its bytes with one the function was finished with, \
+         so it is in the frame over part of the function only and the breakpoint is in that part",
+    ),
 ];
 
 /// What the debugger is asked where the two compilers are meant to differ, and why.
@@ -85,11 +95,21 @@ const ASKED: [(&str, &str); 5] = [
 /// name is a name and the question is a fair one, and this compiler has to say the value is
 /// unavailable, which is what says a dead variable comes out marked rather than stale. An answer
 /// here that agreed with gcc would be a stale register read that happened to still hold the number.
-const DEAD: [(&str, &str); 1] = [(
-    "early",
-    "a local nothing reads after the line that adds it in, so at the breakpoint it is nowhere and \
-     a debugger should say so rather than print whatever is in the register it was last in",
-)];
+const DEAD: [(&str, &str); 2] = [
+    (
+        "early",
+        "a local nothing reads after the line that adds it in, so at the breakpoint it is nowhere \
+         and a debugger should say so rather than print whatever is in the register it was last in",
+    ),
+    (
+        "spent",
+        "an array built at `-O1` that nothing reads after the line that adds two of its elements, \
+         so at the breakpoint its bytes hold the array declared after it, and a debugger should \
+         say it is unavailable rather than print the other one under its name. An answer here \
+         that agreed with gcc would also be the two no longer sharing, which leaves the question \
+         unasked and wants the fixture looking at",
+    ),
+];
 
 /// What a debugger says when it has the name and cannot answer.
 ///
@@ -218,27 +238,30 @@ fn build() -> Result<PathBuf> {
 
     let rucc = crate::cost::compiler()?;
     let fixtures = root().join("tests").join("debugger");
-    let source = fixtures.join("locals.c");
-    let out = Command::new(&rucc)
-        .args(["-c", &format!("--target={TRIPLE}"), "-O0", "-g", crate::VERIFY])
-        .arg("-o")
-        .arg(work.join("locals.o"))
-        .arg(&source)
-        .current_dir(root())
-        .output()
-        .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::Failed {
-            task: "debugger",
-            problems: vec![format!(
-                "locals.c did not compile\n{}",
-                crate::indent(String::from_utf8_lossy(&out.stderr).trim_end())
-            )],
-        });
+    // Each at the level its question is about: `-O0` for the locals, and `-O1` for the arrays that
+    // share, since nothing shares below it.
+    for (name, level) in [("locals", "-O0"), ("shared", "-O1")] {
+        let out = Command::new(&rucc)
+            .args(["-c", &format!("--target={TRIPLE}"), level, "-g", crate::VERIFY])
+            .arg("-o")
+            .arg(work.join(format!("{name}.o")))
+            .arg(fixtures.join(format!("{name}.c")))
+            .current_dir(root())
+            .output()
+            .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
+        if !out.status.success() {
+            return Err(Error::Failed {
+                task: "debugger",
+                problems: vec![format!(
+                    "{name}.c did not compile\n{}",
+                    crate::indent(String::from_utf8_lossy(&out.stderr).trim_end())
+                )],
+            });
+        }
     }
     // Copied rather than read from the tree, because the runner is given one directory and the
     // container mounts it read only.
-    for name in ["locals.c", "main.c", "script.gdb"] {
+    for name in ["locals.c", "shared.c", "main.c", "script.gdb"] {
         let from = fixtures.join(name);
         std::fs::copy(&from, work.join(name))
             .map_err(|e| Error::Io(format!("could not copy {}: {e}", from.display())))?;
@@ -250,8 +273,8 @@ fn build() -> Result<PathBuf> {
 
 /// What the runner runs.
 ///
-/// Two programs out of one source, differing only in which compiler produced the object holding
-/// `examine`. The system compiler builds `main.c` and does the linking in both, so the C library,
+/// Two programs out of one source, differing only in which compiler produced the objects holding
+/// `examine` and `reuse`. The system compiler builds `main.c` and does the linking in both, so the C library,
 /// the entry and the `stop` the breakpoint is on are the same bytes either way.
 ///
 /// A machine with no `gdb` says so and exits zero, because a check that could not run is a
@@ -264,8 +287,9 @@ out=/tmp/debugger
 mkdir -p \"$out\"
 command -v gdb > /dev/null 2>&1 || { echo 'gdb: missing'; exit 0; }
 gcc -O0 -g -c locals.c -o \"$out/gcc.o\" || exit 1
-gcc -O0 -g -o \"$out/prog-gcc\" \"$out/gcc.o\" main.c || exit 1
-gcc -O0 -g -o \"$out/prog-rucc\" locals.o main.c || exit 1
+gcc -O0 -g -c shared.c -o \"$out/gcc-shared.o\" || exit 1
+gcc -O0 -g -o \"$out/prog-gcc\" \"$out/gcc.o\" \"$out/gcc-shared.o\" main.c || exit 1
+gcc -O0 -g -o \"$out/prog-rucc\" locals.o shared.o main.c || exit 1
 for which in rucc gcc; do
   gdb -batch -nx -x script.gdb \"$out/prog-$which\" 2>&1 | sed \"s/^/$which /\"
 done

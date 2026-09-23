@@ -297,6 +297,15 @@ pub struct Func {
     /// alignment the prologue had to force, where the distance is not a constant. See
     /// `Frame::from_frame_base` in `rucc-codegen`.
     pub locals: Vec<(u32, i32)>,
+    /// The declarations of the locals whose frame bytes are theirs over part of the function only,
+    /// because the frame put something else in the same bytes where they are dead.
+    ///
+    /// A local here is not in [`Func::locals`], since an answer good at every address would be
+    /// wrong wherever the other occupant is live. Where it is over the rest is in [`Func::kept`],
+    /// and a debugger stopped anywhere else is told the variable is not available. It is listed
+    /// on its own so that it still has a name when there is nowhere at all to say it is, which is
+    /// a function whose instructions were scheduled. Empty until the frame is laid out.
+    pub sharing: Vec<u32>,
     /// Which declaration in the source each virtual register holds a value of, for the ones that
     /// hold one, as the declaration it is and the register that holds it.
     ///
@@ -366,6 +375,7 @@ impl Func {
             labels: Vec::new(),
             declared: Span::DUMMY,
             locals: Vec::new(),
+            sharing: Vec::new(),
             named: Vec::new(),
             kept: Vec::new(),
             tables: Vec::new(),

@@ -141,6 +141,8 @@ pub struct Slots {
     cells: Vec<Cell>,
     locals: Vec<usize>,
     slots: Vec<usize>,
+    /// Where each local that went in beside something else is wanted, and `None` for the rest.
+    shared: Vec<Option<Vec<Range>>>,
 }
 
 impl Slots {
@@ -162,6 +164,7 @@ impl Slots {
         Self {
             locals: (0..locals.len()).collect(),
             slots: (locals.len()..cells.len()).collect(),
+            shared: vec![None; locals.len()],
             cells,
         }
     }
@@ -220,6 +223,17 @@ impl Slots {
         self.slots.get(usize::try_from(slot).ok()?).copied()
     }
 
+    /// Where a local is wanted, in the allocator's points, if its cell holds something else too,
+    /// and `None` for a local whose bytes are its own.
+    ///
+    /// The bytes of a local that shares are only its over this area. Outside it they hold
+    /// whatever else went in the cell, which is why the debugging information asks: a place given
+    /// for the whole function would have a debugger print the other thing under this one's name.
+    #[must_use]
+    pub fn shared(&self, local: usize) -> Option<&[Range]> {
+        self.shared.get(local)?.as_deref()
+    }
+
     /// How many cells were saved by sharing, which is how many things went in beside something
     /// else.
     ///
@@ -272,6 +286,8 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
     let mut busy: Vec<Option<Vec<Range>>> = Vec::new();
     let mut of_local = vec![0; locals];
     let mut of_slot = vec![0; slots];
+    let mut areas = vec![None; locals];
+    let mut held = Vec::new();
     for want in order {
         let Want { what, size, align, area } = std::mem::replace(
             &mut wants[want],
@@ -290,6 +306,9 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
                 }
             }
         }
+        // Kept for a local as well as handed to the cell, since whether it shared is only known once
+        // everything has been fitted, and one that did is asked about again. See [`Slots::shared`].
+        let mine = if let What::Local(_) = what { area.clone() } else { None };
         let cell = match into {
             Some(cell) => {
                 cells[cell].size = cells[cell].size.max(size);
@@ -305,11 +324,23 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
             }
         };
         match what {
-            What::Local(local) => of_local[local] = cell,
+            What::Local(local) => {
+                of_local[local] = cell;
+                areas[local] = mine;
+            }
             What::Slot(slot) => of_slot[slot] = cell,
         }
+        if held.len() <= cell {
+            held.resize(cell + 1, 0);
+        }
+        held[cell] += 1;
     }
-    Slots { cells, locals: of_local, slots: of_slot }
+    let shared = areas
+        .into_iter()
+        .zip(&of_local)
+        .map(|(area, &cell)| area.filter(|_| held[cell] > 1))
+        .collect();
+    Slots { cells, locals: of_local, slots: of_slot, shared }
 }
 
 /// Which value the allocator put in each spill slot, by slot number.
@@ -819,6 +850,28 @@ mod tests {
         assert_eq!(plan.cells().len(), 1, "one run of bytes for the two of them");
         assert_eq!(plan.local(0), plan.local(1));
         assert_eq!(plan.saved(), 1);
+    }
+
+    #[test]
+    fn a_local_that_went_in_beside_another_says_where_it_is_wanted_and_one_alone_does_not() {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.through(block, first);
+        let second = building.local(block, 1);
+        building.through(block, second);
+        let (reach, allocation) = building.allocate(2, 4);
+
+        // Each of the two is wanted over a stretch the other is not, and it is those stretches the
+        // debugging information gives each of them a place over rather than the whole function.
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        let (one, two) = (plan.shared(0).expect("shares"), plan.shared(1).expect("shares"));
+        assert!(!one.is_empty() && !two.is_empty());
+        assert!(!clashes(one, two), "wanted apart: {one:?} and {two:?}");
+
+        // The same function with nothing allowed to share, where each local's bytes are its own
+        // over the whole of it.
+        let plan = Slots::share(&building.func, None, &allocation, &[WORD, WORD], &[]);
+        assert_eq!((plan.shared(0), plan.shared(1)), (None, None));
     }
 
     #[test]

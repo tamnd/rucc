@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 int examine(int count, const char *label);
+int reuse(int n);
 
 void stop(void)
 {
@@ -16,5 +17,6 @@ void stop(void)
 int main(void)
 {
 	printf("examine: %d\n", examine(7, "hello"));
+	printf("reuse: %d\n", reuse(1));
 	return 0;
 }

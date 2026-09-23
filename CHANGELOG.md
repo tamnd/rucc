@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A local in the frame that shares its bytes with another, which the stack slot allocator does from `-O1` up for two locals that are never wanted at the same time, is now described over the stretches it is wanted rather than at one place for the whole function. A debugger stopped where it was dead used to print the other local's values under its name, and now says it is not available. Under the scheduler at `-O2` no stretch can be given yet, so such a local is not available anywhere there. `cargo xtask debugger` asks this of two arrays built at `-O1`. See tamnd/rucc#1645.
+
 ## 0.11.1
 
 ### Added
