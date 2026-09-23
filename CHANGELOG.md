@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.1
+
 ### Added
 
 - `va_arg` of an `__int128` now works on System V, read as the pair of words the psABI says it is, from the general purpose save area when two registers are left and from the overflow area on a sixteen byte boundary when they are not. A call to a variadic function can pass an `__int128` past the `...` too: the wide pass lays the call out over every argument it passes, since System V puts one behind the `...` where a named one would go. Both agree with gcc 16 with either compiler on either side. `execute/pr92904.c` passes at all six levels. Part of tamnd/rucc#392, tamnd/rucc#340 and tamnd/rucc#351.
