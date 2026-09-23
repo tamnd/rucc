@@ -139,6 +139,7 @@ pub mod narrow;
 pub mod nests;
 pub mod nofree;
 pub mod number;
+pub mod objsize;
 pub mod optinfo;
 pub mod outside;
 pub mod params;

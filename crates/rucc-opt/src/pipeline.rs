@@ -40,7 +40,8 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    ipasra, ipcp, libcall, load, modref, nofree, number, outside, params, pass, purity, reload,
+    ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside, params, pass, purity,
+    reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -781,6 +782,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // of `spec/optimizer/04-pass-manager.md` step over the rewrite it was looking for.
     let mut allowance = opts.fuel.clone();
     let passes = opts.passes();
+    // First of all and whatever the pass list says, because the instruction is a question the
+    // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
+    // at `-O0`, which answers every question as not known, the way gcc does at that level.
+    objsize::answer(module, opts.interposition, opts.level != OptLevel::O0);
     // Before anything runs, because each of these is a fact about the module and every pass after
     // this sees one function. Only when a pass in this run reads them: a flag nothing looks at
     // would show up in every `-O0` dump and mean nothing to anybody reading one.

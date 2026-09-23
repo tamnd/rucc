@@ -171,6 +171,7 @@ enum PendingExtra<'a> {
     Order(MemOrder),
     Prefetch(PrefetchHint),
     Depth(u32),
+    Question(u8),
     Class(StorageClass),
     Owner(Owner),
     Node(Meta),
@@ -806,6 +807,18 @@ impl<'a, 'n> Parser<'a, 'n> {
                 };
                 PendingExtra::Depth(depth)
             }
+            // `object_size %0, kind 1`. The address, and then which of the four questions is asked
+            // about it, written with a name in front the way a locality is.
+            ExtraKind::Question => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("kind")?;
+                let word = self.word();
+                let Some(kind) = word.parse::<u8>().ok().filter(|&kind| kind <= 3) else {
+                    return self.fail(format!("`{word}` is not a kind from 0 to 3"));
+                };
+                PendingExtra::Question(kind)
+            }
             // The plane writes. Each reads its range and then the one thing it needs beyond it,
             // written with a name in front the way the fields of an access are.
             ExtraKind::Class => {
@@ -1307,6 +1320,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Order(order) => Extra::Order(*order),
             PendingExtra::Prefetch(hint) => Extra::Prefetch(*hint),
             PendingExtra::Depth(depth) => Extra::Depth(*depth),
+            PendingExtra::Question(kind) => Extra::Question(*kind),
             PendingExtra::Class(class) => Extra::Class(*class),
             PendingExtra::Owner(owner) => Extra::Owner(*owner),
             PendingExtra::Node(node) => Extra::Node(*node),
@@ -2365,6 +2379,7 @@ global @x : cap = 0, align 8, linkage(internal)
                 Opcode::Fence => ExtraKind::Order,
                 Opcode::Prefetch => ExtraKind::Prefetch,
                 Opcode::FrameAddress | Opcode::ReturnAddress => ExtraKind::Depth,
+                Opcode::ObjectSize => ExtraKind::Question,
                 Opcode::AtomicRmw => ExtraKind::Rmw,
                 Opcode::Switch => ExtraKind::Switch,
                 Opcode::InlineAsm => ExtraKind::Asm,

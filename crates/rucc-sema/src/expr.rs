@@ -463,6 +463,20 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+    /// `__builtin_object_size(p, kind)` where the address is not one whose object can be seen by
+    /// looking at the expression, asked again of the IR.
+    ///
+    /// Where the checker can see the object the call is a constant and never this. What is left is
+    /// a pointer read out of a variable, and inside a function that variable is often a choice
+    /// between addresses that are each knowable, made by a branch or a loop. The IR has every one
+    /// of those in front of it as the arguments of a block parameter, so the question is carried
+    /// down to `rucc_opt::objsize` and answered there. See `check/builtin/size.rs`.
+    ObjectSize {
+        /// The address, which is lowered for its value and read through by nothing.
+        address: ExprId,
+        /// Which of the four questions, from zero to three.
+        kind: u8,
+    },
     /// `__builtin_alloca(n)`, which takes `n` bytes of the frame and answers where they are.
     ///
     /// It is a node rather than a call for the reason the ones above it are: there is no function

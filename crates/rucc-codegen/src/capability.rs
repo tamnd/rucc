@@ -174,6 +174,9 @@ pub static HAND: &[(Opcode, &str)] = &[
     // Memory SSA, which is built at -O2, read by the passes that need it, and taken back off
     // before selection. Nothing in the back end has ever seen a value of type `mem`.
     (Opcode::MemEntry, "nothing at all, since memory SSA comes off before the back end runs"),
+    // An object size question, which `rucc_opt::objsize` answers with a constant before any other
+    // pass runs and at every level, so the back end never sees one.
+    (Opcode::ObjectSize, "nothing at all, since `rucc_opt::objsize` answers it first"),
     // The edges and the two ways of writing down that control does not arrive.
     (Opcode::Jump, "`crate::layout`, since an edge is on the block and not in the block"),
     // The one terminator selection does write, because what it reads is a value. How many arms it

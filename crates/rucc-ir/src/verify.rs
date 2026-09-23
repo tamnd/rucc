@@ -682,6 +682,12 @@ impl<'a> Verifier<'a> {
                 }
                 return;
             }
+            Extra::Question(kind) => {
+                if kind > 3 {
+                    self.error(format!("an object size question is 0 to 3 and this is {kind}"));
+                }
+                return;
+            }
             Extra::Prefetch(hint) => {
                 if !hint.is_valid() {
                     self.error(format!(
@@ -1344,6 +1350,17 @@ impl<'a> Verifier<'a> {
             Opcode::Prefetch | Opcode::StackRestore | Opcode::VaStart | Opcode::VaEnd => {
                 if self.takes(opcode, arity, 1) {
                     self.pointer(opcode, arg(0), 0);
+                }
+            }
+            Opcode::ObjectSize => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && !res(0).is_int() {
+                    self.error(format!(
+                        "object_size produces an integer and this one produces {}",
+                        res(0)
+                    ));
                 }
             }
             Opcode::VaCopy => {

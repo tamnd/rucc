@@ -17,7 +17,7 @@
 //! the smallest. So `&s.b[2]` in a structure whose `b` is a twelve byte array ten bytes in asks
 //! about `s` for kinds zero and two and about `b` for kinds one and three.
 //!
-//! Only the low bit does anything here, because nothing this answers is a guess. Where the object
+//! Only the low bit does anything here, because nothing answered here is a guess. Where the object
 //! is in front of us the largest and the smallest are the same number, and where it is not there
 //! is no answer at all, which is `(size_t) -1` for the kinds that want the largest and zero for
 //! the kinds that want the smallest. That pair is what the standard idiom in a fortified header
@@ -34,6 +34,16 @@
 //!
 //! The storage duration does not matter. A local is as knowable as a global here, unlike in a
 //! constant expression, where the difference is the whole question.
+//!
+//! # What is left for the IR
+//!
+//! An address this cannot see that is read out of a local of the function, with nothing in
+//! working it out that a program could notice, is not answered here. It becomes an
+//! `ExprKind::ObjectSize`, which lowers to an `object_size` instruction, and `rucc_opt::objsize`
+//! answers it before any other pass, following the branches and loops that set the pointer. That
+//! is where the guessing the high bit asks for happens. A pointer read out of a parameter or a
+//! global is answered here as not known, because the IR has no more of where it came from, and
+//! answering it now is what lets lowering make a checking call over one the plain call at `-O0`.
 //!
 //! # Where this parts company with gcc
 //!
@@ -58,11 +68,12 @@
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{ArrayLen, TypeId, TypeKind, integer_info, layout};
+use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, integer_info, layout};
 
 use crate::check::Checker;
+use crate::decl::{DeclKind, StorageDuration};
 use crate::eval::bare;
-use crate::expr::{Conversion, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
 /// The two names, which ask the same question.
@@ -161,7 +172,20 @@ impl Checker<'_> {
             return Some(self.poison(span));
         };
         let ty = self.size_type();
-        let answer = match self.behind(address) {
+        let reach = self.behind(address);
+        // Inside a function, an address read out of a local is asked about again once the function
+        // is IR, where a pointer chosen by a branch or a loop is a block parameter whose every
+        // argument is in front of the walk. Only where lowering the address does nothing a
+        // program could notice, since the pointer is not evaluated, and never in a static
+        // initializer, which has to be a constant by the time this is done. A pointer read out of
+        // a global or a parameter came from somewhere the IR cannot see either, so it is answered
+        // here and now, which is what lets a `_chk` call over one be the plain call at `-O0`.
+        if reach.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
+            let kind = u8::try_from(kind).ok()?;
+            let node = ExprKind::ObjectSize { address, kind };
+            return Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span));
+        }
+        let answer = match reach {
             Some(reach) => i128::from(reach.left(kind & 1 == 1)),
             // Nothing is known, so the answer is the one that says so. The two spellings of it
             // are the extremes of the range, because a kind asking for the largest has to name a
@@ -269,6 +293,52 @@ impl Checker<'_> {
                 })
             }
             _ => None,
+        }
+    }
+
+    /// Whether working this address out changes nothing, so that lowering it for the question
+    /// the IR answers is the same as not evaluating it.
+    ///
+    /// Reads, members, subscripts, arithmetic and choices. A call, an assignment, an increment or
+    /// anything else with an effect stops it, and so does a read of something `volatile`.
+    fn quiet(&self, expr: ExprId) -> bool {
+        if self.types.quals(self.tast[expr].ty).has(Qualifiers::VOLATILE) {
+            return false;
+        }
+        match self.tast[expr].kind {
+            ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) => true,
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.quiet(inner),
+            ExprKind::Member { base, .. } => self.quiet(base),
+            ExprKind::Unary { op, operand } => {
+                !matches!(
+                    op,
+                    UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec
+                ) && self.quiet(operand)
+            }
+            ExprKind::Subscript { base: lhs, index: rhs } | ExprKind::Binary { lhs, rhs, .. } => {
+                self.quiet(lhs) && self.quiet(rhs)
+            }
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.quiet(cond) && self.quiet(then) && self.quiet(otherwise)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the address reads a local of the function being checked, which is the one place a
+    /// pointer can come from that the IR has every assignment of in front of it.
+    fn local(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Decl(id) => {
+                let decl = &self.tast[id];
+                decl.kind == DeclKind::Object
+                    && decl.duration == StorageDuration::Automatic
+                    && !self.is_parameter(id)
+            }
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
+            ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),
+            ExprKind::Cond { then, otherwise, .. } => self.local(then) || self.local(otherwise),
+            _ => false,
         }
     }
 
