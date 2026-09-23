@@ -1379,25 +1379,38 @@ enum Source {
 /// global and a widening and a multiply and an add, where what they wanted was one add.
 /// tamnd/rucc#974.
 ///
-/// What is still refused is a base with a symbol scaled into it, `a[i + k]` for an invariant `k`,
-/// because that is a multiply and an add in the preheader rather than a name, and nothing has
-/// measured whether it is worth writing there.
-fn source(base: Invariant) -> Option<(Source, i128)> {
+/// The third shape is a base with a symbol scaled into it beside what it is measured from, which is
+/// `a[i + k]` for an invariant `k`: the base is `a + sext(k) * 4`. The middle part is not a name,
+/// so it comes back apart from the offset, as the bytes [`rewrite`] works out in the preheader and
+/// adds on once. That is a widening, a multiply and an add paid once in front of the loop, against
+/// the same three paid on every turn inside it when the walk is refused. tamnd/rucc#983.
+///
+/// Those bytes are an offset from a pointer, so they are worked out in sixty four bits, and a part
+/// that is read at any other width is still refused. So is one with no value in it, since that is
+/// a number and belongs in the offset.
+fn source(func: &Func, base: Invariant) -> Option<(Source, Option<Plain>, i128)> {
     if let Some(plain) = base.plain() {
         let value = plain.value.filter(|_| plain.scale == 1 && plain.read.is_none())?;
-        return Some((Source::Value(value), plain.offset));
+        return Some((Source::Value(value), None, plain.offset));
     }
     let (anchor, plain) = base.on()?;
     // The anchor is what the address is measured from, so anything else in the invariant is the
-    // part that would have to be built.
-    if plain.value.is_some() && plain.scale != 0 {
-        return None;
-    }
+    // part that has to be built.
+    let part = match plain.value.filter(|_| plain.scale != 0) {
+        None => None,
+        Some(value) => {
+            let wide = plain.read.map_or(func[value].ty, |read| read.to);
+            if wide != Type::int(64) {
+                return None;
+            }
+            Some(Plain { offset: 0, ..plain })
+        }
+    };
     let from = match anchor {
         Anchor::Value(value) => Source::Value(value),
         Anchor::Address(symbol) => Source::Address(symbol),
     };
-    Some((from, plain.offset))
+    Some((from, part, plain.offset))
 }
 
 /// Gives one group of addresses a pointer of its own, and points the group at it.
@@ -1435,7 +1448,8 @@ fn rewrite(
     // rather than an expression somebody would have to rebuild. Anything else is a group that
     // would need arithmetic emitted for it, and section 28.3's rewrite is not that.
     let step = plan.chrec.step.as_number();
-    let (Some(step), Type::PTR, Some((from, offset))) = (step, plan.chrec.ty, source(base)) else {
+    let found = source(func, base);
+    let (Some(step), Type::PTR, Some((from, part, offset))) = (step, plan.chrec.ty, found) else {
         stats.missed(NOT_A_WALK);
         return None;
     };
@@ -1446,8 +1460,12 @@ fn rewrite(
     // anyway, because the cost of checking is a dominance query and the cost of being wrong is a
     // function that reads a value before it exists. A global's address is not checked because
     // there is nothing to check: it is available everywhere, which is why it is written again
-    // rather than found.
-    if let Source::Value(value) = from {
+    // rather than found. The value a part scaled into the base is built from is asked the same.
+    let named = match from {
+        Source::Value(value) => Some(value),
+        Source::Address(_) => None,
+    };
+    for value in named.into_iter().chain(part.and_then(|part| part.value)) {
         let Some(home) = home(func, value) else {
             stats.missed(OUT_OF_REACH);
             return None;
@@ -1466,6 +1484,16 @@ fn rewrite(
     let from = match from {
         Source::Value(value) => value,
         Source::Address(symbol) => address(func, term, symbol),
+    };
+    let from = match part {
+        None => from,
+        // The reading is only asked when the value is narrower than the bytes, and [`source`]
+        // has made sure a value that is narrower comes with one.
+        Some(part) => {
+            let reading = part.read.map_or(Reading::Signed, |read| read.reading);
+            let bytes = crate::loop_delete::widened(func, term, part, reading);
+            added(func, term, from, bytes)
+        }
     };
     let start = past(func, term, from, offset);
 
@@ -1785,6 +1813,11 @@ fn past(func: &mut Func, before: Inst, from: Value, offset: i128) -> Value {
         return from;
     }
     let by = number(func, before, Type::int(64), offset);
+    added(func, before, from, by)
+}
+
+/// A pointer and a number of bytes held in a value, added in front of an instruction.
+fn added(func: &mut Func, before: Inst, from: Value, by: Value) -> Value {
     let span = func.span(before);
     let args = func.push_values(&[from, by]);
     let data = InstData { args, ..InstData::new(Opcode::PtrAdd) };
@@ -2547,6 +2580,44 @@ mod tests {
         );
         group.kind = super::Kind::Compare;
         assert_eq!(serve(table, &group, &counter), Cost::INFINITE);
+    }
+
+    /// `p[i + k]` for a `k` the loop was handed, which is #983.
+    ///
+    /// The base of the group is `p + sext(k) * 4`, which is not a name, so the walk starts from
+    /// bytes worked out in the preheader. The loop is run with the pointer at a thousand, a limit
+    /// of seven and `k` at three before and after, and writes the same seven addresses both times.
+    #[test]
+    fn a_walk_past_an_invariant_the_loop_was_handed_starts_where_that_puts_it() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[Type::PTR, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let base = func.append_param(entry, Type::PTR);
+        let limit = func.append_param(entry, int);
+        let k = func.append_param(entry, int);
+        let it = given(&mut func, entry, limit);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let sum = build.binary(Opcode::Add, it.counter, k, Flags::NSW);
+        let wide = build.unary(Opcode::SExt, sum, Type::int(64));
+        let addr = strided(&mut build, base, wide, 0, STRIDE);
+        let zero = build.iconst(int, 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close_narrow(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let given = [1000, 7, 3];
+        let before = stores_given(&func, &given);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Missed, NOT_A_WALK), 0, "the bytes are built, not refused");
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 1);
+        let first = 1000 + 3 * STRIDE;
+        assert_eq!(before, (0..7).map(|at| first + at * STRIDE).collect::<Vec<_>>());
+        assert_eq!(stores_given(&func, &given), before, "the same addresses in the same order");
+        sound(&func, &mut names);
     }
 
     /// Section 28.3 calls this the cheapest large win in the pass, so it gets the plainest test.
