@@ -102,7 +102,14 @@ may be any of several held strings is their length where they all have the same 
 an amount the program works out is its length less the step, where the arithmetic that made the step
 says it is no more than the length: a mask, a remainder by a constant and a widening of either are
 read for how large they can be, so `strlen("hello world" + (x & 7))` is `11 - (x & 7)`. A step that
-can pass the terminator is left as a call, since past it the compiler knows nothing. A comparison answers one of minus one, zero and one, because the
+can pass the terminator is left as a call, since past it the compiler knows nothing. The third
+shape is a local array the program has just written a string into a byte at a time, as `str` in
+`builtins/strlen.c` is. The walk goes back from the call through its own block, keeps the last
+constant byte stored at each place in the array, and stops at a call, at a store wider than a byte
+and at a store through anything that is not a local, since each of those could have written the
+array some other way. A store into another local is passed over, because two locals are two objects.
+The answer is the length only where the bytes it kept reach a terminator from the place asked about
+without a gap. A comparison answers one of minus one, zero and one, because the
 sign is what the standard promises and the magnitude is not, and that is what gcc leaves behind as
 well.
 
