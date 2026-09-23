@@ -1202,7 +1202,7 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bo
     let (base, limit) = if signed {
         (chrec.base, limit)
     } else {
-        (as_unsigned(chrec.base, chrec.ty)?, as_unsigned(limit, chrec.ty)?)
+        (unsigned_base(chrec)?, as_unsigned(limit, chrec.ty)?)
     };
 
     // The distance the counter has to travel, always counting up. A loop going down is the same
@@ -1224,7 +1224,7 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bo
         }
         (IntPred::Ne, _) => {
             let distance = if step > 0 { limit.minus(base)? } else { base.minus(limit)? };
-            landing(distance, apart, assumptions)
+            landing(distance, apart, step < 0 && limit.is_zero(), assumptions)
         }
         // Either the counter steps away from the limit, in which case the loop is endless rather
         // than long, or the test is one this does not solve. Silence is the answer to both.
@@ -1303,6 +1303,19 @@ fn trails(chrec: Chrec, held: Chrec) -> bool {
 ///
 /// The step is not put through this, because a step is a difference rather than a value and its
 /// signed reading is the one that says which way the counter goes.
+/// Where a counter starts, read unsigned.
+///
+/// What [`as_unsigned`] says, and one more case it has to refuse without the counter to ask. A base
+/// with a number folded in beside its symbol is safe to read unsigned when the counter promises not
+/// to wrap that way, because the base is the first value the counter took and it took it without
+/// wrapping, so the sum is the number it looks like. The countdown ivopts writes tests its variable
+/// after taking one off, and this is what its base looks like.
+fn unsigned_base(chrec: Chrec) -> Option<Invariant> {
+    let base = chrec.base;
+    let plain = base.on.is_none() && base.read.is_none() && base.scale == 1;
+    as_unsigned(base, chrec.ty).or_else(|| (plain && chrec.does_not_wrap(false)).then_some(base))
+}
+
 fn as_unsigned(inv: Invariant, ty: Type) -> Option<Invariant> {
     match inv.as_number() {
         Some(number) if number >= 0 => Some(inv),
@@ -1360,6 +1373,7 @@ fn ordered(
 fn landing(
     distance: Invariant,
     step: u128,
+    bottom: bool,
     mut assumptions: Vec<Assumption>,
 ) -> Option<(Count, Vec<Assumption>)> {
     match distance.as_number() {
@@ -1372,8 +1386,16 @@ fn landing(
         // A step of one lands on everything ahead of it, so the only thing left to establish is
         // that the limit is ahead. `while (p != end)` is this case, and a step of anything else
         // would need the division a symbolic distance has no room for.
+        //
+        // A counter going down to zero has it established already, because `!=` reads it unsigned
+        // and nothing unsigned is below zero, so zero is ahead of wherever it starts. The `!=`
+        // that ivopts writes for a countdown is this case. A promise not to wrap would not do
+        // instead, since a loop with a limit behind its counter can stop on something else, a
+        // bounds check for one, long before the counter comes round to break the promise.
         None if step == 1 => {
-            assumptions.push(Assumption::Approaching);
+            if !bottom {
+                assumptions.push(Assumption::Approaching);
+            }
             Some((Count::Symbolic(distance), assumptions))
         }
         None => None,
@@ -1946,6 +1968,83 @@ mod tests {
         assert!(assumptions.contains(&Assumption::Entered), "{assumptions:?}");
         assert!(assumptions.contains(&Assumption::StrictOverflow), "{assumptions:?}");
         assert_eq!(found.proven(), None);
+    }
+
+    /// `for (c = n; c != limit; c--)`, with the counter in sixty four bits and no flags on it.
+    fn down_to(limit: i128) -> (Func, Value) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let body = func.create_block();
+        let exit = func.create_block();
+        let start = func.append_param(entry, Type::int(64));
+        let counter = func.append_param(header, Type::int(64));
+
+        let mut build = Builder::new(&mut func, entry);
+        build.jump(header, &[start]);
+        let mut build = Builder::new(&mut func, header);
+        let limit = build.iconst(Type::int(64), limit);
+        let test = build.icmp(IntPred::Ne, counter, limit);
+        build.br_if(test, body, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, body);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Sub, counter, one, Flags::NONE);
+        build.jump(header, &[next]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+        (func, start)
+    }
+
+    #[test]
+    fn a_countdown_to_zero_is_always_heading_for_it() {
+        let (func, start) = down_to(0);
+        let found = bound(&func).expect("it is counted");
+        let (count, assumptions) = found.parts();
+        assert_eq!(count, Count::Symbolic(Invariant::of(start)));
+        assert!(!assumptions.contains(&Assumption::Approaching), "{assumptions:?}");
+    }
+
+    #[test]
+    fn a_countdown_tested_after_its_step_is_counted_when_it_cannot_wrap() {
+        // The shape ivopts writes: the variable starts one above the count and the header takes
+        // one off before the test, so what the test sees starts at the start less one.
+        for (flags, counted) in [(Flags::NSW | Flags::NUW, true), (Flags::NSW, false)] {
+            let mut names = Interner::new();
+            let mut func = Func::new(names.intern("f"), Signature::new());
+            let entry = func.create_block();
+            let header = func.create_block();
+            let body = func.create_block();
+            let exit = func.create_block();
+            let start = func.append_param(entry, Type::int(64));
+            let counter = func.append_param(header, Type::int(64));
+
+            Builder::new(&mut func, entry).jump(header, &[start]);
+            let mut build = Builder::new(&mut func, header);
+            let one = build.iconst(Type::int(64), 1);
+            let next = build.binary(Opcode::Sub, counter, one, flags);
+            let zero = build.iconst(Type::int(64), 0);
+            let test = build.icmp(IntPred::Ne, next, zero);
+            build.br_if(test, body, &[], exit, &[]);
+            Builder::new(&mut func, body).jump(header, &[next]);
+            Builder::new(&mut func, exit).ret(&[]);
+
+            let found = bound(&func);
+            assert_eq!(found.is_some(), counted, "{flags:?}");
+            if let Some(found) = found {
+                let at = Invariant::of(start).plus(Invariant::number(-1)).expect("it adds");
+                assert_eq!(found.comes_back(), Some(Count::Symbolic(at)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_countdown_to_anything_else_may_have_started_below_it() {
+        // Started at zero, this one goes all the way round before it gets to one.
+        let (func, _) = down_to(1);
+        let found = bound(&func).expect("it is counted");
+        let (_, assumptions) = found.parts();
+        assert!(assumptions.contains(&Assumption::Approaching), "{assumptions:?}");
     }
 
     #[test]
