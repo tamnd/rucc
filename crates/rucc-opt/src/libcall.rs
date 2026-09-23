@@ -106,8 +106,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, Linkage, Module,
-    Opcode, Pic, Signature, SymbolRef, Type, Value,
+    CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, Linkage, MemInfo,
+    MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -182,6 +182,21 @@ enum Answer {
     /// declared `strlen` as something returning an `int` gets an `int`, and a constant of the
     /// width the call already had is the only one that can take its place.
     Number(i128),
+    /// One byte of a string the call was given against a byte the compiler knows.
+    ///
+    /// This is the one answer that is an instruction rather than a constant or an address, because
+    /// the byte is in memory and has to be read. Both bytes are `unsigned char` values, which is
+    /// what the standard says a comparison compares, and the answer is the difference between them
+    /// in whichever order the call wrote its arguments.
+    Byte {
+        /// The string nothing is known about, whose first byte is read.
+        of: Value,
+        /// The first byte of the string the module holds, or zero where that string is empty.
+        against: u8,
+        /// Whether the string the module holds was the call's first argument, which is what says
+        /// which way round the difference goes.
+        leading: bool,
+    },
 }
 
 /// Which of the places a character appears in a string a search wants.
@@ -627,29 +642,50 @@ impl Site<'_> {
 
     /// The comparison both of them are, over however many bytes each is allowed to read.
     ///
-    /// The sign is what the standard promises and the magnitude is not, so this answers one of
-    /// minus one, zero and one, which is what gcc leaves behind as well.
+    /// The sign is what the standard promises and the magnitude is not, so where both strings are
+    /// known this answers one of minus one, zero and one, which is what gcc leaves behind as well.
+    /// Where only one of them is known there is still an answer in the two cases the first byte
+    /// settles, and that one is a read rather than a constant.
     fn compared(&self, data: &InstData, args: &[Value], bound: usize) -> Option<Plan> {
         if self.func[args[0]].ty != Type::PTR || self.func[args[1]].ty != Type::PTR {
             return None;
         }
-        self.answers(data)?;
-        let (mut left, mut right) = (self.one(args[0])?, self.one(args[1])?);
-        // The terminator is part of the comparison, since it is what stops one string before the
-        // other and it is smaller than every byte that could be opposite it.
-        left.push(0);
-        right.push(0);
-        let mut answer = 0;
-        for at in 0..bound.min(left.len()).min(right.len()) {
-            if left[at] != right[at] {
-                answer = if left[at] < right[at] { -1 } else { 1 };
-                break;
-            }
-            if left[at] == 0 {
-                break;
-            }
+        let ty = self.answers(data)?;
+        // A comparison told to read no bytes reads neither string, so the answer is the same
+        // whatever the two of them hold, and holds even where neither is there to be read.
+        if bound == 0 {
+            return Some(Plan::Answer(Answer::Number(0)));
         }
-        Some(Plan::Answer(Answer::Number(answer)))
+        match (self.one(args[0]), self.one(args[1])) {
+            (Some(left), Some(right)) => {
+                Some(Plan::Answer(Answer::Number(walk(&left, &right, bound))))
+            }
+            (Some(known), None) => self.byte(ty, &known, args[1], true, bound),
+            (None, Some(known)) => self.byte(ty, &known, args[0], false, bound),
+            (None, None) => None,
+        }
+    }
+
+    /// The comparison a string this module holds makes against one nothing is known about.
+    ///
+    /// Only the first byte of the other string can be read here, so this is an answer in the two
+    /// cases where that byte is the whole comparison: a count of one, which is that byte and
+    /// nothing else, and a known string that is empty, whose terminator stops the walk however
+    /// many bytes the count allowed.
+    fn byte(
+        &self,
+        ty: Type,
+        known: &[u8],
+        other: Value,
+        leading: bool,
+        bound: usize,
+    ) -> Option<Plan> {
+        (bound == 1 || known.is_empty()).then_some(())?;
+        // The answer is a byte widened into the type the call was declared with, and a type no
+        // wider than a byte is a declaration this has no room to answer in.
+        (ty.bits() > 8).then_some(())?;
+        let against = known.first().copied().unwrap_or(0);
+        Some(Plan::Answer(Answer::Byte { of: other, against, leading }))
     }
 
     /// How far into the first string the second one's characters start, or stop.
@@ -1152,6 +1188,28 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
                 .expect("a call whose answer is a number has one");
             constant(func, inst, ty, number)
         }
+        Answer::Byte { of, against, leading } => {
+            let ty = func[inst]
+                .results()
+                .next()
+                .map(|result| func[result].ty)
+                .expect("a call whose answer is a byte has one");
+            let read = read(func, inst, of);
+            // An `unsigned char` is what the standard says a comparison compares, so the byte goes
+            // into the wider type without its top bit being read as a sign.
+            let args = func.push_values(&[read]);
+            let data = InstData { args, ..InstData::new(Opcode::ZExt) };
+            let made = func.create_inst(data, &[ty], span);
+            func.insert_before(made, inst);
+            let wide = func[made].results().next().expect("a conversion is one value");
+            let other = constant(func, inst, ty, i128::from(against));
+            let pair = if leading { [other, wide] } else { [wide, other] };
+            let args = func.push_values(&pair);
+            let data = InstData { args, ..InstData::new(Opcode::Sub) };
+            let made = func.create_inst(data, &[ty], span);
+            func.insert_before(made, inst);
+            func[made].results().next().expect("a difference is one value")
+        }
     };
     let forward: HashMap<Value, Value> =
         func[inst].results().map(|result| (result, value)).collect();
@@ -1159,9 +1217,47 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
     func.remove_inst(inst);
 }
 
+/// How two strings compare, over however many bytes the comparison is allowed to read.
+fn walk(left: &[u8], right: &[u8], bound: usize) -> i128 {
+    // The terminator is part of the comparison, since it is what stops one string before the other
+    // and it is smaller than every byte that could be opposite it.
+    for at in 0..bound.min(left.len() + 1).min(right.len() + 1) {
+        let (this, that) =
+            (left.get(at).copied().unwrap_or(0), right.get(at).copied().unwrap_or(0));
+        if this != that {
+            return if this < that { -1 } else { 1 };
+        }
+        if this == 0 {
+            break;
+        }
+    }
+    0
+}
+
 /// Where the second string is inside the first, in bytes from its front.
 fn at(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// The byte at that address, read in front of the call being replaced.
+///
+/// A comparison reads the first byte of both of its strings before it can answer anything, so this
+/// read is one the call was going to make and is safe wherever the call itself was.
+fn read(func: &mut Func, before: Inst, from: Value) -> Value {
+    let span = func.span(before);
+    let mem = func.add_mem(MemInfo {
+        size: 1,
+        align: 1,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    });
+    let args = func.push_values(&[from]);
+    let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) };
+    let made = func.create_inst(data, &[Type::int(8)], span);
+    func.insert_before(made, before);
+    func[made].results().next().expect("a load is one value")
 }
 
 /// An integer constant of that type, put in front of the call being replaced.
@@ -2045,6 +2141,87 @@ block0:
         assert!(out.contains("iconst.i32 1"), "the longer one is the greater, {out}");
         assert!(out.contains("iconst.i32 -1"), "and the other way round, {out}");
         assert!(out.contains("iconst.i32 0"), "five bytes of each are the same, {out}");
+    }
+
+    /// A comparison against the empty string reads the first byte of the other one, whichever side
+    /// the empty string was written on.
+    #[test]
+    fn a_comparison_against_the_empty_string_is_a_read_of_one_byte() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strcmp(ptr, ptr) -> i32, linkage(external);
+func @use(i32, i32), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strcmp(%0, %1) : (ptr, ptr) -> i32
+    %3 = call @strcmp(%1, %0) : (ptr, ptr) -> i32
+    call @use(%2, %3) : (i32, i32)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strcmp("), "{out}");
+        assert_eq!(out.matches("load.i8 %0").count(), 2, "one read for each call, {out}");
+        assert_eq!(out.matches("zext").count(), 2, "read as an unsigned char, {out}");
+        assert_eq!(out.matches("sub").count(), 2, "and the difference each way round, {out}");
+    }
+
+    /// A comparison told to read no bytes reads neither string, and one told to read a single byte
+    /// against a string this module holds is the difference between two bytes.
+    #[test]
+    fn a_short_count_settles_a_comparison_without_the_other_string() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 4 = { bytes "ozz\00" }, align 1, linkage(internal), constant
+
+func @strncmp(ptr, ptr, i64) -> i32, linkage(external);
+func @use(i32, i32), linkage(external);
+
+func @g(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = global_addr @.Lstr.0
+    %3 = iconst.i32 0
+    %4 = sext.i64 %3
+    %5 = call @strncmp(%0, %1, %4) : (ptr, ptr, i64) -> i32
+    %6 = iconst.i32 1
+    %7 = sext.i64 %6
+    %8 = call @strncmp(%2, %0, %7) : (ptr, ptr, i64) -> i32
+    call @use(%5, %8) : (i32, i32)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strncmp("), "{out}");
+        assert!(out.contains("iconst.i32 0"), "no bytes to read is no difference, {out}");
+        assert!(out.contains("load.i8 %0"), "one byte of the other string, {out}");
+        assert!(out.contains("iconst.i32 111"), "against the first byte of this one, {out}");
+    }
+
+    /// A comparison declared to answer something no wider than the byte it would read is left
+    /// alone, because there is no room in it for the answer.
+    #[test]
+    fn a_comparison_with_no_room_for_a_byte_is_left_alone() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strcmp(ptr, ptr) -> i8, linkage(external);
+func @use(i8), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strcmp(%0, %1) : (ptr, ptr) -> i8
+    call @use(%2) : (i8)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @strcmp("), "{out}");
     }
 
     /// The two spans walk the same string with the test turned round.

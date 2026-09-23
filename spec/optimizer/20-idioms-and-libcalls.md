@@ -108,6 +108,21 @@ read whose end the compiler cannot see, and the call stays. The count itself is 
 written as an `int` in the source and widened on the way into a `size_t` parameter, so the pass
 looks under the widening for it, and refuses a source constant that was negative.
 
+**One of the comparisons answers without either string.** `strcmp` and `strncmp` read the first
+byte of both of their strings before they can answer anything, so where one string is known and the
+other is not there is still an answer in the two cases that first byte settles on its own: a
+`strncmp` whose count is one, which is that byte and nothing else, and a comparison against the
+empty string, whose terminator stops the walk however many bytes the count allowed. The answer is
+the difference between the byte the compiler knows and the byte the other string holds, both read as
+`unsigned char`, which is what the standard says a comparison compares, and it is the one answer in
+this pass that is an instruction rather than a constant or an address, because that byte is in
+memory and has to be read. The read is safe wherever the call was, since the call was going to make
+it. A count of zero is simpler still: it reads neither string, so the answer is zero whatever the
+two of them hold and whether they are there to be read at all. A comparison declared to answer
+something no wider than a byte is left alone, because there is no room in it for the difference.
+`gcc.c-torture/execute/builtins/strcmp.c` writes `strcmp (bar, "")` and `strcmp ("", bar)` over a
+mutable global, and aborts if the library is reached, so passing it means the fold happened.
+
 **A rename does not hide the function.** `extern char *strstr (const char *, const char *) __asm
 ("my_strstr");` declares the standard `strstr` and says the symbol is `my_strstr`, and a pass with
 only the symbol in front of it sees a call to something it has never heard of. The IR carries the
