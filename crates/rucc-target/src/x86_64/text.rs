@@ -882,6 +882,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mov_mr_16", &[spell("movw", &[Reg(0, Word), Mem])]),
     ("mov_mr_32", &[spell("movl", &[Reg(0, Long), Mem])]),
     ("mov_mr_64", &[spell("movq", &[Reg(0, Quad), Mem])]),
+    ("mov_mi_8", &[spell("movb", &[Imm, Mem])]),
+    ("mov_mi_16", &[spell("movw", &[Imm, Mem])]),
+    ("mov_mi_32", &[spell("movl", &[Imm, Mem])]),
+    ("mov_mi_64", &[spell("movq", &[Imm, Mem])]),
     // Reading and writing a truth value, which is a byte in memory and a bit to everything that
     // reads it. The load widens on the way in, because the byte is a zero or a one and a whole
     // register holding it costs the same as a byte of one and is what the next instruction

@@ -952,6 +952,16 @@ fn given(text: &str, memory: &[bool]) -> Option<Given> {
         // Stated for the reason [`base`] gives: the width is the addressing mode's.
         base: Some(Piece::Operand { index, width: Width::Quad, stated: true }),
     };
+    // A distance written in front of an operand in memory, which is `4%2` and means four bytes
+    // past the object: tcc writes the second word of a structure that way. It is only an address
+    // when the operand is in memory, since the same text in front of a register is nothing.
+    if let Some((front, rest)) = text.trim().split_once('%')
+        && !front.is_empty()
+        && let Some(index) = rest.parse().ok().filter(|&index| held(index))
+    {
+        let disp = i32::try_from(number(front)?).ok()?;
+        return Some(Given::Mem(At { disp: Disp::Number(disp), ..object(index) }));
+    }
     match spelled(text)? {
         Given::Operand(index, _) if held(index) => Some(Given::Mem(object(index))),
         Given::High(index) if held(index) => None,
@@ -1394,6 +1404,20 @@ mod tests {
             vec![whole, whole],
             "the word coming out and the word going in"
         );
+    }
+
+    /// A number in front of an operand in memory is a distance past the object, and in front of
+    /// one in a register it is nothing this reads.
+    #[test]
+    fn a_distance_in_front_of_an_operand_in_memory_is_past_the_object() {
+        let at = |disp| At {
+            segment: None,
+            disp: Disp::Number(disp),
+            base: Some(Piece::Operand { index: 0, width: Width::Quad, stated: true }),
+        };
+        assert_eq!(given("4%0", &[true]), Some(Given::Mem(at(4))));
+        assert_eq!(given("%0", &[true]), Some(Given::Mem(at(0))));
+        assert_eq!(given("4%0", &[false]), None);
     }
 
     /// Halves of two different registers is not that instruction. This machine exchanges the two

@@ -3818,8 +3818,14 @@ impl<'a> Lowering<'a> {
             // its type and no other instruction is the one written down.
             let carried = matches!(desc.constraint, Constraint::Reuse(_) | Constraint::Fixed(_))
                 && read_as(list, index).is_some();
+            // The other case is the one the machine settles by itself: a write of the low four
+            // bytes of a register clears the four above them, so a sixty four bit object written
+            // that way holds the thirty two bit answer and nothing else. tcc loads a word through
+            // `movl 4(%0),%k0` into a `long` and means exactly that.
+            let cleared = desc.class == self.gpr && width == x86_64::Width::Long && bits == 64;
             let widened = stated && desc.role.is_def() && width.bits() > bits;
-            let narrowed = stated && width.bits() < bits && (!desc.role.is_def() || carried);
+            let narrowed =
+                stated && width.bits() < bits && (!desc.role.is_def() || carried || cleared);
             if bits != width.bits() && !widened && !narrowed {
                 return Err(refused());
             }

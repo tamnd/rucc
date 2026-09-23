@@ -207,11 +207,12 @@ fn a_width_that_disagrees_with_what_it_is_written_on_says_so() {
     let (ok, _, said) = run("modifier-type", ty);
     assert!(!ok, "a width that contradicts the type of the operand was accepted");
     assert!(said.contains("has an operand this cannot place"), "{said}");
-    // And the narrow half of the same question, which is an instruction that writes a third of the
-    // object it was given and leaves the rest holding whatever was there. gcc writes that one and
-    // the program it writes it for is relying on what the machine does to the top of a register
-    // rather than on anything it said, so this refuses it until something real asks for it.
-    let part = "long f(long x) { long n; asm (\"bsf %k1, %k0\" : \"=r\" (n) : \"r\" (x)); \
+    // And the narrow half of the same question, which is an instruction that writes a quarter of
+    // the object it was given and leaves the rest holding whatever was there. gcc writes that one
+    // and the program it writes it for is relying on what was in the register before rather than
+    // on anything it said, so this refuses it until something real asks for it. Half of a `long`
+    // is not the same question, because a write of four bytes clears the four above them.
+    let part = "long f(long x) { long n; asm (\"bsf %w1, %w0\" : \"=r\" (n) : \"r\" (x)); \
                 return n; }\n";
     let (ok, _, said) = run("modifier-narrow", part);
     assert!(!ok, "an instruction filling part of its output was accepted");
@@ -647,6 +648,22 @@ fn the_two_halves_of_a_word_are_exchanged_in_the_register_that_has_both() {
                   __asm(\"xchgb %b0,%h0\" : \"=Q\" (x) : \"0\" (x)); return x; }\n";
     let body = body(&asm("byte-swap", source), "f");
     assert!(body.contains("xchgb\t%al, %ah"), "the exchange never reached the listing:\n{body}");
+}
+
+#[test]
+fn an_operand_in_memory_is_written_where_it_is_and_four_bytes_past_it() {
+    // `mconstraint_test` in tcc's `tcctest.c`. The template takes the address of an `"m"` operand,
+    // loads the word four bytes in through it into a `long` with `movl 4(%0),%k0`, and then
+    // stores a constant at the operand and at `4%2`, which is four bytes past it. A write of four
+    // bytes clears the top of the register, so the `long` holds the word and nothing else.
+    let source = "struct two { int a; int b; }; \
+                  unsigned long f(struct two *p) { unsigned long ret; unsigned a[2]; a[0] = 0; \
+                  __asm__ volatile (\"lea %2,%0; movl 4(%0),%k0; addl %2,%k0; \
+                  movl $51,%2; movl $52,4%2; movl $63,%1\" \
+                  : \"=&r\" (ret), \"=m\" (a) : \"m\" (*p)); return ret + a[0]; }\n";
+    let body = body(&asm("memory-past", source), "f");
+    assert!(body.contains("movl\t$51, ("), "the store at the operand is missing:\n{body}");
+    assert!(body.contains("movl\t$52, 4("), "the store past the operand is missing:\n{body}");
 }
 
 #[test]
