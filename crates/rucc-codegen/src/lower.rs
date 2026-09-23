@@ -6056,10 +6056,11 @@ mod tests {
         // address is an integer as wide as one, and the arithmetic on them is the add it always
         // was, so every rule written about an add reaches it.
         //
-        // The add stays its own instruction rather than folding into the address the load reads
-        // from. Two registers with no scale on either is the one addressing mode the rules have no
-        // load through, because the folds that exist are the displacement one and the scaled ones,
-        // and this is neither. That is a peephole worth having and not a thing this changes.
+        // The add stays its own instruction here rather than folding into the address the load
+        // reads from. Two registers with no scale on either is the one addressing mode the rules
+        // have no load through, because the folds that exist are the displacement one and the
+        // scaled ones, and this is neither. `crate::fold` is what puts the two together, after
+        // selection, and this is the pair it is handed.
         assert_eq!(
             lower(&mut names, &source),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \

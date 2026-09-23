@@ -121,6 +121,13 @@ pub struct FrameInsts {
     /// epilogue puts the stack pointer back when the frame pointer is the only record of where
     /// it was.
     pub lea: &'static str,
+    /// Adds two general purpose registers at the width of an address.
+    ///
+    /// Not something a prologue writes. It is here because the sum of two registers is the one
+    /// address the selector leaves as arithmetic rather than as a `lea`, and the pass that folds
+    /// addresses into their readers has to know which instruction that is to read it as a base and
+    /// an index at a scale of one.
+    pub sum: &'static str,
     /// Returns to the caller.
     pub ret: &'static str,
     /// Compares two general purpose registers and writes whether they differ into a third.

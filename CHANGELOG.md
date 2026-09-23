@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The sum of two registers folds into the memory operand that reads it on x86-64. `p[i]` on a `char` array is a base and an index with no scale, which the rules leave as an `add_rr_64` rather than making a `lea` of, so a byte array read came out as a copy, an add and a load through the result. `crates/rucc-codegen/src/fold.rs` now reads that add as the address `base + index` and folds it into its readers under the rules a `lea` goes by, so the read is `movb (%rbx,%r13), %dil`. Over the 2663 corpus sources that is 183494 instructions to 183096 at `-O2`, 176127 to 175335 at `-O1` and 174821 to 174041 at `-Os`, with nothing larger at any level, and the SQLite amalgamation at `-O2` goes from 243511 to 241618. Section 37.4 of `spec/optimizer/37-machine-level-optimization.md` has the details. Closes tamnd/rucc#1719.
+
 ## 0.10.78
 
 ### Added

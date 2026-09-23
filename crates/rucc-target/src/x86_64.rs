@@ -205,6 +205,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     align: "and_ri_64",
     imm: "mov_ri_64",
     lea: "lea_64",
+    sum: "add_rr_64",
     ret: "ret",
     differ: "cmp_set_ne_64",
     above: "cmp_set_a_64",

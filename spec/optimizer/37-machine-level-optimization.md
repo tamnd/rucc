@@ -209,6 +209,15 @@ the pass this entry is really about is the case that peephole refuses, one add f
 operations with different offsets, where no single reader owns the address. Worth building, worth
 building late, and small.
 
+The same peephole takes an address the rules never make a `lea` of. The rules that write one are
+the ones with a multiply in them, so `p[i]` on a `char`, a base and an index with no scale, is left
+as the `add_rr_64` it is, and a byte array read came out as a copy, an add and a load through the
+result. The fold reads an add of two registers at the width of an address as a base and an index at
+a scale of one and puts it into its readers under the rules a `lea` goes by, with the stack pointer
+kept out of the index. Over the 2663 corpus sources that is 183494 instructions to 183096 at `-O2`,
+176127 to 175335 at `-O1` and 174821 to 174041 at `-Os`, with nothing larger at any level, and the
+SQLite amalgamation at `-O2` goes from 243511 to 241618. tamnd/rucc#1719.
+
 **Compare elimination.** `gcc/compare-elim.cc`, 981 lines. Most arithmetic instructions on most
 targets set flags; an explicit compare against zero after one of them is redundant. On x86-64 and
 AArch64 this is a real and frequent win, and it is not expressible above selection because flags are
