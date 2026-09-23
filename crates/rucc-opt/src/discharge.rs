@@ -235,6 +235,14 @@
 //! way the pass reads an opcode. Nothing else about a call is believed: the lifetime facts still go
 //! across an unmarked call, a call through an address, and inline assembly.
 //!
+//! Freeing nothing is not writing nothing, and the initialization facts and the type facts are about
+//! what was written. A callee that frees nothing can still store a `float` over bytes this function
+//! last stored an `int` through, or `memcpy` bytes nothing wrote over ones something did, and either
+//! makes a fact from before the call false while leaving every lifetime alone. So a marked call keeps
+//! the bounds and lifetime facts and gives up the other two, unless `crate::purity` says the callee
+//! writes no memory at all, which is `strlen` and its kind and whatever the module's own analysis
+//! worked out.
+//!
 //! What the strictness still costs is measured rather than guessed. A check that a fact would have
 //! covered if a call had not intervened is counted, so `-fopt-info-missed` says per function what
 //! is left to win. On the SQLite amalgamation 3.53.4 at `-O2 -fsafety=detect` that is 3978 bounds
@@ -316,6 +324,7 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Meta, Opcode, Type, Value};
 
+use crate::purity::{Callee, Facts};
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
 use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Preserved, Stats, copy, heap};
@@ -693,7 +702,10 @@ impl Pass for Discharge {
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         let Some(entry) = func.entry() else { return stats };
+        let wrote = writers(func, an.purity());
         let dom = an.dominators(func);
+        let graph = an.cfg(func);
+        let kills = Kills::of(func, &wrote);
 
         // The graph is built for two reasons and neither is the common one, so a function with
         // neither pays for no copy of it. The ranges want it when there is a walk the constant
@@ -724,9 +736,13 @@ impl Pass for Discharge {
         let mut work = vec![(entry, Scope::default())];
         while let Some((block, mut scope)) = work.pop() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
-                match opaque(func, inst) {
+                match opaque(func, &wrote, inst) {
                     Some(Opaque::Called) => {
                         scope.called();
+                        continue;
+                    }
+                    Some(Opaque::Wrote) => {
+                        scope.wrote();
                         continue;
                     }
                     Some(Opaque::Everything) => {
@@ -1158,7 +1174,9 @@ impl Pass for Discharge {
                 }
             }
             for child in dom.children(block) {
-                work.push((child, scope.clone()));
+                let mut scope = scope.clone();
+                scope.crossed(kills.between(graph, block, child));
+                work.push((child, scope));
             }
         }
 
@@ -1411,9 +1429,178 @@ impl Scope {
     fn called(&mut self) {
         self.bounds.crossed();
         self.alive.forget();
+        self.wrote();
+    }
+
+    /// Does to the facts what the blocks between the walk's last block and its next one may have.
+    fn crossed(&mut self, crossed: Crossed) {
+        if crossed.everything {
+            self.forget();
+            return;
+        }
+        if crossed.called {
+            self.called();
+        }
+        if crossed.wrote {
+            self.wrote();
+        }
+        if crossed.unwritten {
+            self.written.forget();
+            self.stored.forget();
+        }
+        match crossed.retyped {
+            Retyped::Untouched => {}
+            Retyped::Only(node) => self.retyped(Some(node)),
+            Retyped::Anyhow => self.retyped(None),
+        }
+    }
+
+    /// Gives up the initialization facts and the type facts, which is what a call that frees
+    /// nothing and may write memory does to them. The module comment has the argument.
+    fn wrote(&mut self) {
         self.written.forget();
         self.stored.forget();
         self.retyped(None);
+    }
+}
+
+/// What the blocks between a block's immediate dominator and the block itself may have done to the
+/// facts the walk is carrying.
+///
+/// The walk hands a block what held at the end of its immediate dominator, and that is only what
+/// holds at the start of the block when every path from the one to the other runs through nothing
+/// that kills a fact. A block with one predecessor, which is its dominator, is that case. Any other
+/// block is reached through blocks the walk visits somewhere else in the tree: the arms of a branch
+/// before the join, or the body of a loop before its header is entered again. A `free` in one arm
+/// ends the lifetime the check in front of the branch found alive, and the read after the join is
+/// then a read of freed storage on that path, so what those blocks do has to be done to the facts
+/// before the block sees them. Which instruction in a block does it and in what order does not
+/// matter, because the facts are given up at the start of the later block whatever happened, so a
+/// block's effect is kept as one summary of everything in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Crossed {
+    /// Something the pass cannot see through, which gives up everything.
+    everything: bool,
+    /// A call that might free.
+    called: bool,
+    /// A call that frees nothing and may write.
+    wrote: bool,
+    /// A `meta_begin` or a `meta_init_copy`, which can make written bytes unwritten.
+    unwritten: bool,
+    /// What happened to the type plane.
+    retyped: Retyped,
+}
+
+/// What some blocks did to the type plane, as [`Scope::retyped`] needs to be told it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Retyped {
+    /// Nothing wrote it.
+    #[default]
+    Untouched,
+    /// Only `meta_type` naming this one entry wrote it, which leaves that entry's facts standing.
+    Only(Meta),
+    /// Anything else.
+    Anyhow,
+}
+
+impl Retyped {
+    /// Both of two things having happened.
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Untouched, done) | (done, Self::Untouched) => done,
+            (Self::Only(one), Self::Only(two)) if one == two => Self::Only(one),
+            _ => Self::Anyhow,
+        }
+    }
+}
+
+impl Crossed {
+    /// Both of two things having happened.
+    fn and(self, other: Self) -> Self {
+        Self {
+            everything: self.everything || other.everything,
+            called: self.called || other.called,
+            wrote: self.wrote || other.wrote,
+            unwritten: self.unwritten || other.unwritten,
+            retyped: self.retyped.and(other.retyped),
+        }
+    }
+
+    /// What one instruction does, which is what the walk does with it when it reaches it.
+    fn of(func: &Func, wrote: &HashSet<Inst>, inst: Inst) -> Self {
+        let mut crossed = Self::default();
+        match opaque(func, wrote, inst) {
+            Some(Opaque::Called) => crossed.called = true,
+            Some(Opaque::Wrote) => crossed.wrote = true,
+            Some(Opaque::Everything) => crossed.everything = true,
+            None => match func[inst].opcode {
+                Opcode::MetaBegin => {
+                    crossed.unwritten = true;
+                    crossed.retyped = Retyped::Anyhow;
+                }
+                Opcode::MetaInitCopy => crossed.unwritten = true,
+                Opcode::MetaTypeCopy => crossed.retyped = Retyped::Anyhow,
+                Opcode::MetaType => {
+                    crossed.retyped = match func[inst].extra {
+                        Extra::Node(node) => Retyped::Only(node),
+                        _ => Retyped::Anyhow,
+                    };
+                }
+                _ => {}
+            },
+        }
+        crossed
+    }
+}
+
+/// Each block's [`Crossed`], for the blocks that do anything to the facts at all.
+struct Kills(HashMap<Block, Crossed>);
+
+impl Kills {
+    /// Read off every block once, before the walk, so the question at each block is a lookup.
+    fn of(func: &Func, wrote: &HashSet<Inst>) -> Self {
+        let mut kills = HashMap::new();
+        for block in func.blocks() {
+            let crossed = func
+                .insts(block)
+                .map(|inst| Crossed::of(func, wrote, inst))
+                .fold(Crossed::default(), Crossed::and);
+            if crossed != Crossed::default() {
+                kills.insert(block, crossed);
+            }
+        }
+        Self(kills)
+    }
+
+    /// What the blocks on some path from `above`, its immediate dominator, to `block` may have
+    /// done, not counting `above` itself, whose instructions the walk has already been through.
+    ///
+    /// Those blocks are the ones that reach `block` without going through `above`, which is a walk
+    /// backwards from its predecessors that stops at `above`. Every block that walk finds is one a
+    /// path from `above` goes through, because a path from the entry to it that missed `above`
+    /// would go on to `block` and `above` would not dominate `block`. `block` is among them when a
+    /// loop comes back to it without going through `above`, and then what it does itself counts
+    /// too, since on the second time round its start comes after its end.
+    fn between(&self, graph: &Cfg, above: Block, block: Block) -> Crossed {
+        if self.0.is_empty() || graph.predecessors(block) == [above] {
+            return Crossed::default();
+        }
+        let mut crossed = Crossed::default();
+        let mut seen: HashSet<Block> = HashSet::new();
+        let mut work: Vec<Block> = graph.predecessors(block).to_vec();
+        while let Some(at) = work.pop() {
+            if at == above || !seen.insert(at) {
+                continue;
+            }
+            if let Some(&kill) = self.0.get(&at) {
+                crossed = crossed.and(kill);
+                if crossed.everything {
+                    break;
+                }
+            }
+            work.extend_from_slice(graph.predecessors(at));
+        }
+        crossed
     }
 }
 
@@ -1422,6 +1609,8 @@ impl Scope {
 enum Opaque {
     /// A call that might free. The lifetime facts go and the bounds facts stay, marked.
     Called,
+    /// A call that frees nothing and may write. The plane facts go and the rest stay.
+    Wrote,
     /// Everything else, which gives up both halves.
     Everything,
 }
@@ -1442,14 +1631,32 @@ enum Opaque {
 /// with the calls, because the argument for keeping the bounds half rests on the lifetime check at
 /// the access reading a plane the runtime wrote, and a block of assembly is the one thing in the
 /// IR that can write over a plane without the runtime having been asked.
-fn opaque(func: &Func, inst: Inst) -> Option<Opaque> {
+fn opaque(func: &Func, wrote: &HashSet<Inst>, inst: Inst) -> Option<Opaque> {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
-            (!func[inst].flags.contains(Flags::NOFREE)).then_some(Opaque::Called)
+            if !func[inst].flags.contains(Flags::NOFREE) {
+                return Some(Opaque::Called);
+            }
+            wrote.contains(&inst).then_some(Opaque::Wrote)
         }
         Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => Some(Opaque::Everything),
         _ => None,
     }
+}
+
+/// The calls marked [`Flags::NOFREE`] that may still write memory, which is every one of them
+/// `crate::purity` has not said otherwise about. Worked out before the walk because the answer is
+/// in the analyses and the walk needs them borrowed for other things.
+fn writers(func: &Func, purity: &Facts) -> HashSet<Inst> {
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| {
+            matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+                && func[inst].flags.contains(Flags::NOFREE)
+                && Callee::of(func, inst)
+                    .is_none_or(|callee| purity.purity_of(callee).writes_memory())
+        })
+        .collect()
 }
 
 /// What a `check_bounds` is about, when it is one this pass can read.
@@ -2463,6 +2670,11 @@ mod tests {
         AsmInfo, Block, BlockCallList, Builder, Extra, Facts, Flags, Func, Inst, InstData, IntPred,
         MemInfo, MemOrder, Meta, Opcode, Restrict, Signature, Type, Value,
     };
+
+    use std::sync::Arc;
+
+    use rucc_ir::Module;
+    use rucc_target::{TargetInfo, Triple};
 
     use super::{DISCHARGE, Fact};
     use crate::stats::Kind;
@@ -3630,6 +3842,169 @@ mod tests {
         assert_eq!(checks(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
         assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL), 0);
+    }
+
+    /// A call to `name` flagged as reaching nothing that frees, which is what `crate::nofree` writes
+    /// onto a `memcpy` or a function of the module's own that stores and never frees.
+    fn freeing_nothing(build: &mut Builder<'_>, names: &mut Interner, name: &str) {
+        let callee = names.intern(name);
+        let signature = build.func().add_signature(Signature::new());
+        let call = build.call(callee, signature, &[]);
+        build.func()[call].flags |= Flags::NOFREE;
+    }
+
+    /// The analyses the pipeline hands a pass, with `crate::purity` told the module declares `name`
+    /// and nothing else, so a name in its library table gets that table's answer.
+    fn declaring(names: &mut Interner, name: &str) -> crate::Analyses {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        module.add_func(Func::new(names.intern(name), Signature::new()));
+        let facts = crate::purity::Facts::of_module(&module, names);
+        crate::machine::fixtures::analyses().calling(Arc::new(facts))
+    }
+
+    #[test]
+    fn a_plane_check_a_call_that_frees_nothing_but_writes_stands_between_stays() {
+        // Freeing nothing is not writing nothing. The callee may store a `float` over the bytes
+        // the first check found holding an `int`, or copy bytes nothing wrote over them, and the
+        // second pair of checks is what would say so. The lifetime of the storage is untouched,
+        // so the bounds check still goes.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 8);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        freeing_nothing(&mut build, &mut names, "retypes_it");
+        check(&mut build, pointer, 8);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(types(&func), 2);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_TYPE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::PAST_A_CALL_INIT), 1);
+    }
+
+    #[test]
+    fn a_plane_check_a_call_that_writes_nothing_stands_between_goes() {
+        // `strlen` frees nothing and writes nothing, which `crate::purity`'s library table says,
+        // so neither plane can have changed and the second pair has nothing left to find.
+        let (mut names, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        freeing_nothing(&mut build, &mut names, "strlen");
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        let mut an = declaring(&mut names, "strlen");
+        let stats = DISCHARGE.run(&mut func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(types(&func), 1);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_after_a_join_a_call_in_one_arm_stands_before_stays() {
+        // The check in front of the branch dominates the one after the join, and on the path
+        // through the arm a call that may free runs between them. The walk goes from the entry to
+        // the join straight down the dominator tree and never through the arm, so what the arm did
+        // has to reach the join some other way, or `free (p)` in one arm of an `if` is a read of
+        // freed storage nothing stops.
+        let (mut names, mut func, block, pointer) = blank();
+        let arm = func.create_block();
+        let join = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        live(&mut build, pointer);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[]);
+        let mut build = Builder::new(&mut func, arm);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        live(&mut build, pointer);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
+    }
+
+    #[test]
+    fn a_plane_check_after_a_join_a_write_in_one_arm_stands_before_stays() {
+        // The same shape for the two plane facts, with a call that frees nothing and may write in
+        // the arm. The bounds check after the join still goes, since nothing in the arm can end
+        // the storage the first one was about.
+        let (mut names, mut func, block, pointer) = blank();
+        let arm = func.create_block();
+        let join = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        check(&mut build, pointer, 8);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[]);
+        let mut build = Builder::new(&mut func, arm);
+        freeing_nothing(&mut build, &mut names, "retypes_it");
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        check(&mut build, pointer, 8);
+        asked(&mut build, pointer, 8, Meta::new(3));
+        began(&mut build, pointer, 8);
+        build.ret(&[]);
+        run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(types(&func), 2);
+        assert_eq!(inits(&func), 2);
+    }
+
+    #[test]
+    fn a_lifetime_check_at_the_top_of_a_loop_a_call_further_down_stays() {
+        // The loop header's immediate dominator is the block in front of the loop, and the second
+        // time round the header is reached from the bottom of the loop, after the call. The call
+        // is in the header itself here, after the check, which is the case where a block's own
+        // instructions come between its end and its next start.
+        let (mut names, mut func, block, pointer) = blank();
+        let header = func.create_block();
+        let exit = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        live(&mut build, pointer);
+        build.jump(header, &[]);
+        let mut build = Builder::new(&mut func, header);
+        live(&mut build, pointer);
+        let callee = names.intern("might_free");
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, header, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+        run(&mut func);
+        assert_eq!(lives(&func), 2);
+    }
+
+    #[test]
+    fn a_check_after_a_join_whose_arms_do_nothing_still_goes() {
+        // The other side: a branch whose arms touch nothing leaves the facts where they were, and
+        // the check after the join is answered by the one in front of the branch as before.
+        let (_, mut func, block, pointer) = blank();
+        let arm = func.create_block();
+        let join = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        live(&mut build, pointer);
+        let condition = build.iconst(Type::int(32), 1);
+        build.br_if(condition, arm, &[], join, &[]);
+        let mut build = Builder::new(&mut func, arm);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        live(&mut build, pointer);
+        build.ret(&[]);
+        run(&mut func);
+        assert_eq!(lives(&func), 1);
     }
 
     #[test]
