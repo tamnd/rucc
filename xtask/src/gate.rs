@@ -231,6 +231,7 @@ fn tree() -> Result<Vec<Step>> {
         Step::task("layers", &[])?,
         Step::task("style", &[])?,
         Step::task("thresholds", &[])?,
+        Step::task("chains", &[])?,
         Step::task("malformed", &[])?,
         Step::task("interpose", &[])?,
         Step::task("version", &[])?,
