@@ -55,9 +55,14 @@
 //! takes and the other does not is a caller calling a function nobody defined, which is a link
 //! error rather than a finding.
 //!
-//! `_Float16` and `__int128` are still out, for the reason `__int128` is out of the seeded half of
-//! the record corpus: each would want a guard of its own, and a corpus is easier to read when the
-//! conditional in it is one.
+//! `__int128` is in on the same terms with a guard of its own, `__SIZEOF_INT128__` in the place of
+//! the quad's macro. It is the other type here that takes two eightbytes, and it takes them as two
+//! general purpose registers or as sixteen bytes of the argument area and never as one of each, so
+//! the cases for it are the ones where the registers run out one short and where the area is at an
+//! odd word when it gets there.
+//!
+//! `_Float16` is still out, for the reason it is out of the seeded half of the record corpus: it
+//! would want a guard of its own, and a corpus is easier to read with fewer conditionals in it.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -98,6 +103,9 @@ const ANCHOR: u64 = 64;
 /// differential needs the answer to be the same on both sides of the call.
 const QUAD: &str = "defined(__FLT128_MANT_DIG__) && defined(__x86_64__)";
 
+/// The condition the `__int128` cases are written under, which is the quad's with the other type.
+const INT128: &str = "defined(__SIZEOF_INT128__) && defined(__x86_64__)";
+
 /// What the generator was asked to do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -129,6 +137,8 @@ enum Scalar {
     /// It is not in [`SCALARS`], so nothing drawn from the seed can be one. Everything it appears
     /// in is written by hand and carries the guard.
     Float128,
+    /// `__int128`, which is the other one, and is not in [`SCALARS`] for the same reason.
+    Int128,
     Pointer,
 }
 
@@ -151,6 +161,7 @@ impl Scalar {
             Scalar::Double => "double",
             Scalar::LongDouble => "long double",
             Scalar::Float128 => "_Float128",
+            Scalar::Int128 => "__int128",
             Scalar::Pointer => "void *",
         }
     }
@@ -553,6 +564,14 @@ impl Values {
             // cast because a quad written as a double and widened would be exact anyway and would
             // stop saying which type the value was meant to be.
             Scalar::Float128 => format!("{}.25f128", 1 + n % 100_000),
+            // Both halves carry the number, so a half that arrived in the other's place is wrong
+            // and a high half that was never passed at all is not the zero it would be by luck.
+            // Built out of unsigned words, since shifting a negative value is undefined.
+            Scalar::Int128 => format!(
+                "(__int128)(((unsigned __int128){}ULL << 64) | {}ULL)",
+                1 + n * 7919 % 4_000_000_000,
+                1 + n.wrapping_mul(0x0001_0f2c_3d4e_5f60) % 18_000_000_000_000_000
+            ),
             Scalar::Pointer => format!("(void *)&anchor[{}]", n % ANCHOR),
         }
     }
@@ -925,6 +944,62 @@ fn signatures() -> Vec<Signature> {
          argument.",
         Some(Ty::Aggregate(14)),
         vec![Ty::Aggregate(14), Ty::Scalar(Scalar::Float128)],
+    );
+
+    // The wide integer cases go after the quad ones, for the reason those go after the rest.
+    let mut wide = |name: &str, why: &'static str, ret: Option<Ty>, params: Vec<Ty>| {
+        let signature = build(&mut values, name.to_string(), why, ret, params);
+        out.push(Signature { guard: Some(INT128), ..signature });
+    };
+
+    wide(
+        "w_int128_with_one_register_left",
+        "Five integers and then a __int128, which gets no pair of registers, so the whole of it \
+         goes in the argument area and the sixth register stays empty. The long long behind it is \
+         the one that takes that register, which is the half of the rule a compiler that split \
+         the value into two words gets wrong.",
+        Some(Ty::Scalar(Scalar::Int128)),
+        vec![
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::LongLong),
+        ],
+    );
+    wide(
+        "w_int128_on_a_sixteen_byte_boundary",
+        "Seven integers and then a __int128, so the seventh is the first word of the argument \
+         area and the wide value leaves the second one empty to start on a sixteen byte boundary.",
+        Some(Ty::Scalar(Scalar::Int128)),
+        vec![
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::LongLong),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Int),
+        ],
+    );
+    wide(
+        "w_int128s_past_the_registers",
+        "Six of them with a double in the middle, so three are in registers, three are in the \
+         argument area and the double takes a vector register without moving any of them.",
+        Some(Ty::Scalar(Scalar::Int128)),
+        vec![
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Double),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Int128),
+            Ty::Scalar(Scalar::Int128),
+        ],
     );
 
     let mut quad_variadic =

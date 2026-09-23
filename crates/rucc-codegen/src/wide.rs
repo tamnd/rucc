@@ -31,11 +31,19 @@
 //! in registers, because the convention hands out argument registers in order and two halves in a
 //! row take the two registers the whole value would have taken. It is not true when they do not: a
 //! value the convention could not fit in registers travels in the argument area as sixteen bytes
-//! aligned to sixteen, and two independent words travel as two words each aligned to eight, which
-//! is a different place as soon as an odd number of words went before them. So a function whose
-//! wide parameter would run out of registers is left exactly as it was and refused by name, the
-//! same as a function this pass does not understand. `tamnd/rucc#351` carries what passing one in
-//! memory would take, which is a form of parameter the IR has no way to spell today.
+//! aligned to sixteen and leaves the register it could not use to whatever comes after it, and two
+//! independent words in a row would put the first one in that register and the second a word up
+//! from wherever the area had got to.
+//!
+//! So a signature with such a parameter is laid out again rather than split in place. Where every
+//! parameter is meant to be is worked out first, and then the split signature is put in the order
+//! that makes the ordinary walk over it arrive at the same places: the ones in registers first,
+//! then the ones in the argument area by how far up it they are, with a filler that carries nothing
+//! wherever the convention leaves a register or a word empty. Both ends of a call are built from the
+//! same layout, a function's own parameters and every call it makes, so nothing below this has to
+//! know a parameter was ever in any other order, and the IR needs no form of parameter it did not
+//! have. A variadic signature is still refused, because its named parameters have to stay in front
+//! of the rest, and that is tamnd/rucc#351 along with the `va_arg` of one in tamnd/rucc#340.
 //!
 //! # Dividing and converting are calls into the runtime
 //!
@@ -124,20 +132,26 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
     if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, &order, at, inst)) {
         return false;
     }
-    if !func.signatures().all(|signature| fits(signature, conv)) {
+    let Some(arriving) = plan(func.signature(), conv) else { return false };
+    if !func.signatures().all(|signature| plan(signature, conv).is_some()) {
         return false;
     }
 
     let mut halves: Halves = HashMap::new();
     let mut forward: HashMap<Value, Value> = HashMap::new();
+    let entry = func.entry();
     for block in func.blocks().collect::<Vec<_>>() {
-        params(func, block, &mut halves, &mut forward);
+        if Some(block) == entry {
+            arrive(func, block, &arriving, &mut halves, &mut forward);
+        } else {
+            params(func, block, &mut halves, &mut forward);
+        }
     }
     for &inst in &insts {
-        rewrite(func, names, conv.abi, &mut halves, &mut forward, inst);
+        rewrite(func, names, conv, &mut halves, &mut forward, inst);
     }
     substitute(func, &forward);
-    let signature = split_signature(func.signature());
+    let signature = planned(func.signature(), &arriving);
     func.set_signature(signature);
     true
 }
@@ -324,41 +338,158 @@ fn operands(func: &Func, inst: Inst) -> Vec<Value> {
     reads
 }
 
-/// Whether both halves of every wide parameter of one signature land in registers.
+/// What one parameter of a split signature is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// The parameter at that index of the whole signature, which is not wide, as it was.
+    Whole(usize),
+    /// The low half of the wide parameter at that index.
+    Low(usize),
+    /// The high half of it.
+    High(usize),
+    /// A value of that type that carries nothing and is there to take a place nothing else takes.
+    Filler(Type),
+}
+
+/// The parameters of one signature once every wide one is two halves, in the order that puts each
+/// of them where the convention puts the whole signature.
 ///
-/// The walk is the one [`crate::abi::entry`] makes, because the answer has to be the one that walk
-/// will give: it hands out places in the order the signature holds the parameters, and a wide
-/// parameter is about to become two halves in a row in that order. Both have to be registers. One
-/// register and one word of the argument area is where two independent words go and is not where
-/// the convention puts a sixteen byte value.
+/// The walk is the one [`crate::abi::entry`] and [`crate::abi::call`] make, because the answer has
+/// to be the one that walk will give: it hands out places in the order the signature holds the
+/// parameters. When both halves of every wide parameter land in registers, two halves in a row in
+/// the place of the whole take the two registers the whole value would have taken, and the order
+/// is the order the signature had.
+///
+/// When one does not, System V puts the whole value in the argument area as sixteen bytes aligned
+/// to sixteen and leaves the registers it did not take to the parameters after it. Two words in a
+/// row go somewhere else: the first takes whatever register is left, and a word only has to be
+/// aligned to eight. So the order is built from where everything is meant to be rather than from
+/// the signature. The ones in general purpose registers come first in register order, then the
+/// ones in vector registers, then the ones in the argument area by how far up it they are. A filler
+/// takes a register a wide value skipped, since a word of the argument area is only handed out once
+/// the registers of its kind have run out, and a filler takes each word the alignment of a wide
+/// value leaves empty. The walk is made again over what was built, and anything that did not land
+/// where it was meant to is `None`, as is a variadic signature, whose named parameters have to stay
+/// in front of the rest, and a convention that counts the two register files as one run, which
+/// passes a value this wide some other way.
 ///
 /// A return value is not asked about. What comes back comes back in the registers a return uses,
 /// which is a sequence of its own with two in it on this convention, and a signature wanting more
 /// than it has is refused by name in [`crate::lower`] already.
-fn fits(signature: &Signature, conv: &CallRegs) -> bool {
+fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
+    let word = Param::new(half());
     let mut places = Places::new(conv);
-    for param in &signature.params {
-        // A structure the classification put in the argument area, which is the one parameter whose
-        // place is bytes rather than a register. Everything else is a value, the pointer an `sret`
-        // hands over included, and a value takes the next register of its own kind.
-        if let Abi::ByVal { size, align } = param.abi {
-            places.on_stack(u32::try_from(size).unwrap_or(u32::MAX), align);
-        } else if crate::abi::on_the_stack(param.ty) {
-            let (size, align) = crate::abi::X87_AREA;
-            places.on_stack(size, align);
-        } else if is_wide(param.ty) {
-            let low = places.integer();
-            let high = places.integer();
-            if !matches!((low, high), (Where::Reg(_), Where::Reg(_))) {
-                return false;
-            }
-        } else if param.ty.is_float() {
-            places.float(crate::abi::float_bytes(param.ty));
-        } else {
-            places.integer();
+    let mut meant: Vec<(Slot, Param, Where)> = Vec::new();
+    let mut moved = false;
+    for (index, &param) in signature.params.iter().enumerate() {
+        if !is_wide(param.ty) {
+            meant.push((Slot::Whole(index), param, place(&mut places, param)));
+            continue;
+        }
+        let mut ahead = places.clone();
+        if let (low @ Where::Reg(_), high @ Where::Reg(_)) = (ahead.integer(), ahead.integer()) {
+            places = ahead;
+            meant.push((Slot::Low(index), word, low));
+            meant.push((Slot::High(index), word, high));
+            continue;
+        }
+        let Where::Stack(at) = places.on_stack(WIDE / 8, WIDE / 8) else { return None };
+        meant.push((Slot::Low(index), word, Where::Stack(at)));
+        meant.push((Slot::High(index), word, Where::Stack(at + HALF / 8)));
+        moved = true;
+    }
+    if !moved {
+        return Some(meant.into_iter().map(|(slot, _, _)| slot).collect());
+    }
+    if signature.variadic || conv.shared_positions {
+        return None;
+    }
+
+    let in_reg = |at: &Where| matches!(at, Where::Reg(_));
+    let mut stacked: Vec<&(Slot, Param, Where)> =
+        meant.iter().filter(|(_, _, at)| !in_reg(at)).collect();
+    stacked.sort_by_key(|(_, _, at)| match at {
+        Where::Stack(up) => *up,
+        Where::Reg(_) => 0,
+    });
+    let mut order: Vec<(Slot, Param, Option<Where>)> = Vec::new();
+    for float in [false, true] {
+        let kind = |param: &Param| scalar(*param) && param.ty.is_float() == float;
+        order.extend(
+            meant
+                .iter()
+                .filter(|(_, param, at)| kind(param) && in_reg(at))
+                .map(|&(slot, param, at)| (slot, param, Some(at))),
+        );
+        let (count, filler) = match float {
+            false => (conv.int_args.len(), word),
+            true => (conv.sse_args.len(), Param::new(Type::float(Float::F64))),
+        };
+        if stacked.iter().any(|(_, param, _)| kind(param)) {
+            let took = order.iter().filter(|(_, param, _)| kind(param)).count();
+            let padding = count.saturating_sub(took);
+            order.extend((0..padding).map(|_| (Slot::Filler(filler.ty), filler, None)));
         }
     }
-    true
+
+    let mut places = Places::new(conv);
+    let mut slots = Vec::with_capacity(order.len() + stacked.len());
+    for (slot, param, meant) in order {
+        let at = place(&mut places, param);
+        if !in_reg(&at) || meant.is_some_and(|meant| meant != at) {
+            return None;
+        }
+        slots.push(slot);
+    }
+    for &&(slot, param, meant) in &stacked {
+        let Where::Stack(up) = meant else { return None };
+        while places.size() < up {
+            if in_reg(&place(&mut places, word)) {
+                return None;
+            }
+            slots.push(Slot::Filler(word.ty));
+        }
+        if place(&mut places, param) != meant {
+            return None;
+        }
+        slots.push(slot);
+    }
+    Some(slots)
+}
+
+/// Where the next parameter goes, asked the way [`crate::abi::entry`] asks.
+fn place(places: &mut Places<'_>, param: Param) -> Where {
+    // A structure the classification put in the argument area, which is the one parameter whose
+    // place is bytes rather than a register. Everything else is a value, the pointer an `sret`
+    // hands over included, and a value takes the next register of its own kind.
+    if let Abi::ByVal { size, align } = param.abi {
+        places.on_stack(u32::try_from(size).unwrap_or(u32::MAX), align)
+    } else if crate::abi::on_the_stack(param.ty) {
+        let (size, align) = crate::abi::X87_AREA;
+        places.on_stack(size, align)
+    } else if param.ty.is_float() {
+        places.float(crate::abi::float_bytes(param.ty))
+    } else {
+        places.integer()
+    }
+}
+
+/// Whether a parameter is a value that takes a register of its kind while there is one left.
+fn scalar(param: Param) -> bool {
+    !matches!(param.abi, Abi::ByVal { .. }) && !crate::abi::on_the_stack(param.ty)
+}
+
+/// A signature laid out the way [`plan`] said, with every wide return value as two halves.
+fn planned(signature: &Signature, slots: &[Slot]) -> Signature {
+    let params = slots
+        .iter()
+        .map(|&slot| match slot {
+            Slot::Whole(index) => signature.params[index],
+            Slot::Low(_) | Slot::High(_) => Param::new(half()),
+            Slot::Filler(ty) => Param::new(ty),
+        })
+        .collect();
+    Signature { params, ..split_signature(signature) }
 }
 
 /// One block's parameters, with each wide one replaced by its two halves in the same position.
@@ -385,15 +516,50 @@ fn params(func: &mut Func, block: Block, halves: &mut Halves, forward: &mut Hash
     func.retain_params(block, |value| !old.contains(&value));
 }
 
+/// The entry block's parameters, laid out the way [`plan`] said the function's own are.
+fn arrive(
+    func: &mut Func,
+    block: Block,
+    slots: &[Slot],
+    halves: &mut Halves,
+    forward: &mut HashMap<Value, Value>,
+) {
+    let old: Vec<Value> = func[block].params.clone();
+    if !old.iter().any(|&value| is_wide(func[value].ty)) {
+        return;
+    }
+    let mut lows = HashMap::new();
+    for &slot in slots {
+        match slot {
+            Slot::Whole(index) => {
+                let again = func.append_param(block, func[old[index]].ty);
+                forward.insert(old[index], again);
+            }
+            Slot::Low(index) => {
+                lows.insert(index, func.append_param(block, half()));
+            }
+            Slot::High(index) => {
+                let high = func.append_param(block, half());
+                halves.insert(old[index], (lows[&index], high));
+            }
+            Slot::Filler(ty) => {
+                func.append_param(block, ty);
+            }
+        }
+    }
+    func.retain_params(block, |value| !old.contains(&value));
+}
+
 /// One instruction, as instructions over halves.
 fn rewrite(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    conv: &CallRegs,
     halves: &mut Halves,
     forward: &mut HashMap<Value, Value>,
     inst: Inst,
 ) {
+    let abi = conv.abi;
     let data = func[inst];
     let produces = data.results().any(|value| is_wide(func[value].ty));
     let takes = func[data.args].iter().any(|&value| is_wide(func[value].ty));
@@ -425,7 +591,7 @@ fn rewrite(
             extend(func, halves, inst, data.opcode == Opcode::SExt);
         }
         Opcode::Call | Opcode::CallIndirect if produces || takes => {
-            call(func, halves, forward, inst);
+            call(func, conv, halves, forward, inst);
         }
         Opcode::Return if takes => flatten(func, halves, inst),
         Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
@@ -1078,17 +1244,47 @@ fn extend(func: &mut Func, halves: &mut Halves, inst: Inst, signed: bool) {
 /// settled when it is created and a wide return value is two where it was one. Its signature is
 /// made again for the same reason, since the signature is what each end of the call lays itself out
 /// against and both ends are split the same way.
-fn call(func: &mut Func, halves: &mut Halves, forward: &mut HashMap<Value, Value>, inst: Inst) {
+fn call(
+    func: &mut Func,
+    conv: &CallRegs,
+    halves: &mut Halves,
+    forward: &mut HashMap<Value, Value>,
+    inst: Inst,
+) {
     let data = func[inst];
     let Extra::Call(info) = data.extra else { return };
     let info = func[info];
-    let args = spread(&func[data.args], halves);
+    let whole = func[info.signature].clone();
+    let old = func[data.args].to_vec();
+    // An indirect call's first operand is the address it calls, and the arguments come after it.
+    let skip = usize::from(data.opcode == Opcode::CallIndirect);
+    if old.len() < skip + whole.params.len() {
+        return;
+    }
+    let Some(slots) = plan(&whole, conv) else { return };
+    let mut args = spread(&old[..skip], halves);
+    for slot in slots.iter().copied() {
+        let value = match slot {
+            Slot::Whole(index) => old[skip + index],
+            Slot::Low(index) => halves[&old[skip + index]].0,
+            Slot::High(index) => halves[&old[skip + index]].1,
+            Slot::Filler(ty) if ty.is_float() => {
+                let extra = Extra::Imm(func.add_imm(Imm::from_bits(0)));
+                written(func, inst, InstData { extra, ..InstData::new(Opcode::FConst) }, ty)
+            }
+            Slot::Filler(_) => ahead_const(func, inst, 0),
+        };
+        args.push(value);
+    }
+    // Whatever a variadic call passes beyond the parameters its signature names, which a plan
+    // leaves where they were because a signature that moves anything is never variadic.
+    args.extend(spread(&old[skip + whole.params.len()..], halves));
     let results: Vec<Type> = data
         .results()
         .map(|value| func[value].ty)
         .flat_map(|ty| if is_wide(ty) { vec![half(), half()] } else { vec![ty] })
         .collect();
-    let signature = func.add_signature(split_signature(&func[info.signature]));
+    let signature = func.add_signature(planned(&whole, &slots));
     let extra = Extra::Call(func.add_call(CallInfo { signature, ..info }));
     let args = func.push_values(&args);
     let span = func.span(inst);
@@ -1273,7 +1469,7 @@ mod tests {
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{HALF, IntPred, MemInfo, Opcode, halves};
+    use super::{Def, Extra, HALF, IntPred, MemInfo, Opcode, halves};
 
     /// The width the pass is about, as a type, which is what every test builds with.
     fn wide() -> Type {
@@ -1770,21 +1966,106 @@ mod tests {
         assert_eq!(text.matches(" = select.i64 ").count(), 2, "one choice per half: {text}");
     }
 
-    #[test]
-    fn a_parameter_with_one_register_left_leaves_the_function_alone() {
+    /// A wide parameter that gets no register pair, as the function's own parameter.
+    ///
+    /// The whole value goes in the argument area and the register it could not use stays empty,
+    /// so the split signature has a filler where that register is and the two halves after it.
+    /// What the function reads from the low half is the parameter the filler is followed by.
+    fn arrived(params: &[Type], wide_at: usize) -> (Signature, usize) {
         let mut names = Interner::new();
         let word = Type::int(HALF);
-        // Five words take five of the six argument registers, so the halves of the sixth
-        // parameter would be one register and one word of the caller's stack, which is not where
-        // the convention puts a value this wide.
-        let params = [word, word, word, word, word, wide()];
-        let (mut func, entry, values) = shell(&mut names, &params, &[word]);
+        let (mut func, entry, values) = shell(&mut names, params, &[word]);
         let mut build = Builder::new(&mut func, entry);
-        let low = build.unary(Opcode::Trunc, values[5], word);
+        let low = build.unary(Opcode::Trunc, values[wide_at], word);
         build.ret(&[low]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let ret = func.insts(entry).last().expect("the block ends in a return");
+        let read = func[func[ret].args][0];
+        let at = func[entry].params.iter().position(|&value| value == read);
+        (func.signature().clone(), at.expect("the low half is a parameter"))
+    }
+
+    fn types(signature: &Signature) -> Vec<Type> {
+        signature.params.iter().map(|param| param.ty).collect()
+    }
+
+    #[test]
+    fn a_parameter_with_one_register_left_goes_in_memory_and_the_register_stays_empty() {
+        let word = Type::int(HALF);
+        let (signature, low) = arrived(&[word, word, word, word, word, wide()], 5);
+        assert_eq!(types(&signature), vec![word; 8], "five, a filler and two halves");
+        assert_eq!(low, 6, "the halves come after the register the value skipped");
+    }
+
+    #[test]
+    fn the_register_a_wide_parameter_skipped_goes_to_the_parameter_after_it() {
+        let word = Type::int(HALF);
+        let (signature, low) = arrived(&[word, word, word, word, word, wide(), word], 5);
+        assert_eq!(types(&signature), vec![word; 8], "six registers and two words, no filler");
+        assert_eq!(low, 6, "the word after the wide value took the sixth register");
+    }
+
+    #[test]
+    fn a_wide_parameter_in_memory_starts_on_a_sixteen_byte_boundary() {
+        let word = Type::int(HALF);
+        let params = [word, word, word, word, word, word, word, wide()];
+        let (signature, low) = arrived(&params, 7);
+        assert_eq!(types(&signature), vec![word; 10], "the seventh word, a filler, the halves");
+        assert_eq!(low, 8, "the filler takes the word the alignment leaves empty");
+    }
+
+    /// The same layout on the calling side, with a constant in the place of the filler.
+    #[test]
+    fn a_call_passes_a_wide_argument_in_memory_the_way_the_callee_reads_it() {
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let (mut func, entry, _) = shell(&mut names, &[], &[]);
+        let callee = names.intern("g");
+        let params = [word, word, word, word, word, wide()];
+        let signature = func.add_signature(Signature::new().with_params(&params));
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(word, 1);
+        let big = build.iconst(wide(), 4);
+        build.call(callee, signature, &[one, one, one, one, one, big]);
+        build.ret(&[]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
+        let call = call.expect("the call is still there");
+        let Extra::Call(info) = func[call].extra else { unreachable!("a call has call info") };
+        let passed = func[func[call].args].to_vec();
+        assert_eq!(types(&func[func[info].signature]), vec![word; 8], "as the callee has it");
+        assert_eq!(passed.len(), 8, "one argument for each parameter");
+        assert_eq!(passed[..5], [one; 5], "the words keep their registers");
+        let constant = |value: Value| {
+            let Def::Result { inst, .. } = func[value].def else { return None };
+            let Extra::Imm(imm) = func[inst].extra else { return None };
+            Some(func[imm].unsigned())
+        };
+        assert_eq!(constant(passed[6]), Some(4), "the low half is the first word in memory");
+        assert_eq!(constant(passed[7]), Some(0), "and the high half the second");
+    }
+
+    /// A variadic callee's named parameters have to stay in front of the rest, so a wide one that
+    /// would go in memory is still refused there, by leaving the function as it was.
+    #[test]
+    fn a_variadic_call_with_a_wide_argument_in_memory_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let (mut func, entry, _) = shell(&mut names, &[], &[]);
+        let callee = names.intern("g");
+        let params = [word, word, word, word, word, wide()];
+        let signature = Signature { variadic: true, ..Signature::new().with_params(&params) };
+        let signature = func.add_signature(signature);
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(word, 1);
+        let big = build.iconst(wide(), 4);
+        build.call(callee, signature, &[one, one, one, one, one, big]);
+        build.ret(&[]);
         let before = printed(&func, &mut names);
 
-        assert!(!halves(&mut func, &mut names, &SYSV), "one of the halves has no register");
+        assert!(!halves(&mut func, &mut names, &SYSV), "the named parameters cannot move");
         assert_eq!(printed(&func, &mut names), before, "so nothing moved");
     }
 
