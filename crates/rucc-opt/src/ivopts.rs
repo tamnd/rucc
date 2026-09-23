@@ -1061,6 +1061,11 @@ fn apart(base: Invariant, from: Invariant, scale: i128) -> Option<(Option<Anchor
         _ => return None,
     };
     let rest = base.minus(from.times(Invariant::number(scale))?)?.plain()?;
+    // A symbol that cancelled is still named in the difference, at a scale of nothing, and so is
+    // the widening it was read through. Neither is there, and a widening left on a symbol that is
+    // not there refused every candidate for a group with one in its base, the walk made for it
+    // included, which is tamnd/rucc#983 over again one step earlier.
+    let rest = if rest.scale == 0 { Plain { value: None, read: None, ..rest } } else { rest };
     Some((left, rest))
 }
 
@@ -2587,6 +2592,10 @@ mod tests {
     /// The base of the group is `p + sext(k) * 4`, which is not a name, so the walk starts from
     /// bytes worked out in the preheader. The loop is run with the pointer at a thousand, a limit
     /// of seven and `k` at three before and after, and writes the same seven addresses both times.
+    ///
+    /// The walk is also the one variable the loop keeps, which needs the walk to be able to serve
+    /// its own group at all. The two bases are the same, so the difference is `sext(k)` at a scale
+    /// of nothing, and a widening left on it used to price the walk out of its own group.
     #[test]
     fn a_walk_past_an_invariant_the_loop_was_handed_starts_where_that_puts_it() {
         let mut names = Interner::new();
@@ -2614,6 +2623,9 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, NOT_A_WALK), 0, "the bytes are built, not refused");
         assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
         assert_eq!(stats.count(Kind::Optimized, REWRITTEN), 1);
+        assert_eq!(stats.count(Kind::Note, CHOSEN), 1, "the walk, and not the counter beside it");
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Ne, "the test is on the pointer now");
         let first = 1000 + 3 * STRIDE;
         assert_eq!(before, (0..7).map(|at| first + at * STRIDE).collect::<Vec<_>>());
         assert_eq!(stores_given(&func, &given), before, "the same addresses in the same order");
