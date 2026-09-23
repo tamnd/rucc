@@ -25,14 +25,7 @@ be sequenced, and document 36 pays it.
 The verifier builds one by scanning every instruction of every block
 (`crates/rucc-ir/src/verify.rs:1306`), which is O(instructions) and is correct exactly once.
 
-**`block_addr` is an edge.** `verify.rs:1299` counts a block named by `block_addr` as a successor
-of the block containing that instruction, and the comment is careful about why: the edge is not
-where control actually flows, but it can only *add* predecessors and therefore only *remove*
-dominance, so treating it as an edge makes the dominance check stricter and never looser. This is
-sound for the verifier. It is not sound as a general CFG, because the real edge runs from every
-`indirect_br` that the address can reach to the labelled block, and document 21 needs the real
-one to know whether a block is dead. The analysis has to model computed gotos properly and the
-verifier's approximation does not carry over.
+**`block_addr` is an edge only where nothing jumps to its block.** The verifier's dominators in `crates/rucc-ir/src/verify.rs` count a block named by `block_addr` as a successor of the block holding that instruction, but only when no `indirect_br` in the function lists the block. Where one does, that jump is the way in and taking the address is not. The verifier used to count the edge every time, on the argument that an extra predecessor can only take dominators away and so only make the check stricter. Stricter turned out to mean wrong: the address of a label is usually taken at the entry, so a label inside a loop looked entered from the entry, stopped being dominated by the loop header, and every read of a header parameter in it was reported as invalid IR. That was issue 1009. Where no jump lists the block, its address has left the function, and the edge is what keeps the block out of the reachability report. This is still not a general CFG, because document 21 needs to know whether such a block is dead, so the analysis models computed gotos from the `indirect_br` edges and the verifier's rule does not carry over.
 
 ## 6.2 What GCC does, and the one place it is cleverer than everybody
 

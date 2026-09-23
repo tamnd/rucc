@@ -2036,17 +2036,31 @@ impl Doms {
         let counts = func.counts();
         let entry = func.entry().expect("a function with blocks has a first one");
 
-        // Every instruction that names a block, and not only the terminator. The one other
-        // instruction that names one is `block_addr`, whose block is somewhere an
-        // `indirect_br` can arrive at from anywhere the address reaches, so counting it as an
-        // edge is what keeps a label that is only jumped to indirectly out of the reachability
-        // report. The edge is a real one in the only direction that matters here: it can add
-        // predecessors to a block and so take dominators away from it, which makes the check
-        // on the uses stricter and never looser.
+        // Every edge the terminators make, and one more for a `block_addr` whose block no
+        // `indirect_br` in the function lists. Taking an address is not arriving, so where an
+        // `indirect_br` does list the block, that jump is the way in and the `block_addr` is not
+        // one. Counting it anyway made the label look entered from wherever its address was
+        // taken, which is usually the entry, and a label inside a loop then stopped being
+        // dominated by the loop header whose parameters it reads. That was issue 1009. Where
+        // nothing jumps to the block, its address has left the function, and the edge is what
+        // keeps it out of the reachability report.
+        let mut listed = vec![false; counts.blocks];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if func[inst].opcode == Opcode::IndirectBr {
+                    for call in func.successors(inst) {
+                        listed[call.block.index()] = true;
+                    }
+                }
+            }
+        }
         let mut succs: Vec<Vec<Block>> = vec![Vec::new(); counts.blocks];
         for block in func.blocks() {
             for inst in func.insts(block) {
-                succs[block.index()].extend(func.successors(inst).map(|call| call.block));
+                let taken = func[inst].opcode == Opcode::BlockAddr;
+                let into = func.successors(inst).map(|call| call.block);
+                let into = into.filter(|to| !taken || !listed[to.index()]);
+                succs[block.index()].extend(into);
             }
         }
 
@@ -2744,6 +2758,27 @@ block1:
 
 block1:
     unreachable
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_label_in_a_loop_reads_the_header_even_though_its_address_is_taken_at_the_entry() {
+        // block2 is only reached by the jump in block1, the header, so what the header takes
+        // reaches block2. The `block_addr` in block0 is not a
+        // way in. This is the shape a `goto *` into a loop body lowers to, from issue 1009.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = block_addr block2
+    jump block1(%0)
+
+block1(%2: i32):
+    indirect_br %1, block2
+
+block2:
+    return %2
 ",
         );
         assert_eq!(errors(&text), Vec::<String>::new());
