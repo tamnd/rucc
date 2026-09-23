@@ -131,6 +131,15 @@ or the call is to a declared `abort` or `exit`. That is what `if (memcmp (...) !
 leaves in front of the next comparison until the branches are cleaned up, which is after this pass,
 and it is all that stood between `builtins/memcmp.c` and a build at every level.
 
+**Rounding a widened float.** `floor`, `ceil`, `trunc`, `round`, `rint` and `nearbyint` of a
+`double` that is a `float` widened become the `float` spelling of the same call on the `float`,
+with its answer widened back, which is the fold gcc makes. Every `float` is exactly a `double`, and
+a whole number rounded from one is a whole number a `float` holds, so the two answers are the same
+number. Only `double` to `float` and only these six, since `sin` of a `float` worked out in `float`
+is a different number from the one worked out in `double`. `execute/20030125-1.c` defines its own
+`floor` to abort and its own `sinf` to abort and checks that this happens to the one and not the
+other, so it passes at every level.
+
 **Moves that cannot overlap.** `memmove` of nothing is its destination, and `memmove` is `memcpy`
 where the two sides cannot overlap. That is so for a single byte, which is read before it is written;
 for a read only source whose definition the link cannot swap, since the destination is written and
