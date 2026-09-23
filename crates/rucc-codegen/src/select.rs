@@ -254,6 +254,26 @@ mod tests {
         assert_eq!(selects(&terms, bit), Some("x64.bit_of_32"));
     }
 
+    /// The unsigned divisions at one byte and at two, which the `narrow` pass writes for a
+    /// division of two zero extensions. The signed ones at those widths have no rule, and a term
+    /// for one finds nothing rather than a wide division it would be wrong to substitute.
+    #[test]
+    fn a_narrow_unsigned_division_is_the_narrow_divide() {
+        let mut terms = Terms::default();
+        for (width, quo, rem) in
+            [(8, "x64.div_quo_8", "x64.div_rem_8"), (16, "x64.div_quo_16", "x64.div_rem_16")]
+        {
+            let x = terms.value(width, "v0");
+            let y = terms.value(width, "v1");
+            let divide = terms.app(&format!("udiv.i{width}"), &[x, y]);
+            assert_eq!(selects(&terms, divide), Some(quo));
+            let remainder = terms.app(&format!("urem.i{width}"), &[x, y]);
+            assert_eq!(selects(&terms, remainder), Some(rem));
+            let signed = terms.app(&format!("sdiv.i{width}"), &[x, y]);
+            assert_eq!(selects(&terms, signed), None);
+        }
+    }
+
     /// A term the rule set says nothing about is nothing rather than a wrong answer, which is
     /// what the completeness check in `spec/10-backend.md` will be for.
     #[test]

@@ -357,6 +357,26 @@
       (x64.div_rem_64 x y)
       (spec (= (bvurem x y) (result))))
 
+;; The narrow unsigned divisions, which the `narrow` pass writes for a division of two zero
+;; extensions. The signed ones at these widths have no rules, since nothing narrows a division
+;; of sign extensions until a range can rule out the most negative value over minus one.
+
+(rule (lower (udiv.i8 (value.i8 x) (value.i8 y)))
+      (x64.div_quo_8 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (udiv.i16 (value.i16 x) (value.i16 y)))
+      (x64.div_quo_16 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (urem.i8 (value.i8 x) (value.i8 y)))
+      (x64.div_rem_8 x y)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (urem.i16 (value.i16 x) (value.i16 y)))
+      (x64.div_rem_16 x y)
+      (spec (= (bvurem x y) (result))))
+
 ;; Shifts by a constant. The guard is the width, since a count the IR would take modulo the
 ;; width is a count this rule is not the one for.
 

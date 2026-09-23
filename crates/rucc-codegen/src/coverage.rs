@@ -169,23 +169,20 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 /// Most of them are back, because the width narrowing pass in `tamnd/rucc#375` is that caller and
 /// it writes a byte add out of the truncation the assignment back to a `char` already was.
 ///
-/// What is left is what the pass will not narrow. A divide is not narrowed because the most
-/// negative byte over minus one is a defined hundred and twenty eight at four bytes and is the
-/// overflow that raises at one, so it wants a range analysis saying that pair cannot happen.
+/// What is left is what the pass will not narrow. A divide of two zero extensions is narrowed and
+/// its unsigned names have rules, but a divide of sign extensions is not, because the most negative
+/// byte over minus one is a defined hundred and twenty eight at four bytes and is the overflow that
+/// raises at one, so it wants a range analysis saying that pair cannot happen.
 ///
 /// Not every narrow name was ever here, because promotion is not the only way a narrow operation
 /// is born. Reading a bitfield is a shift and a mask by constants at the width of the storage
 /// unit, writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow
 /// scalar is an `icmp_ne` at that scalar's width. Those fire, so those always had rules.
 pub static NAMES: &[(&str, &str, &str)] = &[
-    ("sdiv.i8", "a narrow divide, which wants a range analysis before it can be narrowed", NARROW),
+    ("sdiv.i8", "a narrow signed divide, which wants a range analysis first", NARROW),
     ("sdiv.i16", "the same", NARROW),
-    ("udiv.i8", "the same", NARROW),
-    ("udiv.i16", "the same", NARROW),
     ("srem.i8", "the same", NARROW),
     ("srem.i16", "the same", NARROW),
-    ("urem.i8", "the same", NARROW),
-    ("urem.i16", "the same", NARROW),
 ];
 
 /// The issue every entry of [`NAMES`] waits on, since they all wait on the same one.

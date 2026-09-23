@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A division or a remainder of two `unsigned char` or two `unsigned short` values that is stored back at that width is done at that width. C divides them at `int`, so `unsigned char q = a / b;` was two widenings, a sign extension and an `idivl`, and it is now a `divb`. The `narrow` pass in `crates/rucc-opt/src/narrow.rs` takes a divide of two zero extensions from the width it is truncated to as the unsigned divide at that width, whichever of the four division opcodes it was, since a zero extension is never negative. The rules for `udiv` and `urem` at one and two bytes are back, with a test that fires each. A division of sign extensions stays wide, because the most negative value over minus one raises at the narrow width. Nothing in the torture corpus or the SQLite amalgamation has the shape, so both compile to the same text, and a program that divides every pair of bytes runs 11% fewer instructions in the same number of cycles and prints what gcc 16 prints at every level. Part of tamnd/rucc#375.
+
 ## 0.10.79
 
 ### Added
