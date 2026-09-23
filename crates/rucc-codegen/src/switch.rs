@@ -44,7 +44,7 @@
 //! again, on the value less the lowest case and widened to a word, which `crate::lower` turns into
 //! the load and the jump, and `rucc_asm` puts the table itself after the function's last
 //! instruction, where both ends of every distance in it are in one section and nothing is left for
-//! a linker. See [`JUMP_TABLE_GROWTH`] for what dense means.
+//! a linker. See `JUMP_TABLE_GROWTH` for what dense means.
 //!
 //! # Why the tree compares signed
 //!

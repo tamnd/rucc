@@ -3282,12 +3282,14 @@ decl #0 x : int object external static defined
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
     }
 
-    /// The same `switch` with one arm off the line, which keeps every comparison it had.
+    /// The same `switch` with one arm off the line, which stays a `switch`.
     ///
-    /// The answers being a line is what licenses the range check, since a range check answers for
-    /// every label in the range at once. One label whose arm disagrees is a label the check would
-    /// answer wrongly, so this is here to say that the pass is reading the arms and not counting
-    /// the labels.
+    /// The answers being a line is what licenses the range check and the addition, since they
+    /// answer for every label in the range at once. One label whose arm disagrees is a label they
+    /// would answer wrongly, so this is here to say that the pass is reading the arms and not
+    /// counting the labels. Sixteen dense labels are a jump table once the back end lowers them,
+    /// so what is left is either a jump through a table or more than one comparison, and the arm
+    /// off the line is still there.
     #[test]
     fn a_dense_switch_whose_arms_are_not_a_line_keeps_its_comparisons() {
         let arms: String = (0..16)
@@ -3295,7 +3297,9 @@ decl #0 x : int object external static defined
             .collect::<Vec<_>>()
             .join(" ");
         let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
-        assert!(text.matches("\tcmp").count() > 1, "{text}");
+        let dispatched = text.contains("\tjmp\t*") || text.matches("\tcmp").count() > 1;
+        assert!(dispatched, "{text}");
+        assert!(text.contains("$100"), "{text}");
     }
 
     /// A conversion whose operand the optimizer turned into a constant, which is the whole of what
