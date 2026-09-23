@@ -19,6 +19,7 @@ mod builtins_diff;
 mod compress;
 mod corpus;
 mod cost;
+mod debugger;
 mod differential;
 mod disasm;
 mod dso;
@@ -72,6 +73,7 @@ tasks:
   real-libc         hold a stub written from a glibc abilist against this machine's libc.so.6
   dso               build a shared library out of what we emit, link a program against it, run it
   unwind            walk a stack through frames we wrote and count what came back
+  debugger          stop in a function under gdb and print its locals, both compilers
   lines             compile the same source with both compilers and hold our line table
                     against theirs, function by function
   wide              compile 128-bit arithmetic with both compilers, run both, compare
@@ -127,6 +129,7 @@ fn main() -> ExitCode {
         Some("real-libc") => real_libc::real_libc(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
+        Some("debugger") => debugger::debugger(),
         Some("lines") => lines::lines(),
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
