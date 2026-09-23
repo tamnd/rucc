@@ -118,6 +118,20 @@ const AWAY: &str = "jmp_away";
 /// integer has to be at for the cast to be nothing.
 const ADDRESS_BITS: u32 = 64;
 
+/// How much of a register an operand of an `asm` statement fills, which is the width of its type
+/// with two exceptions. A pointer is an address, and a truth value is the byte it is stored in: a
+/// program that writes `sete %0` into a `_Bool` is asking for exactly that byte, which is what tcc's
+/// own test of the width of one checks.
+fn held_bits(ty: Type) -> u32 {
+    if ty.is_ptr() {
+        ADDRESS_BITS
+    } else if ty.bits() == 1 {
+        8
+    } else {
+        ty.bits()
+    }
+}
+
 /// How many bytes a `long double` takes in memory, and what it is aligned to, which are the same
 /// number and are both more than the ten bytes that mean anything.
 ///
@@ -3193,7 +3207,7 @@ impl<'a> Lowering<'a> {
                 if !ty.is_scalar() {
                     return None;
                 }
-                x86_64::Width::of_bits(if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() })
+                x86_64::Width::of_bits(held_bits(ty))
             })
             .collect();
         // An operand in memory is an address the statement holds and an object the template names,
@@ -3786,7 +3800,7 @@ impl<'a> Lowering<'a> {
             (None, Some(value)) => self.source[value].ty,
             (None, None) => return Err(refused()),
         };
-        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        let bits = held_bits(ty);
         if !placeable || self.class_of(ty) != desc.class {
             return Err(refused());
         }
@@ -3983,13 +3997,14 @@ impl<'a> Lowering<'a> {
     fn undefined(&mut self, inst: Inst, result: Value) -> Result<(), Unsupported> {
         let ty = self.source[result].ty;
         let refused = Unsupported::Assembly { inst, refused: Written::Operand };
-        if self.class_of(ty) != self.gpr || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
+        let bits = held_bits(ty);
+        if self.class_of(ty) != self.gpr || !matches!(bits, 8 | 16 | 32 | 64) {
             return Err(refused);
         }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let reg = self.new_reg(result);
-        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{}", ty.bits())));
+        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{bits}")));
         self.out.build(block, put).at(span).def(reg, self.gpr).imm(0).finish();
         Ok(())
     }
