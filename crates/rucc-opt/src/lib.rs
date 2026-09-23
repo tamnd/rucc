@@ -158,6 +158,7 @@ pub mod scev;
 pub mod short_circuit;
 pub mod simplify;
 pub mod simplify_cfg;
+pub mod sink;
 pub mod speculate;
 pub mod split;
 pub mod stats;
