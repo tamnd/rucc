@@ -108,6 +108,17 @@ read whose end the compiler cannot see, and the call stays. The count itself is 
 written as an `int` in the source and widened on the way into a `size_t` parameter, so the pass
 looks under the widening for it, and refuses a source constant that was negative.
 
+`strnlen` over a string whose terminator is inside the object is the exception to both. It reads
+no further than the terminator whatever the count is, so the answer is the smaller of the length
+and the count, and every count is one the call could have been given, including one the source
+wrote as a negative number, which is a very large one once it is a `size_t`. Where the count is not
+known at all the answer still is not a call: the empty string is zero, and anything longer is the
+smaller of the two worked out when the program runs, which is an `icmp ult` and a `select` in the
+count's own type. That is what gcc leaves behind as well, and it is what
+`gcc.c-torture/execute/builtins/strnlen.c` asks for with `strnlen ("12", x & 3) <= 2`. That program
+looks like a question about value ranges and is not one, because the answer does not need the
+range of the count, only the count.
+
 **The pass runs before anything has folded.** It is one walk over the module ahead of the function
 pipeline, so a count or an index the source worked out from constants is still the arithmetic when
 it looks: `s1 + (x & 3)` with `x` known is a `ptr_add` of a `sext` of an `and` of two constants, and
