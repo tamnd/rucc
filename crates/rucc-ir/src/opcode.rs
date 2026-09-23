@@ -605,6 +605,14 @@ pub enum Opcode {
     /// see, which is the largest number there is for the first two questions and zero for the
     /// other two.
     ObjectSize,
+    /// `__builtin_constant_p` of a value the front end could not see to be a constant, which is
+    /// one where the optimizer may yet make it one.
+    ///
+    /// One operand, an integer or a floating point value, and an `i32` answer. It never reaches the
+    /// back end: `rucc_opt::constant_p` answers one where the operand has become a constant by the
+    /// time it runs and zero everywhere else, which is when gcc answers it too, and at `-O0` it
+    /// answers zero before any other pass runs, which is what gcc answers at that level.
+    IsConstant,
     /// What is in a machine register, for `register long x asm ("rbx");`.
     ///
     /// The GNU extension that puts an object in a named register rather than in the frame. The
@@ -788,6 +796,7 @@ impl Opcode {
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
             Self::ObjectSize => "object_size",
+            Self::IsConstant => "is_constant",
             Self::RegisterValue => "register_value",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
@@ -931,6 +940,8 @@ impl Opcode {
                 // A question about an address that reads nothing: the answer is a fact about where
                 // the address came from, which is the same fact wherever the question is asked.
                 | Self::ObjectSize
+                // A question about a value, whose answer is the same wherever it is asked.
+                | Self::IsConstant
                 | Self::MemEntry
                 // Three of the capability instructions are arithmetic on a pointer's
                 // provenance and touch nothing. The other four do: `cap_load`, `cap_store` and
@@ -1498,6 +1509,7 @@ static ALL: &[Opcode] = &[
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
     Opcode::ObjectSize,
+    Opcode::IsConstant,
     Opcode::RegisterValue,
     Opcode::VaStart,
     Opcode::VaArg,

@@ -257,6 +257,7 @@ impl Reach<'_> {
             | ExprKind::Abs { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
+            | ExprKind::ConstantP { value: base }
             | ExprKind::Jump { buffer: base, .. }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }

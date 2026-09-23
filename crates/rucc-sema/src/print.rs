@@ -523,6 +523,7 @@ impl<'a> Printer<'a> {
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
             ExprKind::ObjectSize { kind, .. } => format!("object-size {kind}"),
+            ExprKind::ConstantP { .. } => "constant-p".to_owned(),
             ExprKind::Alloca { .. } => "alloca".to_owned(),
             ExprKind::Jump { ask, .. } => match ask {
                 JumpAsk::Save => "setjmp".to_owned(),
@@ -558,6 +559,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Abs { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
+            | ExprKind::ConstantP { value: base }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

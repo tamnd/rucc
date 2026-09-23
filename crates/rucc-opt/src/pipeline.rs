@@ -39,9 +39,9 @@ use rucc_ir::{FuncId, Module, Pic};
 use rucc_session::OptLevel;
 
 use crate::{
-    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, dce, extents, heap, image,
-    ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside, params, pass, purity,
-    reload,
+    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
+    heap, image, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside, params,
+    pass, purity, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -273,6 +273,7 @@ const O1: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "constant-p",
     "fold",
     "simplify",
     "simplify-cfg",
@@ -342,6 +343,7 @@ const O2: &[&str] = &[
     "number",
     "load-forward",
     "redundant-load",
+    "constant-p",
     "fold",
     "simplify",
     "hoist",
@@ -382,6 +384,7 @@ const O3: &[&str] = &[
     "number",
     "load-forward",
     "redundant-load",
+    "constant-p",
     "fold",
     "simplify",
     "hoist",
@@ -444,6 +447,7 @@ const OS: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "constant-p",
     "fold",
     "simplify",
     "simplify-cfg",
@@ -479,6 +483,7 @@ const OZ: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "constant-p",
     "fold",
     "simplify",
     "simplify-cfg",
@@ -791,6 +796,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
     // at `-O0`, which answers every question as not known, the way gcc does at that level.
     objsize::answer(module, opts.interposition, opts.level != OptLevel::O0);
+    // The same for `__builtin_constant_p`, but only at `-O0`, where every question is answered
+    // zero the way gcc answers it there. Above that the question waits for `constant-p` in the
+    // list, which is after the folding that can turn the value into a constant.
+    if opts.level == OptLevel::O0 {
+        constant_p::answer(module, false);
+    }
     // Before anything runs, because each of these is a fact about the module and every pass after
     // this sees one function. Only when a pass in this run reads them: a flag nothing looks at
     // would show up in every `-O0` dump and mean nothing to anybody reading one.
@@ -1045,6 +1056,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             report.dumps.push(dump(index, "after", name, module, names));
         }
     }
+    // Whatever a list without `constant-p` in it, or a gate that kept the pass off a function,
+    // left standing. Nothing below the optimizer lowers the instruction, so the answer is written
+    // here, and it is the one the pass would have given.
+    constant_p::answer(module, true);
     report
 }
 

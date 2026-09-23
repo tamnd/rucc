@@ -4944,6 +4944,17 @@ impl<'u> Body<'_, 'u> {
                 };
                 Some(self.build(span).value(data, ty))
             }
+            // The other question left for the IR, whose operand the checker also made sure is
+            // one that working out changes nothing. The answer is the `int` the builtin gives.
+            ExprKind::ConstantP { value } => {
+                let value = self.value(value);
+                let ty = self.value_type(self.tast()[expr].ty, span);
+                let data = InstData {
+                    args: self.func.push_values(&[value]),
+                    ..InstData::new(Opcode::IsConstant)
+                };
+                Some(self.build(span).value(data, ty))
+            }
         }
     }
 
@@ -7923,7 +7934,8 @@ impl Scan<'_> {
             }
             ExprKind::Member { base, .. }
             | ExprKind::Prefetch { address: base, .. }
-            | ExprKind::ObjectSize { address: base, .. } => {
+            | ExprKind::ObjectSize { address: base, .. }
+            | ExprKind::ConstantP { value: base } => {
                 self.expr(base);
             }
             // The other node that is answered here rather than where it is met, and for a reason

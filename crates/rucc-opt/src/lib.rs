@@ -106,6 +106,7 @@ pub mod callgraph;
 pub mod canon;
 pub mod cfg;
 pub mod coalesce;
+pub mod constant_p;
 pub(crate) mod copy;
 pub mod dce;
 pub mod dead_plane;

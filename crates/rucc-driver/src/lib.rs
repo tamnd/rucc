@@ -4171,7 +4171,7 @@ mod tests {
         let text = print_pipeline(&opts);
         let left: Vec<&str> =
             rucc_opt::PASSES.iter().filter(|p| p.required()).map(|p| p.name()).collect();
-        assert_eq!(left, vec!["expect"], "{text}");
+        assert_eq!(left, vec!["expect", "constant-p"], "{text}");
         for (at, name) in left.iter().enumerate() {
             assert!(text.contains(&format!("{}: {name},", at + 1)), "{text}");
         }

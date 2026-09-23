@@ -35,10 +35,12 @@
 //! them on every target that has a full barrier anyway.
 
 use rucc_ast as ast;
+use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
-    FunctionType, IntKind, TypeId, TypeKind, is_integer, is_pointer, is_void, pointee,
+    FunctionType, IntKind, Qualifiers, TypeId, TypeKind, is_integer, is_pointer, is_real, is_void,
+    pointee,
 };
 
 use crate::check::Checker;
@@ -46,6 +48,7 @@ use crate::decl::{
     Decl, DeclFlags, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
     StorageDuration,
 };
+use crate::eval::bare;
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::{Base, Const};
 
@@ -273,18 +276,18 @@ impl Checker<'_> {
         Some(self.generic_call(name, generic, args, span))
     }
 
-    /// `__builtin_constant_p(x)`, which is answered here and never reaches the IR.
+    /// `__builtin_constant_p(x)`, which is answered here where the front end can see the answer
+    /// and left for the optimizer where it cannot.
     ///
     /// gcc folds it after optimization, so the answer for an argument that is not written as a
-    /// constant can differ between `-O0` and `-O2`: a static function whose parameter is five at
-    /// its one call site answers one once the call has been inlined and zero before that. This
-    /// answers what the front end can see, which is the same answer at every optimization level
-    /// and is the one every small compiler gives. It is also the answer glibc's headers are
-    /// written against, since what they use it for is choosing between a version that needs a
-    /// literal and one that does not.
-    ///
-    /// The argument is checked and then dropped. Nothing evaluates it, which is what gcc does
-    /// with it as well: `__builtin_constant_p(i++)` leaves `i` alone.
+    /// constant can differ between `-O0` and `-O2`: `int n = sizeof (int);` followed by
+    /// `__builtin_constant_p (n)` is zero at `-O0` and one at `-O2`, which is what
+    /// `execute/builtin-constant.c` checks. A constant as written is one here at every level. An
+    /// argument that working out would change something, or could fault, is zero here at every
+    /// level too, since gcc does not evaluate it either: `__builtin_constant_p(i++)` leaves `i`
+    /// alone. What is left is an arithmetic value read out of objects, which becomes an
+    /// `is_constant` instruction for `rucc_opt::constant_p` to answer, and outside a function,
+    /// where there is no optimizer to wait for, it is zero.
     fn constant_p(&mut self, args: ast::ExprList, span: Span) -> ExprId {
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
         let [written] = written[..] else {
@@ -299,7 +302,55 @@ impl Checker<'_> {
         let arg = self.value(arg);
         let answer = !self.is_poisoned(arg) && self.folds(arg);
         let int = self.int();
+        if !answer && !self.is_poisoned(arg) && self.body.is_some() && self.deferrable(arg) {
+            let node = ExprKind::ConstantP { value: arg };
+            return self.tast.expr(Expr::new(node, int, Category::Rvalue), span);
+        }
         self.constant(Const::Int(i128::from(answer)), int, span)
+    }
+
+    /// Whether this is an arithmetic value whose working out changes nothing and cannot fault,
+    /// which is what lowering it for `__builtin_constant_p` needs, since gcc never evaluates it.
+    ///
+    /// Reads of objects by name, constants, conversions and the arithmetic that cannot trap. No
+    /// call, assignment or increment, no read of anything `volatile`, and no pointer followed,
+    /// since `*p` with `p` null is a fault the program never asked for. Division and remainder
+    /// are left out for the same reason, since the divisor may be zero.
+    fn deferrable(&self, expr: ExprId) -> bool {
+        let ty = self.tast[expr].ty;
+        if self.types.quals(ty).has(Qualifiers::VOLATILE) || !is_real(&self.types, ty) {
+            return false;
+        }
+        self.quietly(expr)
+    }
+
+    /// The walk under [`Self::deferrable`], where a step may be an lvalue on the way to a read.
+    fn quietly(&self, expr: ExprId) -> bool {
+        if self.types.quals(self.tast[expr].ty).has(Qualifiers::VOLATILE) {
+            return false;
+        }
+        match self.tast[expr].kind {
+            ExprKind::Const(_) => true,
+            ExprKind::Decl(id) => self.tast[id].kind == DeclKind::Object,
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.quietly(inner),
+            ExprKind::Member { base, .. } => {
+                !matches!(bare(&self.types, self.tast[base].ty), TypeKind::Pointer(_))
+                    && self.quietly(base)
+            }
+            ExprKind::Unary { op, operand } => {
+                matches!(op, UnaryOp::Minus | UnaryOp::Plus | UnaryOp::Not | UnaryOp::BitNot)
+                    && self.quietly(operand)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                !matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                    && self.quietly(lhs)
+                    && self.quietly(rhs)
+            }
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.quietly(cond) && self.quietly(then) && self.quietly(otherwise)
+            }
+            _ => false,
+        }
     }
 
     /// Whether an expression folds to something gcc counts as a constant.
@@ -339,16 +390,12 @@ impl Checker<'_> {
             {
                 self.settled(operand)
             }
-            ExprKind::Binary {
-                op: op @ (ast::BinaryOp::LogAnd | ast::BinaryOp::LogOr),
-                lhs,
-                rhs,
-            } => {
-                let ends = i128::from(op == ast::BinaryOp::LogOr);
+            ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
+                let ends = i128::from(op == BinaryOp::LogOr);
                 let answer = self.settled(rhs).map(|value| i128::from(value != 0))?;
                 (answer == ends && self.only_reads(lhs)).then_some(ends)
             }
-            ExprKind::Binary { op: ast::BinaryOp::Mul, lhs, rhs }
+            ExprKind::Binary { op: BinaryOp::Mul, lhs, rhs }
                 if is_integer(&self.types, self.tast[expr].ty) =>
             {
                 let zero = |side| side == Some(0);
@@ -385,10 +432,7 @@ impl Checker<'_> {
             ExprKind::Unary { op, operand } => {
                 !matches!(
                     op,
-                    ast::UnaryOp::PreInc
-                        | ast::UnaryOp::PreDec
-                        | ast::UnaryOp::PostInc
-                        | ast::UnaryOp::PostDec
+                    UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec
                 ) && self.only_reads(operand)
             }
             ExprKind::Subscript { base: lhs, index: rhs }

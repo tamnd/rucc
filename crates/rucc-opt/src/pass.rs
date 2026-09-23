@@ -76,6 +76,7 @@ pub trait Pass: Sync {
 /// pass nobody can turn on, so the list is the registry rather than a convenience.
 pub static PASSES: &[&dyn Pass] = &[
     &crate::expect::Expect,
+    &crate::constant_p::ConstantP,
     &crate::fold::Fold,
     &crate::image::Image,
     &crate::simplify::Simplify,

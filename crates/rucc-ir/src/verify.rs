@@ -1363,6 +1363,23 @@ impl<'a> Verifier<'a> {
                     ));
                 }
             }
+            Opcode::IsConstant => {
+                if self.takes(opcode, arity, 1)
+                    && (arg(0).is_vector() || !(arg(0).is_int() || arg(0).is_float()))
+                {
+                    self.error(format!(
+                        "is_constant asks about an integer or a floating point value and this one \
+                         asks about {}",
+                        arg(0)
+                    ));
+                }
+                if results == 1 && res(0) != Type::int(32) {
+                    self.error(format!(
+                        "is_constant produces an i32 and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
             Opcode::VaCopy => {
                 if self.takes(opcode, arity, 2) {
                     self.pointer(opcode, arg(0), 0);

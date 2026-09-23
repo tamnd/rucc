@@ -477,6 +477,16 @@ pub enum ExprKind {
         /// Which of the four questions, from zero to three.
         kind: u8,
     },
+    /// `__builtin_constant_p(x)` where `x` is not a constant as written but may be one once the
+    /// optimizer has been over it, which is when gcc answers the question.
+    ///
+    /// Only where working `x` out changes nothing and cannot fault, since it is lowered for its
+    /// value, and only inside a function. Anywhere a constant is needed, the answer is zero, which
+    /// is gcc's answer there as well. See `check/builtin/generic.rs`.
+    ConstantP {
+        /// The value asked about, an arithmetic one.
+        value: ExprId,
+    },
     /// `__builtin_alloca(n)`, which takes `n` bytes of the frame and answers where they are.
     ///
     /// It is a node rather than a call for the reason the ones above it are: there is no function

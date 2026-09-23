@@ -221,6 +221,10 @@ impl<'a> Eval<'a> {
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
             ExprKind::FpClassify { value, answers } => self.fpclassify(expr, value, answers),
             ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
+            // `__builtin_constant_p` of something that is not a constant yet. Where a constant is
+            // needed, which is the only place this is asked, the answer is no, and gcc gives the
+            // same one: `__builtin_choose_expr (__builtin_constant_p (n), a, b)` is `b`.
+            ExprKind::ConstantP { .. } => Ok(Const::Int(0)),
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
                 kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
