@@ -1053,10 +1053,38 @@ impl<'a> Scev<'a> {
         }
     }
 
+    /// Whether every way round the loop goes through this block.
+    ///
+    /// Walks back from the one latch while each block has one predecessor. A block reached that way
+    /// is one the latch cannot be got to without, and the walk stops at the first join, so it never
+    /// goes round the loop, since the header is a join by having a way in and a way round.
+    fn asked_each_time(&self, id: LoopId, from: Block) -> bool {
+        let [latch] = self.loops.latches(id) else { return false };
+        let mut at = *latch;
+        for _ in 0..self.loops.blocks(id).len() {
+            if at == from {
+                return true;
+            }
+            let &[before] = self.cfg.predecessors(at) else { return false };
+            at = before;
+        }
+        false
+    }
+
     /// The trip count from the exit leaving this block, if this exit can be solved.
+    ///
+    /// Only a test every iteration asks gives one. A test under a condition first fails at some
+    /// iteration and the loop leaves at the first iteration after that on which the condition lets
+    /// the test be asked, which may be much later or never. `while (i != 1024 || j <= 0)` asks
+    /// `j <= 0` only once `i` is 1024, so the count its test gives is 1 and the loop runs ten times.
+    /// Every caller multiplies by the count or takes it to mean the loop ends, and a count from such
+    /// a test is right for neither.
     fn bound_at(&mut self, id: LoopId, from: Block) -> Option<Bound> {
         let test = self.test_at(id, from)?;
-        solve(test.chrec, test.limit, test.pred, test.each)
+        if !test.each {
+            return None;
+        }
+        solve(test.chrec, test.limit, test.pred)
     }
 
     /// The exit test leaving this block, read into the pieces its two readers want.
@@ -1105,14 +1133,14 @@ impl<'a> Scev<'a> {
         };
 
         // Whether every iteration that goes round asks this test. The header runs on all of them by
-        // being the header. A latch runs on all of them only when it is the loop's one latch, since
-        // with two of them an iteration can go round the other and never reach the test. Anywhere
-        // else is a test under a condition, which [`bounded_by_its_test`] must not be given.
-        //
-        // The one latch is written out rather than taken for granted. `at_header` refuses a loop
-        // with two of them already, so nothing reaching here has two, but the two conditions are
-        // about different things and a later loosening of that one should not quietly loosen this.
-        let each = from == self.loops.header(id) || self.loops.latches(id) == [from];
+        // being the header. Any other block runs on all of them when the loop has one latch and the
+        // only way to that latch is through this block, which is read by walking back from the
+        // latch while each block has one way in. That takes in the latch itself, and the block in
+        // front of the jump `crate::canon` splits a back edge into, which is where the test of
+        // nearly every loop by the time this runs is. With two latches an iteration can go round
+        // the other one and never reach the test. Anywhere else is a test under a condition, which
+        // gives no count and which [`bounded_by_its_test`] must not be given.
+        let each = from == self.loops.header(id) || self.asked_each_time(id, from);
         Some(Test { chrec, limit, pred, each })
     }
 }
@@ -1188,9 +1216,10 @@ fn affine(base: Invariant, step: Invariant, ty: Type, flags: Flags) -> Evolution
 
 /// The iteration at which `chrec pred limit` first fails, with what that rests on.
 ///
-/// `each` says the test runs on every iteration that goes round, which is what lets the test itself
-/// stand in for a promise the counter does not carry. See [`bounded_by_its_test`].
-fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bound> {
+/// The test runs on every iteration that goes round, which [`Scev::bound_at`] checks before asking,
+/// and that is what lets the test itself stand in for a promise the counter does not carry. See
+/// [`bounded_by_its_test`].
+fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
     // Section 7.7's first way of being wrong. A step of zero is a loop that never leaves through
     // this exit, and dividing the distance by it is a crash rather than an answer.
     let step = chrec.step.as_number()?;
@@ -1200,7 +1229,7 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred, each: bool) -> Option<Bo
     let signed = matches!(pred, IntPred::Slt | IntPred::Sle | IntPred::Sgt | IntPred::Sge);
 
     let mut assumptions = Vec::new();
-    if !chrec.does_not_wrap(signed) && !(each && bounded_by_its_test(pred, step)) {
+    if !chrec.does_not_wrap(signed) && !bounded_by_its_test(pred, step) {
         assumptions.push(Assumption::NoWrap(chrec));
     }
     if signed {
@@ -2108,14 +2137,14 @@ mod tests {
     }
 
     #[test]
-    fn a_test_the_counter_can_be_stepped_without_being_asked_holds_nothing_either() {
+    fn a_test_the_counter_can_be_stepped_without_being_asked_gives_no_count() {
         // ```text
         // header(i): br_if flag, check, latch
         // check:     br_if i <u 100, latch, exit
         // latch:     jump header(i + 1)
         // ```
         // The counter goes round by a path that never reaches the test, so the test says nothing
-        // about how far the counter got.
+        // about how far the counter got, and with `flag` false the loop never ends at all.
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"), Signature::new());
         let entry = func.create_block();
@@ -2142,9 +2171,51 @@ mod tests {
         let mut build = Builder::new(&mut func, exit);
         build.ret(&[]);
 
-        let found = bound(&func).expect("it is counted");
-        let (_, assumptions) = found.parts();
-        assert!(assumptions.iter().any(|a| matches!(a, Assumption::NoWrap(_))), "{assumptions:?}");
+        assert!(bound(&func).is_none());
+    }
+
+    #[test]
+    fn a_test_asked_only_once_another_one_passes_gives_no_count() {
+        // `while (i != 1024 || j <= 0) { i *= 2; ++j; }`, which is gcc.c-torture 20000731-2.
+        //
+        // ```text
+        // header(i, j): br_if i != 1024, latch, check
+        // check:        br_if j <= 0, latch, exit
+        // latch:        jump header(i + i, j + 1)
+        // ```
+        // `j <= 0` first fails on the second iteration and the loop runs ten, because the test is
+        // only asked once `i` is 1024. Reading a count off it said `j` ends at one.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let check = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let (i, j) =
+            (func.append_param(header, Type::int(32)), func.append_param(header, Type::int(32)));
+
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(Type::int(32), 1);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(header, &[one, zero]);
+        let mut build = Builder::new(&mut func, header);
+        let top = build.iconst(Type::int(32), 1024);
+        let short = build.icmp(IntPred::Ne, i, top);
+        build.br_if(short, latch, &[], check, &[]);
+        let mut build = Builder::new(&mut func, check);
+        let none = build.iconst(Type::int(32), 0);
+        let again = build.icmp(IntPred::Sle, j, none);
+        build.br_if(again, latch, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, latch);
+        let twice = build.binary(Opcode::Add, i, i, Flags::NONE);
+        let step = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, j, step, Flags::NSW);
+        build.jump(header, &[twice, next]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+
+        assert!(bound(&func).is_none());
     }
 
     #[test]
