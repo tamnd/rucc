@@ -56,6 +56,7 @@ rucc-sysroot = { version = "=0.10.77", path = "crates/rucc-sysroot" }
 rucc-target = { version = "=0.10.77", path = "crates/rucc-target" }
 rucc-targets = { version = "=0.10.77", path = "build-tools/rucc-targets" }
 rucc-tuple = { version = "=0.10.77", path = "crates/rucc-tuple" }
+rucc-unpack = { version = "=0.10.77", path = "crates/rucc-unpack" }
 rucc-types = { version = "=0.10.77", path = "crates/rucc-types" }
 # The compiler's dependencies outside the workspace, blessed by spec/18-package-layout.md
 # section 18.3. They are here rather than in the crates that use them so that the next one to be
