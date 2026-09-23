@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `memcmp` of a constant count folds where both sides are known, from a constant object or from what was written into a local array in front of the call, to the sign of the first byte that differs, and a count of zero folds to zero. The walk back that finds what was written passes calls that only read and, at a join, leaves out an arm that calls `abort` or `exit` or anything declared `noreturn`, so `if (...) abort ();` in front of a call no longer stops it. `execute/builtins/memcmp.c` builds and passes at all six levels. Part of tamnd/rucc#392.
+
 - A loop's trip count is only read off an exit test that every iteration asks. `while (i != 1024 || j <= 0)` asks `j <= 0` only once `i` is 1024, the count that test gave was 1 while the loop runs ten times, and at `-O1` the loop was taken out with `j` left at 1, so `execute/20000731-2.c` aborted. A test counts as asked every time when it is in the header, or when the one latch is only reached through its block, which still takes in the block in front of the jump a split back edge leaves. Part of tamnd/rucc#392.
 
 - A floating point comparison is narrowed by a branch in front of it on the same two operands, following edges back while each is the only way into its block. `isunordered (x, y) || !isunordered (x, y)` kept as two branches, which is what `-O1`, `-Os` and `-Oz` do, folds to true that way, so `execute/ieee/compare-fp-3.c` passes at all six levels rather than only at `-O0`, `-O2` and `-O3`. Part of tamnd/rucc#392.

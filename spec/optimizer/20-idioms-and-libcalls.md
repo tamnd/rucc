@@ -120,6 +120,17 @@ bytes. `strncpy` of a count no larger than the source's length and its terminato
 so it is a `memcpy` of the count, and a count of zero is the destination. A longer count fills the
 rest with zeros and stays a call.
 
+`memcmp` of a constant count reads the same two places without stopping at a terminator, so every
+byte up to the count has to be known, from a constant object or from the walk above, and the answer
+is the sign of the first byte that differs read as `unsigned char`. A count of zero is zero whatever
+the two pointers are, and a count of one with only one side known is a read of the other side's
+byte, the same as `strncmp` does. The walk passes a comparison on the same array, since `memcmp`,
+`strcmp`, `strncmp`, `strlen`, `memchr` and `strchr` only read, and at a join it leaves out a block
+in front that calls a function that does not come back, whether that is written on the declaration
+or the call is to a declared `abort` or `exit`. That is what `if (memcmp (...) != 0) abort ();`
+leaves in front of the next comparison until the branches are cleaned up, which is after this pass,
+and it is all that stood between `builtins/memcmp.c` and a build at every level.
+
 **Moves that cannot overlap.** `memmove` of nothing is its destination, and `memmove` is `memcpy`
 where the two sides cannot overlap. That is so for a single byte, which is read before it is written;
 for a read only source whose definition the link cannot swap, since the destination is written and
