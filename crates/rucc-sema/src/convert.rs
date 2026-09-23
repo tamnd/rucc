@@ -139,7 +139,7 @@ impl Conv<'_> {
     /// The lvalue conversion is looked through, because most callers read the object before they
     /// know they are about to promote it and the value they are left holding is still as wide as
     /// the field was.
-    fn bit_field_width(&self, expr: ExprId) -> Option<u32> {
+    pub fn bit_field_width(&self, expr: ExprId) -> Option<u32> {
         let expr = match self.tast[expr].kind {
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
             _ => expr,

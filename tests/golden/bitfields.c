@@ -43,3 +43,10 @@ struct flags at_rest = { 1, 2, -3, 4, 'x' };
 // named twice takes the last value rather than the two of them put together.
 struct flags backwards = { .wide = 4, .kind = 2 };
 struct flags twice = { .kind = 2, .kind = 5 };
+
+// A field wider than an int is an integer as wide as the field, which no call has a register for.
+// Passed where there is no prototype to say otherwise it goes at the type it was declared with,
+// which is what gcc does and what `va_arg` on the other side reads. tcc's `bitfield_test`.
+struct wide_fields { long long f1 : 45; long long : 2; long long f2 : 35; };
+int report(const char *, ...);
+void past_the_prototype(struct wide_fields *w) { report("%lld %lld", w->f1, w->f2); }

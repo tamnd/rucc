@@ -6,6 +6,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 global @at_rest : bytes 8 = { bytes "E\ff", zero 2, bytes "\04", zero 2, i8 120 }, align 4, linkage(external)
 global @backwards : bytes 8 = { bytes "\04", zero 3, bytes "\04", zero 3 }, align 4, linkage(external)
 global @twice : bytes 8 = { bytes "\0a", zero 7 }, align 4, linkage(external)
+global @.Lstr.0 : bytes 10 = { bytes "%lld %lld\00" }, align 1, linkage(internal), constant
 
 func @read_signed(ptr) -> i32, linkage(external) {
 block0(%0: ptr):
@@ -169,6 +170,47 @@ block0:
     %49 = ashr %47, %48
     %50 = sext.i32 %49
     return %50
+}
+
+func @report(ptr, ...) -> i32, linkage(external);
+
+func @past_the_prototype(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = load.i32 %0, align 4
+    %3 = zext.i64 %2
+    %4 = iconst.i64 4
+    %5 = ptr_add %0, %4
+    %6 = load.i16 %5, align 2
+    %7 = zext.i64 %6
+    %8 = iconst.i64 32
+    %9 = shl %7, %8
+    %10 = or %3, %9
+    %11 = iconst.i64 19
+    %12 = shl %10, %11
+    %13 = iconst.i64 19
+    %14 = ashr %12, %13
+    %15 = trunc.i45 %14
+    %16 = sext.i64 %15
+    %17 = iconst.i64 8
+    %18 = ptr_add %0, %17
+    %19 = load.i32 %18, align 4
+    %20 = zext.i64 %19
+    %21 = iconst.i64 4
+    %22 = ptr_add %18, %21
+    %23 = load.i8 %22, align 1
+    %24 = zext.i64 %23
+    %25 = iconst.i64 32
+    %26 = shl %24, %25
+    %27 = or %20, %26
+    %28 = iconst.i64 29
+    %29 = shl %27, %28
+    %30 = iconst.i64 29
+    %31 = ashr %29, %30
+    %32 = trunc.i35 %31
+    %33 = sext.i64 %32
+    %34 = call @report(%1, %16, %33) : (ptr, ...) -> i32
+    return
 }
 
 !0 = tbaa "char", offset 0

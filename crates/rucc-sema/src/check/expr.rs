@@ -2121,9 +2121,22 @@ impl Checker<'_> {
     /// What an argument gets where the prototype does not say what it should be: the integer
     /// promotions, and `float` widened to `double`. Both exist because of how varargs are read,
     /// and a compiler that forgets the second one passes four bytes where `va_arg` reads eight.
+    ///
+    /// A bit-field wider than `int` promotes to an integer exactly as wide as it is, which is not a
+    /// type a call has a register for. gcc passes one at the type it was declared with, so a
+    /// `long long f : 45` arrives at `va_arg` as the `long long` it reads, and so does this.
     pub(in crate::check) fn default_promote(&mut self, arg: ExprId) -> ExprId {
+        let declared = self.tast[arg].ty;
+        let wide = self.conv().bit_field_width(arg).is_some();
         let arg = self.conv().promote(arg);
         let ty = self.tast[arg].ty;
+        if wide
+            && matches!(self.types.kind(self.types.canonical(ty)), TypeKind::BitInt { .. })
+            && matches!(self.types.kind(self.types.canonical(declared)), TypeKind::Int(_))
+        {
+            let declared = self.types.unqualified(declared);
+            return self.conv().to_type(arg, declared);
+        }
         if self.types.kind(self.types.canonical(ty)) == TypeKind::Float(FloatKind::Float) {
             let double = self.types.float(FloatKind::Double);
             return self.conv().to_type(arg, double);
