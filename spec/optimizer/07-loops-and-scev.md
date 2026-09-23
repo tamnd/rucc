@@ -199,6 +199,14 @@ in ways that pass every test written by the person who wrote the analysis, becau
 of them, and the third silently does not hold. The defence is that the type carrying a trip count
 carries its assumptions inseparably and there is no accessor that returns the count alone.
 
+**A test not every iteration asks.** A single exit is not enough to read a count off its test.
+`while (i != 1024 || j <= 0)` has one exit, the test on it is `j <= 0`, and that test first fails
+on the second iteration, but it is only asked once `i` is 1024, so the loop runs ten times and not
+two. A count read off it left `j` at 1 when loop deletion took the loop out, which is
+`execute/20000731-2.c`. The count is only read off a test in the header or in a block the one
+latch cannot be reached without, found by walking back from the latch while each block has one way
+in, and a test under a condition gives no count at all.
+
 **Staleness.** SCEV caches per value per loop (GCC keeps a hash table, `gcc/tree-scalar-
 evolution.cc:300`), and a pass that rewrites an induction variable invalidates every cached chrec
 in that loop. Per document 04.4, scalar evolution is invalidated by loop changes and IV rewrites,
