@@ -250,27 +250,37 @@ fn read_as(list: &[AsmOperand<'_>], index: usize) -> Option<Value> {
 /// and `"0"` on an input is the program saying that one register holds the input on the way in and
 /// the output on the way out, and it is how a statement fills a register the instruction reads and
 /// writes without writing the register down twice. The letter is on the output, which has no value
-/// to read, and the value is on the input, which has no letter, so neither of them answers this on
-/// its own and the answer is the input: what a read wants is the register the value arrived in, and
-/// that is the input's place.
+/// to read, and the value is on the input, which has no letter, and the answer is the output: its
+/// place is read out of the register the input arrived in, and in a template with a loop in it the
+/// place moves on to wherever the last write left it, which is what a read on the next time round
+/// wants. tcc steps a pointer along a string with `lodsb` and `"=&S"` tied to `"0"`, and a read of
+/// the input would start the string again every time round.
+///
+/// And a read of a register an output alone is in is a read of that output, the same as a read of
+/// an output the template numbered. tcc copies a string with `lodsb` and `stosb` and `"=&a"` on an
+/// output nothing is tied to, and what `stosb` stores is what `lodsb` loaded one line up, which is
+/// the output as the template left it rather than anything the statement handed in.
 ///
 /// `None` is a register the instruction uses and the statement put nothing in, which is the usual
 /// answer rather than an unusual one. `cpuid` writes four registers and a program that wanted one
 /// of them names one. See [`Lowering::spare`], which is where that one goes.
 fn bound(list: &[AsmOperand<'_>], reg: PhysReg, role: Role) -> Option<usize> {
-    let named = list.iter().position(|operand| {
-        pinned(operand) == Some(reg)
-            && if role.is_def() { operand.result.is_some() } else { operand.value.is_some() }
-    });
-    if named.is_some() || role.is_def() {
-        return named;
+    let output =
+        list.iter().position(|operand| operand.result.is_some() && pinned(operand) == Some(reg));
+    if role.is_def() {
+        return output;
     }
-    list.iter().position(|operand| {
-        operand.value.is_some()
-            && operand
-                .tied
-                .is_some_and(|at| list.get(at).is_some_and(|out| pinned(out) == Some(reg)))
-    })
+    // The output first when something is in it on the way in, which is what `+` and a matching
+    // constraint both say, since its place is where a write earlier in the template left it and
+    // the read wants that. See [`read_as`] for what it holds before anything wrote it.
+    let arrives = |at: usize| read_as(list, at).is_some();
+    if let Some(at) = output.filter(|&at| arrives(at)) {
+        return Some(at);
+    }
+    let named = list.iter().position(|operand| {
+        operand.result.is_none() && operand.value.is_some() && pinned(operand) == Some(reg)
+    });
+    named.or(output)
 }
 
 /// The register one of an assembly statement's operands is in, whichever of the two ways said it.
@@ -3206,22 +3216,31 @@ impl<'a> Lowering<'a> {
         // reads. An operand the address is counted from is reached that way and is counted here for
         // that reason, because the walk below it is over the opcode's operands and an address is
         // not one of those.
+        //
+        // Whether any instruction reads an operand an instruction above it wrote is counted in the
+        // same walk too. Such a template is one whose instructions have to be written in order with
+        // each read taken from wherever the last write left the operand, which is what
+        // [`Self::woven`] does, and so is one that writes an operand twice.
         let mut writes = vec![0usize; list.len()];
         let mut reads = vec![false; list.len()];
         let mut held = vec![false; list.len()];
+        let mut after = false;
         for step in &steps {
             let x86_64::Step::Line(line) = step else { continue };
             match line.at.and_then(|at| at.base) {
                 Some(x86_64::Piece::Operand { index, .. }) => {
                     *held.get_mut(index).ok_or_else(refused)? = true;
+                    after |= writes[index] > 0;
                 }
                 Some(x86_64::Piece::Reg { reg, .. }) => {
                     if let Some(index) = bound(&list, reg, Role::Use) {
                         *held.get_mut(index).ok_or_else(refused)? = true;
+                        after |= writes[index] > 0;
                     }
                 }
                 _ => {}
             }
+            let mut written = Vec::new();
             let form = x86_64::form(line.opcode).ok_or_else(refused)?;
             // Which registers the instruction reaches, asked the same way it is asked again when
             // the instruction is written. See [`Self::lettered`] for the one opcode whose answer
@@ -3249,12 +3268,19 @@ impl<'a> Lowering<'a> {
                 };
                 *held.get_mut(index).ok_or_else(refused)? = true;
                 if matches!(desc.role, Role::Def | Role::EarlyDef) {
-                    *writes.get_mut(index).ok_or_else(refused)? += 1;
+                    written.push(index);
                 } else {
                     *reads.get_mut(index).ok_or_else(refused)? = true;
+                    after |= writes[index] > 0;
                 }
             }
+            for index in written {
+                *writes.get_mut(index).ok_or_else(refused)? += 1;
+            }
         }
+        let woven = after
+            || writes.iter().any(|&count| count > 1)
+            || steps.iter().any(|step| !matches!(step, x86_64::Step::Line(_)));
 
         // Where every operand is. Worked out in full before the first instruction is written, since
         // reading a value may be what puts it in a register in the first place, and that has to
@@ -3272,7 +3298,7 @@ impl<'a> Lowering<'a> {
                 continue;
             };
             let ty = self.source[result].ty;
-            if on_x87(ty) || writes[index] > 1 {
+            if on_x87(ty) {
                 return Err(refused());
             }
             let tied = operands.tied_to(index);
@@ -3282,7 +3308,7 @@ impl<'a> Lowering<'a> {
                 }
                 places[index].read = Some(self.reg_of(from)?);
             }
-            if writes[index] == 1 {
+            if writes[index] > 0 {
                 places[index].write = Some(self.new_reg(result));
                 continue;
             }
@@ -3323,9 +3349,10 @@ impl<'a> Lowering<'a> {
             if steps.is_empty() { Vec::new() } else { Self::clobbered(inst, &clobbers)? };
 
         // A template with a label in it is not one run of instructions, and what it is instead is
-        // in [`Self::woven`]. Every other template is what it has always been, which is every
+        // in [`Self::woven`], which is also where a template goes whose instructions read what the
+        // ones above them wrote. Every other template is what it has always been, which is every
         // instruction of it written into the block the statement stands in.
-        if steps.iter().any(|step| !matches!(step, x86_64::Step::Line(_))) {
+        if woven {
             return self.woven(inst, &steps, &mut places, &list, &clobbered, &writes);
         }
         for step in &steps {
@@ -3444,6 +3471,7 @@ impl<'a> Lowering<'a> {
             labels.push((name.as_str(), block, params));
         }
 
+        let mut wrote: Vec<usize> = Vec::new();
         for step in steps {
             match step {
                 x86_64::Step::Label(name) => {
@@ -3490,8 +3518,8 @@ impl<'a> Lowering<'a> {
                     self.at = Some(self.out.create_block());
                 }
                 x86_64::Step::Line(line) => {
-                    self.instruction(inst, line, places, list, clobbered)?;
                     let form = x86_64::form(line.opcode).ok_or_else(refused)?;
+                    let mut written = Vec::new();
                     for (desc, piece) in form.operands().iter().zip(&line.operands) {
                         if !desc.role.is_def() {
                             continue;
@@ -3507,6 +3535,23 @@ impl<'a> Lowering<'a> {
                                 None => continue,
                             },
                         };
+                        written.push(index);
+                    }
+                    // A register is written once in this form of the machine IR, so an operand
+                    // an instruction above already wrote is written into a new one here, and what
+                    // reads it below reads that one.
+                    for &index in &written {
+                        if !wrote.contains(&index) {
+                            wrote.push(index);
+                            continue;
+                        }
+                        let &(_, class) =
+                            carried.iter().find(|&&(at, _)| at == index).ok_or_else(refused)?;
+                        let place = places.get_mut(index).ok_or_else(refused)?;
+                        place.write = Some(self.out.new_vreg(class));
+                    }
+                    self.instruction(inst, line, places, list, clobbered)?;
+                    for index in written {
                         let place = places.get_mut(index).ok_or_else(refused)?;
                         if place.write.is_some() {
                             place.read = place.write;

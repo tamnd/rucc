@@ -537,6 +537,59 @@ mod tests {
     /// fills the high half of the dividend itself and then throws one of the two answers away. A
     /// dividend the program filled both halves of is not a term the IR has, and `udiv_qrnnd` beside
     /// the multiply in the same header is how long division a limb at a time is written.
+    /// The string instructions, which a template writes and nothing else does.
+    ///
+    /// Exempt for the reason `cpuid` is in [`TEMPLATE`]: every register one of them reaches is one
+    /// the instruction names for itself, so there is nothing about one for a rule to name. A copy
+    /// or a fill the compiler writes is a loop it can schedule or a call to the library, and never
+    /// one of these.
+    const STRING: &[&str] = &[
+        "movs_8",
+        "movs_16",
+        "movs_32",
+        "movs_64",
+        "rep_movs_8",
+        "rep_movs_16",
+        "rep_movs_32",
+        "rep_movs_64",
+        "stos_8",
+        "stos_16",
+        "stos_32",
+        "stos_64",
+        "rep_stos_8",
+        "rep_stos_16",
+        "rep_stos_32",
+        "rep_stos_64",
+        "lods_8",
+        "lods_16",
+        "lods_32",
+        "lods_64",
+        "scas_8",
+        "scas_16",
+        "scas_32",
+        "scas_64",
+        "repe_scas_8",
+        "repe_scas_16",
+        "repe_scas_32",
+        "repe_scas_64",
+        "repne_scas_8",
+        "repne_scas_16",
+        "repne_scas_32",
+        "repne_scas_64",
+        "cmps_8",
+        "cmps_16",
+        "cmps_32",
+        "cmps_64",
+        "repe_cmps_8",
+        "repe_cmps_16",
+        "repe_cmps_32",
+        "repe_cmps_64",
+        "repne_cmps_8",
+        "repne_cmps_16",
+        "repne_cmps_32",
+        "repne_cmps_64",
+    ];
+
     const WIDE: &[&str] = &[
         "mul_wide_16",
         "mul_wide_32",
@@ -887,7 +940,7 @@ mod tests {
             if SEARCH.contains(&opcode) || SWAP.contains(&opcode) || WIDE.contains(&opcode) {
                 continue;
             }
-            if AWAY.contains(&opcode) || MEMORY.contains(&opcode) {
+            if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {

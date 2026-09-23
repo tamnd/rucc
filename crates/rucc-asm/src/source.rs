@@ -234,6 +234,9 @@ impl Reader {
         if let Some(directive) = word.strip_prefix('.') {
             return self.directive(directive, rest);
         }
+        if let Some((word, rest)) = repeated(word, rest) {
+            return self.instruction(&word, rest);
+        }
         self.instruction(word, rest)
     }
 
@@ -1762,6 +1765,34 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
     out.into_iter().map(|piece| piece.trim().to_owned()).collect()
 }
 
+/// A repeat prefix and the string instruction behind it, as the one mnemonic the encoder knows the
+/// pair by, and what is left of the line after the two.
+///
+/// Five spellings for two bytes. `rep`, `repe` and `repz` are one byte, which is spelled `repe` in
+/// front of a scan or a comparison and `rep` in front of anything else, and `repne` and `repnz` are
+/// the other. A prefix in front of anything that is not a string instruction is left alone here,
+/// so it reaches the encoder as the word it was and is refused there as a mnemonic nobody knows.
+fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
+    let unequal = match word {
+        "rep" | "repe" | "repz" => false,
+        "repne" | "repnz" => true,
+        _ => return None,
+    };
+    let (next, after) = match rest.find(char::is_whitespace) {
+        Some(cut) => (&rest[..cut], rest[cut..].trim()),
+        None => (rest, ""),
+    };
+    let string = next.len() == 5 && next.ends_with(['b', 'w', 'l', 'q']);
+    let which = if string { &next[..4] } else { "" };
+    let prefix = match (unequal, which) {
+        (false, "movs" | "stos") => "rep",
+        (false, "scas" | "cmps") => "repe",
+        (true, "scas" | "cmps") => "repne",
+        _ => return None,
+    };
+    Some((format!("{prefix} {next}"), after))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1798,6 +1829,16 @@ mod tests {
     /// What a file this could not read said about it.
     fn refused(text: &str) -> Trouble {
         read(text).err().unwrap_or_else(|| panic!("this was read and should not have been"))
+    }
+
+    #[test]
+    fn a_repeat_prefix_is_read_with_the_string_instruction_behind_it() {
+        let assembled =
+            assembled("\t.text\n\trep movsl\n\trepnz scasb\n\trepz cmpsb\n\trep stosq\n");
+        assert_eq!(
+            bytes(&assembled, ".text"),
+            [0xF3, 0xA5, 0xF2, 0xAE, 0xF3, 0xA6, 0xF3, 0x48, 0xAB]
+        );
     }
 
     /// A numbered local label, which is a place a file may write as often as it likes.

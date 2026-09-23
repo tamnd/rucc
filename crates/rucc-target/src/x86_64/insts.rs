@@ -36,7 +36,7 @@
 //! than a simplification of the machine.
 
 use crate::operand::{Constraint, OperandDesc};
-use crate::x86_64::{GPR, RAX, RBX, RCX, RDX, XMM, xmm};
+use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
 use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
@@ -45,8 +45,9 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, SwapHalves, Test, TestCmov, Trap, UnaryM,
-    UnaryR, UnaryX87,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
+    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Test, TestCmov, Trap,
+    UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -625,6 +626,38 @@ pub enum Form {
     /// way to ask. zstd writes four of them in `lib/common/cpu.h` to find out whether the machine
     /// it is running on has the vector instructions it would rather use.
     CpuId,
+    /// A string instruction, which moves one element from where `rsi` points to where `rdi` points
+    /// and steps both along.
+    ///
+    /// The string instructions are the other forms here whose every operand is fixed by the
+    /// instruction and spelled by nothing, the way [`Form::CpuId`]'s are: `movsl` is the mnemonic
+    /// alone, and which registers it reads and writes is what the description says rather than
+    /// anything a template wrote. Only an `asm` statement writes one. tcc's tests copy and search
+    /// strings with them, and older C libraries wrote `memcpy` and `strlen` that way.
+    ///
+    /// Each one reads memory at `rsi` or `rdi` or both, which is why they are all on
+    /// [`Form::touches_mem`] and none on [`Form::takes_mem`]: the address is in a register the
+    /// instruction names for itself rather than in an addressing mode.
+    StrMove,
+    /// [`Form::StrMove`] with `rep` in front, which does it `rcx` times and leaves `rcx` at zero.
+    StrMoveRep,
+    /// A string instruction that stores what is in `rax` where `rdi` points and steps `rdi`.
+    StrStore,
+    /// [`Form::StrStore`] with `rep` in front, which fills `rcx` elements.
+    StrStoreRep,
+    /// A string instruction that loads from where `rsi` points into `rax` and steps `rsi`.
+    StrLoad,
+    /// A string instruction that compares `rax` with what `rdi` points at, sets the condition state
+    /// the way a comparison does and steps `rdi`.
+    StrScan,
+    /// [`Form::StrScan`] with `repe` or `repne` in front, which goes on while the elements are equal
+    /// or unequal and `rcx` has not run out, and is what a `strlen` written by hand is.
+    StrScanRep,
+    /// A string instruction that compares what `rsi` points at with what `rdi` points at, sets the
+    /// condition state and steps both.
+    StrCompare,
+    /// [`Form::StrCompare`] with `repe` or `repne` in front.
+    StrCompareRep,
     /// A hint that an address is about to be used, which reads nothing and writes nothing.
     ///
     /// What `__builtin_prefetch` asks for. The machine is told to start bringing a line closer, and
@@ -867,6 +900,43 @@ static CPU_ID: [OperandDesc; 6] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
 ];
+// The string instructions, whose operands are all fixed and all implicit the way the question
+// above's are. Each register a string instruction steps is read and written both, as two operands,
+// and a repeated one reads and writes `rcx` as well, which is the count. The element that goes
+// through `rax` is read by a store and a scan and written by a load. A scan and a comparison take
+// the same registers as a store and a move, and what differs is what happens at `rdi`, which is
+// read rather than written, and that is memory rather than anything a register allocator sees.
+static STR_MOVE: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RSI)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RSI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RDI)),
+];
+static STR_MOVE_REP: [OperandDesc; 6] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RSI)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RCX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RSI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
+];
+static STR_STORE: [OperandDesc; 3] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+];
+static STR_STORE_REP: [OperandDesc; 5] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RCX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RDI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+];
+static STR_LOAD: [OperandDesc; 3] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RSI)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RSI)),
+];
 // One multiplicand is in `rax` and the other is anywhere else, and both halves of the product come
 // back, the low one in `rax` and the high one in `rdx`. Two definitions and both of them wanted,
 // which is what tells this from the two below: a division writes the register its other answer is
@@ -1099,6 +1169,11 @@ impl Form {
             Set => &ONE_WRITTEN,
             Convert | Search => &ONE_TO_ONE,
             CpuId => &CPU_ID,
+            StrMove | StrCompare => &STR_MOVE,
+            StrMoveRep | StrCompareRep => &STR_MOVE_REP,
+            StrStore | StrScan => &STR_STORE,
+            StrStoreRep | StrScanRep => &STR_STORE_REP,
+            StrLoad => &STR_LOAD,
             MulWide => &MUL_WIDE,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
@@ -1222,6 +1297,15 @@ impl Form {
                 | Pop
                 | Ret
                 | Call
+                | StrMove
+                | StrMoveRep
+                | StrStore
+                | StrStoreRep
+                | StrLoad
+                | StrScan
+                | StrScanRep
+                | StrCompare
+                | StrCompareRep
         )
     }
 }
@@ -2008,6 +2092,52 @@ pub static INSTS: &[(&str, Form)] = &[
     // What the processor is asked about itself, which is the second instruction here that only an
     // `asm` statement can reach and the first whose operands are all implicit.
     ("cpuid", CpuId),
+    // The string instructions, at each width and with each prefix that means something in front of
+    // them. Only an `asm` statement writes one. See [`Form::StrMove`].
+    ("movs_8", StrMove),
+    ("movs_16", StrMove),
+    ("movs_32", StrMove),
+    ("movs_64", StrMove),
+    ("rep_movs_8", StrMoveRep),
+    ("rep_movs_16", StrMoveRep),
+    ("rep_movs_32", StrMoveRep),
+    ("rep_movs_64", StrMoveRep),
+    ("stos_8", StrStore),
+    ("stos_16", StrStore),
+    ("stos_32", StrStore),
+    ("stos_64", StrStore),
+    ("rep_stos_8", StrStoreRep),
+    ("rep_stos_16", StrStoreRep),
+    ("rep_stos_32", StrStoreRep),
+    ("rep_stos_64", StrStoreRep),
+    ("lods_8", StrLoad),
+    ("lods_16", StrLoad),
+    ("lods_32", StrLoad),
+    ("lods_64", StrLoad),
+    ("scas_8", StrScan),
+    ("scas_16", StrScan),
+    ("scas_32", StrScan),
+    ("scas_64", StrScan),
+    ("repe_scas_8", StrScanRep),
+    ("repe_scas_16", StrScanRep),
+    ("repe_scas_32", StrScanRep),
+    ("repe_scas_64", StrScanRep),
+    ("repne_scas_8", StrScanRep),
+    ("repne_scas_16", StrScanRep),
+    ("repne_scas_32", StrScanRep),
+    ("repne_scas_64", StrScanRep),
+    ("cmps_8", StrCompare),
+    ("cmps_16", StrCompare),
+    ("cmps_32", StrCompare),
+    ("cmps_64", StrCompare),
+    ("repe_cmps_8", StrCompareRep),
+    ("repe_cmps_16", StrCompareRep),
+    ("repe_cmps_32", StrCompareRep),
+    ("repe_cmps_64", StrCompareRep),
+    ("repne_cmps_8", StrCompareRep),
+    ("repne_cmps_16", StrCompareRep),
+    ("repne_cmps_32", StrCompareRep),
+    ("repne_cmps_64", StrCompareRep),
     // Where the next instruction starts, which is the one entry here that is not an instruction at
     // all. Only an `asm` statement writes one, and what it is written as is a directive in the
     // listing and a run of padding in the bytes rather than anything the processor does.
@@ -2265,7 +2395,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 660);
+        assert_eq!(described, 704);
     }
 
     #[test]

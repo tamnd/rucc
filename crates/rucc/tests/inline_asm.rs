@@ -540,6 +540,44 @@ fn local_labels_and_a_jump_on_the_sign_are_written_as_a_loop() {
     assert!(jumps > 0, "the jump back never reached the listing:\n{body}");
 }
 
+#[test]
+fn a_string_instruction_is_written_with_its_registers_where_it_wants_them() {
+    // tcc's `strcpy` and the copy in its `memcpy1`. The registers are the ones the instructions
+    // name for themselves, so what the listing has to show is the pointers arriving in `rsi` and
+    // `rdi`, the count in `rcx`, and the instructions written the way the template wrote them.
+    let source = "char *copy(char *dest, const char *src) { int d0, d1, d2; \
+                  asm volatile (\"1:\\tlodsb\\n\\tstosb\\n\\ttestb %%al,%%al\\n\\tjne 1b\" \
+                  : \"=&S\" (d0), \"=&D\" (d1), \"=&a\" (d2) : \"0\" (src), \"1\" (dest) : \"memory\"); \
+                  return dest; }\n\
+                  void move(void *to, const void *from, unsigned long n) { long d0, d1, d2; \
+                  asm volatile (\"rep ; movsl\" : \"=&c\" (d0), \"=&D\" (d1), \"=&S\" (d2) \
+                  : \"0\" (n / 4), \"1\" (to), \"2\" (from) : \"memory\"); }\n";
+    let text = asm("string", source);
+    let copy = body(&text, "copy");
+    assert!(copy.contains("lodsb") && copy.contains("stosb"), "the copy is missing:\n{copy}");
+    let moved = body(&text, "move");
+    assert!(moved.contains("rep movsl"), "the repeated move is missing:\n{moved}");
+    assert!(moved.contains("%rcx") || moved.contains("%ecx"), "the count is nowhere:\n{moved}");
+}
+
+#[test]
+fn an_operand_written_twice_is_read_where_the_second_write_left_it() {
+    // The tail of tcc's `memcpy2`, where both pointers are stepped by one instruction and then by
+    // the next. Each instruction writes the two operands again, so what the second one reads has
+    // to be what the first one left and not what the statement handed in.
+    let source = "void tail(char *to, const char *from) { long d1, d2; \
+                  asm volatile (\"movsw\\n\\tmovsb\" : \"=&D\" (d1), \"=&S\" (d2) \
+                  : \"0\" (to), \"1\" (from) : \"memory\"); }\n";
+    let body = body(&asm("twice", source), "tail");
+    let (Some(word), Some(byte)) = (body.find("movsw"), body.find("movsb")) else {
+        panic!("the two moves never reached the listing:\n{body}");
+    };
+    // Nothing is put back into `rsi` or `rdi` between the two, since both already hold what the
+    // second one reads.
+    let between = &body[word..byte];
+    assert!(!between.contains("%rsi") && !between.contains("%rdi"), "{body}");
+}
+
 /// Where a block that holds nothing but a jump sends whatever arrived at it.
 fn landing<'a>(body: &'a str, label: &str) -> Option<&'a str> {
     let at = body.find(&format!("\n{label}:\n"))?;

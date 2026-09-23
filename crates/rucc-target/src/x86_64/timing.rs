@@ -222,6 +222,11 @@ fn plain(form: Form) -> Timing {
         // for the same reason the locked forms carry one: what a schedule needs to know is that
         // it is expensive and that nothing moves past it, and `Unit::Fixed` is the second.
         CpuId => (100, Unit::Fixed),
+        // A string instruction reads memory and a repeated one does it as many times as `rcx` says,
+        // which nothing here knows. The number is a floor, and `Unit::Fixed` is what keeps anything
+        // from being moved past one on the grounds that it touches nothing.
+        StrMove | StrStore | StrLoad | StrScan | StrCompare => (4, Unit::Fixed),
+        StrMoveRep | StrStoreRep | StrScanRep | StrCompareRep => (20, Unit::Fixed),
     };
     Timing { latency, unit }
 }

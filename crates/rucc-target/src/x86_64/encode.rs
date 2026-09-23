@@ -1488,6 +1488,51 @@ static ENCODINGS: &[Encoding] = &[
     // are none in the text: every register it touches is named by the instruction rather than by
     // anything written beside it, so there is no addressing byte and nothing to put in one.
     bytes("cpuid", &NO_ARGS, Long, &[0x0F, 0xA2], NO_MODRM, NO_IMM),
+    // The other string instructions and the move again with a repeat prefix, whose operands are
+    // registers the opcode names for itself. A repeat
+    // prefix is one of the mandatory prefixes as far as the table is concerned, since it has to
+    // come in front of the `REX` the quadword forms carry. The word forms put it after the operand
+    // size prefix instead, which is as good to the processor and needs no size of its own here.
+    bytes("rep movsb", &NO_ARGS, Single, &[0xA4], NO_MODRM, NO_IMM),
+    bytes("rep movsw", &NO_ARGS, Word, &[0xF3, 0xA5], NO_MODRM, NO_IMM),
+    bytes("rep movsl", &NO_ARGS, Single, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("rep movsq", &NO_ARGS, SingleQuad, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("stosb", &NO_ARGS, Byte, &[0xAA], NO_MODRM, NO_IMM),
+    bytes("stosw", &NO_ARGS, Word, &[0xAB], NO_MODRM, NO_IMM),
+    bytes("stosl", &NO_ARGS, Long, &[0xAB], NO_MODRM, NO_IMM),
+    bytes("stosq", &NO_ARGS, Quad, &[0xAB], NO_MODRM, NO_IMM),
+    bytes("rep stosb", &NO_ARGS, Single, &[0xAA], NO_MODRM, NO_IMM),
+    bytes("rep stosw", &NO_ARGS, Word, &[0xF3, 0xAB], NO_MODRM, NO_IMM),
+    bytes("rep stosl", &NO_ARGS, Single, &[0xAB], NO_MODRM, NO_IMM),
+    bytes("rep stosq", &NO_ARGS, SingleQuad, &[0xAB], NO_MODRM, NO_IMM),
+    bytes("lodsb", &NO_ARGS, Byte, &[0xAC], NO_MODRM, NO_IMM),
+    bytes("lodsw", &NO_ARGS, Word, &[0xAD], NO_MODRM, NO_IMM),
+    bytes("lodsl", &NO_ARGS, Long, &[0xAD], NO_MODRM, NO_IMM),
+    bytes("lodsq", &NO_ARGS, Quad, &[0xAD], NO_MODRM, NO_IMM),
+    bytes("scasb", &NO_ARGS, Byte, &[0xAE], NO_MODRM, NO_IMM),
+    bytes("scasw", &NO_ARGS, Word, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("scasl", &NO_ARGS, Long, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("scasq", &NO_ARGS, Quad, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("repe scasb", &NO_ARGS, Single, &[0xAE], NO_MODRM, NO_IMM),
+    bytes("repe scasw", &NO_ARGS, Word, &[0xF3, 0xAF], NO_MODRM, NO_IMM),
+    bytes("repe scasl", &NO_ARGS, Single, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("repe scasq", &NO_ARGS, SingleQuad, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("repne scasb", &NO_ARGS, Double, &[0xAE], NO_MODRM, NO_IMM),
+    bytes("repne scasw", &NO_ARGS, Word, &[0xF2, 0xAF], NO_MODRM, NO_IMM),
+    bytes("repne scasl", &NO_ARGS, Double, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("repne scasq", &NO_ARGS, DoubleQuad, &[0xAF], NO_MODRM, NO_IMM),
+    bytes("cmpsb", &NO_ARGS, Byte, &[0xA6], NO_MODRM, NO_IMM),
+    bytes("cmpsw", &NO_ARGS, Word, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("cmpsl", &NO_ARGS, Long, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("cmpsq", &NO_ARGS, Quad, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("repe cmpsb", &NO_ARGS, Single, &[0xA6], NO_MODRM, NO_IMM),
+    bytes("repe cmpsw", &NO_ARGS, Word, &[0xF3, 0xA7], NO_MODRM, NO_IMM),
+    bytes("repe cmpsl", &NO_ARGS, Single, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("repe cmpsq", &NO_ARGS, SingleQuad, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("repne cmpsb", &NO_ARGS, Double, &[0xA6], NO_MODRM, NO_IMM),
+    bytes("repne cmpsw", &NO_ARGS, Word, &[0xF2, 0xA7], NO_MODRM, NO_IMM),
+    bytes("repne cmpsl", &NO_ARGS, Double, &[0xA7], NO_MODRM, NO_IMM),
+    bytes("repne cmpsq", &NO_ARGS, DoubleQuad, &[0xA7], NO_MODRM, NO_IMM),
     // The lock prefix, which is a row of its own because that is what it is in the encoding: one
     // byte in front of the instruction it applies to, and not a bit of anything the instruction
     // itself writes. An assembler reads it the same way, so the text form is the word on a line of
@@ -2555,6 +2600,19 @@ mod tests {
         assert_eq!(hex("btrq", &[quad(RAX), Value::Mem(base)]), "48 0f b3 01");
         assert_eq!(hex("btsl", &[Value::Imm(5), Value::Mem(base)]), "0f ba 29 05");
         assert_eq!(hex("btcw", &[Value::Imm(3), Value::Mem(base)]), "66 0f ba 39 03");
+    }
+
+    #[test]
+    fn a_repeat_prefix_is_in_front_of_everything_but_the_operand_size() {
+        // The prefix has to come before the `REX` a quadword carries, since a prefix after one
+        // makes the processor ignore it, and it may come either side of the operand size prefix.
+        assert_eq!(hex("rep movsl", &[]), "f3 a5");
+        assert_eq!(hex("rep movsq", &[]), "f3 48 a5");
+        assert_eq!(hex("rep movsw", &[]), "66 f3 a5");
+        assert_eq!(hex("repne scasb", &[]), "f2 ae");
+        assert_eq!(hex("repe cmpsq", &[]), "f3 48 a7");
+        assert_eq!(hex("lodsb", &[]), "ac");
+        assert_eq!(hex("stosw", &[]), "66 ab");
     }
 
     #[test]
