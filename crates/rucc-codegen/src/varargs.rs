@@ -261,9 +261,9 @@ fn next(func: &mut Func, inst: Inst, area: Area) {
     // computes in gets.
     let quad = ty.is_float() && ty.bits() == 128;
     // A scalar of a width a register holds, which is every type the algorithm below is right about.
-    // An `__int128` takes two slots with an alignment rule of its own, which is a second algorithm
-    // rather than a wider reading of this one, so it is left alone here and refused by name further
-    // down.
+    // An `__int128` takes two slots with an alignment rule of its own, which is the walk `object`
+    // makes for a small structure, so `rucc-lower` reads one as that and it never arrives here.
+    // Anything else wider is left alone and refused by name further down.
     if !quad
         && (!ty.is_scalar() || ty.bits() > 64 || !(ty.is_int() || ty.is_float() || ty.is_ptr()))
     {
