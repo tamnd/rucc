@@ -59,6 +59,9 @@
 /// an answer about.
 pub const SPAN: usize = 8;
 
+/// How many bytes of program one word of shadow answers for, which is what a long range is read in.
+pub const RUN: usize = SPAN * size_of::<u64>();
+
 /// How many bytes of shadow a run of `len` bytes of program needs.
 ///
 /// Rounded up, because the last few bytes of a run share a shadow byte with whatever follows them
@@ -120,22 +123,73 @@ impl Init {
     /// wording is about an access the planes did not permit and this is one of the planes.
     ///
     /// A shadow byte at a time, so a run that covers whole eights is one load and one compare per
-    /// eight bytes of program, and an access of four or eight bytes is one of each.
+    /// eight bytes of program, and an access of four or eight bytes is one of each. A long range is
+    /// cheaper through [`Init::sweep`], which gives the same answer.
     ///
     /// # Safety
     ///
     /// `[lo, lo + len)` is inside the mapping this plane was built for.
     #[must_use]
     pub unsafe fn allows(&self, lo: usize, len: usize) -> bool {
+        // SAFETY: the caller's contract, passed straight on.
+        unsafe { self.bytes(lo, lo + len) }
+    }
+
+    /// [`Init::allows`] for a long range, which is what a check taken out of a loop asks about.
+    ///
+    /// Once the walk reaches the start of a shadow byte it reads a word of shadow at a time, so the
+    /// middle of the range costs one load and one compare per sixty four bytes of program rather
+    /// than per eight. The ragged ends go a shadow byte at a time. It is a function of its own
+    /// rather than a length test inside [`Init::allows`], because the few instructions a load's own
+    /// check costs are the ones every load pays and a second path beside them makes all of them
+    /// dearer. `crate::check` makes the choice once, at the entry point, from the length.
+    ///
+    /// # Safety
+    ///
+    /// As [`Init::allows`].
+    #[must_use]
+    pub unsafe fn sweep(&self, lo: usize, len: usize) -> bool {
+        let end = lo + len;
         let mut at = lo;
-        while at < lo + len {
-            let end = next(at).min(lo + len);
-            // SAFETY: `at` is inside the range the caller says is mapped.
-            let bits = unsafe { self.slot(at).read() };
-            if bits & mask(at, end) != 0 {
+        if at % SPAN != 0 {
+            let head = next(at).min(end);
+            // SAFETY: `[at, head)` is inside the range the caller says is mapped.
+            if !unsafe { self.bytes(at, head) } {
                 return false;
             }
-            at = end;
+            at = head;
+        }
+        while end - at >= RUN {
+            // SAFETY: `at` starts a shadow byte, so the eight shadow bytes from its slot on are the
+            // answers for `[at, at + RUN)`, which is inside the range the caller says is mapped.
+            // Unaligned, because the origin is a bias and says nothing about how the shadow lines
+            // up with a word.
+            let bits = unsafe { self.slot(at).cast::<u64>().read_unaligned() };
+            if bits != 0 {
+                return false;
+            }
+            at += RUN;
+        }
+        // SAFETY: what is left of the range, which is inside the one the caller says is mapped.
+        unsafe { self.bytes(at, end) }
+    }
+
+    /// The shadow byte at a time walk, over `[lo, end)`.
+    ///
+    /// # Safety
+    ///
+    /// `[lo, end)` is inside the mapping this plane was built for.
+    #[inline]
+    unsafe fn bytes(&self, lo: usize, end: usize) -> bool {
+        let mut at = lo;
+        while at < end {
+            let stop = next(at).min(end);
+            // SAFETY: `at` is inside the range the caller says is mapped.
+            let bits = unsafe { self.slot(at).read() };
+            if bits & mask(at, stop) != 0 {
+                return false;
+            }
+            at = stop;
         }
         true
     }
@@ -297,6 +351,11 @@ mod tests {
             unsafe { self.plane().allows(self.base + offset, len) }
         }
 
+        fn sweep(&self, offset: usize, len: usize) -> bool {
+            // SAFETY: as above.
+            unsafe { self.plane().sweep(self.base + offset, len) }
+        }
+
         fn set(&self, offset: usize, len: usize) {
             // SAFETY: as above.
             unsafe { self.plane().set(self.base + offset, len) }
@@ -442,6 +501,25 @@ mod tests {
         fake.forget(0, 16);
 
         assert!(!fake.allows(0, 16));
+    }
+
+    #[test]
+    fn a_sweep_answers_what_a_byte_at_a_time_walk_would() {
+        // The word at a time path a check taken out of a loop goes down, held against the plainest
+        // walk there is. One unwritten byte is moved through a range long enough to have ragged
+        // ends and whole words in the middle, and every start and length around it is asked.
+        let fake = Fake::new(320);
+        for hole in [0, 3, 8, 63, 64, 100, 191, 255, 319] {
+            fake.set(0, 320);
+            fake.forget(hole, 1);
+            for lo in 0..20 {
+                for len in [0, 1, 7, 8, 63, 64, 65, 127, 128, 200, 300] {
+                    let plain = (lo..lo + len).all(|at| fake.read(at));
+                    assert_eq!(fake.sweep(lo, len), plain, "hole at {hole}, {len} bytes from {lo}");
+                    assert_eq!(fake.allows(lo, len), plain, "hole at {hole}, {len} from {lo}");
+                }
+            }
+        }
     }
 
     #[test]

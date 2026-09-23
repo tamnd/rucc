@@ -537,6 +537,49 @@ pub unsafe fn allowed(addr: *const c_void, size: usize, ty: TypeId, descriptor: 
     }
 }
 
+/// The plane checks over a range, which is what a check taken out of a loop hands over.
+///
+/// The same judgements as [`typed`], [`filled`] and [`allowed`], in the same order, asked through
+/// `sweep` on each plane rather than `allows`, so a long range costs a load per sixty four bytes
+/// rather than per eight. `ty` is the type the read wants, or nothing when the type plane is not
+/// asked, and `init` says whether the init plane is.
+///
+/// A function of its own rather than a length test in those, and the compiler is what chooses:
+/// `rucc_safety::lower` calls the three `_range` entry points for a check over a computed width
+/// or a constant one of sixty four bytes or more, which is the check `rucc_opt::hoist` writes in
+/// front of a loop, and the plain ones for every check on an access. A length test at the top of the plain ones was tried and measured. The
+/// compiler saved the registers the body needs before it made the test, so each of the many
+/// millions of per access checks in `a-binary-tree-walk` paid three instructions more and the
+/// program got 0.8 percent slower, which is too much to charge every load for a loop's benefit.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`]. `ty` is a plane vocabulary entry and is not an address.
+pub unsafe fn swept(
+    addr: *const c_void,
+    size: usize,
+    ty: Option<TypeId>,
+    init: bool,
+    descriptor: *const Descriptor,
+) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let size = clipped(&region, addr, size);
+    // SAFETY: as in `allowed`.
+    let held = unsafe {
+        ty.is_none_or(|ty| region.types.sweep(addr, size, ty))
+            && (!init || region.init.sweep(addr, size))
+    };
+    if !held {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
 /// The judgement a store makes: the bytes it wrote hold what it wrote.
 ///
 /// Not a check, the same way [`judge`] is not. Which range a store that writes a whole object names
@@ -1309,6 +1352,54 @@ pub mod exports {
     ) {
         // SAFETY: this wrapper's contract is the one it calls, passed straight on.
         unsafe { super::allowed(addr, size, ty, descriptor) };
+    }
+
+    /// [`__rucc_check_type`] over a range a loop reads, which is what `rucc_opt::hoist` writes.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_type`], whose arguments these are.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_type_range(
+        addr: *const c_void,
+        size: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::swept(addr, size, Some(ty), false, descriptor) };
+    }
+
+    /// [`__rucc_check_init`] over a range a loop reads, which is what `rucc_opt::hoist` writes.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_init`], whose arguments these are.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_init_range(
+        addr: *const c_void,
+        size: usize,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::swept(addr, size, None, true, descriptor) };
+    }
+
+    /// [`__rucc_check_typed_init`] over a range a loop reads, which is what `rucc_opt::hoist`
+    /// writes.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_type`], whose arguments these are.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_typed_init_range(
+        addr: *const c_void,
+        size: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::swept(addr, size, Some(ty), true, descriptor) };
     }
 
     /// # Safety

@@ -146,10 +146,12 @@
 //! piece out of the middle of one of those and the same sentence is true of the piece. So one check
 //! of the whole walk says what the walk's checks were going to say, which is exactly the step
 //! `swept.i64` and `swept.sym.i64` are proved about, and nothing in either rule mentions which
-//! plane is being asked. The runtime side costs nothing either, because
+//! plane is being asked. The runtime side is the same question with a larger number in it, because
 //! `__rucc_check_init(pointer, size, descriptor)` and
-//! `__rucc_check_type(pointer, size, type, descriptor)` already take a width, so the range query
-//! the hoisted check needs is the call that was already there with a larger number in it.
+//! `__rucc_check_type(pointer, size, type, descriptor)` already take a width. A check with a
+//! computed width, or a constant one of sixty four bytes or more, is lowered to the `_range` form of
+//! the same routine, which takes the same arguments and reads the plane a word at a time, so a
+//! dense range costs a load per sixty four bytes rather than per eight.
 //!
 //! One condition is new, and it is in `writes`. Nothing a loop with no call in it can do will
 //! move the edges of an object, so a bounds check has nothing to worry about from the loop's own
