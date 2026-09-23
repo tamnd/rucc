@@ -187,6 +187,7 @@ use rucc_ir::{
 };
 
 use crate::cfg::Cfg;
+use crate::discharge::constant;
 use crate::rules::{Match, Piece, Subject, Table, canonical, compare, identities, strength, width};
 use crate::uses::{count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -706,6 +707,7 @@ fn become_instruction(
 ) {
     let result = func[inst].first_result.expect("the rule matched a result");
     let ty = func[result].ty;
+    let kept = carried(func, inst, opcode, lhs, rhs);
     let lhs = defined(func, inst, ty, lhs);
     let rhs = defined(func, inst, ty, rhs);
     let args = func.push_values(&[lhs, rhs]);
@@ -725,8 +727,64 @@ fn become_instruction(
     // multiplication is a promise about that multiplication, and the addition that replaces it is
     // a different instruction. The promise may well still hold, and carrying one across a rewrite
     // because it probably still holds is how a wrong one gets made. Dropping it costs a later
-    // pass an assumption and costs no program its meaning.
-    data.flags = Flags::NONE;
+    // pass an assumption and costs no program its meaning. The one exception is a promise that is
+    // provably the same one, which `carried` says.
+    data.flags = kept;
+}
+
+/// The flags a rewrite keeps from the instruction it replaces, which is none but for the few
+/// rewrites of a multiplication by a constant where the promise is the same one on both sides.
+///
+/// Each case is checked against what the instruction was as well as what the rule writes, so a
+/// rule added later that happens to share the opcodes keeps nothing until it is added here with
+/// its own reason.
+///
+/// - `k * x` written as `x * k` is the same product.
+/// - `x * 2` written as `x + x` is the same sum, and both flags say that `2x` fits.
+/// - `x * -1` written as `0 - x` promises the same about the signed result, which is that `x` is
+///   not the most negative number. Read unsigned, `-1` is the largest number there is and the
+///   multiplication's `nuw` is about a different product, so only `nsw` is kept.
+/// - `x * 2^k` written as `x << k`. `nsw` on a shift says that `x * 2^k` fits the signed width,
+///   which is what it says on the multiplication while `2^k` is a positive number at that width,
+///   so every `k` below the width less one. At the width less one the constant read as signed is
+///   the most negative number and nothing is kept. `nuw` is the same on both.
+///
+/// It matters because of what reads the flags afterwards. `row * 128` that loses its `nsw` on the
+/// way to a shift is a subscript scalar evolution can no longer widen to the address width, and
+/// every check on `grid[row * 128 + col]` stays inside the loop, which was `a-strided-column-sum`.
+/// See #1748.
+fn carried(func: &Func, inst: Inst, now: Opcode, lhs: Operand, rhs: Operand) -> Flags {
+    let data = func[inst];
+    let args = &func[data.args];
+    let (Opcode::Mul, Some(&first), Some(&second)) = (data.opcode, args.first(), args.get(1))
+    else {
+        return Flags::NONE;
+    };
+    let (x, k) = match (constant(func, first), constant(func, second)) {
+        (None, Some(k)) => (first, k),
+        (Some(k), None) => (second, k),
+        _ => return Flags::NONE,
+    };
+    let both = data.flags.intersection(Flags::NSW.union(Flags::NUW));
+    match (now, lhs, rhs) {
+        (Opcode::Mul, Operand::Value(v), Operand::Constant { number, bits })
+            if v == x && bits < 128 && (number ^ k) & ((1 << bits) - 1) == 0 =>
+        {
+            both
+        }
+        (Opcode::Add, Operand::Value(v), Operand::Value(w)) if v == x && w == x && k == 2 => both,
+        (Opcode::Sub, Operand::Constant { number: 0, .. }, Operand::Value(v))
+            if v == x && k == -1 =>
+        {
+            data.flags.intersection(Flags::NSW)
+        }
+        (Opcode::Shl, Operand::Value(v), Operand::Constant { number, bits })
+            if v == x && (0..i128::from(bits) - 1).contains(&number) && k == 1 << number =>
+        {
+            both
+        }
+        _ => Flags::NONE,
+    }
 }
 
 /// Turns an instruction into the conversion a rule says computes the same thing.
@@ -2452,20 +2510,37 @@ mod tests {
     }
 
     #[test]
-    fn the_flags_of_the_instruction_a_strength_reduction_replaces_do_not_come_with_it() {
-        // An `nsw` on a multiplication is a promise about that multiplication. The addition below
-        // may well keep it, and a promise carried across a rewrite because it probably still holds
-        // is how a wrong one gets made.
+    fn a_strength_reduction_keeps_a_promise_only_where_it_is_the_same_promise() {
+        // An `nsw` on a multiplication is a promise about that multiplication, and carrying one
+        // across a rewrite because it probably still holds is how a wrong one gets made. These are
+        // the rewrites where it provably holds, and the two places next to them where it does not:
+        // `nuw` on a multiplication by `-1` is about the largest unsigned number, and a shift by
+        // thirty one is a multiplication by the most negative `int`.
         let i32 = Type::int(32);
-        let (_, mut func, block) = one_block(i32);
-        let x = func.append_param(block, i32);
-        let mut build = Builder::new(&mut func, block);
-        let two = build.iconst(i32, 2);
-        let doubled = build.binary(Opcode::Mul, x, two, Flags::NSW);
-        build.ret(&[doubled]);
-        assert!(simplify(&mut func));
-        let rucc_ir::Def::Result { inst, .. } = func[doubled].def else { panic!("not a result") };
-        assert_eq!(func[inst].flags, Flags::NONE);
+        let both = Flags::NSW.union(Flags::NUW);
+        for (by, left, flags, opcode, kept) in [
+            (2, false, both, Opcode::Add, both),
+            (-1, false, both, Opcode::Sub, Flags::NSW),
+            (128, false, Flags::NSW, Opcode::Shl, Flags::NSW),
+            (128, false, both, Opcode::Shl, both),
+            (128, true, Flags::NSW, Opcode::Shl, Flags::NSW),
+            (128, false, Flags::NONE, Opcode::Shl, Flags::NONE),
+            (i128::from(i32::MIN), false, Flags::NSW, Opcode::Shl, Flags::NONE),
+        ] {
+            let (_, mut func, block) = one_block(i32);
+            let x = func.append_param(block, i32);
+            let mut build = Builder::new(&mut func, block);
+            let k = build.iconst(i32, by);
+            let (lhs, rhs) = if left { (k, x) } else { (x, k) };
+            let product = build.binary(Opcode::Mul, lhs, rhs, flags);
+            build.ret(&[product]);
+            assert!(simplify(&mut func));
+            let rucc_ir::Def::Result { inst, .. } = func[product].def else {
+                panic!("not a result")
+            };
+            assert_eq!(func[inst].opcode, opcode, "{by}");
+            assert_eq!(func[inst].flags, kept, "{by}, {flags:?}, constant on the left {left}");
+        }
     }
 
     #[test]
