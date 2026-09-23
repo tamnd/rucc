@@ -115,7 +115,7 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    AbiList, AttrSet, Block, CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst,
+    AbiList, AttrSet, Block, CallInfo, Datum, Def, Extra, Float, Func, FuncId, Global, Imm, Inst,
     InstData, IntPred, Linkage, MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature,
     SymbolRef, Type, Value,
 };
@@ -149,17 +149,23 @@ const CHAIN: u32 = 12;
 const ROUNDS: u32 = 8;
 
 /// The names a fold may leave behind, sorted.
-const REPLACEMENTS: [&str; 10] = [
+const REPLACEMENTS: [&str; 16] = [
     "__memcpy_chk",
+    "ceilf",
+    "floorf",
     "fputc",
     "fputs",
     "fwrite",
     "memcpy",
+    "nearbyintf",
     "putchar",
     "puts",
+    "rintf",
+    "roundf",
     "strchr",
     "strcpy",
     "strlen",
+    "truncf",
 ];
 
 /// The names a checking call may become once its check cannot fail, sorted.
@@ -190,7 +196,7 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 49] = [
+const SOURCES: [&str; 55] = [
     "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
@@ -210,6 +216,8 @@ const SOURCES: [&str; 49] = [
     "__vsnprintf_chk",
     "__vsprintf_chk",
     "bcopy",
+    "ceil",
+    "floor",
     "fprintf",
     "fprintf_unlocked",
     "fputs",
@@ -219,9 +227,12 @@ const SOURCES: [&str; 49] = [
     "memcmp",
     "memmove",
     "mempcpy",
+    "nearbyint",
     "printf",
     "printf_unlocked",
     "rindex",
+    "rint",
+    "round",
     "sprintf",
     "stpcpy",
     "strcat",
@@ -238,6 +249,7 @@ const SOURCES: [&str; 49] = [
     "strrchr",
     "strspn",
     "strstr",
+    "trunc",
     "vfprintf",
     "vprintf",
 ];
@@ -274,6 +286,19 @@ enum Plan {
         /// The places of the arguments that go.
         drop: &'static [usize],
     },
+    /// The same rounding done in `float` on the `float` the argument was widened from, with the
+    /// answer widened after it.
+    ///
+    /// Every `float` is a `double` exactly, and rounding one to a whole number gives a whole number
+    /// a `float` holds, so `floor ((double) f)` and `(double) floorf (f)` are the same number.
+    Narrow {
+        /// The symbol the `float` spelling carries.
+        callee: Symbol,
+        /// What that function takes and returns.
+        signature: Signature,
+        /// The `float` the argument was widened from.
+        arg: Value,
+    },
 }
 
 impl Plan {
@@ -284,6 +309,10 @@ impl Plan {
         }
         let answer = match self {
             Plan::Drop | Plan::Unchecked { .. } => None,
+            Plan::Narrow { arg, .. } => {
+                *arg = renamed.get(arg).copied().unwrap_or(*arg);
+                None
+            }
             Plan::Answer(answer) => Some(answer),
             Plan::Swap { args, answer, .. } => {
                 for arg in args {
@@ -485,6 +514,10 @@ fn canonical(module: &Module, name: &str) -> Signature {
         "memcpy" => {
             Signature::new().with_params(&[Type::PTR, Type::PTR, size]).with_returns(&[Type::PTR])
         }
+        "ceilf" | "floorf" | "nearbyintf" | "rintf" | "roundf" | "truncf" => {
+            let float = Type::float(Float::F32);
+            Signature::new().with_params(&[float]).with_returns(&[float])
+        }
         "__memcpy_chk" => Signature::new()
             .with_params(&[Type::PTR, Type::PTR, size, size])
             .with_returns(&[Type::PTR]),
@@ -654,6 +687,7 @@ impl Site<'_> {
                     Plan::Answer(_) => "call to the library whose answer is known folded",
                     Plan::Swap { .. } => "call to the library folded",
                     Plan::Unchecked { .. } => "checking call whose check cannot fail made plain",
+                    Plan::Narrow { .. } => "rounding of a widened float done in float",
                 });
                 plans.push((inst, plan));
             }
@@ -733,6 +767,12 @@ impl Site<'_> {
                 })
             }
             "sprintf" => self.sprintf(data, &args, ignored),
+            "ceil" => self.narrow(data, &args, "ceilf"),
+            "floor" => self.narrow(data, &args, "floorf"),
+            "nearbyint" => self.narrow(data, &args, "nearbyintf"),
+            "rint" => self.narrow(data, &args, "rintf"),
+            "round" => self.narrow(data, &args, "roundf"),
+            "trunc" => self.narrow(data, &args, "truncf"),
             "__memcpy_chk" | "__memmove_chk" | "__mempcpy_chk" | "__memset_chk" => {
                 self.memory_chk(data, name, &args, ignored)
             }
@@ -1877,6 +1917,36 @@ impl Site<'_> {
         self.strings(value)?.iter().map(|text| text.len() as u128).max()
     }
 
+    /// The `float` spelling of a rounding to a whole number, where the `double` it was handed is a
+    /// `float` widened and its answer is a `double`, which is the fold gcc makes too.
+    ///
+    /// Only the roundings, since `sin ((double) f)` in `float` is a different number from the one
+    /// in `double` once it is widened back, and only from `float` to `double`, since a `long
+    /// double` is not one format on every target.
+    fn narrow(&self, data: &InstData, args: &[Value], callee: &'static str) -> Option<Plan> {
+        let &[wide] = args else { return None };
+        let double = Type::float(Float::F64);
+        let float = Type::float(Float::F32);
+        if self.func[wide].ty != double || self.answers_float(data) != Some(double) {
+            return None;
+        }
+        let Def::Result { inst, .. } = self.func[wide].def else { return None };
+        let widened = &self.func[inst];
+        let &[arg] = &self.func[widened.args] else { return None };
+        if widened.opcode != Opcode::FPExt || self.func[arg].ty != float {
+            return None;
+        }
+        let (callee, signature) = self.shapes.get(callee)?;
+        Some(Plan::Narrow { callee, signature, arg })
+    }
+
+    /// The type this call's one result has, where it has one and it is a floating point number.
+    fn answers_float(&self, data: &InstData) -> Option<Type> {
+        let mut results = data.results();
+        let ty = self.func[results.next()?].ty;
+        (results.next().is_none() && ty.is_float() && !ty.is_vector()).then_some(ty)
+    }
+
     /// A call to that name, or nothing where this module does not allow one.
     fn call(&self, callee: &'static str, args: Vec<Argument>) -> Option<Plan> {
         let (callee, signature) = self.shapes.get(callee)?;
@@ -2046,6 +2116,24 @@ fn apply(
             return answered(&mut module[id], inst, answer, width);
         }
         Plan::Swap { callee, signature, args, answer } => (callee, signature, args, answer),
+        Plan::Narrow { callee, signature, arg } => {
+            let func = &mut module[id];
+            let Some(old) = func[inst].results().next() else { return HashMap::new() };
+            let ty = func[old].ty;
+            let span = func.span(inst);
+            let varargs = func.push_abis(&[]);
+            let made = call(func, inst, callee, signature, varargs, &[arg]);
+            let narrow = func[made].results().next().expect("a rounding is one value");
+            let args = func.push_values(&[narrow]);
+            let data = InstData { args, ..InstData::new(Opcode::FPExt) };
+            let wide = func.create_inst(data, &[ty], span);
+            func.insert_before(wide, inst);
+            let value = func[wide].results().next().expect("a conversion is one value");
+            let forward = HashMap::from([(old, value)]);
+            uses::substitute(func, &forward);
+            func.remove_inst(inst);
+            return forward;
+        }
         Plan::Unchecked { callee, drop } => {
             let func = &mut module[id];
             let Extra::Call(at) = func[inst].extra else { return HashMap::new() };
@@ -4223,5 +4311,30 @@ block1(%5: i64):
         assert!(fits.contains("call @memcpy("), "{fits}");
         let short = folded(&text.replace("SIZE", "7"));
         assert!(short.contains("call @__memcpy_chk("), "{short}");
+    }
+
+    /// `floor ((double) f)` is `floorf (f)` widened, whether the answer is kept as a `double` or
+    /// taken back to a `float`, and `sin` of the same widened `float` stays a call to `sin`.
+    #[test]
+    fn rounding_a_widened_float_is_done_in_float() {
+        let text = r#"
+func @floor(f64) -> f64, linkage(external);
+func @sin(f64) -> f64, linkage(external);
+func @use(f64, f64, f64), linkage(external);
+
+func @g(f32, f64), linkage(external) {
+block0(%0: f32, %1: f64):
+    %2 = fpext.f64 %0
+    %3 = call @floor(%2) : (f64) -> f64
+    %4 = call @sin(%2) : (f64) -> f64
+    %5 = call @floor(%1) : (f64) -> f64
+    call @use(%3, %4, %5) : (f64, f64, f64)
+    return
+}
+"#;
+        let out = folded(text);
+        assert!(out.contains("call @floorf(%0) : (f32) -> f32"), "{out}");
+        assert_eq!(out.matches("call @floor(").count(), 1, "the double one stays, {out}");
+        assert_eq!(out.matches("call @sin(").count(), 1, "{out}");
     }
 }

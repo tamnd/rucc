@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `floor`, `ceil`, `trunc`, `round`, `rint` and `nearbyint` of a `float` widened to `double` become the `float` spelling of the call with its answer widened back, as gcc does, while `sin` and the other functions whose answer changes with the precision stay as they are. `execute/20030125-1.c` passes at all six levels. Part of tamnd/rucc#392.
+
 ## 0.11.0
 
 ### Added
