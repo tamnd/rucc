@@ -95,6 +95,26 @@ be genuinely target-aware rather than a table of nominal instruction counts, and
 things per target: the legal addressing mode forms, the cost of an address computation not expressible
 as an addressing mode, and the number of allocatable registers for the set-size penalty.
 
+*A base measured from something.* A group over a global array has a base that is the address of
+the global plus a number, and the arithmetic on invariants will not scale or negate an address,
+because it cannot tell two of them apart. Pricing a candidate for such a group asks for the base
+minus the candidate's base times a scale, so for a long time every candidate came back with no
+price, including the walk made for that very group. The search then had no set that served every
+use and returned the one it started from, which kept the counter beside the walk in every loop over
+a global (tamnd/rucc#762). The price now takes the anchor off both bases first. A candidate
+measured from the same global at a scale of one cancels it, which is the walk serving its own group
+and pays a plain base. A candidate measured from nothing leaves the global as the base register,
+and since nothing moves the address of a global out of a loop and x86-64 has no mode holding both
+a symbol and an index, that candidate pays a `lea` on every turn on top of the mode. A value use
+measured from a global is never served by a number.
+
+Over the corpus this moves six loops from keeping their own variables to changing them (394 and
+376 before, 388 and 382 after). The instruction text at `-O2` grows by 47 over 14 sources, and the
+instructions those programs execute fall by 293 in total with the same output. The growth is a
+callee saved register pushed and popped in `main` when a nested loop keeps the walk beside a counter
+it still reads for a value, which costs a few instructions once and saves more than that over the
+outer loop.
+
 *Rewriting*, then document 17's DCE removes the now-dead original variables. The pass does not delete
 anything itself, which keeps it simpler and follows the general discipline of one job per pass.
 

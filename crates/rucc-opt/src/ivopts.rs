@@ -1015,22 +1015,66 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
     }
     let Some(scale) = ratio(cand.chrec.step, group.chrec.step) else { return Cost::INFINITE };
     // What is left over once the candidate has been scaled up to the group's step, which is the
-    // part that has to be added on and is the same on every iteration.
-    let scaled = match cand.chrec.base.times(Invariant::number(scale)) {
-        Some(scaled) => scaled,
-        None => return Cost::INFINITE,
-    };
-    let Some(rest) = group.chrec.base.minus(scaled) else { return Cost::INFINITE };
-    // Two symbols is two registers before the scale is applied, which is a shape no addressing
-    // mode holds, so there is no price to quote for it. A symbol read at a wider type than its own
-    // is not a register either: it is an extension in front of one, and what the modes hold is the
-    // register.
-    let Some(rest) = rest.plain().filter(|rest| rest.read.is_none()) else {
+    // part that has to be added on and is the same on every iteration. Two symbols is two
+    // registers before the scale is applied, which is a shape no addressing mode holds, so there
+    // is no price to quote for it. A symbol read at a wider type than its own is not a register
+    // either: it is an extension in front of one, and what the modes hold is the register.
+    let Some((left, rest)) = apart(group.chrec.base, cand.chrec.base, scale) else {
         return Cost::INFINITE;
     };
+    if rest.read.is_some() {
+        return Cost::INFINITE;
+    }
+    let anchored = left.is_some();
     match group.kind {
-        Kind::Address => address_cost(table, scale, rest) + index_cost(table, cand.chrec.ty),
+        Kind::Address => {
+            address_cost_on(table, scale, rest, anchored)
+                + index_cost(table, cand.chrec.ty)
+                + base_cost(table, left)
+        }
+        // A value measured from a pointer is a pointer, and neither kind of value use is one.
+        Kind::Compare | Kind::Generic if anchored => Cost::INFINITE,
         Kind::Compare | Kind::Generic => value_cost(table, group.chrec.ty, scale, rest),
+    }
+}
+
+/// How far a group's base is from `scale` of a candidate's, and whether what is left over is
+/// still measured from something.
+///
+/// The arithmetic on [`Invariant`] refuses to scale or negate a base measured from something, so
+/// asking it for the difference directly refused every group over a global array, including the
+/// walk made for that very group. The search then had no set that served every use and handed back
+/// the one it started from, which kept the counter beside the walk in every such loop. That is
+/// tamnd/rucc#762. Taking the anchor off first is what makes the question answerable.
+///
+/// A candidate measured from something serves a group measured from the same thing at a scale of
+/// one, and the two cancel, which is a walk serving its own group or one a constant apart from it.
+/// A candidate measured from nothing leaves the group's anchor where it was, and that anchor is a
+/// base register: the address of a global worked out once in front of the loop, or the pointer
+/// the loop was handed.
+fn apart(base: Invariant, from: Invariant, scale: i128) -> Option<(Option<Anchor>, Plain)> {
+    let (anchor, base) = base.loose();
+    let (from_anchor, from) = from.loose();
+    let left = match (anchor, from_anchor) {
+        (_, None) => anchor,
+        (Some(anchor), Some(from_anchor)) if anchor == from_anchor && scale == 1 => None,
+        _ => return None,
+    };
+    let rest = base.minus(from.times(Invariant::number(scale))?)?.plain()?;
+    Some((left, rest))
+}
+
+/// What the base register of an address costs to have in hand on every turn.
+///
+/// Nothing for a value, which is in a register already. The address of a global is not: nothing
+/// moves a `global_addr` out of a loop, which [`crate::scev::Anchor`] explains, and the back end
+/// cannot put a symbol and an index in one addressing mode, so an address that indexes off a global
+/// works the address of the global out again every time round. A walk made for the group started
+/// from that address once, in front of the loop, and does not pay it.
+fn base_cost(table: &CostTable, left: Option<Anchor>) -> Cost {
+    match left {
+        Some(Anchor::Address(_)) => Cost::cycles(table.lea),
+        Some(Anchor::Value(_)) | None => Cost::ZERO,
     }
 }
 
@@ -1072,15 +1116,28 @@ fn ratio(step: Invariant, wanted: Invariant) -> Option<i128> {
 /// the candidate is what the index holds. That is the ordinary `a[i]`: `a` is the base, `i` is the
 /// index, and the width of an element is the scale.
 fn address_cost(table: &CostTable, scale: i128, rest: Plain) -> Cost {
+    address_cost_on(table, scale, rest, false)
+}
+
+/// The same, with `anchored` saying the invariant part is measured from something as well.
+///
+/// That something is a base register, so it is the symbolic part of the address when `rest` has
+/// none, and a second register the modes have no room for when `rest` has one.
+fn address_cost_on(table: &CostTable, scale: i128, rest: Plain, anchored: bool) -> Cost {
     let indexed = scale != 1;
     let displaced = rest.offset != 0;
-    let symbolic = rest.value.is_some() && rest.scale != 0;
+    let own = rest.value.is_some() && rest.scale != 0;
+    if anchored && own {
+        return Cost::INFINITE;
+    }
+    let symbolic = own || anchored;
     if indexed && !legal_scale(scale) {
         // A scale no addressing mode holds has to be multiplied out, and then the product is a
         // plain register the other modes can still use.
-        return Cost::cycles(scaling(table, width(rest), scale)) + address_cost(table, 1, rest);
+        return Cost::cycles(scaling(table, width(rest), scale))
+            + address_cost_on(table, 1, rest, anchored);
     }
-    if symbolic && rest.scale != 1 {
+    if own && rest.scale != 1 {
         // A base is a register, and this one is a multiple of a register. Multiplying it out
         // leaves an address of the same shape whose invariant part is one of something, which
         // every arm below can then read as a base.
@@ -2425,6 +2482,71 @@ mod tests {
         let outside = func.insts(entry).filter(|&at| func[at].opcode == Opcode::GlobalAddr).count();
         assert_eq!(outside, 1, "the address the walk starts from is worked out before the loop");
         sound(&func, &mut names);
+    }
+
+    /// The same loop again, asked what it keeps, which is #762.
+    ///
+    /// The walk over the global serves the store and the exit test both, so the counter has
+    /// nothing left to do and goes. Pricing every candidate for a group over a global as no price
+    /// at all used to leave the search with no set that served the store, and it handed back the
+    /// counter and the walk together.
+    #[test]
+    fn a_walk_over_a_global_array_is_the_one_variable_the_loop_keeps() {
+        let mut names = Interner::new();
+        let (mut func, entry, _) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+
+        let grid = names.intern("grid");
+        let mut build = Builder::new(&mut func, it.body);
+        let named = InstData { extra: Extra::Symbol(grid), ..InstData::new(Opcode::GlobalAddr) };
+        let base = build.value(named, Type::PTR);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Note, CHOSEN), 1, "the walk, and not the counter beside it");
+        assert_eq!(stats.count(Kind::Note, CHANGED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Ne, "the test is on the pointer now");
+        sound(&func, &mut names);
+    }
+
+    /// What serving a group over a global costs, from the walk made for it and from the counter.
+    ///
+    /// The walk is measured from the same global, so the two cancel and what is left is a plain
+    /// base. The counter leaves the global where it was, which makes it the base register, and
+    /// nothing moves the address of a global out of a loop, so that is a `lea` on every turn on
+    /// top of the mode and the widening. A value use of either is no use at all.
+    #[test]
+    fn a_group_over_a_global_is_priced_from_its_own_walk_and_from_the_counter() {
+        let mut names = Interner::new();
+        let machine = priced();
+        let table = machine.table().unwrap();
+        let grid = Invariant::address(names.intern("grid"));
+        let step = Invariant::number(4);
+        let walk = Chrec { base: grid, step, ty: Type::PTR, flags: Flags::NONE };
+        let kind = super::Kind::Address;
+        let mut group = Group { kind, chrec: walk, uses: Vec::new(), exit: false };
+        let own = Cand { chrec: walk, origin: Origin::Derived };
+        let counter = Cand {
+            chrec: Chrec {
+                base: Invariant::number(0),
+                step: Invariant::number(1),
+                ty: Type::int(64),
+                flags: Flags::NONE,
+            },
+            origin: Origin::Original,
+        };
+        assert_eq!(serve(table, &group, &own), table.addr_cost(AddrMode::Base));
+        assert_eq!(
+            serve(table, &group, &counter),
+            table.addr_cost(AddrMode::BaseIndexScale) + Cost::cycles(table.lea)
+        );
+        group.kind = super::Kind::Compare;
+        assert_eq!(serve(table, &group, &counter), Cost::INFINITE);
     }
 
     /// Section 28.3 calls this the cheapest large win in the pass, so it gets the plainest test.

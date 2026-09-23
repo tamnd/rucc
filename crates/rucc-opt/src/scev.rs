@@ -245,6 +245,16 @@ impl Invariant {
         ))
     }
 
+    /// What it is measured from, when anything, and the rest of it with that taken off.
+    ///
+    /// For a reader that has to cancel the thing two expressions are measured from before it can
+    /// do arithmetic on what is left, which [`Invariant::minus`] will not do on its own because
+    /// it has no way to know the two are the same object.
+    #[must_use]
+    pub fn loose(self) -> (Option<Anchor>, Self) {
+        (self.on, Self { on: None, ..self })
+    }
+
     /// Whether the two are the same expression apart from the number added to them.
     #[must_use]
     pub fn alike(self, other: Self) -> bool {
