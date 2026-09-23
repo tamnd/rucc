@@ -105,13 +105,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, Builder, Extra, Func, Inst, InstData, IntPred, Opcode, Type, Value};
+use rucc_ir::{Block, Builder, Def, Extra, Func, Inst, InstData, IntPred, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::purity::Facts;
-use crate::scev::{Count, Invariant, Plain, Reading, Scev};
+use crate::scev::{Assumption, Count, Invariant, Plain, Reading, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const DELETED: &str = "loop taken out, it comes back and leaves nothing behind";
@@ -164,6 +164,14 @@ impl Pass for LoopDelete {
             an.clear();
             crate::simplify_cfg::sweep(func, an, &mut stats);
         }
+        // What only the loop read goes with it. This is the last pass in every pipeline, so there
+        // is no dead code elimination after it to take out what a deleted loop leaves behind, and
+        // what it leaves is not always nothing: a countdown from ivopts starts from a clamp worked
+        // out in front of the loop, and that clamp is read by the loop and by nothing else. What
+        // it says about the instructions is dead code elimination's to say, not this pass's.
+        if !done.is_empty() {
+            crate::dce::dce_in(func, an.purity(), &mut Fuel::unlimited());
+        }
         an.clear();
         stats
     }
@@ -184,6 +192,8 @@ struct Job {
     args: Vec<Value>,
     /// Every value the loop defines that anything outside it reads, and what it ends up holding.
     ends: Vec<(Value, Leaves)>,
+    /// Whether the count is only right for a loop that was entered, which is what the clamp is for.
+    entered: bool,
 }
 
 /// What a value the loop defines holds by the time anything outside it looks.
@@ -301,6 +311,7 @@ fn consider(
     // Taken here rather than inside [`ending`] because it belongs to the exit test rather than to
     // any one value the loop hands over, so every one of them owes the same widening.
     let reading = bound.reading();
+    let entered = bound.assumptions().contains(&Assumption::Entered);
     let count = bound.comes_back().ok_or(NO_COUNT)?;
 
     let term = func.terminator(only.from).ok_or(SHAPE)?;
@@ -330,7 +341,7 @@ fn consider(
         );
         ends.push((value, end));
     }
-    Ok(Job { header, preheader, exit: only.to, inside, args, ends })
+    Ok(Job { header, preheader, exit: only.to, inside, args, ends, entered })
 }
 
 /// Every value the loop defines that a block outside it names, in the order they turn up.
@@ -439,10 +450,10 @@ fn names(leaves: Leaves) -> Vec<Value> {
 /// The block a value is defined in.
 fn defined_in(func: &Func, value: Value) -> Block {
     match func[value].def {
-        rucc_ir::Def::Result { inst, .. } => {
+        Def::Result { inst, .. } => {
             func.block_of(inst).expect("a value in use is defined in a block")
         }
-        rucc_ir::Def::Param { block, .. } => block,
+        Def::Param { block, .. } => block,
     }
 }
 
@@ -461,7 +472,8 @@ fn apply(func: &mut Func, job: &Job) -> usize {
             Leaves::Built { ty, base, step, count, reading } => {
                 let all = match times {
                     Some(had) => had,
-                    None => *times.insert(clamped(func, term, count, reading)),
+                    None if job.entered => *times.insert(clamped(func, term, count, reading)),
+                    None => *times.insert(widened(func, term, count, reading)),
                 };
                 built(func, term, ty, base, step, all)
             }
@@ -534,7 +546,38 @@ fn write(func: &mut Func, before: Inst, ty: Type, end: Invariant) -> Value {
 /// in step. It lives here because this is where it was written and where the argument for it is.
 pub(crate) fn clamped(func: &mut Func, before: Inst, count: Plain, reading: Reading) -> Value {
     let word = Type::int(64);
-    let on = count.value.expect("a count that is an expression is built on a value");
+    let wide = widened(func, before, count, reading);
+    let none = crate::ivopts::number(func, before, word, 0);
+    let args = func.push_values(&[wide, none]);
+    let test =
+        InstData { args, extra: Extra::IntPred(IntPred::Sgt), ..InstData::new(Opcode::ICmp) };
+    let entered = made(func, before, test, word.with_lane(Type::I1));
+    let args = func.push_values(&[entered, wide, none]);
+    made(func, before, InstData { args, ..InstData::new(Opcode::Select) }, word)
+}
+
+/// How many times the back edge is taken, worked out in front of the loop, for a count with nothing
+/// to clamp.
+///
+/// The same `read(value) * scale + offset` in sixty four bits as [`clamped`], without the `max`. A
+/// count that does not rest on [`Assumption::Entered`] is never negative, and neither is one the
+/// loop guard shows is not, so the clamp would be a `select` choosing the same thing every time.
+///
+/// A count built on a sum of something and a number is built on the something, with the number
+/// folded into the offset. Nothing after this pass would fold the two, and the countdown ivopts
+/// writes starts one above its count, so the count read back off it is exactly that shape. The fold
+/// is exact because all of this is sixty four bit arithmetic that wraps, and so is the sum.
+pub(crate) fn widened(func: &mut Func, before: Inst, count: Plain, reading: Reading) -> Value {
+    let word = Type::int(64);
+    let mut on = count.value.expect("a count that is an expression is built on a value");
+    let mut offset = count.offset;
+    if count.scale == 1 && func[on].ty == word {
+        if let Some((inner, more)) = plus_a_number(func, on) {
+            if let Some(sum) = offset.checked_add(more) {
+                (on, offset) = (inner, sum);
+            }
+        }
+    }
     let mut wide = on;
     if func[on].ty.bits() < 64 {
         let widen = match reading {
@@ -547,17 +590,22 @@ pub(crate) fn clamped(func: &mut Func, before: Inst, count: Plain, reading: Read
         let by = crate::ivopts::number(func, before, word, count.scale);
         wide = arith(func, before, Opcode::Mul, wide, by, word);
     }
-    if count.offset != 0 {
-        let by = crate::ivopts::number(func, before, word, count.offset);
+    if offset != 0 {
+        let by = crate::ivopts::number(func, before, word, offset);
         wide = arith(func, before, Opcode::Add, wide, by, word);
     }
-    let none = crate::ivopts::number(func, before, word, 0);
-    let args = func.push_values(&[wide, none]);
-    let test =
-        InstData { args, extra: Extra::IntPred(IntPred::Sgt), ..InstData::new(Opcode::ICmp) };
-    let entered = made(func, before, test, word.with_lane(Type::I1));
-    let args = func.push_values(&[entered, wide, none]);
-    made(func, before, InstData { args, ..InstData::new(Opcode::Select) }, word)
+    wide
+}
+
+/// The value this one adds a number to, and the number, when it is that.
+fn plus_a_number(func: &Func, value: Value) -> Option<(Value, i128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::Add {
+        return None;
+    }
+    let [inner, by] = func[func[inst].args] else { return None };
+    let (imm, ty) = crate::fold::constant(func, by)?;
+    Some((inner, imm.signed(ty)))
 }
 
 /// `base + step * times`, worked out in front of the loop in the type the value evolved in.

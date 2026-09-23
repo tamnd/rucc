@@ -117,6 +117,8 @@
 //! misses that pays for three. Only address uses group, because a constant offset is free inside
 //! an addressing mode and costs an add anywhere else.
 
+use std::collections::HashSet;
+
 use rucc_base::Symbol;
 use rucc_cost::{AddrMode, Cost, CostTable, Cycles, RegClass, Width, heuristics};
 use rucc_ir::{
@@ -128,7 +130,8 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
-use crate::scev::{Anchor, Chrec, Count, Evolution, Invariant, Plain, Reading, Scev};
+use crate::range::query::Ranges;
+use crate::scev::{Anchor, Assumption, Chrec, Count, Evolution, Invariant, Plain, Reading, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 const NO_TARGET: &str =
@@ -220,9 +223,10 @@ impl Pass for Ivopts {
         let mut tallies = Vec::new();
         {
             let mut scev = Scev::new(func, cfg, loops);
-            let it = Loop { func, loops, doms, machine, table };
+            let mut ranges = Ranges::new(func, cfg, doms);
+            let it = Loop { func, loops, doms, cfg, machine, table };
             for id in loops.all() {
-                consider(&it, &mut scev, id, &mut stats, &mut plans, &mut tallies);
+                consider(&it, &mut scev, &mut ranges, id, &mut stats, &mut plans, &mut tallies);
             }
         }
         for tally in &tallies {
@@ -384,12 +388,56 @@ struct Plan {
 struct Tally {
     /// The loop it goes round.
     id: LoopId,
-    /// The type it counts in, which is the one the candidate was priced in.
+    /// The type it counts in.
     ty: Type,
-    /// How many turns the loop takes, which is one less than where the variable starts.
-    count: i128,
+    /// Where it starts, which is one above the number of turns.
+    start: Start,
     /// The exit test to ask of it.
     aim: Aim,
+}
+
+/// Where a countdown starts, which is one above the number of turns the loop takes.
+///
+/// Either a number or an expression to work out in the preheader, for the same reason a walk's
+/// reach is one of those two: which it is only ever follows from which the count was.
+#[derive(Clone, Copy, Debug)]
+enum Start {
+    /// This number, from a count that was a number.
+    Fixed(i128),
+    /// The count, to be clamped at zero where the loop starts and then have one added to it.
+    Worked(Plain),
+}
+
+/// Where a countdown for a loop taking this many turns would start, and the type it would count in.
+///
+/// A count that is a number starts the variable in the type the candidate was priced in, which is
+/// the type the loop's own counter is in, and has to leave room for the one on top. A count that is
+/// an expression starts it in sixty four bits whatever the counter is, because that is the width
+/// [`crate::loop_delete::clamped`] works the count out in and nothing is gained by cutting it back:
+/// a decrement is one instruction at either width. What has to fit is then the largest the
+/// expression can be, which is the same bound [`reach`] puts on a walk, asked with a step of one
+/// and one more on the end.
+///
+/// `None` is a countdown that is not written, and [`candidates`] asks this before it makes one, so
+/// the search is never offered a variable the rewrite would then have to refuse.
+fn starts(func: &Func, count: Count, ty: Type) -> Option<(Type, Start)> {
+    match count {
+        Count::Exact(count) => {
+            let start = i128::try_from(count).ok()?.checked_add(1)?;
+            (start < 1i128 << (ty.bits() - 1)).then_some((ty, Start::Fixed(start)))
+        }
+        Count::Symbolic(count) => {
+            // The same three things [`aim`] asks of a count before a walk is written against it,
+            // for the same reasons, and then the size.
+            let plain = count.plain().filter(|plain| plain.read.is_none())?;
+            let on = plain.value.filter(|_| plain.scale != 0)?;
+            let bits = func[on].ty.bits();
+            let most = 1i128.checked_shl(bits)?.checked_mul(plain.scale.checked_abs()?)?;
+            let most = most.checked_add(plain.offset.checked_abs()?)?.checked_add(1)?;
+            i64::try_from(most).ok()?;
+            Some((Type::int(64), Start::Worked(plain)))
+        }
+    }
 }
 
 /// The comparison a loop leaves on, read into the pieces section 28.4's rewrite needs.
@@ -405,6 +453,10 @@ struct Aim {
     reading: Reading,
     /// Whether the loop keeps going when the comparison holds.
     stays: bool,
+    /// Whether a count that is an expression has to be clamped at zero before anything uses it,
+    /// which it does when it rests on [`crate::scev::Assumption::Entered`] and nothing in front of
+    /// the loop says it is not negative.
+    entered: bool,
 }
 
 /// What every loop in one function is decided against, which is the same five things each time.
@@ -415,6 +467,8 @@ struct Loop<'a> {
     loops: &'a Loops,
     /// Which blocks reach which, for whether the exit test is asked on every turn.
     doms: &'a Dominators,
+    /// Its edges, for where each loop is entered from.
+    cfg: &'a Cfg,
     /// The machine, for how many registers there are to spare.
     machine: Machine,
     /// Its prices, which section 28.2 says the answer is a fact about.
@@ -425,12 +479,13 @@ struct Loop<'a> {
 fn consider(
     it: &Loop<'_>,
     scev: &mut Scev<'_>,
+    ranges: &mut Ranges<'_>,
     id: LoopId,
     stats: &mut Stats,
     plans: &mut Vec<Plan>,
     tallies: &mut Vec<Tally>,
 ) {
-    let Loop { func, loops, doms, machine, table } = *it;
+    let Loop { func, loops, doms, cfg, machine, table } = *it;
     let wants = collect(func, loops, scev, id);
     if wants.is_empty() {
         return;
@@ -448,7 +503,13 @@ fn consider(
 
     // Which group is the exit test, worked out before anything is priced, because a test section
     // 28.4 can move is a test that costs the same whichever variable it is asked of.
-    let aimed = aim(func, loops, doms, scev, id);
+    let aimed = aim(func, loops, doms, scev, id).map(|mut at| {
+        // Asked here rather than in `aim` because it is a question about the ranges and not about
+        // the test, and a loop with no preheader is refused later with a reason of its own.
+        let pre = loops.preheader(cfg, id);
+        at.entered = at.entered && !pre.is_some_and(|pre| settled(ranges, pre, at));
+        at
+    });
     let mut groups = group(wants);
     for one in &mut groups {
         let is_exit = |at: Aim| one.kind == Kind::Compare && one.uses.iter().any(|u| u.at == at.at);
@@ -463,6 +524,13 @@ fn consider(
     }
 
     let mut cands = candidates(func, loops, scev, id, &groups);
+    // A countdown is priced as the variable that takes the counter's place, which it only is when
+    // the exit test is all that reads the counter. `collect` looks at this loop's own blocks, so a
+    // counter a loop inside this one reads, or one read after the loop, looks to the search like a
+    // counter nothing else wants, and a countdown beside a counter that stays is one more.
+    if aimed.is_ok_and(|at| read_elsewhere(func, loops, id, at)) {
+        cands.retain(|cand| cand.origin != Origin::Countdown);
+    }
     prune(&mut cands, table, &groups, stats);
     for _ in &cands {
         stats.note(CANDIDATE);
@@ -529,22 +597,22 @@ fn consider(
     };
     // A countdown wins the test when the search kept one, because it was priced against the walk
     // and against the counter and came out ahead of both. A walk gets it otherwise.
-    match counting {
-        Some(&had) => {
-            let cand = &cands[had];
-            let count = cand.chrec.base.as_number().expect("a countdown starts at a number");
-            // The variable counts in the type the candidate was priced in, so the number it
-            // starts at has to be a number that type holds, and it starts one above the number of
-            // turns. A loop taking more turns than its own counter can count is not a loop, so
-            // this is a guard rather than a case.
-            let most = 1i128 << (cand.chrec.ty.bits() - 1);
-            if count + 1 >= most {
+    //
+    // The count is the one [`aim`] read rather than the one the candidate was made from. They are
+    // the same count out of the same `Bound`, and the one here has been through the checks a count
+    // has to pass before anything is written against it. [`starts`] said yes to it once already,
+    // when the candidate was made, so a no here is a guard rather than a case, and a walk still
+    // takes the test when there is one.
+    let counted = counting.and_then(|&had| starts(func, at.count, cands[had].chrec.ty));
+    match counted {
+        Some((ty, start)) => tallies.push(Tally { id, ty, start, aim: at }),
+        None => {
+            if counting.is_some() {
                 stats.missed(COUNT_TOO_FAR);
+            }
+            if walks == 0 {
                 return;
             }
-            tallies.push(Tally { id, ty: cand.chrec.ty, count, aim: at });
-        }
-        None => {
             let first = plans.len() - walks;
             plans[first].aim = Some(at);
         }
@@ -656,6 +724,7 @@ fn aim(
     // is a test that never refuses.
     let Some(bound) = scev.bound(id) else { return Err(NOT_A_COUNT) };
     let reading = bound.reading();
+    let entered = bound.assumptions().contains(&Assumption::Entered);
     let Some(count) = bound.comes_back() else { return Err(NOT_A_COUNT) };
     if let Count::Symbolic(count) = count {
         // The same three things `crate::loop_delete` asks of a count before it writes one down. A
@@ -671,7 +740,93 @@ fn aim(
             return Err(COUNT_NOT_WRITABLE);
         }
     }
-    Ok(Aim { at: inst, branch, count, reading, stays })
+    Ok(Aim { at: inst, branch, count, reading, stays, entered })
+}
+
+/// Whether anything but the exit test and the counter's own steps reads the counter.
+///
+/// The counter is the cycle through the header that the test's moving side is on: the parameters
+/// it passes through, the additions and subtractions of something the loop does not change that
+/// take it round, and the block arguments that carry it from one of those to the next. Anything on that cycle read by anything off
+/// it is a reader, wherever in the function it is. A value this does not know how to follow is
+/// taken to be read, since the cost of being wrong that way is a countdown not written.
+fn read_elsewhere(func: &Func, loops: &Loops, id: LoopId, aim: Aim) -> bool {
+    // A constant is invariant wherever it was written, and one written inside the loop is not
+    // outside it, so it is asked about first.
+    let moving = |value: &Value| {
+        crate::fold::constant(func, *value).is_none() && !loops.is_invariant(func, id, *value)
+    };
+    let mut cycle: HashSet<Value> = HashSet::new();
+    let mut steps: HashSet<Inst> = HashSet::new();
+    let mut work: Vec<Value> = func[func[aim.at].args].iter().copied().filter(moving).collect();
+    while let Some(value) = work.pop() {
+        if !cycle.insert(value) {
+            continue;
+        }
+        match func[value].def {
+            // What arrives at a parameter from inside the loop, which for the header is what the
+            // latches carry back and for any other block is what it was handed on the way.
+            Def::Param { block, index } if loops.contains(id, block) => {
+                for &from in loops.blocks(id) {
+                    let Some(term) = func.terminator(from) else { return true };
+                    for call in func.successors(term).filter(|call| call.block == block) {
+                        work.extend(func[call.args].get(index as usize).copied());
+                    }
+                }
+            }
+            Def::Result { inst, .. }
+                if matches!(func[inst].opcode, Opcode::Add | Opcode::Sub)
+                    && func.block_of(inst).is_some_and(|block| loops.contains(id, block)) =>
+            {
+                steps.insert(inst);
+                work.extend(func[func[inst].args].iter().copied().filter(moving));
+            }
+            _ => return true,
+        }
+    }
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if inst == aim.at || steps.contains(&inst) {
+                continue;
+            }
+            if func[func[inst].args].iter().any(|arg| cycle.contains(arg)) {
+                return true;
+            }
+            for call in func.successors(inst) {
+                let params = &func[call.block].params;
+                let carried = func[call.args].iter().enumerate().any(|(index, arg)| {
+                    let onward = params.get(index).is_some_and(|param| cycle.contains(param));
+                    cycle.contains(arg) && !onward
+                });
+                if carried {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a count that is an expression is known not to be negative where the loop is entered.
+///
+/// The loop guard is what usually says so. `for (i = 0; i < n; i++)` is compiled behind an `if (0
+/// < n)` that header copying put there, and a count of `n` asked about in the preheader behind it
+/// is at least one. The range analysis reads that off the branch and this reads it off the range,
+/// at each end of the range because the count is a line and a line is least at one of its ends.
+fn settled(ranges: &mut Ranges<'_>, preheader: Block, aim: Aim) -> bool {
+    let Count::Symbolic(count) = aim.count else { return true };
+    let Some(plain) = count.plain() else { return false };
+    let Some(on) = plain.value else { return false };
+    let range = ranges.at(on, preheader);
+    let ends = match aim.reading {
+        Reading::Signed => range.signed_bounds(),
+        Reading::Unsigned => range
+            .unsigned_bounds()
+            .and_then(|(low, high)| Some((i128::try_from(low).ok()?, i128::try_from(high).ok()?))),
+    };
+    let Some((low, high)) = ends else { return false };
+    let least = |end: i128| end.checked_mul(plain.scale)?.checked_add(plain.offset);
+    least(low).zip(least(high)).is_some_and(|(one, other)| one.min(other) >= 0)
 }
 
 /// Whether the value this instruction computes moves by a fixed step around the loop.
@@ -751,14 +906,15 @@ fn candidates(
         add(Cand { chrec: one.chrec, origin: Origin::Derived });
     }
 
-    // Section 28.4's countdown, worth a candidate only when the trip count is a number the
-    // analysis will stand behind, because a countdown from a guess is a loop that runs the wrong
-    // number of times. `under_undefined_overflow` rather than `proven` because C is the language
-    // and `crate::scev` documents that `proven` answers nothing for any `for (int i = 0; i < n;
-    // i++)` in it.
+    // Section 28.4's countdown, worth a candidate only when the trip count is one the analysis
+    // will stand behind, because a countdown from a guess is a loop that runs the wrong number of
+    // times. `comes_back` rather than `proven`, because C is the language and `crate::scev`
+    // documents that `proven` answers nothing for any `for (int i = 0; i < n; i++)` in it, and
+    // rather than `under_undefined_overflow` for the reason [`aim`] gives: the one assumption
+    // between the two is `Entered`, and the clamp the count is started from pays for it.
     if let Some(bound) = scev.bound(id) {
-        if let Some(count) = bound.under_undefined_overflow() {
-            if let Some(chrec) = countdown(count, groups) {
+        if let Some(count) = bound.comes_back() {
+            if let Some(chrec) = countdown(func, count, groups) {
                 add(Cand { chrec, origin: Origin::Countdown });
             }
         }
@@ -770,18 +926,22 @@ fn candidates(
 ///
 /// It starts at the trip count and steps down by one, so the exit test becomes a comparison
 /// against zero, which section 28.4 says every one of rucc's three targets gets cheaply. The type
-/// comes from a group rather than from the count, because the count is a number and a number has
-/// no width of its own.
-fn countdown(count: Count, groups: &[Group]) -> Option<Chrec> {
-    let Count::Exact(iterations) = count else { return None };
-    let iterations = i128::try_from(iterations).ok()?;
+/// comes from a group rather than from the count, because a count that is a number has no width of
+/// its own, and [`starts`] is what says whether a countdown from here can be written at all.
+///
+/// A count the loop works out is a candidate as well as a count that is a number, and it is the
+/// common one: `candidates` makes a countdown 35 times over the SQLite amalgamation from numbers
+/// and nearly every other loop in it counts to something the program read. What it starts at is
+/// then that expression rather than a number, which the search does not need to know, since the
+/// exit test is the only thing a countdown serves and the price of that is the same either way.
+fn countdown(func: &Func, count: Count, groups: &[Group]) -> Option<Chrec> {
     let ty = groups.iter().map(|one| one.chrec.ty).find(|ty| ty.is_int())?;
-    Some(Chrec {
-        base: Invariant::number(iterations),
-        step: Invariant::number(-1),
-        ty,
-        flags: Flags::NONE,
-    })
+    let (ty, _) = starts(func, count, ty)?;
+    let base = match count {
+        Count::Exact(iterations) => Invariant::number(i128::try_from(iterations).ok()?),
+        Count::Symbolic(count) => count,
+    };
+    Some(Chrec { base, step: Invariant::number(-1), ty, flags: Flags::NONE })
 }
 
 /// Drops the candidates no group would pick and the loop does not already have.
@@ -1346,7 +1506,24 @@ fn count_down(
 
     let header = loops.header(tally.id);
     let term = func.terminator(pre).expect("a preheader ends in a jump to the header");
-    let start = number(func, term, tally.ty, tally.count + 1);
+    let start = match tally.start {
+        Start::Fixed(start) => number(func, term, tally.ty, start),
+        // The clamp is what pays for `Entered`, as it does for a walk: a count worked out from a
+        // distance that came out negative is a loop that goes round no times, and a variable that
+        // starts at one refuses the first time it is asked. The one on top promises nothing about
+        // overflow and does not need to, since [`starts`] has already shown the sum fits.
+        Start::Worked(count) if tally.aim.entered => {
+            let times = crate::loop_delete::clamped(func, term, count, tally.aim.reading);
+            let one = number(func, term, tally.ty, 1);
+            crate::loop_delete::arith(func, term, Opcode::Add, times, one, tally.ty)
+        }
+        // With nothing to clamp, the one on top is one more on the count's own offset, which is
+        // an addition fewer in front of every loop the guard has already said is entered.
+        Start::Worked(count) => {
+            let start = Plain { offset: count.offset + 1, ..count };
+            crate::loop_delete::widened(func, term, start, tally.aim.reading)
+        }
+    };
 
     let param = func.append_param(header, tally.ty);
     let next = fewer(func, tally.aim.at, param, tally.ty);
@@ -1451,7 +1628,11 @@ fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mu
     let limit = match reach {
         Reach::Fixed(far) => past(func, term, walk.start, far),
         Reach::Worked(count) => {
-            let times = crate::loop_delete::clamped(func, term, count, aim.reading);
+            let times = if aim.entered {
+                crate::loop_delete::clamped(func, term, count, aim.reading)
+            } else {
+                crate::loop_delete::widened(func, term, count, aim.reading)
+            };
             walked(func, term, walk.start, times, walk.step)
         }
     };
@@ -2347,6 +2528,98 @@ mod tests {
         sound(&func, &mut names);
     }
 
+    /// How many `select`s the function has, which is how many clamps were written.
+    fn selects(func: &Func) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .filter(|&inst| func[inst].opcode == Opcode::Select)
+            .count()
+    }
+
+    /// The countdown on a loop counting to a limit handed in, which is #1696.
+    ///
+    /// The variable starts at the count clamped at zero and one on top, worked out in the
+    /// preheader, and the loop is run at limits of minus one, nought and seven before and after to
+    /// show it takes the same number of turns at each. Minus one is the limit the clamp is there
+    /// for.
+    #[test]
+    fn a_loop_counting_to_a_limit_handed_in_is_counted_down_too() {
+        let mut names = Interner::new();
+        let (mut func, entry, base, limit) = shell_given(&mut names);
+        let it = given(&mut func, entry, limit);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let read = build.load(Type::int(32), base, plain(), Flags::NONE);
+        build.store(read, base, plain(), Flags::NONE);
+        close_narrow(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let limits = [-1, 0, 7];
+        let before: Vec<usize> = limits.map(|n| stores_given(&func, &[0, n]).len()).to_vec();
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Ne);
+        assert_eq!(selects(&func), 1, "nothing says the loop is entered, so the count is clamped");
+        let after: Vec<usize> = limits.map(|n| stores_given(&func, &[0, n]).len()).to_vec();
+        assert_eq!(before, vec![0, 0, 7]);
+        assert_eq!(after, before, "the same number of turns at every limit");
+        sound(&func, &mut names);
+    }
+
+    /// The same loop behind the guard header copying puts in front of it, which says the count is
+    /// at least one where the loop is entered, so there is nothing for a clamp to do.
+    #[test]
+    fn a_loop_behind_its_guard_is_counted_down_without_a_clamp() {
+        let mut names = Interner::new();
+        let (mut func, entry, base, limit) = shell_given(&mut names);
+        let pre = func.create_block();
+        let it = given(&mut func, pre, limit);
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        let enter = build.icmp(IntPred::Slt, zero, limit);
+        build.br_if(enter, pre, &[], it.out, &[]);
+
+        let mut build = Builder::new(&mut func, it.body);
+        let read = build.load(Type::int(32), base, plain(), Flags::NONE);
+        build.store(read, base, plain(), Flags::NONE);
+        close_narrow(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let limits = [-1, 0, 1, 7];
+        let before: Vec<usize> = limits.map(|n| stores_given(&func, &[0, n]).len()).to_vec();
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(selects(&func), 0, "the guard already said the loop is entered");
+        let after: Vec<usize> = limits.map(|n| stores_given(&func, &[0, n]).len()).to_vec();
+        assert_eq!(before, vec![0, 0, 1, 7]);
+        assert_eq!(after, before);
+        sound(&func, &mut names);
+    }
+
+    /// A counter read after the loop stays whatever the exit test is asked of, so a countdown
+    /// beside it would be one variable more. `collect` never sees that read, since it is not in
+    /// the loop, which is why the countdown is refused on the counter's uses and not on the price.
+    #[test]
+    fn a_loop_whose_counter_is_read_after_it_is_not_counted_down() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+        let counter = func[it.head].params[0];
+
+        let mut build = Builder::new(&mut func, it.body);
+        let read = build.load(Type::int(32), base, plain(), Flags::NONE);
+        build.store(read, base, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        let mut build = Builder::new(&mut func, it.out);
+        build.store(counter, base, plain(), Flags::NONE);
+        build.ret(&[]);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 0);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Slt, "the test it was written with");
+        sound(&func, &mut names);
+    }
+
     /// Section 28.2's claim, and the one thing in this pass that is a fact about the machine.
     #[test]
     fn a_machine_nobody_priced_is_told_so_rather_than_guessed_at() {
@@ -2745,7 +3018,9 @@ mod tests {
 
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Note, USE_ADDRESS), 1, "the address was looked at");
-        assert_eq!(stats.count(Kind::Note, CANDIDATE), 3, "and a pointer for it was costed");
+        // Two rather than three, because the address reads the counter and a countdown only
+        // takes the place of a counter nothing but the exit test reads.
+        assert_eq!(stats.count(Kind::Note, CANDIDATE), 2, "and a pointer for it was costed");
         assert_eq!(stats.count(Kind::Note, KEPT), 1, "and it lost to the counter");
         assert_eq!(stats.count(Kind::Optimized, ADDED), 0);
         assert_eq!(params(&func, it.head), before, "nothing new goes round the loop");
