@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `floor`, `ceil`, `trunc`, `round`, `rint` and `nearbyint` of a `float` widened to `double` become the `float` spelling of the call with its answer widened back, as gcc does, while `sin` and the other functions whose answer changes with the precision stay as they are. `execute/20030125-1.c` passes at all six levels. Part of tamnd/rucc#392.
 
+### Changed
+
+- A loop that writes the init or type plane no longer keeps every check of that plane in it. `hoist` now keeps one only when some write in the loop may be to the object the check is about, so a copy between two blocks from two calls to `malloc` gets the plane checks on its source taken out in front of the loop, and `plane-sink` then moves the writes over its destination out after it. `a-byte-at-a-time-copy` goes from 3670879638 instructions to 2545314173 at `-O2 -fsafety=detect`, and no other safety bench moves. Two programs in `tests/safety` pin both sides: a copy whose source is only half written is still refused at `-O2`, and one whose source is fully written is not. Part of tamnd/rucc#1617.
+
 ### Fixed
 
 - A check after a join or at the top of a loop is no longer taken as answered by a check in front of the branch when something on the other path could have changed the answer. The discharge walked the dominator tree and handed a join the facts its dominator ended with, never looking at the arms, so `if (argc > 1) free (p); int b = *p;` read freed storage at `-O2` while `-O0` refused it. Each block now gets the kills of every block on a path from its dominator to it, which is the arms of a branch and the body of a loop alike. A call flagged as freeing nothing also no longer keeps the type and init facts, since freeing nothing is not writing nothing, unless the callee is known to write no memory at all. Tracked in tamnd/rucc#1755.
