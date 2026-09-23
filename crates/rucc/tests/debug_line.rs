@@ -87,11 +87,14 @@ fn the_table_names_the_file_the_way_the_prefix_map_says() {
 
     // Without the flag the table says where the file really was, which is what a debugger on the
     // machine that built it needs.
-    assert!(holds(&plain, &format!("{here}/one.c")), "the table does not name the file");
+    // The path is the one the compiler was handed, so it is joined the way this platform joins one.
+    let file = dir.join("one.c").to_string_lossy().into_owned();
+    assert!(holds(&plain, &file), "the table does not name the file");
 
     // With it, the rewritten path is in the file and the real one is nowhere in it. Both halves
     // matter: a build that rewrote the unit's name and left a directory behind is still a build
     // whose output depends on where it ran, which is the whole thing the flag exists to stop.
-    assert!(holds(&mapped, "SRC/one.c"), "the mapping did not reach the table");
+    let file = Path::new("SRC").join("one.c").to_string_lossy().into_owned();
+    assert!(holds(&mapped, &file), "the mapping did not reach the table");
     assert!(!holds(&mapped, &here), "the build directory is still in the object");
 }

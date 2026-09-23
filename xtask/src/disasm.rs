@@ -60,7 +60,7 @@ pub(crate) fn disasm() -> Result<()> {
 
     let mut problems = Vec::new();
     for (at, ((meant, said), bytes)) in yours.iter().zip(&mine).zip(&ours).enumerate() {
-        if meant != said {
+        if !same(meant, said) {
             problems
                 .push(format!("line {}: `{meant}` encoded to {bytes}, which is `{said}`", at + 1));
         }
@@ -70,6 +70,29 @@ pub(crate) fn disasm() -> Result<()> {
         return Ok(());
     }
     Err(Error::Failed { task: "disasm", problems })
+}
+
+/// Whether two decoded instructions are the same instruction.
+///
+/// They are where the text is the same, and they are as well where both are an `xchg` of the same
+/// two registers written the other way round. A swap has no direction, the opcode encodes either
+/// register in either field, and `xchgb %al, %ah` is `86 c4` from us and `86 e0` from an assembler,
+/// which a decoder reads back as two spellings of one swap.
+fn same(meant: &str, said: &str) -> bool {
+    if meant == said {
+        return true;
+    }
+    let swap = |text: &str| {
+        let (op, rest) = text.split_once(char::is_whitespace)?;
+        let (one, two) = rest.split_once(',')?;
+        let (one, two) = (one.trim(), two.trim());
+        (op.starts_with("xchg") && one.starts_with('%') && two.starts_with('%'))
+            .then(|| (op.to_owned(), one.to_owned(), two.to_owned()))
+    };
+    matches!(
+        (swap(meant), swap(said)),
+        (Some((a, b, c)), Some((d, e, f))) if a == d && b == f && c == e
+    )
 }
 
 /// The decoder, wherever it is on this machine.
