@@ -212,6 +212,9 @@ pub struct Amode {
     /// The block of this function the address is of, for the address of a label. See
     /// [`Mem::block`].
     pub block: Option<Block>,
+    /// The jump table of this function the address is of, as its place in
+    /// [`crate::Func::tables`]. See [`Mem::table`].
+    pub table: Option<u32>,
     /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
@@ -227,6 +230,7 @@ impl Amode {
         disp: 0,
         symbol: None,
         block: None,
+        table: None,
         reach: Reach::Itself,
         segment: None,
     };
@@ -252,6 +256,8 @@ pub struct Mem {
     pub symbol: Option<Symbol>,
     /// The block of this function the address is of. See [`Mem::block`].
     pub block: Option<Block>,
+    /// The jump table of this function the address is of. See [`Mem::table`].
+    pub table: Option<u32>,
     /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
@@ -269,6 +275,7 @@ impl Mem {
             disp: 0,
             symbol: None,
             block: None,
+            table: None,
             reach: Reach::Itself,
             segment: None,
         }
@@ -284,6 +291,7 @@ impl Mem {
             disp: 0,
             symbol: Some(symbol),
             block: None,
+            table: None,
             reach: Reach::Itself,
             segment: None,
         }
@@ -306,6 +314,34 @@ impl Mem {
             disp: 0,
             symbol: None,
             block: Some(block),
+            table: None,
+            reach: Reach::Itself,
+            segment: None,
+        }
+    }
+
+    /// The address of one of this function's jump tables, which is what a `switch` dense enough to
+    /// be one reads its destination out of.
+    ///
+    /// An index into [`crate::Func::tables`] rather than a symbol, for the reason [`Self::block`]
+    /// is a block: the table is written into the same section as the function, straight after its
+    /// last instruction, so both ends of the distance are places the assembler lays out itself and
+    /// there is nothing for a linker to be told.
+    #[must_use]
+    pub const fn table(table: u32) -> Self {
+        Self { table: Some(table), ..Self::of_nothing() }
+    }
+
+    /// The address naming nothing at all, which the constructors above start from.
+    const fn of_nothing() -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            block: None,
+            table: None,
             reach: Reach::Itself,
             segment: None,
         }
@@ -324,6 +360,7 @@ impl Mem {
             disp,
             symbol: None,
             block: None,
+            table: None,
             reach: Reach::Itself,
             segment: Some(segment),
         }

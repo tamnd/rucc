@@ -206,6 +206,26 @@ pub enum Where {
     Frame(i32),
 }
 
+/// A jump table: where a `switch` goes for each value from zero up, read by an indirect jump.
+///
+/// Each cell is the place of an arm among the successors of the block the jump ends, rather than
+/// the block the arm goes to. That is what keeps a table right while the passes after selection
+/// work on the edges. Splitting an edge, or moving the values it carries into a block of their own
+/// in front of the arm, rewrites the successor and leaves its place alone, so a table written in
+/// places follows every one of those without being told, and a table written in blocks would have
+/// to be found and rewritten by each of them.
+///
+/// The jump rather than its block, for the same reason in the other direction: a pass that splits
+/// a block moves the jump and the successors into the new half together, and the instruction is
+/// the one thing about the pair that does not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    /// The indirect jump that reads the table, which is the last instruction of its block.
+    pub jump: Inst,
+    /// For each value from zero up, which successor of the jump's block it goes to.
+    pub cells: Vec<u32>,
+}
+
 /// One function, in machine instructions.
 #[derive(Debug)]
 pub struct Func {
@@ -312,6 +332,9 @@ pub struct Func {
     /// one, and read by the debugging information once the encoder has given every instruction an
     /// address. Empty until the first of those.
     pub kept: Vec<Kept>,
+    /// The jump tables, each one written after the function's last instruction and read by the
+    /// address [`Mem::table`] names. See [`Table`].
+    pub tables: Vec<Table>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -345,6 +368,7 @@ impl Func {
             locals: Vec::new(),
             named: Vec::new(),
             kept: Vec::new(),
+            tables: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
@@ -849,6 +873,7 @@ impl InstBuilder<'_> {
             disp: mem.disp,
             symbol: mem.symbol,
             block: mem.block,
+            table: mem.table,
             reach: mem.reach,
             segment: mem.segment,
         };

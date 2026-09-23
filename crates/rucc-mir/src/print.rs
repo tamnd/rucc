@@ -110,6 +110,20 @@ impl<'a> Printer<'a> {
             }
             self.block(func, block, index);
         }
+        // After the blocks, since that is where the tables are written into the section too. Each
+        // names the block whose jump reads it, and then the successors its cells go to by place.
+        for (index, table) in func.tables.iter().enumerate() {
+            let _ = write!(self.out, "\n  table{index} ");
+            match func.block_of(table.jump) {
+                Some(block) => self.label(block),
+                None => self.out.push_str("block?"),
+            }
+            self.out.push(':');
+            for cell in &table.cells {
+                let _ = write!(self.out, " {cell}");
+            }
+            self.out.push('\n');
+        }
         self.out.push_str("}\n");
     }
 
@@ -320,6 +334,11 @@ impl<'a> Printer<'a> {
         // this function and the other is a name the linker resolves.
         if let Some(block) = amode.block {
             self.label(block);
+            written = true;
+        }
+        // A jump table of this function, which is a place in it the same way.
+        if let Some(table) = amode.table {
+            let _ = write!(self.out, "table{table}");
             written = true;
         }
         if let Some(operand) = amode.base.and_then(|at| operands.get(usize::from(at))) {

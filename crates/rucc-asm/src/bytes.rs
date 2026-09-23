@@ -211,11 +211,18 @@ struct Jump {
     at: usize,
     /// Where the instruction it belongs to ends, which is what the distance is counted from.
     end: usize,
-    /// The block it goes to.
-    to: Block,
+    /// The place it goes to.
+    to: To,
     /// What is added to the distance, which is nothing for a jump and is the displacement for an
     /// address that names a block and has one.
     disp: i64,
+}
+
+/// A place in this function that an instruction can name: a block, or one of its jump tables.
+#[derive(Clone, Copy)]
+enum To {
+    Block(Block),
+    Table(u32),
 }
 
 /// One function being written out.
@@ -298,8 +305,12 @@ impl Assembler<'_> {
                 self.rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
             }
         }
+        let tables = self.tables()?;
         for jump in std::mem::take(&mut self.jumps) {
-            let to = self.blocks[jump.to.index()];
+            let to = match jump.to {
+                To::Block(block) => self.blocks[block.index()],
+                To::Table(table) => tables[table as usize],
+            };
             debug_assert_ne!(to, usize::MAX, "a jump to a block that was never laid out");
             let distance = i64::try_from(to).expect("a section this size") + jump.disp
                 - i64::try_from(jump.end).expect("a section this size");
@@ -308,6 +319,41 @@ impl Assembler<'_> {
             self.text.bytes[jump.at..jump.at + 4].copy_from_slice(&distance.to_le_bytes());
         }
         Ok(())
+    }
+
+    /// The jump tables, after the last instruction, giving back where each one starts.
+    ///
+    /// Inside the function rather than in a section of data, which is what gcc does on ELF as
+    /// well: every cell is a distance from the table to a block, both ends are in this section,
+    /// and so the whole table is filled in here and the linker is told nothing. It also keeps
+    /// the table inside the function's extent, which is what `-ffunction-sections` moves around
+    /// as one piece. The cells are four bytes each and start on a four byte boundary, reached by
+    /// the byte that does nothing, although nothing ever runs into it: the last instruction of a
+    /// function is a return or a jump.
+    fn tables(&mut self) -> Result<Vec<usize>, Error> {
+        let mut starts = Vec::with_capacity(self.func.tables.len());
+        if self.func.tables.is_empty() {
+            return Ok(starts);
+        }
+        while self.text.bytes.len() % 4 != 0 {
+            self.text.bytes.push(NOP);
+        }
+        for table in &self.func.tables {
+            let start = self.text.bytes.len();
+            starts.push(start);
+            let block = self.func.block_of(table.jump).expect("a table read by a jump in no block");
+            let succs = &self.func[block].succs;
+            for &cell in &table.cells {
+                let to = self.blocks[succs[cell as usize].block.index()];
+                debug_assert_ne!(to, usize::MAX, "a table naming a block that was never laid out");
+                let distance = i64::try_from(to).expect("a section this size")
+                    - i64::try_from(start).expect("a section this size");
+                let distance = i32::try_from(distance)
+                    .map_err(|_| Error::Distance { func: self.name.to_owned(), bytes: distance })?;
+                self.text.bytes.extend_from_slice(&distance.to_le_bytes());
+            }
+        }
+        Ok(starts)
     }
 
     /// One instruction of the machine IR, as however many instructions of the machine it is.
@@ -423,7 +469,10 @@ impl Assembler<'_> {
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }
                         if let Some(block) = amode.and_then(|mem| mem.block) {
-                            labelled = Some((block, i64::from(addr.disp)));
+                            labelled = Some((To::Block(block), i64::from(addr.disp)));
+                        }
+                        if let Some(table) = amode.and_then(|mem| mem.table) {
+                            labelled = Some((To::Table(table), i64::from(addr.disp)));
                         }
                         Value::Mem(addr)
                     }
@@ -487,7 +536,9 @@ impl Assembler<'_> {
                 self.jumps.push(Jump { at, end, to, disp });
             } else if let Some(at) = holes.dest {
                 match self.func[block].succs.first() {
-                    Some(call) => self.jumps.push(Jump { at, end, to: call.block, disp: 0 }),
+                    Some(call) => {
+                        self.jumps.push(Jump { at, end, to: To::Block(call.block), disp: 0 });
+                    }
                     None => debug_assert!(false, "a jump out of a block with no arms"),
                 }
             }
@@ -522,7 +573,7 @@ impl Assembler<'_> {
         // A block is reached the same way and leaves the same four bytes. What is different is who
         // fills them in, which is this file rather than the linker, and that is the caller's to
         // sort out: what it needs from here is that the address was written that way at all.
-        let names = symbol.is_some() || amode.block.is_some();
+        let names = symbol.is_some() || amode.block.is_some() || amode.table.is_some();
         let rip = names && base.is_none() && index.is_none();
         let addr =
             Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment: amode.segment };
@@ -543,7 +594,7 @@ mod tests {
     use super::*;
 
     use rucc_base::Interner;
-    use rucc_mir::{BlockCall, Mem, Opcode, Reg};
+    use rucc_mir::{BlockCall, Mem, Opcode, Reg, Table};
     use rucc_object::{Binding, Visibility};
     use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
     use rucc_target::{Arch, Env, Os, Triple};
@@ -719,6 +770,37 @@ mod tests {
         // what is in between.
         assert_eq!(hex(&text.bytes), "48 8d 05 02 00 00 00 ff e0 c3");
         assert!(text.relocs.is_empty(), "a label of this function is not the linker's business");
+    }
+
+    #[test]
+    fn a_jump_table_is_written_after_the_code_as_distances_from_itself() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let head = func.create_block();
+        let first = func.create_block();
+        let second = func.create_block();
+        let lea = Opcode::new(names.intern("x64.lea_64"));
+        func.build(head, lea)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::table(0))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+        let jump = func.build(head, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        func.succs_mut(head).push(BlockCall::to(first));
+        func.succs_mut(head).push(BlockCall::to(second));
+        func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
+        func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+        func.tables.push(Table { jump, cells: vec![0, 1, 0] });
+
+        let text = assemble(&[func], &names, &target(), true, false).expect("a table").text;
+        // Seven bytes of address, two of jump and two returns end at eleven, one byte that does
+        // nothing brings the table to twelve, and each cell is how far back its block is from
+        // there. The address counts from the end of its own instruction, so it is five.
+        assert_eq!(
+            hex(&text.bytes),
+            "48 8d 05 05 00 00 00 ff e0 c3 c3 90 fd ff ff ff fe ff ff ff fd ff ff ff"
+        );
+        assert!(text.relocs.is_empty(), "a table of this function is not the linker's business");
     }
 
     #[test]

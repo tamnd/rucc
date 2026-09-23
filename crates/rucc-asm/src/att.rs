@@ -197,6 +197,7 @@ impl Writer<'_> {
                 }
             }
         }
+        self.tables(func, &name);
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_endproc");
         }
@@ -526,6 +527,13 @@ impl Writer<'_> {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
             }
+        } else if let Some(table) = amode.table {
+            // A jump table of this function, which is a place in it the way a label is.
+            out.push_str(&self.table(func_name, table as usize));
+            if amode.disp != 0 {
+                let sign = if amode.disp < 0 { '-' } else { '+' };
+                let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
+            }
         } else if amode.disp != 0 || (amode.base.is_none() && amode.index.is_none()) {
             // A mode that names no register at all is an absolute address, and zero is one of
             // them, so the number is written even when it is zero and there is nothing else.
@@ -543,10 +551,36 @@ impl Writer<'_> {
                 let _ = write!(out, ",{reg},{}", amode.scale);
             }
             out.push(')');
-        } else if amode.symbol.is_some() || amode.block.is_some() {
+        } else if amode.symbol.is_some() || amode.block.is_some() || amode.table.is_some() {
             out.push_str("(%rip)");
         }
         Ok(out)
+    }
+
+    /// The jump tables, after the last instruction and inside the function, the way the encoder
+    /// lays them out. Each cell is the distance from the table to a block, which the assembler
+    /// works out itself since both ends are in this section. See `bytes::Assembler::tables`.
+    fn tables(&mut self, func: &Func, func_name: &str) {
+        if func.tables.is_empty() {
+            return;
+        }
+        let _ = writeln!(self.out, "\t.p2align\t2, 0x90");
+        for (index, table) in func.tables.iter().enumerate() {
+            let label = self.table(func_name, index);
+            let _ = writeln!(self.out, "{label}:");
+            let block = func.block_of(table.jump).expect("a table read by a jump in no block");
+            let succs = &func[block].succs;
+            for &cell in &table.cells {
+                let to = self.label(func_name, succs[cell as usize].block);
+                let _ = writeln!(self.out, "\t.long\t{to}-{label}");
+            }
+        }
+    }
+
+    /// The label one jump table of one function carries. The `j` is what keeps it apart from a
+    /// block's label, which is a number after the same underscore.
+    fn table(&self, func_name: &str, index: usize) -> String {
+        format!("{}{func_name}_j{index}", self.directives.local())
     }
 
     /// The label one block of one function carries.
@@ -832,6 +866,35 @@ mod tests {
         // itself rather than one a relocation asks the linker for, since both ends of it are in
         // the section being written.
         assert_eq!(body(&text), ["leaq\t.Lf_1(%rip), %rax", "jmp\t*%rax", "ret"]);
+    }
+
+    #[test]
+    fn a_jump_table_is_a_label_and_the_distance_to_each_block_from_it() {
+        let text = write(|func, names| {
+            let head = func.create_block();
+            let first = func.create_block();
+            let second = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+            func.build(head, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem::table(0))
+                .finish();
+            let jump =
+                func.build(head, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+            func.succs_mut(head).push(rucc_mir::BlockCall::to(first));
+            func.succs_mut(head).push(rucc_mir::BlockCall::to(second));
+            func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
+            func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+            func.tables.push(rucc_mir::Table { jump, cells: vec![0, 1, 0] });
+        });
+        assert_eq!(body(&text), ["leaq\t.Lf_j0(%rip), %rax", "jmp\t*%rax", "ret", "ret"]);
+        let table: Vec<&str> = text.lines().skip_while(|line| *line != ".Lf_j0:").take(4).collect();
+        assert_eq!(
+            table,
+            [".Lf_j0:", "\t.long\t.Lf_1-.Lf_j0", "\t.long\t.Lf_2-.Lf_j0", "\t.long\t.Lf_1-.Lf_j0"],
+            "{text}"
+        );
     }
 
     #[test]

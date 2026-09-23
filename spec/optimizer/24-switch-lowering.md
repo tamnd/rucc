@@ -129,6 +129,8 @@ most benefits from it. GCC gets this too, and it is the reason `switch` survives
 **Lowering happens once, late, at the boundary into the machine level**, which is document 36. This
 document owns the decision procedure; document 36 owns the emission.
 
+**What is built today.** All four cluster shapes are written in `crates/rucc-codegen/src/switch.rs`. A stretch of at least eight clusters whose values span no more than eight times the compares it replaces is a jump table, which is gcc's growth ratio at `-O2`, unless it spans a word and goes to three places or fewer, where the bit test is kept as gcc keeps it. The table is left in the IR as a range check and a `switch` over an index from zero, and the x86-64 lowering reads that as a `lea` of the table, a `movslq` of the cell, an add and an indirect jump. The table is four bytes a cell, each the distance from the table to its block, written after the function's last instruction in `.text`, so it is read only and needs no relocation. The growth ratio does not yet drop to three at `-Os`. tamnd/rucc#1548.
+
 **And there is one middle-end transformation on switches**: removing cases that document 10's ranges
 prove impossible. If the operand's range is `[0, 3]`, cases 7 and 12 are dead and the switch shrinks,
 which can turn a sparse switch into a dense one and change the lowering decision entirely. This is

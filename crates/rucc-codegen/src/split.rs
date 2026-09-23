@@ -296,6 +296,16 @@ pub fn pads(
             }
         }
     }
+    // And every arm of a jump table, which an indirect jump arrives at the same way.
+    for table in &func.tables {
+        let Some(jump) = func.block_of(table.jump) else { continue };
+        for &cell in &table.cells {
+            let named = func[jump].succs[cell as usize].block;
+            if !addressed.contains(&named) {
+                addressed.push(named);
+            }
+        }
+    }
     for &block in &addressed {
         let inst = func.build_loose(opcode).finish();
         func.prepend_inst(block, inst);

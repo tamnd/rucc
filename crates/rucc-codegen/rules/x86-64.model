@@ -502,6 +502,12 @@
 ;; readings are equal exactly when the seven bits above the value are zero, which is what C says a
 ;; `_Bool` object holds, and the store is what makes that true of every one this compiler writes.
 (semantics (x64.mov_rm_bit a) (extract 0 0 (select (mem) a)))
+;; One cell of a jump table: four bytes, widened with their sign, since a cell is a distance that
+;; can point either way from the table.
+(semantics (x64.movsxd_rm_32_64 a)
+           (sign_extend 32 64
+                        (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                                (select (mem) (bvadd a 1)) (select (mem) a))))
 (semantics (x64.mov_mr_bit a v) (store (mem) a (zero_extend 1 8 v)))
 (semantics (x64.movss_rm a)
            (float_from_bits 32
