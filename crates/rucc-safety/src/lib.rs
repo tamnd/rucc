@@ -487,6 +487,9 @@ pub fn insert(
             _ => {}
         }
     }
+    // Once every load has had its `cap_load` put behind it, so that a pointer arriving at a join
+    // is handed the capability its edge already has rather than one worked out from the address.
+    origins.join(func);
     // Last, so that the check it puts in front of an access lands after the bounds check that is
     // already there. It is its own walk rather than another arm above because what it puts in is
     // not one check per access: the scopes are per function and the two calls that keep one go in
@@ -1414,8 +1417,8 @@ fn one(func: &mut Func, at: Inst, ty: Type) -> Value {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, Flags, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict, RmwOp, Signature,
-        TbaaNode, print_func, verify_func,
+        Block, Builder, Flags, IntPred, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict,
+        RmwOp, Signature, TbaaNode, print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -2855,6 +2858,111 @@ mod tests {
         assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
         assert!(printed.contains("check_deriv %2, %0, %4, %3\n"), "{printed}");
         assert!(printed.contains("check_bounds %2, %4, size 4, align 4\n"), "{printed}");
+    }
+
+    /// A loop through a block parameter, `head(x)`, that reads four bytes at `x` and goes round
+    /// again four bytes along, entered with `into` pointers from as many blocks as there are.
+    ///
+    /// The entry block takes one pointer parameter for each and branches on a counter to reach
+    /// them, so a single one is the plain `for (x = p; ...; x++)` walk and two are a join of two
+    /// different objects.
+    fn looping(names: &mut Interner, into: usize) -> Func {
+        let i32_ = Type::int(32);
+        let i64_ = Type::int(64);
+        let mut params = vec![Type::PTR; into];
+        params.push(i64_);
+        let mut func = Func::new(
+            names.intern("loop"),
+            Signature::new().with_params(&params).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let pointers: Vec<Value> = (0..into).map(|_| func.append_param(entry, Type::PTR)).collect();
+        let n = func.append_param(entry, i64_);
+        let arms: Vec<Block> = (0..into).map(|_| func.create_block()).collect();
+        let head = func.create_block();
+        let done = func.create_block();
+        let x = func.append_param(head, Type::PTR);
+        let i = func.append_param(head, i64_);
+
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i64_, 0);
+        match arms.as_slice() {
+            [only] => {
+                b.jump(*only, &[]);
+            }
+            [first, second] => {
+                let taken = b.icmp(IntPred::Slt, n, zero);
+                b.br_if(taken, *first, &[], *second, &[]);
+            }
+            _ => unreachable!("one or two ways in"),
+        }
+        for (&arm, &pointer) in arms.iter().zip(&pointers) {
+            let mut b = Builder::new(&mut func, arm);
+            let zero = b.iconst(i64_, 0);
+            b.jump(head, &[pointer, zero]);
+        }
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, head);
+        let args = b.func().push_values(&[x]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        let four = b.iconst(i64_, 4);
+        let args = b.func().push_values(&[x, four]);
+        let next = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let one = b.iconst(i64_, 1);
+        let more = b.binary(Opcode::Add, i, one, Flags::NSW);
+        let again = b.icmp(IntPred::Slt, more, n);
+        b.br_if(again, head, &[next, more], done, &[]);
+        Builder::new(&mut func, done).ret(&[read]);
+        func
+    }
+
+    #[test]
+    fn a_walk_round_a_loop_carries_the_capability_it_started_with() {
+        // Every edge into the loop header hands it a pointer off one object, so one capability is
+        // taken where that object came in and every check round the loop names it. Before, the
+        // header's parameter took a `cap_of` of its own, which lowers to a walk of the plane every
+        // time round.
+        let mut names = Interner::new();
+        let mut func = looping(&mut names, 1);
+        let (module, plane) = planed(&mut names, "loop.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
+        assert!(printed.contains("%2 = cap_of %0\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %5, size 4, align 4\n"), "{printed}");
+        assert!(printed.contains("check_deriv %2, %5, %10, %9\n"), "{printed}");
+        assert!(!printed.contains(": cap"), "no parameter was left carrying it\n{printed}");
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_join_of_two_objects_carries_whichever_capability_came_in() {
+        // Two ways into the loop with two different objects, so no one capability is right for
+        // every edge. The header gets a parameter for it and each edge passes the capability of
+        // the pointer it passes, which is the one `slot` later gives a slot of its own.
+        let mut names = Interner::new();
+        let mut func = looping(&mut names, 2);
+        let (module, plane) = planed(&mut names, "join.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 2, "{printed}");
+        assert_eq!(printed.matches(": cap)").count(), 1, "{printed}");
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 
     #[test]

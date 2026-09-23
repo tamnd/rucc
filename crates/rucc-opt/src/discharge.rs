@@ -482,6 +482,19 @@ const LOST_ALIGNMENT: &str =
 /// Recorded for a bounds check whose operands this pass cannot read.
 const UNKNOWN_SHAPE: &str = "bounds check left alone, its pointer is not a base and a constant";
 
+/// Recorded for a bounds check kept with its capability, which [`Fact::by`] is, that no check naming
+/// the same capability answered.
+const CARRIED: &str = "bounds check kept, its capability names neither its address nor the base of \
+                       it and no check in front of it named the same one";
+
+/// The same as [`CARRIED`], for a lifetime check.
+const CARRIED_LIVE: &str = "lifetime check kept, its capability names neither its address nor the \
+                            base of it and no check in front of it named the same one";
+
+/// The same as [`CARRIED`], for a derivation check.
+const CARRIED_DERIV: &str = "derivation check kept, its capability names neither the pointer that \
+                             went in nor the base of it and nothing in front of it named the same one";
+
 /// Recorded for a bounds check whose capability names neither its address nor the base of it.
 ///
 /// The other way [`about`] gives up, and it is a different thing entirely from the row above. The
@@ -879,6 +892,8 @@ impl Pass for Discharge {
                         let Some(why) = why else {
                             if scope.bounds.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL);
+                            } else if asked.by.is_some() {
+                                stats.missed(CARRIED);
                             }
                             // A check that stays is a check that runs, and a check that runs
                             // establishes what it was about. One that was removed establishes
@@ -977,6 +992,8 @@ impl Pass for Discharge {
                         let Some(why) = why else {
                             if scope.alive.covered_before(&asked) {
                                 stats.missed(PAST_A_CALL_LIVE);
+                            } else if asked.by.is_some() {
+                                stats.missed(CARRIED_LIVE);
                             }
                             scope.alive.held.push(widened(func, &scope.bounds, asked));
                             continue;
@@ -1058,6 +1075,8 @@ impl Pass for Discharge {
                                 Some((from, to)) => {
                                     if scope.bounds.held_both_before(&from, &to) {
                                         stats.missed(PAST_A_CALL_DERIV);
+                                    } else if from.by.is_some() {
+                                        stats.missed(CARRIED_DERIV);
                                     }
                                 }
                                 None => {
@@ -1201,6 +1220,18 @@ pub(crate) struct Fact {
     pub(crate) offset: i128,
     /// How many bytes it covers.
     size: i128,
+    /// The capability the check that established it named, when that capability is not about
+    /// [`Fact::base`] or the address itself.
+    ///
+    /// `rucc_safety::origin` carries a capability through a loop's block parameter, so a check in
+    /// the loop names the pointer the walk started from while its address is off the parameter.
+    /// Neither end of that is something [`its_own`] can tie together, and reading the base as the
+    /// instance would be claiming the parameter is in whatever the capability names. What is true
+    /// is narrower: this check passed with this capability, so the bytes are in the instance that
+    /// capability names. A second check naming the very same capability value over bytes inside
+    /// those asks the same question of the same instance, and nothing else does, so a fact with one
+    /// of these answers only a check with the same one. Without one, it is the usual reading.
+    by: Option<Value>,
 }
 
 impl Fact {
@@ -1209,7 +1240,7 @@ impl Fact {
     /// The two sources of one of these are an `alloca` of a fixed size and a global, and what they
     /// have in common is that the size is said by something other than a check that passed.
     pub(crate) fn whole(base: Value, size: i128) -> Self {
-        Self { base, offset: 0, size }
+        Self { base, offset: 0, size, by: None }
     }
 
     /// A range of bytes named by where it starts and how far it runs.
@@ -1218,7 +1249,7 @@ impl Fact {
     /// rather than an object. `crate::dead_plane` is the one, and what it has is a plane write
     /// rather than an access, which is a different thing to be about and the same thing to ask.
     pub(crate) fn range(base: Value, offset: i128, size: i128) -> Self {
-        Self { base, offset, size }
+        Self { base, offset, size, by: None }
     }
 }
 
@@ -1661,9 +1692,9 @@ fn writers(func: &Func, purity: &Facts) -> HashSet<Inst> {
 
 /// What a `check_bounds` is about, when it is one this pass can read.
 pub(crate) fn about(func: &Func, check: Inst) -> Option<Fact> {
-    let (base, offset, whole) = addressed(func, check)?;
+    let (base, offset, whole, by) = addressed(func, check)?;
     let Extra::Mem(info) = func[check].extra else { return None };
-    hull(base, offset, i128::from(func[info].size), whole)
+    Some(Fact { by, ..hull(base, offset, i128::from(func[info].size), whole)? })
 }
 
 /// What a `check_type` is about, when it is one this pass can read: which plane entry it asks with
@@ -1693,7 +1724,7 @@ fn planed(func: &Func, check: Inst) -> Option<Fact> {
     let &pointer = func[func[check].args].get(1)?;
     let Extra::Mem(info) = func[check].extra else { return None };
     let (base, offset) = normal(func, pointer);
-    Some(Fact { base, offset, size: i128::from(func[info].size) })
+    Some(Fact::range(base, offset, i128::from(func[info].size)))
 }
 
 /// What a `check_live` is about, when it is one this pass can read.
@@ -1702,22 +1733,28 @@ fn planed(func: &Func, check: Inst) -> Option<Fact> {
 /// is alive, and nothing about the address next door. The widening to a range that makes the fact
 /// useful is `widened`, and it needs a bounds fact to do it.
 pub(crate) fn alive(func: &Func, check: Inst) -> Option<Fact> {
-    let (base, offset, whole) = addressed(func, check)?;
-    hull(base, offset, 1, whole)
+    let (base, offset, whole, by) = addressed(func, check)?;
+    Some(Fact { by, ..hull(base, offset, 1, whole)? })
 }
 
-/// The address a check is about, as a base and a constant, and whether the capability names the
-/// base rather than the address.
+/// The address a check is about, as a base and a constant, whether the capability names the base
+/// rather than the address, and the capability itself when it names neither.
 ///
-/// The capability has to be one this pass can tie to the address, which [`its_own`] is, so a check
-/// that does not have it is not a check this pass has anything to say about.
-fn addressed(func: &Func, check: Inst) -> Option<(Value, i128, bool)> {
+/// A capability [`its_own`] can tie to the address is the usual reading. One it cannot is read
+/// narrowly and kept with the fact, for the reason [`Fact::by`] gives, except where the address is
+/// a walk off the pointer the capability names by a step the constant reader stopped at. That one
+/// is [`midway`]'s, and the range reader does better with it than a fact only the same capability
+/// can answer would.
+fn addressed(func: &Func, check: Inst) -> Option<(Value, i128, bool, Option<Value>)> {
     let args = &func[func[check].args];
     let &capability = args.first()?;
     let &pointer = args.get(1)?;
     let (base, offset) = normal(func, pointer);
-    let named = named_by(func, capability)?;
-    its_own(named, pointer, base).map(|whole| (base, offset, whole))
+    match named_by(func, capability).and_then(|named| its_own(named, pointer, base)) {
+        Some(whole) => Some((base, offset, whole, None)),
+        None if midway(func, check) => None,
+        None => Some((base, offset, false, Some(capability))),
+    }
 }
 
 /// Whether a check's capability is about the address the check names or about the pointer that
@@ -1726,8 +1763,8 @@ fn addressed(func: &Func, check: Inst) -> Option<(Value, i128, bool)> {
 /// Both are shapes `rucc-safety` emits. The first is what it used to emit everywhere, a `cap_of` in
 /// front of each check naming the check's own pointer, and the second is what
 /// `rucc_safety::origin` emits now, one capability taken where the object came from and shared by
-/// every address walked off it. A check naming anything else is about some other instance and
-/// nothing here is entitled to read it.
+/// every address walked off it. A check naming anything else is read by [`addressed`] as a fact
+/// only the same capability can answer.
 /// Whether a check this pass could not read names a capability the address really did come off.
 ///
 /// Asked only where [`about`] has already answered nothing, so it is never on the path of a check
@@ -1828,11 +1865,11 @@ fn its_own(named: Value, pointer: Value, base: Value) -> Option<bool> {
 /// base is worth having here.
 fn hull(base: Value, offset: i128, size: i128, whole: bool) -> Option<Fact> {
     if !whole {
-        return Some(Fact { base, offset, size });
+        return Some(Fact::range(base, offset, size));
     }
     let low = offset.min(0);
     let high = offset.checked_add(size)?.max(1);
-    Some(Fact { base, offset: low, size: high.checked_sub(low)? })
+    Some(Fact::range(base, low, high.checked_sub(low)?))
 }
 
 /// The two ends of a `check_deriv`, each as the single byte at it.
@@ -1842,9 +1879,9 @@ fn hull(base: Value, offset: i128, size: i128, whole: bool) -> Option<Fact> {
 /// come out of the same value, which is what makes the two offsets comparable at all. One byte each
 /// because that is what is being asked about: not a range, but whether an address is in an instance.
 ///
-/// The capability has to be about the pointer that went in, for the reason [`addressed`] gives. The
-/// instance the check is about is the one that pointer belongs to, and a check naming some other
-/// capability is about some other instance.
+/// The capability is read the way [`addressed`] reads it. One about the pointer that went in or its
+/// base is the usual reading, and one about neither leaves both ends kept with it, so only a fact
+/// the same capability established can hold the pair.
 ///
 /// The width operand is not read. It matters to the runtime only for a pointer that walked off the
 /// near end, where the check passes on the byte a stride further along instead of on the address
@@ -1856,16 +1893,18 @@ pub(crate) fn derives(func: &Func, check: Inst) -> Option<(Fact, Fact)> {
     let &from = args.get(1)?;
     let &to = args.get(2)?;
     let (base, start) = normal(func, from);
-    let named = named_by(func, capability)?;
-    let whole = its_own(named, from, base)?;
+    let own = named_by(func, capability).and_then(|named| its_own(named, from, base));
+    let by = own.is_none().then_some(capability);
     let (walked, end) = normal(func, to);
     if base != walked {
         return None;
     }
     // One fact has to hold both ends, so widening the near one to reach the base is what carries
     // the base into whatever answers, which is what [`hull`] is for. The far end is left as it is,
-    // since the one fact that holds the pair holds it.
-    Some((hull(base, start, 1, whole)?, Fact { base, offset: end, size: 1 }))
+    // since the one fact that holds the pair holds it. A capability that names neither is read the
+    // way [`addressed`] reads one, narrowly and kept with both ends.
+    let near = hull(base, start, 1, own.unwrap_or(false))?;
+    Some((Fact { by, ..near }, Fact { by, ..Fact::range(base, end, 1) }))
 }
 
 /// The object a local is, when the address a check is about was computed from one.
@@ -2308,6 +2347,11 @@ pub(crate) fn normal(func: &Func, value: Value) -> (Value, i128) {
 /// proves. A check that runs and passes proves the address the program used was inside the object,
 /// and says nothing at all about the rest of the range this function made up around it.
 fn reach(func: &Func, ranges: Option<&mut Ranges<'_>>, asked: &Fact, at: Inst) -> Option<Reach> {
+    // Whatever answers a range answers it about the base's own instance, which is not what a check
+    // kept with its capability asked.
+    if asked.by.is_some() {
+        return None;
+    }
     let wide = spanned(func, ranges?, asked.base, asked.offset, asked.size, at, None)?;
     // Nothing was walked past, so this is the fact that came in and asking it again is work
     // somebody already did.
@@ -2542,7 +2586,7 @@ pub(crate) fn constant(func: &Func, value: Value) -> Option<i128> {
 /// out that the two addresses are one value a constant apart, and whether that is enough is
 /// somebody's proof rather than this file's opinion.
 pub(crate) fn covers(fact: &Fact, asked: &Fact) -> bool {
-    if fact.base != asked.base {
+    if fact.base != asked.base || fact.by != asked.by {
         return false;
     }
     let Some(delta) = asked.offset.checked_sub(fact.offset) else { return false };
@@ -2569,7 +2613,9 @@ pub(crate) fn covers(fact: &Fact, asked: &Fact) -> bool {
 /// asks the table. The distance the program actually walks is opaque in the question, which is
 /// what makes one answer cover every value it could take.
 fn reaches(fact: &Fact, asked: &Reach) -> bool {
-    if fact.base != asked.base {
+    // A range is always about the instance its base is in, and a fact kept with a capability is
+    // about the instance that capability names, which the two need not share.
+    if fact.base != asked.base || fact.by.is_some() {
         return false;
     }
     let Some(delta) = asked.low.checked_sub(fact.offset) else { return false };
@@ -3749,11 +3795,10 @@ mod tests {
 
     #[test]
     fn a_check_whose_capability_is_about_neither_end_of_the_walk_stays() {
-        // Two rules and no third. A capability is about the address being checked or about the
-        // pointer that address came off, and one about anything else is asking after an instance
-        // this pass has nothing to say about. The capability here is readable and names a
-        // pointer this address was never walked off, which is a different instance and nothing to
-        // be done about, so it stays in the row it was in.
+        // A capability is about the address being checked or about the pointer that address came
+        // off, and one about anything else is asking after an instance only a check naming the
+        // same capability can say anything about. The capability here names a pointer this address
+        // was never walked off, and the check in front of it named another one, so it stays.
         let mut names = Interner::new();
         let name = names.intern("two");
         let mut func = Func::new(name, Signature::new().with_params(&[Type::PTR, Type::PTR]));
@@ -3767,7 +3812,7 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(checks(&func), 2);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::CARRIED), 1);
     }
 
     #[test]
@@ -3777,8 +3822,8 @@ mod tests {
         // names that pointer, so what stopped it is that the capability is about something
         // further back than the base a walk this pass can follow reaches, and since the pointer is
         // a parameter nothing here has an extent for, it lands in the row that says so. The second
-        // is checked through a capability taken at an unrelated pointer, which is a different
-        // instance and is not the same problem at all.
+        // is checked through a capability taken at an unrelated pointer, which only a check naming
+        // that capability could answer, and that is not the same problem at all.
         let mut names = Interner::new();
         let name = names.intern("two");
         let params = [Type::PTR, Type::PTR, Type::int(64)];
@@ -3795,7 +3840,7 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(checks(&func), 2);
         assert_eq!(stats.count(Kind::Missed, super::MIDWAY_NO_EXTENT), 1);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::CARRIED), 1);
     }
 
     #[test]
@@ -3818,7 +3863,7 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(lives(&func), 2);
         assert_eq!(stats.count(Kind::Missed, super::MIDWAY_NO_EXTENT_LIVE), 1);
-        assert_eq!(stats.count(Kind::Missed, super::UNKNOWN_SHAPE_LIVE), 1);
+        assert_eq!(stats.count(Kind::Missed, super::CARRIED_LIVE), 1);
     }
 
     #[test]
@@ -4291,8 +4336,8 @@ mod tests {
         // here is wrong, it simply is not proved, and a check that is not proved to be unnecessary
         // stays.
         let huge = i128::from(u64::MAX) * 4;
-        let fact = Fact { base: Value::new(0), offset: 0, size: huge };
-        let asked = Fact { base: Value::new(0), offset: huge / 2, size: 4 };
+        let fact = Fact::range(Value::new(0), 0, huge);
+        let asked = Fact::range(Value::new(0), huge / 2, 4);
         assert!(!super::covers(&fact, &asked));
     }
 
@@ -5300,8 +5345,9 @@ mod tests {
 
     #[test]
     fn a_walk_off_a_pointer_the_check_does_not_name_stays() {
-        // The capability has to be the `cap_of` of the pointer that went in. One naming something
-        // else is asking about a different instance and is not this pass's to answer.
+        // The capability has to be the `cap_of` of the pointer that went in or of its base. One
+        // naming something else is asking about the instance it names, and nothing in front of
+        // this one named it.
         let (_, mut func, block, pointer) = blank();
         let mut build = Builder::new(&mut func, block);
         check(&mut build, pointer, 16);
@@ -5314,6 +5360,63 @@ mod tests {
         build.ret(&[]);
         let stats = run(&mut func);
         assert_eq!(derivs(&func), 1);
-        assert_eq!(stats.count(Kind::Missed, super::NOT_ITS_CAPABILITY_DERIV), 1);
+        assert_eq!(stats.count(Kind::Missed, super::CARRIED_DERIV), 1);
+    }
+
+    /// A check naming `capability` over `size` bytes at `pointer`, where the capability is
+    /// whatever the caller hands in rather than a `cap_of` made here.
+    fn carried(build: &mut Builder<'_>, capability: Value, pointer: Value, size: u64) {
+        let info = MemInfo {
+            size,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[capability, pointer]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[]);
+    }
+
+    #[test]
+    fn a_check_naming_the_capability_one_in_front_named_is_answered_by_it() {
+        // The shape a capability carried through a loop's block parameter leaves. The address is
+        // the parameter, the capability names where the walk began, and neither is the other. The
+        // first check passing says those sixteen bytes are in the instance that capability names,
+        // and the second asks the same capability about four of them.
+        let (_, mut func, block, pointer) = blank();
+        let start = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let args = build.func().push_values(&[start]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        carried(&mut build, capability, pointer, 16);
+        let field = past(&mut build, pointer, 4);
+        carried(&mut build, capability, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
+    }
+
+    #[test]
+    fn a_check_naming_another_capability_over_the_same_bytes_stays() {
+        // Two capabilities over one address are two questions, since the address being inside the
+        // instance one of them names says nothing about the other.
+        let (_, mut func, block, pointer) = blank();
+        let start = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let args = build.func().push_values(&[start]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        carried(&mut build, capability, pointer, 16);
+        check(&mut build, pointer, 4);
+        let field = past(&mut build, pointer, 4);
+        let args = build.func().push_values(&[start]);
+        let other = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        carried(&mut build, other, field, 4);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(checks(&func), 3);
+        assert_eq!(stats.count(Kind::Missed, super::CARRIED), 2);
     }
 }

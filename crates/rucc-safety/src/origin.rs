@@ -51,10 +51,24 @@
 //! The walk stops at a block parameter, so it cannot run round a loop: a pointer that is
 //! recomputed each time round arrives as a parameter of the loop header, and there is no way to
 //! build a cycle out of instruction results in a body that is in SSA form.
+//!
+//! # Joins
+//!
+//! A pointer that arrives at a block parameter gets a capability parameter beside it, and every
+//! edge into the block passes the capability of the pointer it passes. It used to get a `cap_of` at
+//! the top of the block, and that is the plane walk once per arrival: `cursor = cursor->next`
+//! makes `cursor` a parameter of the loop header, so every hop of a list walk recovered from the
+//! address what the `cap_load` beside the load had just read out of the aux slot. The slot's answer
+//! is also the better one. It says which object the pointer was written for, where recovery says
+//! which object is at the address now, and those differ exactly when the pointer is dangling.
+//!
+//! The edges are filled in by [`Origins::join`] once the walk is over rather than when the
+//! parameter is made, because the capability an edge passes is often a `cap_load` behind a load the
+//! walk has not reached yet, and asking for it early would put a `cap_of` there instead.
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Def, Func, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Block, BlockCall, Def, Func, Inst, InstData, Opcode, Type, Value};
 
 /// The capability each pointer in one function has.
 ///
@@ -63,6 +77,9 @@ use rucc_ir::{Def, Func, Inst, InstData, Opcode, Type, Value};
 pub(crate) struct Origins {
     /// What each pointer's capability is, including the derived ones that share a base's.
     held: HashMap<Value, Value>,
+    /// The capability parameters made for pointer parameters, with the block and the position of
+    /// the pointer, in the order they were made, which is the order their arguments go on the edges.
+    joins: Vec<(Block, usize, Value)>,
 }
 
 impl Origins {
@@ -85,7 +102,14 @@ impl Origins {
         let cap = match self.held.get(&base) {
             Some(&held) => held,
             None => {
-                let made = cap_of(func, base, at);
+                let made = match joinable(func, base) {
+                    Some((block, index)) => {
+                        let made = func.append_param(block, Type::CAP);
+                        self.joins.push((block, index, made));
+                        made
+                    }
+                    None => cap_of(func, base, at),
+                };
                 self.held.insert(base, made);
                 made
             }
@@ -118,6 +142,137 @@ impl Origins {
     pub(crate) fn seed(&mut self, pointer: Value, cap: Value) {
         self.held.insert(pointer, cap);
     }
+
+    /// Hands every capability parameter [`of`](Self::of) made the capability of what each edge
+    /// passes, once the walk that made them is over.
+    ///
+    /// In the order they were made, since that is the order the parameters were appended and so the
+    /// order their arguments have to go on. Asking an edge for its capability can make another join,
+    /// when what the edge passes is itself a pointer parameter nobody asked about yet, and that one
+    /// goes on the end of the list and is filled in after the ones already there.
+    ///
+    /// A join that turns out to be handed one capability, not counting itself round a loop, is not
+    /// a join and goes again, with its readers pointed at that capability. That is every pointer
+    /// stepped through an object with `p++`, whose back edge hands the parameter its own
+    /// capability, and leaving the parameter in would hide from the loop passes that the capability
+    /// never changes, which is what hoisting and splitting a check out of the loop rests on.
+    pub(crate) fn join(&mut self, func: &mut Func) {
+        let mut next = 0;
+        while let Some(&(block, index, _)) = self.joins.get(next) {
+            next += 1;
+            for pred in func.blocks().collect::<Vec<Block>>() {
+                let Some(term) = func.terminator(pred) else { continue };
+                for at in func.target_list(term).iter() {
+                    let call = func[at];
+                    if call.block != block {
+                        continue;
+                    }
+                    let Some(&passed) = func[call.args].get(index) else { continue };
+                    let cap = self.of(func, passed, term);
+                    let call = func[at];
+                    let args = func.append_arg(call.args, cap);
+                    func.set_block_call(at, BlockCall { args, ..call });
+                }
+            }
+        }
+        loop {
+            let mut again = false;
+            for &(block, _, cap) in &self.joins {
+                let Some(at) = func[block].params.iter().position(|&param| param == cap) else {
+                    continue;
+                };
+                let arriving: HashSet<Value> =
+                    edges(func, block).map(|args| func[args][at]).filter(|&v| v != cap).collect();
+                let Some(&only) = arriving.iter().next() else { continue };
+                if arriving.len() != 1 {
+                    continue;
+                }
+                renamed(func, cap, only);
+                unjoin(func, block, at);
+                again = true;
+            }
+            if !again {
+                return;
+            }
+        }
+    }
+}
+
+/// The argument lists of every edge into `block`.
+fn edges(func: &Func, block: Block) -> impl Iterator<Item = rucc_ir::ValueList> + use<'_> {
+    func.blocks()
+        .filter_map(|pred| func.terminator(pred))
+        .flat_map(|term| func.successors(term))
+        .filter(move |call| call.block == block)
+        .map(|call| call.args)
+}
+
+/// Points everything that reads `from`, operands and edge arguments alike, at `to` instead.
+fn renamed(func: &mut Func, from: Value, to: Value) {
+    let with = |value: Value| if value == from { to } else { value };
+    for block in func.blocks().collect::<Vec<Block>>() {
+        for inst in func.insts(block).collect::<Vec<Inst>>() {
+            func.rewrite(func[inst].args, with);
+            for call in func.successors(inst).collect::<Vec<_>>() {
+                func.rewrite(call.args, with);
+            }
+        }
+    }
+}
+
+/// Takes the parameter at `at` off `block`, and its argument off every edge into it.
+fn unjoin(func: &mut Func, block: Block, at: usize) {
+    for pred in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(pred) else { continue };
+        for place in func.target_list(term).iter() {
+            let call = func[place];
+            if call.block != block {
+                continue;
+            }
+            let mut kept = func[call.args].to_vec();
+            kept.remove(at);
+            let args = func.push_values(&kept);
+            func.set_block_call(place, BlockCall { args, ..call });
+        }
+    }
+    let gone = func[block].params[at];
+    func.retain_params(block, |param| param != gone);
+}
+
+/// Where a pointer parameter's capability parameter goes, when it can have one.
+///
+/// Not the entry block's, which are the function's own parameters and have a producer of their
+/// own in the frame the caller wrote. Not a block nothing branches to, since a parameter with no
+/// edges has nothing to be handed. And not one whose edges include something that would put its
+/// capability in the wrong place: a computed `goto`, which passes no arguments, or a pointer made by
+/// a terminator, which has nowhere behind it for a `cap_of` to go that is still in front of the
+/// branch passing it.
+fn joinable(func: &Func, pointer: Value) -> Option<(Block, usize)> {
+    let Def::Param { block, index } = func[pointer].def else { return None };
+    if func.entry() == Some(block) {
+        return None;
+    }
+    let index = index as usize;
+    let mut reached = false;
+    for pred in func.blocks() {
+        let Some(term) = func.terminator(pred) else { continue };
+        for call in func.successors(term) {
+            if call.block != block {
+                continue;
+            }
+            if func[term].opcode == Opcode::IndirectBr {
+                return None;
+            }
+            let &passed = func[call.args].get(index)?;
+            if let Def::Result { inst, .. } = func[root(func, passed)].def
+                && func.is_terminator(inst)
+            {
+                return None;
+            }
+            reached = true;
+        }
+    }
+    reached.then_some((block, index))
 }
 
 /// The capability each pointer in a function already has, without making a single new one.
@@ -170,7 +325,73 @@ pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
             held.entry(root(func, pointer)).or_insert(cap);
         }
     }
+    joins(func, &alive, &mut held);
     held
+}
+
+/// Adds the pointer parameters whose capability arrives as a parameter beside them.
+///
+/// What [`Origins::join`] made, found again after the optimizer has had the function, which may
+/// have moved, merged or dropped parameters, so the pairing is worked out from the edges rather
+/// than remembered. A `cap` parameter belongs to a pointer parameter of the same block when every
+/// edge into the block passes it the capability of what that edge passes the pointer, or passes
+/// each parameter back to itself. To a fixpoint, because the capability an edge passes can be a
+/// parameter of another join.
+fn joins(func: &Func, alive: &HashSet<Value>, held: &mut HashMap<Value, Value>) {
+    loop {
+        let mut again = false;
+        for block in func.blocks() {
+            let params = &func[block].params;
+            for (at, &cap) in params.iter().enumerate() {
+                if !func[cap].ty.is_cap() || !alive.contains(&cap) {
+                    continue;
+                }
+                for (index, &pointer) in params.iter().enumerate() {
+                    if !func[pointer].ty.is_ptr() || held.contains_key(&pointer) {
+                        continue;
+                    }
+                    if paired(func, held, block, (index, pointer), (at, cap)) {
+                        held.insert(pointer, cap);
+                        again = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !again {
+            return;
+        }
+    }
+}
+
+/// Whether every edge into `block` passes the `cap` parameter the capability of what it passes the
+/// pointer parameter, as [`joins`] asks.
+fn paired(
+    func: &Func,
+    held: &HashMap<Value, Value>,
+    block: Block,
+    (index, pointer): (usize, Value),
+    (at, cap): (usize, Value),
+) -> bool {
+    let mut reached = false;
+    for pred in func.blocks() {
+        let Some(term) = func.terminator(pred) else { continue };
+        for call in func.successors(term) {
+            if call.block != block {
+                continue;
+            }
+            let args = &func[call.args];
+            let (Some(&passed), Some(&carried)) = (args.get(index), args.get(at)) else {
+                return false;
+            };
+            let round = passed == pointer && carried == cap;
+            if !round && held.get(&root(func, passed)) != Some(&carried) {
+                return false;
+            }
+            reached = true;
+        }
+    }
+    reached
 }
 
 /// Which capabilities in a function are still read once every check has become a call.
@@ -197,6 +418,17 @@ fn kept(func: &Func) -> HashSet<Value> {
     loop {
         let mut again = false;
         for block in func.blocks() {
+            // A `cap` parameter that is kept keeps what every edge into it passes.
+            if let Some(term) = func.terminator(block) {
+                for call in func.successors(term) {
+                    for (&value, &param) in func[call.args].iter().zip(&func[call.block].params) {
+                        if func[param].ty.is_cap() && alive.contains(&param) && alive.insert(value)
+                        {
+                            again = true;
+                        }
+                    }
+                }
+            }
             for inst in func.insts(block) {
                 if !func[inst].opcode.makes_capability() {
                     continue;
