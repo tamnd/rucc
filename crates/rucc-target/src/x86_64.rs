@@ -319,13 +319,16 @@ pub static BRANCH: BranchInsts = BranchInsts {
     fused: &FUSED,
 };
 
-/// Every jump on the condition state this machine has, which is ten conditions.
+/// Every jump on the condition state this machine has, which is sixteen conditions.
 ///
-/// The same ten the comparisons are described at and the same ten a template may write, since a
-/// jump the reader gives back is one of these by name. What reads this is the layout, to tell a
+/// The ten the comparisons are described at, and the sign, the overflow and the parity each way
+/// round, which only a template writes. These are the sixteen a template may write, since a jump the
+/// reader gives back is one of these by name. What reads this is the layout, to tell a
 /// block whose jump is already there from one that still wants a test and a jump behind it.
-static CONDITIONAL: [&str; 10] =
-    ["jcc_e", "jcc_ne", "jcc_l", "jcc_le", "jcc_g", "jcc_ge", "jcc_b", "jcc_be", "jcc_a", "jcc_ae"];
+static CONDITIONAL: [&str; 16] = [
+    "jcc_e", "jcc_ne", "jcc_l", "jcc_le", "jcc_g", "jcc_ge", "jcc_b", "jcc_be", "jcc_a", "jcc_ae",
+    "jcc_s", "jcc_ns", "jcc_o", "jcc_no", "jcc_p", "jcc_np",
+];
 
 /// Every comparison the test in front of a branch can be taken off, which is all of them.
 ///
@@ -813,7 +816,7 @@ static COMPARES: [Compare; 88] = [
 /// door lists them, and they are the eight rows here that carry no condition in their names. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 226] = [
+static READERS: [Reader; 232] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -1040,6 +1043,12 @@ static READERS: [Reader; 226] = [
     Reader { name: "jcc_be", reads: Reads::Unsigned },
     Reader { name: "jcc_a", reads: Reads::Unsigned },
     Reader { name: "jcc_ae", reads: Reads::Unsigned },
+    Reader { name: "jcc_s", reads: Reads::Bit },
+    Reader { name: "jcc_ns", reads: Reads::Bit },
+    Reader { name: "jcc_o", reads: Reads::Bit },
+    Reader { name: "jcc_no", reads: Reads::Bit },
+    Reader { name: "jcc_p", reads: Reads::Bit },
+    Reader { name: "jcc_np", reads: Reads::Bit },
 ];
 
 /// Every instruction that leaves behind what a comparison of what it wrote against zero leaves.
@@ -1610,6 +1619,7 @@ mod tests {
                 "e" | "ne" => Reads::Zero,
                 "l" | "le" | "g" | "ge" => Reads::Signed,
                 "b" | "be" | "a" | "ae" => Reads::Unsigned,
+                "s" | "ns" | "o" | "no" | "p" | "np" => Reads::Bit,
                 other => panic!("{} asks about {other}, which is nothing", entry.name),
             };
             assert_eq!(entry.reads, wanted, "{} reads the wrong part", entry.name);

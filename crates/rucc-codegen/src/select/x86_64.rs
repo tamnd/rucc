@@ -340,6 +340,12 @@ mod tests {
     ///
     /// So these have operands a rule could have named, unlike everything in [`TEMPLATE`], and they
     /// are still not instructions a rule could have been written for.
+    ///
+    /// The jumps on the sign, the overflow and the parity are here for the same reason. The layout
+    /// writes the other ten behind a comparison it chose, and nothing chooses one of these: a C
+    /// condition never asks about one bit on its own, so the only line above one is a line in a
+    /// template, which is what a loop in tcc's tests that counts down with `dec` and stops on `js`
+    /// is.
     /// The add with carry and the subtract with borrow, which read a bit off the instruction in
     /// front of them.
     ///
@@ -406,6 +412,12 @@ mod tests {
         "cmov_ae_16",
         "cmov_ae_32",
         "cmov_ae_64",
+        "jcc_s",
+        "jcc_ns",
+        "jcc_o",
+        "jcc_no",
+        "jcc_p",
+        "jcc_np",
     ];
 
     /// The instructions that look for a set bit, which a template asks for and nothing else does.

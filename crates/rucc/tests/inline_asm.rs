@@ -526,6 +526,20 @@ fn a_label_and_a_jump_back_to_it_are_written_as_a_loop() {
     assert!(back, "the jump goes to {to}, which is not a place above it:\n{body}");
 }
 
+#[test]
+fn local_labels_and_a_jump_on_the_sign_are_written_as_a_loop() {
+    // The count down in tcc's `strncat1`, cut down to the loop. The label shares its line with the
+    // instruction behind it, the jumps name the nearest `1` behind and the nearest `2` in front, and
+    // the way out is on the sign, which no C condition asks about on its own.
+    let source = "int f(int n) { \
+                  asm (\"1:\\tdec %0\\n\\tjs 2f\\n\\tjne 1b\\n2:\" : \"+r\" (n)); return n; }\n";
+    let body = body(&asm("local-labels", source), "f");
+    assert!(body.contains("decl\t"), "the count down never reached the listing:\n{body}");
+    assert!(body.contains("\tjs\t"), "the jump on the sign never reached the listing:\n{body}");
+    let jumps = body.matches("\tjne\t").count() + body.matches("\tje\t").count();
+    assert!(jumps > 0, "the jump back never reached the listing:\n{body}");
+}
+
 /// Where a block that holds nothing but a jump sends whatever arrived at it.
 fn landing<'a>(body: &'a str, label: &str) -> Option<&'a str> {
     let at = body.find(&format!("\n{label}:\n"))?;
