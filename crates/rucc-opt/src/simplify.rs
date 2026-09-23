@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and three rewrites written out by hand below them.
+//! instruction and are where anything new goes, and four rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -65,9 +65,9 @@
 //! that same rewrite in place with one operand instead of two, and it is its own case because a
 //! conversion is the one instruction whose operand is not the width of its result.
 //!
-//! ## The three written by hand
+//! ## The four written by hand
 //!
-//! All three are about comparisons, and all three are here rather than in `rules/` for the same
+//! All four are about comparisons, and all four are here rather than in `rules/` for the same
 //! reason: what each one is, is one statement quantified over the predicates, and the rule language
 //! has no way to say that, so writing any of them as rules would mean writing out every predicate,
 //! every operand order and every width by hand and keeping the enumeration in step with the two
@@ -140,6 +140,18 @@
 //! with its sign bit cleared and there is nothing to call. So what the pattern looks for is a
 //! bitcast of an `and` against a mask whose top bit is clear, which is what that lowering leaves.
 //!
+//! ### A comparison a constant or a repeated operand settles
+//!
+//! A NaN is unordered against everything, so `dnan < x` is false and `dnan != x` is true whatever
+//! `x` holds. That is `gcc.c-torture/execute/ieee/fp-cmp-6.c` and `fp-cmp-9.c`, with the NaN read
+//! out of a `const` global, and `fp-cmp-7.c` asks the same of `x > inf`, which nothing is.
+//!
+//! The buckets again, narrowed by what the operands allow rather than by what a magnitude does. A
+//! NaN on either side leaves only the unordered bucket, two constants leave the one they are in, an
+//! infinity leaves every bucket but the one past it, and a value against itself is equal or
+//! unordered. Unlike the sign rewrite this one can come out true, since the unordered predicates
+//! accept the one bucket a NaN leaves. gcc 16 folds all of these without `-ffast-math`.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -190,6 +202,13 @@ const MAGNITUDE: &str = "comparison against a value whose sign bit is clear sett
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_MAGNITUDE: &str =
     "comparison against a magnitude left alone, the pass ran out of fuel";
+
+/// Recorded once for each floating point comparison a constant or a repeated operand settles.
+const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_BOUNDED: &str =
+    "floating point comparison against a bound left alone, the pass ran out of fuel";
 
 /// Recorded for a rule that would have fired if there had been fuel for it.
 const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
@@ -286,7 +305,7 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, the strength reductions, the canonicalisations, and the three comparison \
+        "the identities, the strength reductions, the canonicalisations, and the four comparison \
          rewrites written by hand"
     }
 
@@ -368,6 +387,15 @@ impl Pass for Simplify {
                     }
                     fold_composite(func, inst, settled);
                     stats.optimized(MAGNITUDE);
+                    continue;
+                }
+                if let Some(settled) = bounded_comparison(func, inst) {
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL_BOUNDED);
+                        continue;
+                    }
+                    fold_composite(func, inst, settled);
+                    stats.optimized(BOUNDED);
                     continue;
                 }
                 let Some((rewrite, pattern)) = identity(func, inst) else { continue };
@@ -1128,20 +1156,11 @@ fn clears_the_sign(func: &Func, value: Value) -> bool {
 ///
 /// Nothing for a constant that is positive, where the answer is every bucket and there would be
 /// nothing to narrow, and nothing for a NaN, where [`Float::compare`] has no ordering to report and
-/// the pair is unordered whatever the other side holds. That second case folds already, as a
-/// comparison of two constants when both sides are or as nothing at all when only one is, and
-/// answering it here would be a second opinion about it.
+/// the pair is unordered whatever the other side holds. [`bounded_comparison`] answers that one.
 fn against(func: &Func, value: Value) -> Option<u8> {
     use bucket::{EQ, GT, UN};
-    let Def::Result { inst, .. } = func[value].def else { return None };
-    let data = &func[inst];
-    if data.opcode != Opcode::FConst {
-        return None;
-    }
-    let Extra::Imm(at) = data.extra else { return None };
-    let format = func[value].ty.format()?.encoding();
-    let number = Float::from_bits(format, func[at].bits());
-    match number.compare(Float::zero(format, false))? {
+    let number = float_constant(func, value)?;
+    match number.compare(Float::zero(number.format(), false))? {
         Ordering::Less => Some(GT | UN),
         Ordering::Equal => Some(GT | EQ | UN),
         Ordering::Greater => None,
@@ -1193,6 +1212,86 @@ fn magnitude_comparison(func: &Func, inst: Inst) -> Option<Composite> {
         lhs,
         rhs,
     }))
+}
+
+/// A floating point comparison that a constant on one side settles, or the same value on both.
+///
+/// A NaN is unordered against everything, so `dnan < x` is false and `dnan != x` is true whatever
+/// `x` holds, and `gcc.c-torture/execute/ieee/fp-cmp-6.c` and `fp-cmp-9.c` assert that of a NaN a
+/// `const` global was given by calling a function they never define. Nothing is above a positive
+/// infinity, so `x > __builtin_inf ()` is false, which is `fp-cmp-7.c`. Two constants are one
+/// bucket, and a value against itself is equal or unordered and never below or above. gcc 16 folds
+/// all of these without `-ffast-math`, since none of them depends on anything but the operands.
+///
+/// It is the narrowing [`magnitude_comparison`] does, over what these operands allow rather than
+/// over what a magnitude does, and unlike that one it can come out true, since a NaN on either side
+/// leaves the one bucket `une` and the other unordered predicates accept.
+fn bounded_comparison(func: &Func, inst: Inst) -> Option<Composite> {
+    use bucket::{EQ, GT, LT, UN};
+    let data = &func[inst];
+    let Extra::FloatPred(pred) = data.extra else { return None };
+    if data.opcode != Opcode::FCmp {
+        return None;
+    }
+    let args = &func[data.args];
+    let lhs = *args.first()?;
+    let rhs = *args.get(1)?;
+    let left = float_constant(func, lhs);
+    let right = float_constant(func, rhs);
+    let possible = match (left, right) {
+        _ if left.is_some_and(Float::is_nan) || right.is_some_and(Float::is_nan) => UN,
+        (Some(left), Some(right)) => match left.compare(right)? {
+            Ordering::Less => LT,
+            Ordering::Equal => EQ,
+            Ordering::Greater => GT,
+        },
+        (None, Some(bound)) => past(bound)?,
+        (Some(bound), None) => turned(past(bound)?),
+        (None, None) if lhs == rhs => EQ | UN,
+        (None, None) => return None,
+    };
+    let asked = float_buckets(pred);
+    let buckets = asked & possible;
+    if buckets == 0 {
+        return Some(Composite::Always(false));
+    }
+    if buckets == possible {
+        return Some(Composite::Always(true));
+    }
+    if buckets == asked {
+        return None;
+    }
+    Some(Composite::Pred(Flip {
+        opcode: Opcode::FCmp,
+        flags: data.flags,
+        extra: Extra::FloatPred(float_pred(buckets)?),
+        lhs,
+        rhs,
+    }))
+}
+
+/// The buckets a pair with this constant on the right can be in, when the constant is an infinity.
+///
+/// Nothing is above a positive infinity and nothing is below a negative one. Any other constant
+/// leaves every bucket, which is nothing to narrow by.
+fn past(bound: Float) -> Option<u8> {
+    use bucket::{EQ, GT, LT, UN};
+    if !bound.is_infinite() {
+        return None;
+    }
+    Some(if bound.is_negative() { GT | EQ | UN } else { LT | EQ | UN })
+}
+
+/// The number a floating point constant holds.
+fn float_constant(func: &Func, value: Value) -> Option<Float> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if data.opcode != Opcode::FConst {
+        return None;
+    }
+    let Extra::Imm(at) = data.extra else { return None };
+    let format = func[value].ty.format()?.encoding();
+    Some(Float::from_bits(format, func[at].bits()))
 }
 
 /// Writes what a set of buckets came to over the instruction it was worked out from.
@@ -2367,7 +2466,10 @@ mod tests {
             let mut build = Builder::new(&mut func, block);
             let x = build.iconst(Type::int(64), 0);
             let x = build.unary(Opcode::Bitcast, x, Type::float(Float::F64));
-            let cmp = build.fcmp(pred, x, x, Flags::NONE);
+            // Not `x` against itself, which is equal or unordered and settles most predicates on its own.
+            let y = build.iconst(Type::int(64), 1);
+            let y = build.unary(Opcode::Bitcast, y, Type::float(Float::F64));
+            let cmp = build.fcmp(pred, x, y, Flags::NONE);
             let ones = build.iconst(Type::int(1), -1);
             let not = build.binary(Opcode::Xor, cmp, ones, Flags::NONE);
             build.ret(&[not]);
@@ -2466,7 +2568,10 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let x = build.iconst(Type::int(64), 0);
         let x = build.unary(Opcode::Bitcast, x, Type::float(Float::F64));
-        let cmp = build.fcmp(FloatPred::Olt, x, x, Flags::FAST);
+        // Not `x` against itself, which is equal or unordered and settles most predicates on its own.
+        let y = build.iconst(Type::int(64), 1);
+        let y = build.unary(Opcode::Bitcast, y, Type::float(Float::F64));
+        let cmp = build.fcmp(FloatPred::Olt, x, y, Flags::FAST);
         let ones = build.iconst(Type::int(1), -1);
         let not = build.binary(Opcode::Xor, cmp, ones, Flags::NONE);
         build.ret(&[not]);
@@ -2845,15 +2950,126 @@ mod tests {
         assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
     }
 
-    /// A NaN on the other side is left to the comparison folder, which has an answer for it that
-    /// does not depend on either operand being a magnitude.
+    /// A NaN on the other side settles the comparison on its own, and it is the NaN that does it
+    /// rather than the magnitude, so the answer is the one any value against a NaN has.
     #[test]
-    fn a_magnitude_against_a_nan_is_left_alone() {
+    fn a_magnitude_against_a_nan_is_settled_by_the_nan() {
         let (mut func, block, x) = a_float();
         let mut build = Builder::new(&mut func, block);
         let p = magnitude_of(&mut build, x);
-        let nan = build.fconst(Type::float(Float::F64), 0x7ff8_0000_0000_0000);
+        let nan = build.fconst(Type::float(Float::F64), NAN);
         let below = build.fcmp(FloatPred::Olt, p, nan, Flags::NONE);
+        build.ret(&[below]);
+        let stats = Simplify.run(
+            &mut func,
+            &mut crate::machine::fixtures::analyses(),
+            &mut Fuel::unlimited(),
+        );
+        assert_eq!(stats.count(Kind::Optimized, super::MAGNITUDE), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::BOUNDED), 1);
+        assert_eq!(number(&func, below), 0);
+    }
+
+    /// The quiet NaN a `const double` given `1.0/0.0 - 1.0/0.0` holds.
+    const NAN: u128 = 0x7ff8_0000_0000_0000;
+
+    /// A positive infinity.
+    const INFINITY: u128 = 0x7ff0_0000_0000_0000;
+
+    /// Every comparison of `gcc.c-torture/execute/ieee/fp-cmp-6.c`, which is a NaN against a
+    /// number the program could have changed. The ordered ones and `ueq`'s missing half are false
+    /// and `une` is true, whatever `x` holds.
+    #[test]
+    fn a_nan_is_unordered_against_anything() {
+        for (pred, answer) in [
+            (FloatPred::Oeq, false),
+            (FloatPred::Olt, false),
+            (FloatPred::Ogt, false),
+            (FloatPred::Ole, false),
+            (FloatPred::Oge, false),
+            (FloatPred::One, false),
+            (FloatPred::Une, true),
+            (FloatPred::Ult, true),
+            (FloatPred::Uno, true),
+        ] {
+            let (mut func, block, x) = a_float();
+            let mut build = Builder::new(&mut func, block);
+            let nan = build.fconst(Type::float(Float::F64), NAN);
+            let asked = build.fcmp(pred, nan, x, Flags::NONE);
+            build.ret(&[asked]);
+            assert!(simplify(&mut func), "{pred:?}");
+            assert_eq!(number(&func, asked) != 0, answer, "{pred:?}");
+        }
+    }
+
+    /// Nothing is above a positive infinity, which is `gcc.c-torture/execute/ieee/fp-cmp-7.c`. At or
+    /// below one is only a question about a NaN, and it is left as written because what it narrows
+    /// to is the predicate it already is.
+    #[test]
+    fn nothing_is_above_a_positive_infinity() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let infinity = build.fconst(Type::float(Float::F64), INFINITY);
+        let above = build.fcmp(FloatPred::Ogt, x, infinity, Flags::NONE);
+        let atmost = build.fcmp(FloatPred::Ole, x, infinity, Flags::NONE);
+        let below = build.fcmp(FloatPred::Olt, x, infinity, Flags::NONE);
+        build.ret(&[above, atmost, below]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, above), 0);
+        assert_eq!(came_from(&func, atmost).1, Extra::FloatPred(FloatPred::Ole));
+        assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
+    }
+
+    /// The same on the left of a negative infinity, turned round.
+    #[test]
+    fn a_negative_infinity_is_above_nothing() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let infinity = build.fconst(Type::float(Float::F64), INFINITY | 1 << 63);
+        let above = build.fcmp(FloatPred::Ogt, infinity, x, Flags::NONE);
+        build.ret(&[above]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, above), 0);
+    }
+
+    /// Two constants are one bucket, so every predicate over them is an answer.
+    #[test]
+    fn two_float_constants_are_an_answer() {
+        let (mut func, block, _) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let one = build.fconst(Type::float(Float::F64), 0x3ff0_0000_0000_0000);
+        let two = build.fconst(Type::float(Float::F64), 0x4000_0000_0000_0000);
+        let below = build.fcmp(FloatPred::Olt, one, two, Flags::NONE);
+        let equal = build.fcmp(FloatPred::Ueq, one, two, Flags::NONE);
+        build.ret(&[below, equal]);
+        assert!(simplify(&mut func));
+        assert_ne!(number(&func, below), 0);
+        assert_eq!(number(&func, equal), 0);
+    }
+
+    /// A value is equal to itself or is a NaN, so it is never below itself, and `x != x` is the
+    /// question of whether it is a NaN. `x == x` is the shortest it can be written already.
+    #[test]
+    fn a_value_against_itself_is_equal_or_a_nan() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let below = build.fcmp(FloatPred::Olt, x, x, Flags::NONE);
+        let differs = build.fcmp(FloatPred::Une, x, x, Flags::NONE);
+        let same = build.fcmp(FloatPred::Oeq, x, x, Flags::NONE);
+        build.ret(&[below, differs, same]);
+        assert!(simplify(&mut func));
+        assert_eq!(number(&func, below), 0);
+        assert_eq!(came_from(&func, differs).1, Extra::FloatPred(FloatPred::Uno));
+        assert_eq!(came_from(&func, same).1, Extra::FloatPred(FloatPred::Oeq));
+    }
+
+    /// A number that is not an infinity says nothing about the other side on its own.
+    #[test]
+    fn a_finite_bound_is_left_alone() {
+        let (mut func, block, x) = a_float();
+        let mut build = Builder::new(&mut func, block);
+        let one = build.fconst(Type::float(Float::F64), 0x3ff0_0000_0000_0000);
+        let below = build.fcmp(FloatPred::Olt, x, one, Flags::NONE);
         build.ret(&[below]);
         assert!(!simplify(&mut func));
         assert_eq!(came_from(&func, below).1, Extra::FloatPred(FloatPred::Olt));
