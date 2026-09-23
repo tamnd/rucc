@@ -22,7 +22,7 @@
 //! # What the walk believes
 //!
 //! A fixed `alloca` is its size and a dynamic one of a constant count is that count. A global is
-//! its size where [`crate::extents::vouched`] says the definition in the module is the one that
+//! its size where `extents::vouched` says the definition in the module is the one that
 //! will run. A `ptr_add` of a constant count takes it off what is left, down to nothing past the
 //! end, and one going backwards is not followed. A block parameter is every argument every branch
 //! to its block passes and a `select` is both of its arms. Anything else is not known.
