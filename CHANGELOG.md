@@ -6,6 +6,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `strcat` of a string of known length onto a local array whose string the code in front of the call just wrote is a `memcpy` of the string and its terminator to the end of that string. The walk that finds the length now reads `memset`, `memcpy` and `strcpy` as writes and goes on into a block with one predecessor, and the libcall pass runs up to eight rounds so a nest of six `strcat` calls folds all the way. `execute/builtins/strcat.c` passes at every level. Part of tamnd/rucc#1677.
+- `strncpy` of a count no larger than the source's length and its terminator is a `memcpy` of the count, and `strncpy` of nothing is its destination, which is what gcc 16 makes of both. A count that would pad with zeros stays a call. `execute/builtins/strncpy.c` passes at every level. Part of tamnd/rucc#1677.
+
 - `memmove` and `bcopy` are folded as gcc 16 folds them. A move of nothing is its destination, and a move that cannot overlap is a `memcpy`, which is so for one byte, for a read only source and for two different objects where one is a local. `strcpy` of a pointer that may be any of several strings of one length is a `memcpy` of that length and a terminator. `execute/builtins/memmove.c`, `memmove-2.c` and `strcpy-2.c` pass at every level. The bound walk added for `strlen` is folded into the one the fortify checks already had, so there is one walk for how large a count or a step can be. Part of tamnd/rucc#1677.
 
 - `strlen` of a local array the same block has just written a string into, one constant byte at a time, is the length of that string, from the front or from part way along. The walk back from the call stops at a call, a wider store or a store through a pointer that is not a local, so nothing that could have changed the array is looked past. `execute/builtins/strlen.c` passes at every level. Part of tamnd/rucc#1677.

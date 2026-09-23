@@ -142,8 +142,10 @@ const DEPTH: u32 = 4;
 const CHAIN: u32 = 12;
 
 /// How many times the calls in one function are looked at, which is the longest chain of folds
-/// where each one leaves a call behind that the next one folds.
-const ROUNDS: u32 = 3;
+/// where each one leaves a call behind that the next one folds. `builtins/strcat.c` nests six
+/// `strcat` calls, and what the writes in front of one say is only known once the one inside it is
+/// a copy, so that is a round each. Rounds stop as soon as one finds nothing to do.
+const ROUNDS: u32 = 8;
 
 /// The names a fold may leave behind, sorted.
 const REPLACEMENTS: [&str; 10] = [
@@ -187,7 +189,7 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 47] = [
+const SOURCES: [&str; 48] = [
     "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
@@ -228,6 +230,7 @@ const SOURCES: [&str; 47] = [
     "strlen",
     "strncat",
     "strncmp",
+    "strncpy",
     "strnlen",
     "strpbrk",
     "strrchr",
@@ -282,7 +285,7 @@ impl Plan {
             Plan::Answer(answer) => Some(answer),
             Plan::Swap { args, answer, .. } => {
                 for arg in args {
-                    if let Argument::Have(value) = arg {
+                    if let Argument::Have(value) | Argument::At(value, _) = arg {
                         *value = renamed.get(value).copied().unwrap_or(*value);
                     }
                 }
@@ -374,6 +377,8 @@ enum Argument {
     Count(u64),
     /// The address of a read only object holding these bytes and a terminator.
     Text(Vec<u8>),
+    /// A value the call being replaced already had, that many bytes further on.
+    At(Value, u64),
 }
 
 /// What this module already says about each name a fold may leave behind.
@@ -551,7 +556,7 @@ pub fn fold(
         let mut stats = Stats::new();
         // A fold can leave behind a call another fold knows, which is how `__stpcpy_chk` of a
         // string that fits becomes `stpcpy` and then a `memcpy` with the end of the copy as its
-        // answer. Each round is one step along a chain like that and none is longer than this.
+        // answer. Each round is one step along a chain like that, and `strcat` onto `strcat` is another.
         for _ in 0..ROUNDS {
             // The whole body is read before any of it changes. A plan names values the body holds,
             // and working the next one out from a body half rewritten is how a pass comes to read
@@ -665,12 +670,7 @@ impl Site<'_> {
         // no two of the printf family answer the same number. `strstr` is not in that position: its
         // answer is what the call is for and the fold produces the same one.
         let ignored = data.results().all(|result| self.counts[result.index()] == 0);
-        let Extra::Call(at) = data.extra else { return None };
-        let callee = self.func[at].callee?;
-        let name = self.names.resolve(self.standard.get(&callee).copied().unwrap_or(callee));
-        if self.no_builtin.iter().any(|it| it == name) {
-            return None;
-        }
+        let name = self.called(inst)?;
         let args: Vec<Value> = self.func[data.args].to_vec();
         // The locked and the unlocked spellings take the same arguments and differ only in how far
         // the fold may go, so they are an arm each with a flag rather than two bodies.
@@ -713,10 +713,11 @@ impl Site<'_> {
             "strspn" => self.span(data, &args, Set::Inside),
             "strpbrk" => self.strpbrk(data, &args),
             "strcpy" | "stpcpy" => self.strcpy(data, name, &args, ignored),
-            "strcat" => self.strcat(data, &args, None),
+            "strcat" => self.strcat(inst, data, &args),
             "strncat" => self.strncat(data, &args),
             "mempcpy" => self.mempcpy(data, &args, ignored),
             "memmove" => self.memmove(data, &args),
+            "strncpy" => self.strncpy(data, &args),
             // `bcopy` is `memmove` with the two addresses the other way round and no answer.
             "bcopy" => {
                 let [source, dest, count] = *args else { return None };
@@ -872,44 +873,39 @@ impl Site<'_> {
         Some(Plan::Answer(Answer::Less { len, step }))
     }
 
-    /// The string at this address in a local array, as the stores in front of the call wrote it.
+    /// The string at this address in a local array, as what ran in front of the call wrote it.
     ///
     /// `builtins/strlen.c` writes "nts" and its terminator into a `char str[8]` a byte at a time
-    /// and asks how long it is, and gcc 16 answers that from the stores. The walk goes back from
-    /// the call through its own block and keeps the last byte stored at each place, and it stops at
-    /// the first thing that could have written the array some other way: a call, a store of more
-    /// than a byte, or a store through a pointer that is not this array or another local one. What
-    /// it has then is enough only where it reaches a stored terminator without a gap.
+    /// and asks how long it is, and `builtins/strcat.c` fills its array with `memset` and `strcpy`
+    /// before every `strcat`, and gcc 16 answers both from what was written. The walk goes back
+    /// from the call and keeps the last byte written at each place. It carries on into the block
+    /// in front where the block it is in has only that one way in, which is what a `do { } while
+    /// (0)` around the writes leaves behind, and it stops at the first thing that could have
+    /// written the array some other way. What it has then is enough only where it reaches a
+    /// terminator from the place asked about without a gap.
     fn stored(&self, call: Inst, value: Value) -> Option<Vec<u8>> {
         let (base, offset) = self.address(value)?;
-        if !self.local(base) {
-            return None;
-        }
-        let block = self.func.block_of(call)?;
+        let size = self.extent(base)?;
         let mut bytes: HashMap<i128, u8> = HashMap::new();
-        for inst in self.func.insts_backwards(block).skip_while(|&inst| inst != call).skip(1) {
-            let data = &self.func[inst];
-            if !data.opcode.writes_memory() {
-                continue;
-            }
-            if data.opcode != Opcode::Store {
-                break;
-            }
-            let &[byte, to] = &self.func[data.args] else { break };
-            let Some((root, at)) = self.address(to) else { break };
-            if root != base {
-                // Two locals are two objects, so a store into another one leaves this one alone.
-                if self.local(root) {
-                    continue;
+        let mut block = self.func.block_of(call)?;
+        let mut from = Some(call);
+        'walk: for _ in 0..CHAIN {
+            let insts: Vec<Inst> = match from.take() {
+                Some(call) => self
+                    .func
+                    .insts_backwards(block)
+                    .skip_while(|&inst| inst != call)
+                    .skip(1)
+                    .collect(),
+                None => self.func.insts_backwards(block).collect(),
+            };
+            for inst in insts {
+                if self.wrote(inst, base, size, &mut bytes).is_none() {
+                    break 'walk;
                 }
-                break;
             }
-            if self.func[byte].ty != Type::int(8) {
-                break;
-            }
-            let Some((imm, _)) = crate::fold::evaluated(self.func, byte, DEPTH) else { break };
-            let Ok(byte) = u8::try_from(imm.unsigned()) else { break };
-            bytes.entry(at).or_insert(byte);
+            let &[pred] = self.cfg.predecessors(block) else { break };
+            block = pred;
         }
         let mut text = Vec::new();
         for at in (offset..).take(bytes.len()) {
@@ -919,6 +915,91 @@ impl Site<'_> {
             }
         }
         None
+    }
+
+    /// Puts what this instruction wrote into the local array at `base` into `bytes`, under the
+    /// places nothing later wrote, or `None` where it may have written the array in a way this
+    /// cannot read.
+    ///
+    /// A byte stored, a `memset` of a known byte, a `memcpy` out of an object whose bytes the
+    /// module holds and a `strcpy` of a string it holds are read. Anything else that writes memory
+    /// ends the walk, apart from one of those into another local, since two locals are two
+    /// objects.
+    fn wrote(
+        &self,
+        inst: Inst,
+        base: Value,
+        size: u64,
+        bytes: &mut HashMap<i128, u8>,
+    ) -> Option<()> {
+        let data = &self.func[inst];
+        if !data.opcode.writes_memory() {
+            return Some(());
+        }
+        let args = &self.func[data.args];
+        let (to, written) = match data.opcode {
+            Opcode::Store => {
+                let &[byte, to] = args else { return None };
+                if self.func[byte].ty != Type::int(8) {
+                    return None;
+                }
+                (to, vec![u8::try_from(self.number(byte)?).ok()?])
+            }
+            Opcode::Call => {
+                let &to = args.first()?;
+                let count =
+                    || self.number(*args.get(2)?).filter(|&count| count <= u128::from(size));
+                let written = match self.called(inst)? {
+                    "memset" => {
+                        vec![self.character(*args.get(1)?)?; usize::try_from(count()?).ok()?]
+                    }
+                    "memcpy" => {
+                        let count = usize::try_from(count()?).ok()?;
+                        self.raw(*args.get(1)?)?.get(..count)?.to_vec()
+                    }
+                    "strcpy" => {
+                        let mut text = self.one(*args.get(1)?)?;
+                        text.push(0);
+                        text
+                    }
+                    _ => return None,
+                };
+                (to, written)
+            }
+            _ => return None,
+        };
+        let (root, at) = self.address(to)?;
+        if root != base {
+            return self.local(root).then_some(());
+        }
+        let end = at.checked_add(i128::try_from(written.len()).ok()?)?;
+        if at < 0 || end > i128::from(size) {
+            return None;
+        }
+        for (place, byte) in (at..).zip(written) {
+            bytes.entry(place).or_insert(byte);
+        }
+        Some(())
+    }
+
+    /// The name of the library function this call is to, where the program has not taken the
+    /// compiler's knowledge of it away.
+    fn called(&self, inst: Inst) -> Option<&str> {
+        let Extra::Call(at) = self.func[inst].extra else { return None };
+        let callee = self.func[at].callee?;
+        let name = self.names.resolve(self.standard.get(&callee).copied().unwrap_or(callee));
+        (!self.no_builtin.iter().any(|it| it == name)).then_some(name)
+    }
+
+    /// How many bytes the local array at this address has, or `None` where it is not one.
+    fn extent(&self, value: Value) -> Option<u64> {
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        let data = &self.func[inst];
+        if data.opcode != Opcode::Alloca || !self.func[data.args].is_empty() {
+            return None;
+        }
+        let Extra::Mem(mem) = data.extra else { return None };
+        Some(self.func[mem].size)
     }
 
     /// The same, stopping at a count.
@@ -1295,17 +1376,37 @@ impl Site<'_> {
     ///
     /// Nothing is appended where the string is empty or where the count is zero, and neither call
     /// reads the destination before it knows that.
-    fn strcat(&self, data: &InstData, args: &[Value], count: Option<Value>) -> Option<Plan> {
+    fn nothing(&self, data: &InstData, args: &[Value], count: Option<Value>) -> Option<Plan> {
         let [dest, source] = *args else { return None };
         let nothing = self.one(source).is_some_and(|text| text.is_empty())
             || count.is_some_and(|count| self.number(count) == Some(0));
         (nothing && self.places(data)).then_some(Plan::Answer(Answer::Along(dest, 0)))
     }
 
+    /// `strcat` that appends nothing, and `strcat` of a string of known length onto one whose
+    /// length the writes in front of the call say, which is a copy of the string and its
+    /// terminator to where the old terminator was. gcc 16 makes that of every `strcat` in
+    /// `builtins/strcat.c`.
+    fn strcat(&self, inst: Inst, data: &InstData, args: &[Value]) -> Option<Plan> {
+        if let Some(plan) = self.nothing(data, args, None) {
+            return Some(plan);
+        }
+        let [dest, source] = *args else { return None };
+        if !self.places(data) {
+            return None;
+        }
+        let len = u64::try_from(self.length(source)?).ok()?;
+        let before = u64::try_from(self.stored(inst, dest)?.len()).ok()?;
+        let (callee, signature) = self.shapes.get("memcpy")?;
+        let args =
+            vec![Argument::At(dest, before), Argument::Have(source), Argument::Count(len + 1)];
+        Some(Plan::Swap { callee, signature, args, answer: Some(Answer::Along(dest, 0)) })
+    }
+
     /// `strncat` whose count is no limit on a string whose length is known, which is `strcat`.
     fn strncat(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
         let [dest, source, count] = *args else { return None };
-        if let Some(plan) = self.strcat(data, &[dest, source], Some(count)) {
+        if let Some(plan) = self.nothing(data, &[dest, source], Some(count)) {
             return Some(plan);
         }
         let len = self.one(source)?.len() as u128;
@@ -1342,6 +1443,22 @@ impl Site<'_> {
             || (to != from && self.object(to) && self.object(from))
                 && (self.local(to) || self.local(from));
         apart.then(|| self.copy(dest, source, count))?
+    }
+
+    /// `strncpy` that copies nothing, which answers its destination, and `strncpy` whose count is
+    /// no more than the source's length and its terminator, which pads with nothing and is a
+    /// `memcpy` of the count. A longer count pads the rest with zeros and is left as a call.
+    fn strncpy(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        let [dest, source, count] = *args else { return None };
+        if !self.places(data) {
+            return None;
+        }
+        let number = self.number(count)?;
+        if number == 0 {
+            return Some(Plan::Answer(Answer::Along(dest, 0)));
+        }
+        let len = u128::try_from(self.length(source)?).ok()?;
+        (number <= len + 1).then(|| self.copy(dest, source, count))?
     }
 
     /// A `memcpy` of that many bytes, answering the destination.
@@ -1497,7 +1614,7 @@ impl Site<'_> {
     /// What it appends to is a string whose length is not known here, so no size is enough.
     fn strcat_chk(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
         let [dest, source, size] = *args else { return None };
-        if let Some(plan) = self.strcat(data, &[dest, source], None) {
+        if let Some(plan) = self.nothing(data, &[dest, source], None) {
             return Some(plan);
         }
         self.unknown(size).then(|| self.unchecked(data, "strcat", &[2]))?
@@ -1507,7 +1624,7 @@ impl Site<'_> {
     /// is known.
     fn strncat_chk(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
         let [dest, source, count, size] = *args else { return None };
-        if let Some(plan) = self.strcat(data, &[dest, source], Some(count)) {
+        if let Some(plan) = self.nothing(data, &[dest, source], Some(count)) {
             return Some(plan);
         }
         if self.unknown(size) {
@@ -1876,6 +1993,14 @@ fn apply(
             Argument::Have(value) => *value,
             Argument::Char(byte) => constant(func, inst, int(), i128::from(*byte)),
             Argument::Count(count) => constant(func, inst, width, i128::from(*count)),
+            Argument::At(value, by) => {
+                let step = constant(func, inst, width, i128::from(*by));
+                let args = func.push_values(&[*value, step]);
+                let data = InstData { args, ..InstData::new(Opcode::PtrAdd) };
+                let made = func.create_inst(data, &[Type::PTR], span);
+                func.insert_before(made, inst);
+                func[made].results().next().expect("an address is one value")
+            }
             Argument::Text(_) => {
                 let extra = Extra::Symbol(symbol.expect("a text argument has an object"));
                 let data = InstData { extra, ..InstData::new(Opcode::GlobalAddr) };
@@ -2872,6 +2997,84 @@ block0(%0: ptr, %1: i64):
             2,
             "a local and a pointer from outside, and two places in one object, stay moves, {out}"
         );
+    }
+
+    /// `strcat` onto a local array that `memset` and `strcpy` just filled, from a block in front
+    /// with only the one way in, is a copy to where the terminator was, and a chain of them folds
+    /// one a round. A call that may have written the array in between leaves it a call.
+    #[test]
+    fn strcat_onto_what_was_just_written_is_a_copy_to_its_end() {
+        let text = r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 6 = { bytes " 1111\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 3 = { bytes "ab\00" }, align 1, linkage(internal), constant
+
+func @strcat(ptr, ptr) -> ptr, linkage(external);
+func @strcpy(ptr, ptr) -> ptr, linkage(external);
+func @memset(ptr, i32, i64) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+func @touch(ptr), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = alloca, size 64, align 16
+    jump block1
+block1:
+    %1 = iconst.i32 88
+    %2 = iconst.i64 64
+    %3 = call @memset(%0, %1, %2) : (ptr, i32, i64) -> ptr
+    %4 = global_addr @.Lstr.0
+    %5 = call @strcpy(%0, %4) : (ptr, ptr) -> ptr
+    TOUCH
+    jump block2
+block2:
+    %6 = global_addr @.Lstr.1
+    %7 = call @strcat(%0, %6) : (ptr, ptr) -> ptr
+    %8 = global_addr @.Lstr.2
+    %9 = call @strcat(%7, %8) : (ptr, ptr) -> ptr
+    call @use(%9) : (ptr)
+    return
+}
+"#;
+        let out = folded(&text.replace("TOUCH", ""));
+        assert!(!out.contains("call @strcat("), "{out}");
+        assert!(out.contains("iconst.i64 11"), "the first goes where the terminator was, {out}");
+        assert!(out.contains("iconst.i64 16"), "the second after the first, {out}");
+        assert!(out.contains("call @use(%0)"), "{out}");
+
+        let out = folded(&text.replace("TOUCH", "call @touch(%0) : (ptr)"));
+        assert_eq!(out.matches("call @strcat(").count(), 2, "{out}");
+    }
+
+    /// `strncpy` of up to a string and its terminator is a copy of the count, of nothing is its
+    /// destination, and of more than that is left alone because the rest is padded with zeros.
+    #[test]
+    fn strncpy_that_pads_nothing_is_a_copy() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strncpy(ptr, ptr, i64) -> ptr, linkage(external);
+func @use(ptr, ptr, ptr, ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = iconst.i64 4
+    %3 = call @strncpy(%0, %1, %2) : (ptr, ptr, i64) -> ptr
+    %4 = iconst.i64 12
+    %5 = call @strncpy(%0, %1, %4) : (ptr, ptr, i64) -> ptr
+    %6 = iconst.i64 0
+    %7 = call @strncpy(%0, %1, %6) : (ptr, ptr, i64) -> ptr
+    %8 = iconst.i64 13
+    %9 = call @strncpy(%0, %1, %8) : (ptr, ptr, i64) -> ptr
+    call @use(%3, %5, %7, %9) : (ptr, ptr, ptr, ptr)
+    return
+}
+"#,
+        );
+        assert_eq!(out.matches("call @memcpy(").count(), 2, "{out}");
+        assert_eq!(out.matches("call @strncpy(").count(), 1, "thirteen pads a byte, {out}");
     }
 
     /// `strcpy` of a pointer that may be any of several strings of one length is a copy of that
