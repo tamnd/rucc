@@ -73,6 +73,19 @@ pub enum Const {
     },
     /// The address of an object, which is a number nobody knows until the link.
     Address(Address),
+    /// How far one label of a function is from another, `&&to - &&from` in GNU C.
+    ///
+    /// Neither address is known until the link, and yet the difference is known as soon as the
+    /// function is laid out, since both ends are in its code and the code moves as one piece.
+    /// That makes it a number the assembler writes rather than one a relocation asks the linker
+    /// for, and it is how a table of places to jump to says where each one is in four bytes and
+    /// without anything to relocate when the program is loaded.
+    Apart {
+        /// The label the distance is measured to.
+        to: LabelId,
+        /// The label it is measured from.
+        from: LabelId,
+    },
 }
 
 /// An address constant: some object, and how far into it.

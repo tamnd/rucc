@@ -5082,6 +5082,18 @@ impl<'u> Body<'_, 'u> {
             // A complex constant has no value type, so the line above answered before this was
             // reached. Where one goes is [`Self::complex_into`]'s to say.
             Const::Complex { .. } | Const::ComplexInt { .. } => None,
+            // Two labels of this function, which in an image is a number the assembler works out
+            // and in code is the subtraction it was written as, at whatever width it went into.
+            Const::Apart { to, from } => {
+                let to = self.label_addr(to, span)?;
+                let from = self.label_addr(from, span)?;
+                let address = self.address;
+                let mut build = self.build(span);
+                let to = build.unary(Opcode::PtrToInt, to, address);
+                let from = build.unary(Opcode::PtrToInt, from, address);
+                let bytes = build.binary(Opcode::Sub, to, from, Flags::NONE);
+                Some(self.widen(bytes, true, ir, span))
+            }
             Const::Address(address) => {
                 // The address of a label is the one base that is a place in this function rather
                 // than an object the linker knows by name, so it is the instruction that says so

@@ -238,10 +238,15 @@ impl<'a> Printer<'a> {
                 let _ = write!(self.out, "{ty} ");
                 self.imm(self.module[value], ty);
             }
-            Datum::Addr(reloc) | Datum::Away(reloc) => {
-                // The one word says which of the two it is, since the rest of the line is the
-                // same: a symbol, how many bytes it is written in, and what to add to it.
-                let what = if matches!(datum, Datum::Away(_)) { "away" } else { "addr" };
+            Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } => {
+                // The one word says which of the three it is, since the rest of the line is the
+                // same: a symbol, how many bytes it is written in, and what to add to it. A
+                // distance between two places then says where it is measured from.
+                let what = match datum {
+                    Datum::Away(_) => "away",
+                    Datum::Apart { .. } => "apart",
+                    _ => "addr",
+                };
                 let Reloc { symbol, addend, size } = self.module[reloc];
                 let _ = write!(self.out, "{what}.{size} @{}", self.names.resolve(symbol));
                 match addend.signum() {
@@ -258,6 +263,9 @@ impl<'a> Printer<'a> {
                         };
                     }
                     _ => {}
+                }
+                if let Datum::Apart { from, .. } = datum {
+                    let _ = write!(self.out, " from @{}", self.names.resolve(from));
                 }
             }
         }

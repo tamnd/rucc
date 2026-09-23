@@ -1492,6 +1492,15 @@ impl Unit<'_> {
                 let imm = self.module.add_imm(Imm::int(offset, ty));
                 Some(Datum::Scalar { ty, value: imm })
             }
+            // Two labels, both named for the image the way one is for `&&l`, and the width is
+            // the type's since the distance is a number and not an address.
+            Const::Apart { to, from } => {
+                let to = self.label_name(to);
+                let from = self.label_name(from);
+                let size = u32::try_from(size).unwrap_or(0);
+                let to = self.module.add_reloc(Reloc { symbol: to, addend: 0, size });
+                Some(Datum::Apart { to, from })
+            }
             Const::Address(address) => {
                 let symbol = match address.base {
                     Base::Decl(decl) => {
