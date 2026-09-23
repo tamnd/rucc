@@ -115,6 +115,23 @@ callee saved register pushed and popped in `main` when a nested loop keeps the w
 it still reads for a value, which costs a few instructions once and saves more than that over the
 outer loop.
 
+*A base with something scaled into it.* `p[i + k]` for an invariant `k` has the base `p +
+sext(k) * 4`, and the middle part names nothing the function holds. The rewrite used to refuse the
+group for that, after the search had already chosen a walk for it, so the loop kept the widening,
+the multiply and the add on every turn and the walk it was priced with was never written
+(tamnd/rucc#983). The rewrite now works those bytes out in the preheader in sixty four bits, adds
+them to the pointer once, and starts the walk there. The value they are built from has to dominate
+the preheader, the same as the pointer does.
+
+This is rare in the corpus, which changes three sources at `-O2` and makes none of them larger (9
+fewer instructions). A benchmark of two such loops runs 20% fewer instructions and 4% faster. The
+SQLite amalgamation at `-O2` grows by 251 instructions over 51 functions, most of them a few
+instructions each: the walks the search chose are now written, and each costs a widening and an add in
+front of its loop. A SQLite workload runs 0.1% more instructions with the same output, and its time
+is within noise. What is left is the exit test. The counter is still read by the index the walk
+replaces, so the test stays on the counter and the loop keeps both until that read is known to be
+dead when the test is decided.
+
 *Rewriting*, then document 17's DCE removes the now-dead original variables. The pass does not delete
 anything itself, which keeps it simpler and follows the general discipline of one job per pass.
 
