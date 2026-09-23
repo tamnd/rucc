@@ -144,6 +144,43 @@ something no wider than a byte is left alone, because there is no room in it for
 `gcc.c-torture/execute/builtins/strcmp.c` writes `strcmp (bar, "")` and `strcmp ("", bar)` over a
 mutable global, and aborts if the library is reached, so passing it means the fold happened.
 
+**A checking call whose check cannot fail is the plain call.** `_FORTIFY_SOURCE` turns `memcpy(d, s,
+n)` into `__memcpy_chk(d, s, n, size)`, where `size` is what `__builtin_object_size` said the
+destination holds, and the checking function aborts when the copy would not fit. Where the size is
+all ones, which is the builtin saying it does not know, or where the count is known and fits, the
+check is one that cannot fail and the call is the plain one with the size dropped. The same rule
+covers `__memmove_chk`, `__mempcpy_chk` and `__memset_chk` with a count, `__strncpy_chk` and
+`__stpncpy_chk` with a count as well, `__strcpy_chk` and `__stpcpy_chk` with the longest the source
+string can be plus its terminator, and `__snprintf_chk` and `__vsnprintf_chk` with the bound they
+were given. `__sprintf_chk` and `__vsprintf_chk` have a flag as well as a size, and are plain only
+where the flag is zero or the format is one the compiler can read and holds nothing that could write
+through `%n`. Where the check can fail, gcc still makes the call cheaper, and so does this pass: a
+checking `stpcpy` or `mempcpy` whose answer nothing reads is the `strcpy` or `memcpy` version, and a
+checking `strcpy` of a known string is a checking `memcpy` of its length plus one. An append of the
+empty string, or a counted append of zero bytes, is the destination, and a counted append whose
+count covers the whole of a known source is the uncounted one. A count is read as the largest number
+it can be, through a conditional expression or a block parameter, so `l1 ? sizeof (buf) : 4` fits an
+eight byte `buf` whichever arm was taken. The plain calls these leave behind have folds of their
+own: `strcpy` and `stpcpy` of a known string are `memcpy` of its length plus one, `sprintf` of a
+format with nothing to convert, or of `"%s"` and a known string, is `strcpy` answering the length,
+`strncat` whose count covers a known string is `strcat`, and `mempcpy` is `memcpy` with the end of
+the copy worked out beside it, which is an address this can write only where the count is known.
+Every one of these rules is gcc 16's, measured by compiling the same calls with it. The plain name
+has to be one the module either does not declare or declares with the shape the call has, since a
+program with its own `memcpy` of some other shape has a function the pass knows nothing about. Once
+a call is plain the ordinary folds apply to it, so the pass looks at a function more than once, and
+three rounds is the longest chain any of these makes: a checking `sprintf` of a literal is
+`sprintf`, which is `strcpy` answering the length, which is `memcpy`. Every plan in a round is
+worked out from the body as it was, so a plan applied after another is renamed through what the
+other one replaced: in `mempcpy (mempcpy (p, a, 4), b, 4)` the second copy's destination is the
+first one's answer, which the first fold took away.
+
+What this does not do yet is the object size gcc works out after lowering. A destination picked by
+a branch or a loop, `r = l1 == 1 ? &a.buf1[5] : &a.buf2[4]`, is a size of all ones by the time
+the front end folds `__builtin_object_size`, so the call is made plain where gcc keeps the check
+with the larger of the two sizes. The `test3` functions of the `builtins/*-chk.c` torture programs
+count exactly those checks.
+
 **A rename does not hide the function.** `extern char *strstr (const char *, const char *) __asm
 ("my_strstr");` declares the standard `strstr` and says the symbol is `my_strstr`, and a pass with
 only the symbol in front of it sees a call to something it has never heard of. The IR carries the

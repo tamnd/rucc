@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The checking calls `_FORTIFY_SOURCE` writes are folded the way gcc 16 folds them. `__memcpy_chk` and the thirteen beside it carry the size `__builtin_object_size` gave for the destination and abort when the call would not fit, and where that size is all ones, which is the builtin saying it does not know, or where what the call writes is known to fit, the check cannot fail and the call becomes the plain one. Where the check can fail the call still gets cheaper in the ways gcc makes it cheaper: a checking `stpcpy` or `mempcpy` whose answer nothing reads becomes the `strcpy` or `memcpy` version, a checking `strcpy` of a known string becomes a checking `memcpy` of its length plus one, an append of the empty string is the destination, and a counted append whose count covers a known source is the uncounted one. Some plain calls fold too, since a checking call made plain is usually one of them: `strcpy` and `stpcpy` of a known string are `memcpy`, `sprintf` of a format with nothing to convert or of `"%s"` and a known string is `strcpy`, `strncat` whose count covers a known string is `strcat`, and `mempcpy` is `memcpy` with the end of the copy worked out beside it. A count is read as the largest number it can be, so `l1 ? sizeof (buf) : 4` fits an 8 byte `buf` whichever arm was taken. The plain name has to be one the module does not declare with some other shape. The pass now looks at a function up to three times, because each of these can leave a call another one folds, and a plan applied later in a round is renamed through what the plans before it replaced, which fixes a dangling operand that `mempcpy (mempcpy (p, a, 4), b, 4)` used to leave behind. `gcc.c-torture/execute/builtins/pr23484-chk.c` passes at all five optimizing levels, and `mempcpy-chk.c` and `stpcpy-chk.c` now fail only where a destination picked by a branch needs an object size worked out after lowering. Section 20.2 of `spec/optimizer/20-idioms-and-libcalls.md` has the rules. Part of tamnd/rucc#1677.
+
 ## 0.10.77
 
 ### Added

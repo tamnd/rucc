@@ -56,6 +56,15 @@
 //! nothing is removed. gcc stops in exactly the same place and the reason is in the torture
 //! program's own comment: a system need not have a `puts_unlocked` for the compiler to name.
 //!
+//! The checking spellings `_FORTIFY_SOURCE` writes, `__memcpy_chk` and the thirteen beside it,
+//! carry the size of the destination as one more argument and abort when the call would not fit.
+//! Where that size is all ones, which is `__builtin_object_size` not knowing, or where what the
+//! call writes is known to fit, the check cannot fail and the call is the plain one without it.
+//! Where it can fail the call may still get cheaper: a checking `stpcpy` whose answer nothing reads
+//! is a checking `strcpy`, and a checking `strcpy` of a known string is a checking `memcpy`. An
+//! append of nothing is the destination. The plain name has to be one the module does not declare
+//! with some other shape, and a call made plain is looked at again, up to three times.
+//!
 //! # What a call has to be
 //!
 //! For the printf family, its result has to be read by nothing. `printf` answers the number of
@@ -106,8 +115,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, IntPred, Linkage,
-    MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
+    AbiList, CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, IntPred,
+    Linkage, MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -124,24 +133,86 @@ pub const NAME: &str = "libcall";
 /// down a chain of `ptr_add`, where one level is one index written in the source.
 const DEPTH: u32 = 4;
 
+/// How many times the calls in one function are looked at, which is the longest chain of folds
+/// where each one leaves a call behind that the next one folds.
+const ROUNDS: u32 = 3;
+
 /// The names a fold may leave behind, sorted.
-const REPLACEMENTS: [&str; 7] = ["fputc", "fputs", "fwrite", "putchar", "puts", "strchr", "strlen"];
+const REPLACEMENTS: [&str; 10] = [
+    "__memcpy_chk",
+    "fputc",
+    "fputs",
+    "fwrite",
+    "memcpy",
+    "putchar",
+    "puts",
+    "strchr",
+    "strcpy",
+    "strlen",
+];
+
+/// The names a checking call may become once its check cannot fail, sorted.
+///
+/// These are not in [`REPLACEMENTS`] because what a call to one of them looks like is read off the
+/// call it replaces rather than written down here. Half of them are variadic or take a `va_list`,
+/// and what a `va_list` is travels with the target, so the one signature that is right is the one
+/// the checking call already had with the checking arguments taken out of it.
+const UNCHECKED: [&str; 18] = [
+    "__memcpy_chk",
+    "__strcat_chk",
+    "__strcpy_chk",
+    "__strncpy_chk",
+    "memcpy",
+    "memmove",
+    "mempcpy",
+    "memset",
+    "snprintf",
+    "sprintf",
+    "stpcpy",
+    "stpncpy",
+    "strcat",
+    "strcpy",
+    "strncat",
+    "strncpy",
+    "vsnprintf",
+    "vsprintf",
+];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 19] = [
+const SOURCES: [&str; 39] = [
+    "__memcpy_chk",
+    "__memmove_chk",
+    "__mempcpy_chk",
+    "__memset_chk",
+    "__snprintf_chk",
+    "__sprintf_chk",
+    "__stpcpy_chk",
+    "__stpncpy_chk",
+    "__strcat_chk",
+    "__strcpy_chk",
+    "__strncat_chk",
+    "__strncpy_chk",
+    "__vsnprintf_chk",
+    "__vsprintf_chk",
     "fprintf",
     "fprintf_unlocked",
     "fputs",
     "fputs_unlocked",
     "index",
     "memchr",
+    "mempcpy",
     "printf",
     "printf_unlocked",
     "rindex",
+    "sprintf",
+    "stpcpy",
+    "strcat",
     "strchr",
     "strcmp",
+    "strcpy",
     "strcspn",
     "strlen",
+    "strncat",
     "strncmp",
     "strnlen",
     "strpbrk",
@@ -166,7 +237,49 @@ enum Plan {
         signature: Signature,
         /// What to pass it.
         args: Vec<Argument>,
+        /// What takes the place of the old call's result, where that is not the new call's
+        /// result. `stpcpy` of a string whose length is known is a `memcpy` whose answer is the
+        /// start of the copy, and the answer `stpcpy` gives is the end of it.
+        answer: Option<Answer>,
     },
+    /// The same call to another function, with the arguments at these places left out.
+    ///
+    /// This is what a call to one of the checking functions `_FORTIFY_SOURCE` writes becomes once
+    /// its check cannot fail. What the new call looks like is the old one without those
+    /// arguments, including whatever the old one passed beyond its named parameters.
+    Unchecked {
+        /// The symbol the new call names.
+        callee: Symbol,
+        /// The places of the arguments that go.
+        drop: &'static [usize],
+    },
+}
+
+impl Plan {
+    /// Names what each value was renamed to wherever this plan names the old one.
+    fn rename(&mut self, renamed: &HashMap<Value, Value>) {
+        if renamed.is_empty() {
+            return;
+        }
+        let answer = match self {
+            Plan::Drop | Plan::Unchecked { .. } => None,
+            Plan::Answer(answer) => Some(answer),
+            Plan::Swap { args, answer, .. } => {
+                for arg in args {
+                    if let Argument::Have(value) = arg {
+                        *value = renamed.get(value).copied().unwrap_or(*value);
+                    }
+                }
+                answer.as_mut()
+            }
+        };
+        let value = match answer {
+            Some(Answer::Along(value, _) | Answer::Least { count: value, .. }) => value,
+            Some(Answer::Byte { of, .. }) => of,
+            Some(Answer::Nowhere | Answer::Number(_)) | None => return,
+        };
+        *value = renamed.get(value).copied().unwrap_or(*value);
+    }
 }
 
 /// What a call that answers rather than writes was going to answer.
@@ -248,6 +361,9 @@ struct Shapes {
     /// The symbol a call to that name has to carry and the signature it has to have, and `None`
     /// where no call may name it.
     held: HashMap<&'static str, Option<(Symbol, Signature)>>,
+    /// The same for each name in [`UNCHECKED`], where the signature is the one the module declared
+    /// and `None` where it declared nothing, since the call a checking call becomes brings its own.
+    named: HashMap<&'static str, Option<(Symbol, Option<Signature>)>>,
 }
 
 impl Shapes {
@@ -257,11 +373,16 @@ impl Shapes {
             .iter()
             .map(|&name| (name, Some((names.intern(name), canonical(module, name)))))
             .collect();
+        let mut named: HashMap<&'static str, Option<(Symbol, Option<Signature>)>> =
+            UNCHECKED.iter().map(|&name| (name, Some((names.intern(name), None)))).collect();
         for id in module.funcs() {
             // The name the source gave it, so that a module which renamed `puts` is left with a
             // call to the symbol it renamed it to rather than one to a `puts` it never declared.
             let func = &module[id];
             let spelled = func.spelled.unwrap_or(func.name);
+            if let Some(slot) = named.get_mut(names.resolve(spelled)) {
+                *slot = Some((func.name, Some(func.signature().clone())));
+            }
             let Some(slot) = held.get_mut(names.resolve(spelled)) else { continue };
             let declared = func.signature();
             let agrees = slot.as_ref().is_some_and(|(_, want)| {
@@ -274,21 +395,41 @@ impl Shapes {
         // A variable or a second name for something else is not a function to call, whatever it is
         // spelled.
         for id in module.globals() {
-            if let Some(slot) = held.get_mut(names.resolve(module[id].name)) {
+            let name = names.resolve(module[id].name);
+            if let Some(slot) = held.get_mut(name) {
+                *slot = None;
+            }
+            if let Some(slot) = named.get_mut(name) {
                 *slot = None;
             }
         }
         for id in module.aliases() {
-            if let Some(slot) = held.get_mut(names.resolve(module[id].name)) {
+            let name = names.resolve(module[id].name);
+            if let Some(slot) = held.get_mut(name) {
+                *slot = None;
+            }
+            if let Some(slot) = named.get_mut(name) {
                 *slot = None;
             }
         }
-        Self { held }
+        Self { held, named }
     }
 
     /// What a call to that name carries, or `None` where this module does not allow one.
     fn get(&self, name: &'static str) -> Option<(Symbol, Signature)> {
         self.held.get(name)?.clone()
+    }
+
+    /// What a call to that name carries, where a call to it with this signature is one the module
+    /// allows.
+    fn unchecked(&self, name: &str, want: &Signature) -> Option<Symbol> {
+        let (symbol, declared) = self.named.get(name)?.as_ref()?;
+        let agrees = declared.as_ref().is_none_or(|declared| {
+            declared.variadic == want.variadic
+                && declared.param_types().eq(want.param_types())
+                && declared.return_types().eq(want.return_types())
+        });
+        agrees.then_some(*symbol)
     }
 }
 
@@ -306,6 +447,15 @@ fn canonical(module: &Module, name: &str) -> Signature {
         "fputs" => Signature::new().with_params(&[Type::PTR, Type::PTR]).with_returns(&[int]),
         "strchr" => Signature::new().with_params(&[Type::PTR, int]).with_returns(&[Type::PTR]),
         "strlen" => Signature::new().with_params(&[Type::PTR]).with_returns(&[size]),
+        "strcpy" => {
+            Signature::new().with_params(&[Type::PTR, Type::PTR]).with_returns(&[Type::PTR])
+        }
+        "memcpy" => {
+            Signature::new().with_params(&[Type::PTR, Type::PTR, size]).with_returns(&[Type::PTR])
+        }
+        "__memcpy_chk" => Signature::new()
+            .with_params(&[Type::PTR, Type::PTR, size, size])
+            .with_returns(&[Type::PTR]),
         // `fwrite`, the one that is told how many bytes to write rather than going looking for a
         // terminator, and the only one of the five whose types are the target's rather than fixed.
         _ => {
@@ -365,27 +515,46 @@ pub fn fold(
             continue;
         }
         let mut stats = Stats::new();
-        // The whole body is read before any of it changes. A plan names values the body holds, and
-        // working the next one out from a body half rewritten is how a pass comes to read a value
-        // whose definition it has just taken away.
-        let plans = {
-            let func = &module[id];
-            let site = Site {
-                module,
-                func,
-                cfg: &Cfg::new(func),
-                shapes: &shapes,
-                counts: &uses::count(func),
-                defined: &defined,
-                standard: &standard,
-                names,
-                no_builtin,
-                pic,
+        // A fold can leave behind a call another fold knows, which is how `__stpcpy_chk` of a
+        // string that fits becomes `stpcpy` and then a `memcpy` with the end of the copy as its
+        // answer. Each round is one step along a chain like that and none is longer than this.
+        for _ in 0..ROUNDS {
+            // The whole body is read before any of it changes. A plan names values the body holds,
+            // and working the next one out from a body half rewritten is how a pass comes to read
+            // a value whose definition it has just taken away.
+            let plans = {
+                let func = &module[id];
+                let site = Site {
+                    module,
+                    func,
+                    cfg: &Cfg::new(func),
+                    shapes: &shapes,
+                    counts: &uses::count(func),
+                    defined: &defined,
+                    standard: &standard,
+                    names,
+                    no_builtin,
+                    pic,
+                };
+                site.survey(fuel, &mut stats)
             };
-            site.survey(fuel, &mut stats)
-        };
-        for (inst, plan) in plans {
-            apply(module, id, names, &mut texts, inst, plan);
+            if plans.is_empty() {
+                break;
+            }
+            // A plan read the body as it was, so a value it names may be the answer of a call an
+            // earlier plan in this round took away, which is `mempcpy (mempcpy (p, a, 4), b, 4)`.
+            // Every plan is renamed through what the ones before it replaced.
+            let mut renamed: HashMap<Value, Value> = HashMap::new();
+            for (inst, mut plan) in plans {
+                plan.rename(&renamed);
+                let made = apply(module, id, names, &mut texts, inst, plan);
+                for value in renamed.values_mut() {
+                    if let Some(&to) = made.get(value) {
+                        *value = to;
+                    }
+                }
+                renamed.extend(made);
+            }
         }
         if stats.changed() {
             done.push((id, stats));
@@ -446,6 +615,7 @@ impl Site<'_> {
                     Plan::Drop => "call to the library that writes nothing removed",
                     Plan::Answer(_) => "call to the library whose answer is known folded",
                     Plan::Swap { .. } => "call to the library folded",
+                    Plan::Unchecked { .. } => "checking call whose check cannot fail made plain",
                 });
                 plans.push((inst, plan));
             }
@@ -496,6 +666,20 @@ impl Site<'_> {
             "strcspn" => self.span(data, &args, Set::Outside),
             "strspn" => self.span(data, &args, Set::Inside),
             "strpbrk" => self.strpbrk(data, &args),
+            "strcpy" | "stpcpy" => self.strcpy(data, name, &args, ignored),
+            "strcat" => self.strcat(data, &args, None),
+            "strncat" => self.strncat(data, &args),
+            "mempcpy" => self.mempcpy(data, &args, ignored),
+            "sprintf" => self.sprintf(data, &args, ignored),
+            "__memcpy_chk" | "__memmove_chk" | "__mempcpy_chk" | "__memset_chk" => {
+                self.memory_chk(data, name, &args, ignored)
+            }
+            "__strcpy_chk" | "__stpcpy_chk" => self.strcpy_chk(data, name, &args, ignored),
+            "__strncpy_chk" | "__stpncpy_chk" => self.strncpy_chk(data, name, &args, ignored),
+            "__strcat_chk" => self.strcat_chk(data, &args),
+            "__strncat_chk" => self.strncat_chk(data, &args),
+            "__sprintf_chk" | "__vsprintf_chk" => self.sprintf_chk(data, name, &args),
+            "__snprintf_chk" | "__vsnprintf_chk" => self.snprintf_chk(data, name, &args),
             _ => None,
         }
     }
@@ -961,10 +1145,310 @@ impl Site<'_> {
         )
     }
 
+    /// `strcpy` and `stpcpy` of a string whose length is known, which copy that many bytes and a
+    /// terminator and are `memcpy` of that many.
+    ///
+    /// `stpcpy` answers the end of the copy rather than the start, which is the one difference
+    /// between the two, so where nothing reads its answer it is `strcpy` whatever the string is.
+    fn strcpy(&self, data: &InstData, name: &str, args: &[Value], ignored: bool) -> Option<Plan> {
+        let [dest, source] = *args else { return None };
+        if !self.places(data) {
+            return None;
+        }
+        let end = name == "stpcpy";
+        if end && ignored {
+            return self.unchecked(data, "strcpy", &[]);
+        }
+        let len = self.one(source)?.len();
+        let (callee, signature) = self.shapes.get("memcpy")?;
+        let args =
+            vec![Argument::Have(dest), Argument::Have(source), Argument::Count(len as u64 + 1)];
+        let answer = end.then_some(Answer::Along(dest, len as u64));
+        Some(Plan::Swap { callee, signature, args, answer })
+    }
+
+    /// `strcat` and `strncat` that append nothing, which answer where they were told to append.
+    ///
+    /// Nothing is appended where the string is empty or where the count is zero, and neither call
+    /// reads the destination before it knows that.
+    fn strcat(&self, data: &InstData, args: &[Value], count: Option<Value>) -> Option<Plan> {
+        let [dest, source] = *args else { return None };
+        let nothing = self.one(source).is_some_and(|text| text.is_empty())
+            || count.is_some_and(|count| self.number(count) == Some(0));
+        (nothing && self.places(data)).then_some(Plan::Answer(Answer::Along(dest, 0)))
+    }
+
+    /// `strncat` whose count is no limit on a string whose length is known, which is `strcat`.
+    fn strncat(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        let [dest, source, count] = *args else { return None };
+        if let Some(plan) = self.strcat(data, &[dest, source], Some(count)) {
+            return Some(plan);
+        }
+        let len = self.one(source)?.len() as u128;
+        (self.number(count)? >= len).then(|| self.unchecked(data, "strcat", &[2]))?
+    }
+
+    /// `mempcpy`, which is `memcpy` answering the end of the copy rather than the start.
+    ///
+    /// Where nothing reads the answer the two are the same call. Where something does, the end is
+    /// the start and the count, which is an address this can write only where the count is known.
+    fn mempcpy(&self, data: &InstData, args: &[Value], ignored: bool) -> Option<Plan> {
+        let [dest, source, count] = *args else { return None };
+        if ignored {
+            return self.unchecked(data, "memcpy", &[]);
+        }
+        let along = u64::try_from(self.number(count)?).ok()?;
+        if !self.places(data) {
+            return None;
+        }
+        let (callee, signature) = self.shapes.get("memcpy")?;
+        let args = vec![Argument::Have(dest), Argument::Have(source), Argument::Have(count)];
+        Some(Plan::Swap { callee, signature, args, answer: Some(Answer::Along(dest, along)) })
+    }
+
+    /// `sprintf` of a format with nothing to convert, or of `"%s"` and one string, which writes
+    /// the string and is `strcpy` of it.
+    ///
+    /// The count `sprintf` answers is the length of what it wrote and `strcpy` answers something
+    /// else, so a program reading it needs that length to be one the compiler knows.
+    fn sprintf(&self, data: &InstData, args: &[Value], ignored: bool) -> Option<Plan> {
+        let (&dest, &format) = (args.first()?, args.get(1)?);
+        let text = self.one(format)?;
+        let source = match *args {
+            [_, _] if !text.contains(&b'%') => format,
+            [_, _, arg] if text == b"%s" && self.func[arg].ty == Type::PTR => arg,
+            _ => return None,
+        };
+        let answer = if ignored {
+            None
+        } else {
+            self.answers(data)?;
+            Some(Answer::Number(i128::try_from(self.one(source)?.len()).ok()?))
+        };
+        let (callee, signature) = self.shapes.get("strcpy")?;
+        Some(Plan::Swap {
+            callee,
+            signature,
+            args: vec![Argument::Have(dest), Argument::Have(source)],
+            answer,
+        })
+    }
+
+    /// `__memcpy_chk` and the three beside it, which are the plain call where the count is known to
+    /// fit the object.
+    ///
+    /// `__mempcpy_chk` answers the end of the copy and `__memcpy_chk` the start, so where nothing
+    /// reads the answer and the check has to stay, it stays on the call that does not work one out.
+    fn memory_chk(
+        &self,
+        data: &InstData,
+        name: &str,
+        args: &[Value],
+        ignored: bool,
+    ) -> Option<Plan> {
+        let [_, _, count, size] = *args else { return None };
+        if self.fits(count, size) {
+            return self.unchecked(data, plain(name), &[3]);
+        }
+        (name == "__mempcpy_chk" && ignored).then(|| self.unchecked(data, "__memcpy_chk", &[]))?
+    }
+
+    /// `__strcpy_chk` and `__stpcpy_chk`, which are the plain call where the string and its
+    /// terminator are known to fit.
+    ///
+    /// Where they are not known to, a string whose length is known is still a count, so
+    /// `__strcpy_chk` becomes the `__memcpy_chk` of that many bytes and the library checks a number
+    /// rather than walking a string to find one. `__stpcpy_chk` whose answer nothing reads becomes
+    /// `__strcpy_chk` for the same reason `stpcpy` becomes `strcpy`.
+    fn strcpy_chk(
+        &self,
+        data: &InstData,
+        name: &str,
+        args: &[Value],
+        ignored: bool,
+    ) -> Option<Plan> {
+        let [dest, source, size] = *args else { return None };
+        let end = name == "__stpcpy_chk";
+        let fits = self.unknown(size)
+            || self.longest(source).zip(self.number(size)).is_some_and(|(len, size)| len < size);
+        if fits {
+            return self.unchecked(data, if end && !ignored { "stpcpy" } else { "strcpy" }, &[2]);
+        }
+        if end {
+            return ignored.then(|| self.unchecked(data, "__strcpy_chk", &[]))?;
+        }
+        let len = self.one(source)?.len() as u64;
+        let args = vec![
+            Argument::Have(dest),
+            Argument::Have(source),
+            Argument::Count(len + 1),
+            Argument::Have(size),
+        ];
+        self.call("__memcpy_chk", args)
+    }
+
+    /// `__strncpy_chk` and `__stpncpy_chk`, which write exactly as many bytes as they were told to
+    /// and are the plain call where that many fit.
+    fn strncpy_chk(
+        &self,
+        data: &InstData,
+        name: &str,
+        args: &[Value],
+        ignored: bool,
+    ) -> Option<Plan> {
+        let [_, _, count, size] = *args else { return None };
+        let end = name == "__stpncpy_chk";
+        if self.fits(count, size) {
+            return self.unchecked(data, if end && !ignored { "stpncpy" } else { "strncpy" }, &[3]);
+        }
+        (end && ignored).then(|| self.unchecked(data, "__strncpy_chk", &[]))?
+    }
+
+    /// `__strcat_chk`, which appends nothing where the string is empty and is the plain call only
+    /// where nothing is known about the object.
+    ///
+    /// What it appends to is a string whose length is not known here, so no size is enough.
+    fn strcat_chk(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        let [dest, source, size] = *args else { return None };
+        if let Some(plan) = self.strcat(data, &[dest, source], None) {
+            return Some(plan);
+        }
+        self.unknown(size).then(|| self.unchecked(data, "strcat", &[2]))?
+    }
+
+    /// `__strncat_chk`, which is `__strcat_chk` where the count is no limit on a string whose length
+    /// is known.
+    fn strncat_chk(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+        let [dest, source, count, size] = *args else { return None };
+        if let Some(plan) = self.strcat(data, &[dest, source], Some(count)) {
+            return Some(plan);
+        }
+        if self.unknown(size) {
+            return self.unchecked(data, "strncat", &[3]);
+        }
+        let len = self.one(source)?.len() as u128;
+        (self.number(count)? >= len).then(|| self.unchecked(data, "__strcat_chk", &[2]))?
+    }
+
+    /// `__sprintf_chk` and `__vsprintf_chk`, which are the plain call where what they write is known
+    /// to fit.
+    ///
+    /// What they write is known in two shapes, a format with nothing to convert and `"%s"` of a
+    /// string the module holds, and the second is only readable in the variadic one because a
+    /// `va_list` is not something this can look inside.
+    fn sprintf_chk(&self, data: &InstData, name: &str, args: &[Value]) -> Option<Plan> {
+        let (&flag, &size, &format) = (args.get(1)?, args.get(2)?, args.get(3)?);
+        let text = self.one(format);
+        let len = match (text.as_deref(), args.get(4..)?) {
+            (Some(text), rest)
+                if !text.contains(&b'%') && (name == "__vsprintf_chk" || rest.is_empty()) =>
+            {
+                Some(text.len() as u128)
+            }
+            (Some(b"%s"), &[arg]) if name == "__sprintf_chk" => {
+                self.one(arg).map(|arg| arg.len() as u128)
+            }
+            _ => None,
+        };
+        let fits =
+            self.unknown(size) || len.zip(self.number(size)).is_some_and(|(len, size)| len < size);
+        (fits && self.flagless(flag, text.as_deref()))
+            .then(|| self.unchecked(data, plain(name), &[1, 2]))?
+    }
+
+    /// `__snprintf_chk` and `__vsnprintf_chk`, which write no more than they were told to and are
+    /// the plain call where that many fit.
+    fn snprintf_chk(&self, data: &InstData, name: &str, args: &[Value]) -> Option<Plan> {
+        let (&count, &flag, &size, &format) =
+            (args.get(1)?, args.get(2)?, args.get(3)?, args.get(4)?);
+        let text = self.one(format);
+        (self.fits(count, size) && self.flagless(flag, text.as_deref()))
+            .then(|| self.unchecked(data, plain(name), &[2, 3]))?
+    }
+
+    /// Whether the flag a checking printf was handed asks for nothing the plain one does not do.
+    ///
+    /// The flag is set above `_FORTIFY_SOURCE=1` and what it adds is refusing `%n` in a format
+    /// that is writable memory, so a format with nothing to convert, or with a `%s` alone, is one
+    /// the flag has nothing to say about.
+    fn flagless(&self, flag: Value, text: Option<&[u8]>) -> bool {
+        self.number(flag) == Some(0)
+            || text.is_some_and(|text| !text.contains(&b'%') || text == b"%s")
+    }
+
+    /// The same call to the function that name is, with the arguments at those places left out,
+    /// where the module allows a call to it that looks like that.
+    fn unchecked(&self, data: &InstData, name: &str, drop: &'static [usize]) -> Option<Plan> {
+        let Extra::Call(at) = data.extra else { return None };
+        let want = without(&self.func[self.func[at].signature], drop)?;
+        let callee = self.shapes.unchecked(name, &want)?;
+        Some(Plan::Unchecked { callee, drop })
+    }
+
+    /// Whether a checking call's size is the one that says nothing is known about the object.
+    ///
+    /// `__builtin_object_size` answers all ones where it cannot tell, and a check against that is
+    /// a check nothing can fail.
+    fn unknown(&self, size: Value) -> bool {
+        crate::fold::evaluated(self.func, size, DEPTH).is_some_and(|(imm, ty)| imm.signed(ty) == -1)
+    }
+
+    /// Whether a count is known to be no more than the size of the object it is a count of.
+    fn fits(&self, count: Value, size: Value) -> bool {
+        self.unknown(size)
+            || self
+                .largest(count, DEPTH)
+                .zip(self.number(size))
+                .is_some_and(|(count, size)| count <= size)
+    }
+
+    /// The largest number this value may work out to, read as an unsigned one.
+    ///
+    /// The same walk [`Self::strings`] makes, through block parameters and selects, so
+    /// `l1 ? sizeof (buf) : 4` is a count of at most the size of `buf` whichever arm was taken.
+    fn largest(&self, value: Value, depth: u32) -> Option<u128> {
+        if depth == 0 {
+            return None;
+        }
+        match self.func[value].def {
+            Def::Param { block, index } => {
+                let preds = self.cfg.predecessors(block);
+                let mut most = None;
+                for &pred in preds {
+                    let term = self.func.terminator(pred)?;
+                    for call in self.func.successors(term).collect::<Vec<_>>() {
+                        if call.block != block {
+                            continue;
+                        }
+                        let arg = *self.func[call.args].get(index as usize)?;
+                        most = most.max(Some(self.largest(arg, depth - 1)?));
+                    }
+                }
+                most
+            }
+            Def::Result { inst, .. } if self.func[inst].opcode == Opcode::Select => {
+                let args = &self.func[self.func[inst].args];
+                let (then, other) = (*args.get(1)?, *args.get(2)?);
+                Some(self.largest(then, depth - 1)?.max(self.largest(other, depth - 1)?))
+            }
+            _ => self.number(value),
+        }
+    }
+
+    /// The number this value works out to, read as an unsigned one.
+    fn number(&self, value: Value) -> Option<u128> {
+        crate::fold::evaluated(self.func, value, DEPTH).map(|(imm, _)| imm.unsigned())
+    }
+
+    /// The length of the longest string this value may point at.
+    fn longest(&self, value: Value) -> Option<u128> {
+        self.strings(value, DEPTH)?.iter().map(|text| text.len() as u128).max()
+    }
+
     /// A call to that name, or nothing where this module does not allow one.
     fn call(&self, callee: &'static str, args: Vec<Argument>) -> Option<Plan> {
         let (callee, signature) = self.shapes.get(callee)?;
-        Some(Plan::Swap { callee, signature, args })
+        Some(Plan::Swap { callee, signature, args, answer: None })
     }
 
     /// The one string this value points at, or `None` where there is more than one of them.
@@ -1105,18 +1589,33 @@ fn apply(
     texts: &mut HashMap<Vec<u8>, Symbol>,
     inst: Inst,
     plan: Plan,
-) {
-    let (callee, signature, args) = match plan {
+) -> HashMap<Value, Value> {
+    let (callee, signature, args, answer) = match plan {
         Plan::Drop => {
             module[id].remove_inst(inst);
-            return;
+            return HashMap::new();
         }
         Plan::Answer(answer) => {
             let width = size(module);
-            answered(&mut module[id], inst, answer, width);
-            return;
+            return answered(&mut module[id], inst, answer, width);
         }
-        Plan::Swap { callee, signature, args } => (callee, signature, args),
+        Plan::Swap { callee, signature, args, answer } => (callee, signature, args, answer),
+        Plan::Unchecked { callee, drop } => {
+            let func = &mut module[id];
+            let Extra::Call(at) = func[inst].extra else { return HashMap::new() };
+            let info = func[at];
+            let Some(signature) = without(&func[info.signature], drop) else {
+                return HashMap::new();
+            };
+            let values: Vec<Value> = func[func[inst].args]
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !drop.contains(index))
+                .map(|(_, &value)| value)
+                .collect();
+            let made = call(func, inst, callee, signature, info.varargs, &values);
+            return forward(func, inst, made);
+        }
     };
     // The objects first, because a string the fold prints belongs to the module and the module is
     // what the function is reached through.
@@ -1145,30 +1644,75 @@ fn apply(
             }
         });
     }
+    let varargs = func.push_abis(&[]);
+    let made = call(func, inst, callee, signature, varargs, &values);
+    match answer {
+        Some(answer) => answered(func, inst, answer, width),
+        None => forward(func, inst, made),
+    }
+}
+
+/// The function a checking call is where the check is taken off, which is its name without the
+/// `__` in front and the `_chk` behind.
+fn plain(name: &str) -> &str {
+    name.strip_prefix("__").and_then(|rest| rest.strip_suffix("_chk")).unwrap_or(name)
+}
+
+/// A call to that function with those arguments, put in front of the call being replaced.
+fn call(
+    func: &mut Func,
+    before: Inst,
+    callee: Symbol,
+    signature: Signature,
+    varargs: AbiList,
+    values: &[Value],
+) -> Inst {
+    let span = func.span(before);
     let results: Vec<Type> = signature.return_types().collect();
     let sig = func.add_signature(signature);
-    let varargs = func.push_abis(&[]);
     let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
-    let args = func.push_values(&values);
+    let args = func.push_values(values);
     let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
     let made = func.create_inst(data, &results, span);
-    func.insert_before(made, inst);
-    // Whoever read the old call's answer reads the new one's, where the two are the same kind of
-    // thing. The printf family is folded only where nothing read it, so the map is empty there and
-    // this costs a walk over a function that is about to be walked anyway.
-    let forward: HashMap<Value, Value> = func[inst]
+    func.insert_before(made, before);
+    made
+}
+
+/// Hands whoever read the old call's answer the new one's, takes the old call away, and says what
+/// was renamed.
+fn forward(func: &mut Func, old: Inst, new: Inst) -> HashMap<Value, Value> {
+    // Only where the two are the same kind of thing. The printf family is folded only where nothing
+    // read it, so the map is empty there and this costs a walk over a function that is about to be
+    // walked anyway.
+    let forward: HashMap<Value, Value> = func[old]
         .results()
-        .zip(func[made].results().collect::<Vec<Value>>())
+        .zip(func[new].results().collect::<Vec<Value>>())
         .filter(|&(from, to)| func[from].ty == func[to].ty)
         .collect();
     if !forward.is_empty() {
         uses::substitute(func, &forward);
     }
-    func.remove_inst(inst);
+    func.remove_inst(old);
+    forward
 }
 
-/// Writes the answer a search worked out in place of the call that would have worked it out.
-fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
+/// That signature with the parameters at those places taken out, or `None` where one of the places
+/// is not a parameter it names.
+fn without(signature: &Signature, drop: &[usize]) -> Option<Signature> {
+    drop.iter().all(|&index| index < signature.params.len()).then_some(())?;
+    let params = signature
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !drop.contains(index))
+        .map(|(_, param)| *param)
+        .collect();
+    Some(Signature { params, ..signature.clone() })
+}
+
+/// Writes the answer a search worked out in place of the call that would have worked it out, and
+/// says what was renamed.
+fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) -> HashMap<Value, Value> {
     let span = func.span(inst);
     let value = match answer {
         // The haystack itself, which is what a search for the empty string finds and what a search
@@ -1243,6 +1787,7 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
         func[inst].results().map(|result| (result, value)).collect();
     uses::substitute(func, &forward);
     func.remove_inst(inst);
+    forward
 }
 
 /// How two strings compare, over however many bytes the comparison is allowed to read.
@@ -2545,5 +3090,298 @@ block0:
 "#,
         );
         assert!(out.contains("call @strlen("), "{out}");
+    }
+
+    /// A checking copy whose count is known to fit is the plain copy, one that is not known to
+    /// fit keeps its check, and `__mempcpy_chk` whose answer nothing reads keeps its check on the
+    /// copy that has no answer to work out.
+    #[test]
+    fn a_checking_copy_that_fits_is_the_plain_copy() {
+        let out = folded(
+            r#"
+func @__memcpy_chk(ptr, ptr, i64, i64) -> ptr, linkage(external);
+func @__mempcpy_chk(ptr, ptr, i64, i64) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(ptr, ptr, i64), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = iconst.i64 4
+    %4 = iconst.i64 32
+    %5 = call @__memcpy_chk(%0, %1, %3, %4) : (ptr, ptr, i64, i64) -> ptr
+    %6 = iconst.i64 40
+    %7 = call @__memcpy_chk(%0, %1, %6, %4) : (ptr, ptr, i64, i64) -> ptr
+    %8 = call @__mempcpy_chk(%0, %1, %2, %4) : (ptr, ptr, i64, i64) -> ptr
+    call @use(%5, %7) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @memcpy(%0, %1, %3)"), "four bytes fit in thirty two, {out}");
+        assert!(out.contains("call @__memcpy_chk(%0, %1, %6, %4)"), "forty do not, {out}");
+        assert!(out.contains("call @__memcpy_chk(%0, %1, %2, %4)"), "nothing read the end, {out}");
+        assert!(!out.contains("call @__mempcpy_chk("), "{out}");
+    }
+
+    /// `__stpcpy_chk` of a string that fits is `stpcpy`, which is a `memcpy` of the string and its
+    /// terminator answering the end of the copy, and of a string nothing is known about it stays,
+    /// or becomes `__strcpy_chk` where its answer is not read.
+    #[test]
+    fn a_checking_string_copy_goes_as_far_as_the_string_is_known() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 6 = { bytes "abcde\00" }, align 1, linkage(internal), constant
+
+func @__stpcpy_chk(ptr, ptr, i64) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = global_addr @.Lstr.0
+    %3 = iconst.i64 32
+    %4 = call @__stpcpy_chk(%0, %2, %3) : (ptr, ptr, i64) -> ptr
+    %5 = call @__stpcpy_chk(%0, %1, %3) : (ptr, ptr, i64) -> ptr
+    %6 = call @__stpcpy_chk(%0, %1, %3) : (ptr, ptr, i64) -> ptr
+    call @use(%4, %5) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @memcpy(%0, %2, "), "{out}");
+        assert!(out.contains("iconst.i64 6"), "five bytes and a terminator, {out}");
+        assert!(out.contains("ptr_add %0"), "the answer is the end of the copy, {out}");
+        assert!(out.contains("call @__stpcpy_chk(%0, %1, %3)"), "{out}");
+        assert!(out.contains("call @__strcpy_chk(%0, %1, %3)"), "{out}");
+    }
+
+    /// A string known not to fit is still a count, so `__strcpy_chk` of it is `__memcpy_chk` of
+    /// the string and its terminator, and the library checks a number.
+    #[test]
+    fn a_checking_string_copy_that_does_not_fit_is_a_checking_copy_of_a_count() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 6 = { bytes "abcde\00" }, align 1, linkage(internal), constant
+
+func @__strcpy_chk(ptr, ptr, i64) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = iconst.i64 4
+    %3 = call @__strcpy_chk(%0, %1, %2) : (ptr, ptr, i64) -> ptr
+    call @use(%3) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @__memcpy_chk(%0, %1, "), "{out}");
+        assert!(out.contains("iconst.i64 6"), "{out}");
+    }
+
+    /// Appending the empty string, or no bytes of any string, answers the destination, and
+    /// `__strncat_chk` whose count is no limit on the string is `__strcat_chk`.
+    #[test]
+    fn a_checking_append_of_nothing_is_the_destination() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "abc\00" }, align 1, linkage(internal), constant
+
+func @__strcat_chk(ptr, ptr, i64) -> ptr, linkage(external);
+func @__strncat_chk(ptr, ptr, i64, i64) -> ptr, linkage(external);
+func @use(ptr, ptr, ptr, ptr), linkage(external);
+
+func @g(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = global_addr @.Lstr.0
+    %3 = global_addr @.Lstr.1
+    %4 = iconst.i64 32
+    %5 = call @__strcat_chk(%0, %2, %4) : (ptr, ptr, i64) -> ptr
+    %6 = iconst.i64 0
+    %7 = call @__strncat_chk(%0, %1, %6, %4) : (ptr, ptr, i64, i64) -> ptr
+    %8 = iconst.i64 5
+    %9 = call @__strncat_chk(%0, %3, %8, %4) : (ptr, ptr, i64, i64) -> ptr
+    %10 = iconst.i64 2
+    %11 = call @__strncat_chk(%0, %3, %10, %4) : (ptr, ptr, i64, i64) -> ptr
+    call @use(%5, %7, %9, %11) : (ptr, ptr, ptr, ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @use(%0, %0, "), "{out}");
+        assert_eq!(
+            out.matches("call @__strcat_chk(%0, ").count(),
+            1,
+            "five is no limit on three, {out}"
+        );
+        assert_eq!(out.matches("call @__strncat_chk(%0, ").count(), 1, "two is, {out}");
+    }
+
+    /// `__sprintf_chk` of a format with nothing to convert that fits is `sprintf`, which is
+    /// `strcpy` answering the length, which is `memcpy`. A format with a conversion in it writes a
+    /// length nothing knows and keeps its check.
+    #[test]
+    fn a_checking_sprintf_of_a_known_string_is_a_copy() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 6 = { bytes "hello\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 3 = { bytes "%d\00" }, align 1, linkage(internal), constant
+
+func @__sprintf_chk(ptr, i32, i64, ptr, ...) -> i32, linkage(external);
+func @use(i32, i32), linkage(external);
+
+func @g(ptr, i32), linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = global_addr @.Lstr.0
+    %3 = global_addr @.Lstr.1
+    %4 = iconst.i32 0
+    %5 = iconst.i64 32
+    %6 = call @__sprintf_chk(%0, %4, %5, %2) : (ptr, i32, i64, ptr, ...) -> i32
+    %7 = call @__sprintf_chk(%0, %4, %5, %3, %1) : (ptr, i32, i64, ptr, ...) -> i32
+    call @use(%6, %7) : (i32, i32)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @memcpy(%0, %2, "), "{out}");
+        assert!(out.contains("iconst.i32 5"), "the length is the answer, {out}");
+        assert!(out.contains("call @__sprintf_chk(%0, %4, %5, %3, %1)"), "{out}");
+    }
+
+    /// `__snprintf_chk` whose bound fits is `snprintf` with what it was passed beyond its format
+    /// still passed, and a flag asking for more checking keeps the check on a format it would read.
+    #[test]
+    fn a_checking_snprintf_keeps_its_arguments_and_loses_its_check() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 3 = { bytes "%d\00" }, align 1, linkage(internal), constant
+
+func @__snprintf_chk(ptr, i64, i32, i64, ptr, ...) -> i32, linkage(external);
+func @use(i32, i32), linkage(external);
+
+func @g(ptr, i32), linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = global_addr @.Lstr.0
+    %3 = iconst.i64 8
+    %4 = iconst.i32 0
+    %5 = iconst.i64 32
+    %6 = call @__snprintf_chk(%0, %3, %4, %5, %2, %1) : (ptr, i64, i32, i64, ptr, ...) -> i32
+    %7 = iconst.i32 1
+    %8 = call @__snprintf_chk(%0, %3, %7, %5, %2, %1) : (ptr, i64, i32, i64, ptr, ...) -> i32
+    call @use(%6, %8) : (i32, i32)
+    return
+}
+"#,
+        );
+        assert!(
+            out.contains("call @snprintf(%0, %3, %2, %1) : (ptr, i64, ptr, ...) -> i32"),
+            "{out}"
+        );
+        assert!(out.contains("call @__snprintf_chk(%0, %3, %7, %5, %2, %1)"), "{out}");
+    }
+
+    /// A program that declared the plain function as something else keeps its checking call.
+    #[test]
+    fn a_plain_function_of_another_shape_keeps_the_check() {
+        let out = folded(
+            r#"
+func @__memcpy_chk(ptr, ptr, i64, i64) -> ptr, linkage(external);
+func @memcpy(ptr, ptr, i32) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = iconst.i64 4
+    %3 = iconst.i64 32
+    %4 = call @__memcpy_chk(%0, %1, %2, %3) : (ptr, ptr, i64, i64) -> ptr
+    call @use(%4) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @__memcpy_chk("), "{out}");
+    }
+
+    /// `mempcpy` is `memcpy` answering the end of the copy, and a `mempcpy` into the end of another
+    /// one is the second of two copies whose destination is the first one's answer, which is a
+    /// value the first fold took away and the second has to be told about.
+    #[test]
+    fn a_copy_into_the_end_of_a_copy_names_the_end_the_first_fold_wrote() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 8 = { bytes "abcdEFG\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "efg\00" }, align 1, linkage(internal), constant
+
+func @mempcpy(ptr, ptr, i64) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = global_addr @.Lstr.1
+    %3 = iconst.i64 4
+    %4 = call @mempcpy(%0, %1, %3) : (ptr, ptr, i64) -> ptr
+    %5 = call @mempcpy(%4, %2, %3) : (ptr, ptr, i64) -> ptr
+    call @use(%5) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @mempcpy("), "{out}");
+        assert_eq!(out.matches("call @memcpy(").count(), 2, "{out}");
+        assert_eq!(out.matches("ptr_add").count(), 2, "{out}");
+    }
+
+    /// `strncat` whose count is no limit on a string whose length is known is `strcat`, and one
+    /// whose count is short of it keeps the count.
+    #[test]
+    fn a_counted_append_of_all_of_a_known_string_is_the_uncounted_one() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 4 = { bytes "foo\00" }, align 1, linkage(internal), constant
+
+func @strncat(ptr, ptr, i64) -> ptr, linkage(external);
+func @use(ptr, ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = iconst.i64 3
+    %3 = call @strncat(%0, %1, %2) : (ptr, ptr, i64) -> ptr
+    %4 = iconst.i64 2
+    %5 = call @strncat(%0, %1, %4) : (ptr, ptr, i64) -> ptr
+    call @use(%3, %5) : (ptr, ptr)
+    return
+}
+"#,
+        );
+        assert_eq!(out.matches("call @strcat(%0, %1)").count(), 1, "{out}");
+        assert_eq!(out.matches("call @strncat(").count(), 1, "{out}");
+    }
+
+    /// A count that is one of two numbers fits where the larger of the two does, which is
+    /// `l1 ? sizeof (buf) : 4` in `builtins/pr23484-chk.c`.
+    #[test]
+    fn a_count_fits_where_the_largest_it_may_be_fits() {
+        let text = r#"
+func @__memcpy_chk(ptr, ptr, i64, i64) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr, ptr, i1), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i1):
+    %3 = iconst.i64 8
+    %4 = iconst.i64 4
+    br_if %2, block1(%3), block1(%4)
+block1(%5: i64):
+    %6 = iconst.i64 SIZE
+    %7 = call @__memcpy_chk(%0, %1, %5, %6) : (ptr, ptr, i64, i64) -> ptr
+    call @use(%7) : (ptr)
+    return
+}
+"#;
+        let fits = folded(&text.replace("SIZE", "8"));
+        assert!(fits.contains("call @memcpy("), "{fits}");
+        let short = folded(&text.replace("SIZE", "7"));
+        assert!(short.contains("call @__memcpy_chk("), "{short}");
     }
 }
