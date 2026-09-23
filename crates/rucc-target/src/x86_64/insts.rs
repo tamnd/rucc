@@ -45,8 +45,8 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, SwapHalves, Test, TestCmov, Trap, UnaryR,
-    UnaryX87,
+    ShiftCl, ShiftRi, Spin, Store, StoreVec, Swap, SwapHalves, Test, TestCmov, Trap, UnaryM,
+    UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -147,6 +147,17 @@ pub enum Form {
     AluMi,
     /// Two-address arithmetic on one register, which is negation and complement.
     UnaryR,
+    /// The same instruction as [`Form::UnaryR`] working on memory rather than on a register.
+    ///
+    /// An addressing mode and nothing else, which is [`Form::AluMi`] without the constant: the
+    /// place the answer goes is the place the one source came from, so there is no register of its
+    /// own and the description is empty for the reason that one's is.
+    ///
+    /// Nothing selects one and nothing combines one. What writes one is a template: `incl %0` on
+    /// `"+m" (count)` is a program counting in memory where it lives, which tcc's `tests/tcctest.c`
+    /// writes to show that a static local is reachable from assembly, and the only way to read that
+    /// template as an instruction is to have the instruction.
+    UnaryM,
     /// A two-address shift by a constant.
     ShiftRi,
     /// A two-address shift by a count, which this machine reads from `cl` and nowhere else.
@@ -1095,7 +1106,7 @@ impl Form {
             Lea => &ADDRESS,
             Load => &LOAD,
             AluMr | Store => &STORE,
-            AluMi => &ALU_MI,
+            AluMi | UnaryM => &ALU_MI,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
@@ -1149,6 +1160,7 @@ impl Form {
                 | AluRm
                 | AluMr
                 | AluMi
+                | UnaryM
                 | CmpSetRm
                 | CmpRm
                 | CmpSetMi
@@ -1192,6 +1204,7 @@ impl Form {
             Load | AluRm
                 | AluMr
                 | AluMi
+                | UnaryM
                 | CmpSetRm
                 | CmpRm
                 | CmpSetMi
@@ -1394,6 +1407,29 @@ pub static INSTS: &[(&str, Form)] = &[
     ("xor_mi_16", AluMi),
     ("xor_mi_32", AluMi),
     ("xor_mi_64", AluMi),
+    // Setting, clearing and turning over one bit of something in memory, counted by a register or
+    // by a constant. They are the arithmetic above in every way that matters here: one source, and
+    // the answer left where the other one was read from. Nothing selects one. A template does,
+    // which is how the signal set in tcc's `tests/tcctest.c` is written and how a C library wrote
+    // `sigaddset` before there was a builtin for it. No byte form, because the machine has none.
+    ("bts_mr_16", AluMr),
+    ("bts_mr_32", AluMr),
+    ("bts_mr_64", AluMr),
+    ("btr_mr_16", AluMr),
+    ("btr_mr_32", AluMr),
+    ("btr_mr_64", AluMr),
+    ("btc_mr_16", AluMr),
+    ("btc_mr_32", AluMr),
+    ("btc_mr_64", AluMr),
+    ("bts_mi_16", AluMi),
+    ("bts_mi_32", AluMi),
+    ("bts_mi_64", AluMi),
+    ("btr_mi_16", AluMi),
+    ("btr_mi_32", AluMi),
+    ("btr_mi_64", AluMi),
+    ("btc_mi_16", AluMi),
+    ("btc_mi_32", AluMi),
+    ("btc_mi_64", AluMi),
     // Arithmetic, register with immediate.
     ("add_ri_8", AluRi),
     ("add_ri_16", AluRi),
@@ -1445,6 +1481,23 @@ pub static INSTS: &[(&str, Form)] = &[
     ("dec_r_16", UnaryR),
     ("dec_r_32", UnaryR),
     ("dec_r_64", UnaryR),
+    // The same four in memory. See [`Form::UnaryM`] for what writes one.
+    ("neg_m_8", UnaryM),
+    ("neg_m_16", UnaryM),
+    ("neg_m_32", UnaryM),
+    ("neg_m_64", UnaryM),
+    ("not_m_8", UnaryM),
+    ("not_m_16", UnaryM),
+    ("not_m_32", UnaryM),
+    ("not_m_64", UnaryM),
+    ("inc_m_8", UnaryM),
+    ("inc_m_16", UnaryM),
+    ("inc_m_32", UnaryM),
+    ("inc_m_64", UnaryM),
+    ("dec_m_8", UnaryM),
+    ("dec_m_16", UnaryM),
+    ("dec_m_32", UnaryM),
+    ("dec_m_64", UnaryM),
     // The multiply that keeps both halves of its product, signed and unsigned. No rule selects one,
     // and the reason is that nothing in the IR asks for a product wider than its operands: a C
     // multiply of two values of a type is a value of that type, and the wide product is something
@@ -2206,7 +2259,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 620);
+        assert_eq!(described, 654);
     }
 
     #[test]
@@ -2271,6 +2324,7 @@ mod tests {
                             | ArithX87
                             | UnaryX87
                             | AluMi
+                            | UnaryM
                             | Landing
                             | Nop
                             | Spin
@@ -2447,6 +2501,7 @@ mod tests {
                             | Ret
                             | Barrier
                             | AluMi
+                            | UnaryM
                             | CmpMi
                             | Landing
                             | Nop

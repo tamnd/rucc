@@ -106,6 +106,37 @@ fn an_operand_in_memory_is_the_object_it_names() {
 }
 
 #[test]
+fn an_instruction_on_an_operand_in_memory_works_on_the_object_where_it_lives() {
+    // tcc's `tests/tcctest.c`, which counts a static local up from assembly to show that one is
+    // reachable from there at all. The object is in memory and stays there, so what the listing
+    // has is one instruction adding one to an address and not a load, an addition and a store.
+    let source = "int f(void) { static int n = 41; asm (\"incl %0\" : \"+m\" (n)); return n; }\n";
+    let text = asm("counted", source);
+    let body = body(&text, "f");
+    assert!(body.contains("incl\tn.0(%rip)"), "{body}");
+}
+
+#[test]
+fn a_bit_set_in_memory_is_the_one_instruction_that_sets_it() {
+    // How a C library wrote `sigaddset` before there was a builtin for it, and how tcc's test suite
+    // still does: the bit number in a register and the set it is counted in, in memory.
+    let source = "void f(unsigned *set, int bit) { \
+                  asm (\"btsl %1,%0\" : \"+m\" (*set) : \"Ir\" (bit) : \"cc\", \"flags\"); }\n";
+    let text = asm("bits", source);
+    let body = body(&text, "f");
+    assert!(body.contains("btsl\t%"), "{body}");
+}
+
+#[test]
+fn an_operand_in_memory_the_template_names_as_a_register_is_refused() {
+    // `%h0` is the byte above the low byte of a register, and an object in memory is not in one.
+    let source = "void f(short *p) { asm (\"xchgb %b0,%h0\" : \"+m\" (*p)); }\n";
+    let (ok, _, said) = run("half", source);
+    assert!(!ok, "the high byte of an object in memory was accepted");
+    assert!(said.contains("instructions in its template"), "{said}");
+}
+
+#[test]
 fn a_template_with_an_instruction_in_it_is_that_instruction() {
     let text = asm("real", "int f(int x) { asm volatile (\"pause\"); return x; }\n");
     let body = body(&text, "f");

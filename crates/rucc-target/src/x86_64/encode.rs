@@ -1236,6 +1236,26 @@ static ENCODINGS: &[Encoding] = &[
     bytes("btcw", &RR, Word, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
     bytes("btcl", &RR, Long, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
     bytes("btcq", &RR, Quad, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    // The same three on something in memory, which is the same opcode with the addressing byte
+    // pointing at an address rather than at a register, the way the arithmetic's memory rows are.
+    takes("btsw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btsl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btsq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
+    takes("btrw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btrl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btrq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 6), ImmSize::Ib),
+    takes("btcw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    takes("btcl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    takes("btcq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    bytes("btsw", &RM, Word, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btsl", &RM, Long, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btsq", &RM, Quad, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
+    bytes("btrw", &RM, Word, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btrl", &RM, Long, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btrq", &RM, Quad, &[0x0F, 0xB3], pair(1, 0), NO_IMM),
+    bytes("btcw", &RM, Word, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    bytes("btcl", &RM, Long, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
+    bytes("btcq", &RM, Quad, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
     // Finding the lowest or the highest bit that is set, which read one operand and write another,
     // so they go the way the conversions above do and not the way the bit tests beside them do.
     bytes("bsfw", &RR, Word, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
@@ -2524,6 +2544,17 @@ mod tests {
         assert_eq!(hex("leaq", &[Value::Mem(indexed), quad(RAX)]), "48 8d 44 91 f0");
         // A store is the same address with the two ends the other way round.
         assert_eq!(hex("movl", &[long(RAX), Value::Mem(near)]), "89 41 f0");
+    }
+
+    #[test]
+    fn a_bit_in_memory_is_set_where_it_lives() {
+        // What a template writes to set a bit of a signal set without reading the set first, with
+        // the bit number in a register and then written into the instruction.
+        let base = Addr { base: Some(RCX), ..Addr::default() };
+        assert_eq!(hex("btsl", &[long(RAX), Value::Mem(base)]), "0f ab 01");
+        assert_eq!(hex("btrq", &[quad(RAX), Value::Mem(base)]), "48 0f b3 01");
+        assert_eq!(hex("btsl", &[Value::Imm(5), Value::Mem(base)]), "0f ba 29 05");
+        assert_eq!(hex("btcw", &[Value::Imm(3), Value::Mem(base)]), "66 0f ba 39 03");
     }
 
     #[test]

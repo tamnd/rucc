@@ -299,6 +299,25 @@ pub enum Step {
 /// operands at all passes an empty slice and is in the same position.
 #[must_use]
 pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
+    read_in(template, widths, &[])
+}
+
+/// The same, for a statement some of whose operands are in memory rather than in a register.
+///
+/// One flag for each operand, in the order the constraints number them, and set for one whose
+/// constraint was `m`. What the statement holds for that operand is its address, and what `%0`
+/// spells for it is the object at that address, so an instruction naming it reaches memory: `incl
+/// %0` on `"+m" (count)` adds one to `count` where it lives rather than to a copy of it in a
+/// register. It is read as an address counted from the register the address is in, which is the
+/// plainest thing an assembler would have been handed for it and is the same address whatever
+/// the object turns out to be.
+///
+/// An operand in memory that the template writes a width on is the same address, because a width
+/// is something a register is spelled with and an address is not. The high byte of one, the
+/// distance into an address and the register an address is counted from are none of them things
+/// an object in memory can be, and a template naming one that way is refused.
+#[must_use]
+pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Option<Vec<Step>> {
     let mut steps = Vec::new();
     let mut carried = false;
     for text in template.split(['\n', ';']) {
@@ -354,7 +373,7 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
             steps.push(Step::Line(line));
             continue;
         }
-        steps.push(Step::Line(instruction(text, carried, widths)?));
+        steps.push(Step::Line(instruction(text, carried, widths, memory)?));
         carried = false;
     }
     // A prefix with nothing behind it is half an instruction, and half a template is refused for
@@ -584,7 +603,12 @@ fn uncommented(text: &str) -> &str {
 /// not name is refused, `lock` included, because a prefix that changes what an instruction does is
 /// not something to guess at: dropping the `lock` off a read modify write would turn a program that
 /// is correct into one that is nearly always correct.
-fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<Line> {
+fn instruction(
+    text: &str,
+    prefixed: bool,
+    widths: &[Option<Width>],
+    memory: &[bool],
+) -> Option<Line> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     // The same prefix written on the same line as what it applies to, which is the other way a
     // template writes it and is the same instruction.
@@ -592,7 +616,7 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
         if prefixed {
             return None;
         }
-        return instruction(rest.trim(), true, widths);
+        return instruction(rest.trim(), true, widths, memory);
     }
     let mnemonic: Cow<'_, str> =
         if prefixed { Cow::Owned(repeated(mnemonic, rest)?) } else { Cow::Borrowed(mnemonic) };
@@ -605,7 +629,7 @@ fn instruction(text: &str, prefixed: bool, widths: &[Option<Width>]) -> Option<L
     }
 
     let given: Vec<Given> =
-        arguments(rest).iter().map(|text| given(text)).collect::<Option<_>>()?;
+        arguments(rest).iter().map(|text| given(text, memory)).collect::<Option<_>>()?;
     let shapes: Vec<Shape> = given.iter().map(Given::shape).collect();
     let opcode = match machine(mnemonic, &shapes) {
         Some(opcode) => opcode,
@@ -797,8 +821,33 @@ impl Given {
     }
 }
 
-/// One argument, or nothing for one this cannot read.
-fn given(text: &str) -> Option<Given> {
+/// One argument, or nothing for one this cannot read, with the operands that are in memory read
+/// as the objects they are. See [`read_in`].
+fn given(text: &str, memory: &[bool]) -> Option<Given> {
+    let held = |index: usize| memory.get(index).copied().unwrap_or(false);
+    let object = |index| At {
+        segment: None,
+        disp: Disp::Number(0),
+        // Stated for the reason [`base`] gives: the width is the addressing mode's.
+        base: Some(Piece::Operand { index, width: Width::Quad, stated: true }),
+    };
+    match spelled(text)? {
+        Given::Operand(index, _) if held(index) => Some(Given::Mem(object(index))),
+        Given::High(index) if held(index) => None,
+        Given::Mem(at) => {
+            let counted = match at.base {
+                Some(Piece::Operand { index, .. }) => held(index),
+                _ => false,
+            };
+            let distance = matches!(at.disp, Disp::Operand(index) if held(index));
+            (!counted && !distance).then_some(Given::Mem(at))
+        }
+        given => Some(given),
+    }
+}
+
+/// One argument as it is spelled, before anything about where the operands are is known.
+fn spelled(text: &str) -> Option<Given> {
     if let Some(written) = text.strip_prefix('$') {
         return number(written.trim()).map(Given::Imm);
     }
@@ -1481,5 +1530,45 @@ mod tests {
         assert_eq!(plain(".byte 1,2,3,4,5,6,7,8", &[]), None, "more bytes than fit");
         assert_eq!(plain(".word 0x0f01", &[]), None, "a directive that is not `.byte`");
         assert_eq!(plain("rep; .byte 0x90", &[]), None, "a prefix in front of one");
+    }
+
+    /// An operand the statement holds the address of, which `%0` spells as the object at that
+    /// address rather than as a register. See [`read_in`].
+    #[test]
+    fn an_operand_in_memory_is_the_object_at_its_address() {
+        let object = At {
+            segment: None,
+            disp: Disp::Number(0),
+            base: Some(Piece::Operand { index: 0, width: Width::Quad, stated: true }),
+        };
+        let steps = read_in("incl %0", &[Some(Width::Quad)], &[true]).expect("a count in memory");
+        let [Step::Line(line)] = steps.as_slice() else { panic!("one instruction: {steps:?}") };
+        assert_eq!(line.opcode, "inc_m_32");
+        assert_eq!(line.at, Some(object));
+        assert!(line.operands.is_empty());
+
+        // A width written on one is a width a register is spelled with, and there is no register,
+        // so it is the same address.
+        let steps =
+            read_in("btsl %1, %k0", &[Some(Width::Quad), Some(Width::Long)], &[true, false])
+                .expect("a bit set in memory");
+        let [Step::Line(line)] = steps.as_slice() else { panic!("one instruction: {steps:?}") };
+        assert_eq!(line.opcode, "bts_mr_32");
+        assert_eq!(line.at, Some(object));
+        assert_eq!(line.operands, [Piece::Operand { index: 1, width: Width::Long, stated: false }]);
+
+        // The same template with the operand in a register is the register form, which is what
+        // tells the two apart: the text is the same and the constraint is what differs.
+        assert_eq!(read_in("incl %0", &[Some(Width::Long)], &[false]).map(|s| s.len()), Some(1));
+    }
+
+    /// The things an object in memory cannot be, which are part of a register and a register an
+    /// address is counted from.
+    #[test]
+    fn an_operand_in_memory_named_as_a_register_is_refused() {
+        let quad = [Some(Width::Quad); 2];
+        assert_eq!(read_in("xchgb %b0,%h0", &quad, &[true]), None, "the high byte of one");
+        assert_eq!(read_in("movq (%0), %1", &quad, &[true, false]), None, "an address from one");
+        assert_eq!(read_in("movq %c0(%1), %1", &quad, &[true, false]), None, "a distance in one");
     }
 }

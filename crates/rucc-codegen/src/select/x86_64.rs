@@ -459,6 +459,51 @@ mod tests {
     /// [`rucc_target::x86_64::Step::Away`].
     const AWAY: &[&str] = &["jmp_away"];
 
+    /// The instructions that change an object where it lives, which a template asks for and
+    /// nothing else does.
+    ///
+    /// Each of these is a load, one operation and a store in one line. The rules select the three
+    /// on their own and never the one that is all of them, because what a rule sees is a value in a
+    /// register and the store is a separate term further on. What asks for one is a program that
+    /// gave an `asm` operand the constraint `m` and then named it in an instruction, which is how a
+    /// C library sets a bit in a `sigset_t` and how tcc's `tests/tcctest.c` counts a static local up.
+    const MEMORY: &[&str] = &[
+        "neg_m_8",
+        "neg_m_16",
+        "neg_m_32",
+        "neg_m_64",
+        "not_m_8",
+        "not_m_16",
+        "not_m_32",
+        "not_m_64",
+        "inc_m_8",
+        "inc_m_16",
+        "inc_m_32",
+        "inc_m_64",
+        "dec_m_8",
+        "dec_m_16",
+        "dec_m_32",
+        "dec_m_64",
+        "bts_mr_16",
+        "bts_mr_32",
+        "bts_mr_64",
+        "btr_mr_16",
+        "btr_mr_32",
+        "btr_mr_64",
+        "btc_mr_16",
+        "btc_mr_32",
+        "btc_mr_64",
+        "bts_mi_16",
+        "bts_mi_32",
+        "bts_mi_64",
+        "btr_mi_16",
+        "btr_mi_32",
+        "btr_mi_64",
+        "btc_mi_16",
+        "btc_mi_32",
+        "btc_mi_64",
+    ];
+
     /// The multiply that keeps both halves of its product and the division that reads both halves
     /// of its dividend, which a template asks for and nothing else does.
     ///
@@ -830,7 +875,7 @@ mod tests {
             if SEARCH.contains(&opcode) || SWAP.contains(&opcode) || WIDE.contains(&opcode) {
                 continue;
             }
-            if AWAY.contains(&opcode) {
+            if AWAY.contains(&opcode) || MEMORY.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) {
