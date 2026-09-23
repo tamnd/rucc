@@ -153,10 +153,12 @@ Where the answers are not a line, they are a table. The pass asks for a read onl
 `crates/rucc-opt/src/readonly.rs`, because a pass is handed one function and an array belongs to the
 module, and the pipeline adds what was asked for as an internal constant global before the module is
 verified. Each array is named `CSWTCH.` and a number, as gcc names it. The arm for label `k` becomes
-one load from cell `k - low`. The labels may have holes, each a cell nothing reads, as long as the
-table spans no more than eight cells for each label it replaces, which is gcc's
+one load from cell `k - low`. The labels may have holes as long as the table spans no more than
+eight cells for each label it replaces, which is gcc's
 `switch-conversion-max-branch-ratio` and is `SWITCH_CONVERSION_MAX_GROWTH` in
-`crates/rucc-cost/src/heuristics.rs`. A cell is as wide as the answer, and at `-Os` it is as narrow
+`crates/rucc-cost/src/heuristics.rs`. Where the default only gives a constant, a hole's cell is that
+constant and the hole gets a case going to the load, so the labels are one run and one comparison.
+Where the default does more, a hole keeps going to it and its cell is never read. A cell is as wide as the answer, and at `-Os` it is as narrow
 as the answers allow with the load widened back, which is what gcc 16 does at `-Os` and not at `-O2`.
 Only integer answers are tabled so far. An array of pointers needs a relocation in every cell and is
 tamnd/rucc#1775.
@@ -219,9 +221,9 @@ case must also reach the default. The second is the trap: a switch on `0, 1, 3` 
 of size four needs a hole at index 2. GCC's `gather_default_values`
 (`gcc/tree-switch-conversion.cc:710`) fills the holes with the default's value, which is correct only
 if the default arm merely assigns a constant. If the default does something else, the switch is not
-convertible. rucc sidesteps the trap rather than filling holes: the `switch` stays a `switch` with its
-case edges pointed at the load, so a value in a hole still goes down the default edge and the cell
-for it is never read.
+convertible. rucc fills a hole only in that case, and only when every other value the default hands
+on is what the arms hand on. Otherwise the `switch` stays a `switch` with its case edges pointed at
+the load, a value in a hole still goes down the default edge, and the cell for it is never read.
 
 **The lookup table is emitted in a writable section.** It must be read-only, and on targets that
 care, it must be in a section the linker can place near the code. rucc marks the array constant and
