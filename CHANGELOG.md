@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.2
+
 ### Added
 
 - The difference of two label addresses, GNU C's `&&l1 - &&l0`, is now a constant, so `static int b[] = { &&l1 - &&l0 };` compiles where it was refused with E0618. The image names both labels and the object writer fills in the distance once the function is laid out, with no relocation for the linker, and `-S` writes it as `.long .Llbl.1-.Llbl.0`. Written in a function body it is the subtraction of the two block addresses. `gcc.c-torture/execute/pr70460.c` passes at every level. See #1198.
