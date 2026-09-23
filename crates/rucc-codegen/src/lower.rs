@@ -3148,7 +3148,9 @@ impl<'a> Lowering<'a> {
     /// nothing a register list could hold. `cc` says it ruins the condition flags, and the flag
     /// tracking already has that from the instructions the template was read into, since it takes
     /// every instruction it does not recognize as writing them and every instruction here is one
-    /// this machine describes.
+    /// this machine describes. `flags` is the name gcc's own register table gives the same thing on
+    /// this machine, so a program writing it has written `cc` and is read that way: tcc's
+    /// `tests/tcctest.c` lists both on one statement.
     ///
     /// A clobber the instruction already writes is left off it. `cpuid` writes all four registers
     /// by description, and a statement listing three of them as clobbers as well is saying the
@@ -3184,11 +3186,14 @@ impl<'a> Lowering<'a> {
                 x86_64::Width::of_bits(if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() })
             })
             .collect();
+        // An operand in memory is an address the statement holds and an object the template names,
+        // so the reader is told which ones those are and spells `%0` for one as the object.
+        let memory: Vec<bool> = list.iter().map(|operand| operand.memory).collect();
         let template = self.names.resolve(info.template).to_string();
         let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
-            x86_64::read(&template, &widths)
+            x86_64::read_in(&template, &widths, &memory)
                 .ok_or(Unsupported::Assembly { inst, refused: Written::Template })?
         };
 
@@ -3552,7 +3557,7 @@ impl<'a> Lowering<'a> {
             // The sigil is optional in a clobber list and means nothing when it is there, unlike
             // in a template, where it is what tells a register from an operand.
             let entry = entry.strip_prefix('%').unwrap_or(entry);
-            if entry.is_empty() || entry == "memory" || entry == "cc" {
+            if entry.is_empty() || matches!(entry, "memory" | "cc" | "flags") {
                 continue;
             }
             let (reg, _) = x86_64::gpr_named(entry).ok_or_else(refused)?;

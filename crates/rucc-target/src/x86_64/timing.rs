@@ -138,6 +138,9 @@ fn plain(form: Form) -> Timing {
         // costs. Where the second source came from is not something the machine spends a cycle on
         // once the address is known, and a constant is on the instruction.
         AluMi => (1 + LOAD, Unit::Store),
+        // The same with no second source at all, which costs what the one with a constant costs,
+        // for the reason that one costs what the register form does.
+        UnaryM => (1 + LOAD, Unit::Store),
         // A comparison reading its right hand side out of memory, with and without the byte
         // behind it. Each is its register form plus a load, and the unit is the address unit for
         // the reason it is above: the comparison itself is a cycle on a unit there are four of and
