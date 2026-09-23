@@ -47,10 +47,14 @@
 //! would then have to cut the run at, and one comparison becomes several for a function that was
 //! only fitted to the labels either side of it.
 //!
-//! For a table, the labels may have holes, and each hole is a cell nothing reads. The `switch`
-//! still sends a value with no case to the default, so a hole is never looked up, and the cell is
-//! written as zero only because an array has to have something there. What bounds the holes is
-//! size: the table spans at most eight cells for every label it replaces, which is gcc's
+//! For a table, the labels may have holes. Where the default hands on what the arms hand on with a
+//! constant in the answer's place, which is `default: return 0;` and `default: y = 0; break;`, a
+//! hole's cell is that constant and the hole is given a case of its own going to the load, as gcc's
+//! `gather_default_values` does. The labels are then one run, which the lowering checks with one
+//! comparison, where a run with holes in it is a comparison and a bit test, and the bit test is a
+//! branch a stream of values mispredicts. Where the default does anything else, the `switch` still
+//! sends a value in a hole to the default, the hole's cell is never read, and it is written as zero
+//! only because an array has to have something there. What bounds the holes is size: the table spans at most eight cells for every label it replaces, which is gcc's
 //! `switch-conversion-max-branch-ratio`, so a `switch` over three labels a thousand apart stays a
 //! `switch`.
 //!
@@ -271,6 +275,9 @@ struct Plan {
     how: How,
     /// The blocks the arms were, which nothing reaches once the case edges have moved.
     arms: Vec<Block>,
+    /// Values between two labels that get a case of their own going to the load, because the
+    /// default gives what their cell holds.
+    holes: Vec<i128>,
 }
 
 /// How the answer is worked out from the label.
@@ -401,9 +408,13 @@ fn plan(
     let kind = func[args[answer]].ty;
 
     let line = if consecutive && kind == ty { line(&labels, &answers, ty) } else { None };
-    let how = match (line, index_bits) {
-        (Some((scale, offset)), _) => How::Line { scale, offset },
-        (None, Some(index_bits)) => table(&labels, &answers, ty, kind, index_bits, small)?,
+    let (how, holes) = match (line, index_bits) {
+        (Some((scale, offset)), _) => (How::Line { scale, offset }, Vec::new()),
+        (None, Some(index_bits)) => {
+            let fill = fallback(func, default, hands, &args, answer);
+            let shape = Shape { ty, kind, index_bits, small };
+            table(&labels, &answers, shape, fill)?
+        }
         (None, None) if kind != ty => return Err(WIDTHS_DIFFER),
         (None, None) => return Err(NOT_AFFINE),
     };
@@ -416,23 +427,75 @@ fn plan(
         answer,
         how,
         arms: arms.iter().map(|call| call.block).collect(),
+        holes,
     })
 }
 
-/// The table the answers make, when one is worth making.
+/// What the default gives in the answer's place, when that is all it does differently from an arm.
 ///
-/// The labels are read with their own sign and so are ordered that way, which is only a question
+/// Two shapes of default qualify. One is a block of its own that works out constants and hands
+/// them on the way the arms do, which is `default: return 0;`. The other is an edge straight to
+/// where the arms hand their answer, carrying the answer itself, which is what is left of
+/// `default: y = 0; break;` once the empty block is gone. Either way every position but the answer
+/// has to be what the arms pass, since a hole given a case is about to pass that instead. The
+/// default block is only read here and never taken away, so it may be shared.
+fn fallback(
+    func: &Func,
+    default: BlockCall,
+    hands: Hands,
+    args: &[Value],
+    answer: usize,
+) -> Option<i128> {
+    let theirs = if default.args.is_empty() {
+        let (way, theirs) = tail(func, default.block).ok()?;
+        if way != hands {
+            return None;
+        }
+        theirs
+    } else if hands == Hands::On(default.block) {
+        func[default.args].to_vec()
+    } else {
+        return None;
+    };
+    if theirs.len() != args.len() {
+        return None;
+    }
+    let agrees =
+        args.iter().zip(&theirs).enumerate().all(|(at, (mine, it))| at == answer || mine == it);
+    if !agrees {
+        return None;
+    }
+    constant(func, theirs[answer])
+}
+
+/// What a table is made for: the label's width, the answer's, an index's, and whether the goal is
+/// size.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    /// The width of the label.
+    ty: Type,
+    /// The width of the answer.
+    kind: Type,
+    /// The width of an index into the table.
+    index_bits: u32,
+    /// Whether a cell may be narrower than the answer.
+    small: bool,
+}
+
+/// The table the answers make when one is worth making, and the holes that get a case of their own.
+///
+/// A hole gets one only when `fill` is what the default gives, and then its cell is that. The
+/// labels are read with their own sign and so are ordered that way, which is only a question
 /// of which one is cell zero. What the index is at run time is the label less the lowest one at the
 /// label's width, and for a label that is a case that difference is the distance between the two
 /// however the bits are read, because the table is short and the distance fits.
 fn table(
     labels: &[i128],
     answers: &[i128],
-    ty: Type,
-    kind: Type,
-    index_bits: u32,
-    small: bool,
-) -> Result<How, &'static str> {
+    shape: Shape,
+    fill: Option<i128>,
+) -> Result<(How, Vec<i128>), &'static str> {
+    let Shape { ty, kind, index_bits, small } = shape;
     if ty.bits() > 64 {
         return Err(LABEL_TOO_WIDE);
     }
@@ -446,13 +509,18 @@ fn table(
     if span > GROWTH * labels.len() as i128 {
         return Err(TOO_SPARSE);
     }
-    let mut cells = vec![0; usize::try_from(span).map_err(|_| TOO_SPARSE)?];
+    let mut cells = vec![None; usize::try_from(span).map_err(|_| TOO_SPARSE)?];
     for (&label, &answer) in labels.iter().zip(answers) {
         let at = usize::try_from(label - low).map_err(|_| TOO_SPARSE)?;
-        cells[at] = answer;
+        cells[at] = Some(answer);
     }
-    let cell = if small { narrowest(answers, kind) } else { Cell { ty: kind, signed: false } };
-    Ok(How::Table { low, ty: kind, cell, cells, index_bits })
+    let holes: Vec<i128> = match fill {
+        Some(_) => (low..=high).filter(|&label| cells[(label - low) as usize].is_none()).collect(),
+        None => Vec::new(),
+    };
+    let cells: Vec<i128> = cells.into_iter().map(|cell| cell.or(fill).unwrap_or(0)).collect();
+    let cell = if small { narrowest(&cells, kind) } else { Cell { ty: kind, signed: false } };
+    Ok((How::Table { low, ty: kind, cell, cells, index_bits }, holes))
 }
 
 /// The narrowest cell every answer fits in, read back to the answer's width.
@@ -637,8 +705,13 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
         // cannot carry a number that was true of one arm.
         *call = BlockCall::new(hit, empty);
     }
+    let mut cases: Vec<Imm> = func[func[info].cases].to_vec();
+    for &hole in &plan.holes {
+        calls.push(BlockCall::new(hit, empty));
+        cases.push(Imm::int(hole, plan.ty));
+    }
     let targets = func.push_block_calls(&calls);
-    let cases = func[info].cases;
+    let cases = func.push_imms(&cases);
     let info = func.add_switch(rucc_ir::SwitchInfo { targets, cases });
     func[plan.inst].extra = Extra::Switch(info);
 
@@ -1054,14 +1127,42 @@ mod tests {
         }
     }
 
-    /// A hole is a cell nothing reads, because the value that would read it has no case and goes
-    /// to the default down the edge it always went down.
+    /// A hole gets the default's answer and a case of its own, when the default only gives one.
+    ///
+    /// The default here returns 999 and nothing else, so the value in the hole reads 999 out of
+    /// the table and gets what it got before, and the labels are one run with no hole in it.
     #[test]
-    fn a_table_has_a_cell_for_each_hole_and_the_holes_still_go_to_the_default() {
+    fn a_hole_is_filled_with_what_a_default_that_only_answers_gives() {
         let mut func = returning(i32(), &[1, 2, 4, 5], &[10, 20, 40, 55]);
         let head = func.entry().expect("a function with blocks in it");
         let before = func.terminator(head).expect("a head block has one");
         let default = func.successors(before).next().expect("a switch has a default").block;
+        let (stats, tables) = tabled(&mut func);
+        assert!(fired(&stats));
+        assert_eq!(tables[0].cells, [10, 20, 999, 40, 55]);
+        assert_eq!(cases(&func).len(), 5, "the hole was not given a case");
+        let after = func.terminator(head).expect("a head block has one");
+        assert_eq!(func.successors(after).next().map(|call| call.block), Some(default));
+        let arm = arm(&func);
+        for (label, answer) in [(1, 10), (2, 20), (3, 999), (4, 40), (5, 55)] {
+            assert_eq!(looked_up(&func, arm, label, &tables), answer);
+        }
+    }
+
+    /// A hole is a cell nothing reads when the default does something other than answer.
+    ///
+    /// This default returns the label, which is no constant, so the value in the hole has to
+    /// keep going to it down the edge it always went down.
+    #[test]
+    fn a_hole_still_goes_to_a_default_that_does_more_than_answer() {
+        let mut func = returning(i32(), &[1, 2, 4, 5], &[10, 20, 40, 55]);
+        let head = func.entry().expect("a function with blocks in it");
+        let before = func.terminator(head).expect("a head block has one");
+        let default = func.successors(before).next().expect("a switch has a default").block;
+        let label = func[func[before].args][0];
+        let ret = func.terminator(default).expect("the default returns");
+        func.remove_inst(ret);
+        Builder::new(&mut func, default).ret(&[label]);
         let (stats, tables) = tabled(&mut func);
         assert!(fired(&stats));
         assert_eq!(tables[0].cells, [10, 20, 0, 40, 55]);
@@ -1094,10 +1195,11 @@ mod tests {
         let mut func = returning(ty, &labels, &answers);
         let (stats, tables) = tabled(&mut func);
         assert!(fired(&stats));
-        assert_eq!(tables[0].cells, [7, -5, 11, 3, 0, -100]);
+        // The default returns 999, which is -25 as a `signed char`, and the hole at 1 is given it.
+        assert_eq!(tables[0].cells, [7, -5, 11, 3, -25, -100]);
         let arm = arm(&func);
         assert_eq!(opcodes(&func, arm)[..2], [Opcode::IConst, Opcode::Sub]);
-        for (&label, &answer) in labels.iter().zip(&answers) {
+        for (&label, &answer) in labels.iter().zip(&answers).chain([(&1, &-25)]) {
             assert_eq!(looked_up(&func, arm, label, &tables), answer);
         }
     }
