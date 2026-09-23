@@ -150,6 +150,7 @@ fn calls(
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     let pairs = pairs(func, &insts);
     let fused: HashSet<Inst> = pairs.values().copied().collect();
+    let kept = kept(func, &insts);
     for &inst in &insts {
         // The init check of a pair is lowered by its type check, which asks both questions in one
         // call, so there is nothing left here for it to be.
@@ -160,7 +161,7 @@ fn calls(
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckFree => freed(func, names, table, inst),
-            Opcode::CheckDeriv => deriv(func, names, word, table, inst),
+            Opcode::CheckDeriv => deriv(func, names, word, table, &kept, inst),
             Opcode::CheckType => {
                 typed(func, names, word, numbers, table, inst, pairs.get(&inst).copied());
             }
@@ -357,22 +358,57 @@ fn freed(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, ins
     call(func, names, inst, "__rucc_check_free", params, &[], &[capability, pointer, desc]);
 }
 
-/// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, descriptor)`.
+/// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, capability, descriptor)`.
 ///
 /// The stride goes through as a value rather than into the descriptor, because a walk over a
 /// variable length array steps by a width the program computes and a descriptor is constant data.
+///
+/// The capability goes through only when something [`keeps`] already reads it, and a null goes in
+/// its place otherwise. With it the runtime answers a derivation that stays inside the object from
+/// two words the caller already has, where it used to find the region and read the lifetime plane
+/// twice. Without it the runtime asks the planes the way it always did. Handing it over when nothing
+/// else wants it would make this a reader, and a reader keeps alive a `cap_of` whose walk of the
+/// lifetime plane costs more than the region lookup it saves, which is the resurrection [`keeps`]
+/// is a whitelist to prevent. So `CheckDeriv` stays off that list and reads a capability for free
+/// or not at all.
 fn deriv(
     func: &mut Func,
     names: &mut Interner,
     word: Type,
     table: &mut Vec<Descriptor>,
+    kept: &HashSet<Value>,
     inst: Inst,
 ) {
-    let [_capability, base, derived, stride] = func[func[inst].args] else { return };
+    let [capability, base, derived, stride] = func[func[inst].args] else { return };
     let row = Descriptor { judgement: DERIVE, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
-    let params = &[Type::PTR, Type::PTR, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_deriv", params, &[], &[base, derived, stride, desc]);
+    let capability =
+        if kept.contains(&capability) { capability } else { nothing(func, inst, word) };
+    let params = &[Type::PTR, Type::PTR, word, Type::PTR, Type::PTR];
+    let args = &[base, derived, stride, capability, desc];
+    call(func, names, inst, "__rucc_check_deriv", params, &[], args);
+}
+
+/// The capabilities something that [`keeps`] one reads, taken before any of them is rewritten.
+fn kept(func: &Func, insts: &[Inst]) -> HashSet<Value> {
+    insts
+        .iter()
+        .filter(|&&inst| keeps(func[inst].opcode))
+        .flat_map(|&inst| func[func[inst].args].iter().copied())
+        .filter(|&value| func[value].ty.is_cap())
+        .collect()
+}
+
+/// A null pointer in front of `inst`, which is what a runtime entry point taking a capability reads
+/// as having been given none.
+fn nothing(func: &mut Func, inst: Inst, word: Type) -> Value {
+    let zero = konst(func, inst, Imm::int(0, word), word);
+    let span = func.span(inst);
+    let args = func.push_values(&[zero]);
+    let made =
+        func.create_inst(InstData { args, ..InstData::new(Opcode::IntToPtr) }, &[Type::PTR], span);
+    func.insert_before(made, inst);
+    func[made].results().next().expect("a cast created with one result has one")
 }
 
 /// Which type checks have an init check beside them that belongs to the same read.
@@ -1025,7 +1061,8 @@ fn emit(module: &mut Module, names: &mut Interner, index: usize, row: Descriptor
 #[cfg(test)]
 mod tests {
     use rucc_ir::{
-        Builder, MemInfo, MemOrder, MetaNode, Restrict, RmwOp, TbaaNode, print_func, verify_func,
+        Builder, Def, MemInfo, MemOrder, MetaNode, Restrict, RmwOp, TbaaNode, print_func,
+        verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -1916,6 +1953,60 @@ mod tests {
         let mut table = Vec::new();
         calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
         assert_eq!(table, [Descriptor { judgement: DERIVE, class: 0, size: 0 }]);
+    }
+
+    /// A derivation from `p` by `n` with its check, and a lifetime check at the result when `live`
+    /// says so, lowered, with what the derivation call was handed for a capability.
+    fn derived(live: bool) -> (Func, Value) {
+        let mut names = Interner::new();
+        let word = Type::int(64);
+        let mut func =
+            Func::new(names.intern("walk"), Signature::new().with_params(&[Type::PTR, word]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, word);
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = b.func().push_values(&[p, n]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let stride = b.iconst(word, 1);
+        marker(&mut b, Opcode::CheckDeriv, None, &[cap, p, moved, stride]);
+        if live {
+            marker(&mut b, Opcode::CheckLive, None, &[cap, moved]);
+        }
+        b.ret(&[]);
+        let (_, numbers) = planeless(&mut names);
+        calls(&mut func, &mut names, word, &numbers, &mut Vec::new());
+        let call = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .find(|&inst| func[inst].opcode == Opcode::Call && func[func[inst].args].len() == 5)
+            .expect("the derivation check is the one call taking five");
+        let handed = func[func[call].args][3];
+        (func, handed)
+    }
+
+    #[test]
+    fn a_derivation_check_is_handed_the_capability_another_check_reads_anyway() {
+        let (func, handed) = derived(true);
+        let Def::Result { inst: made, .. } = func[handed].def else { panic!("a slot address") };
+        assert_ne!(func[made].opcode, Opcode::IntToPtr);
+    }
+
+    #[test]
+    fn a_derivation_check_that_is_the_only_reader_is_handed_a_null() {
+        // Handing it over would keep a `cap_of` alive that nothing else wants, and its walk of the
+        // lifetime plane is dearer than what the capability saves the derivation check.
+        let (func, handed) = derived(false);
+        let Def::Result { inst: made, .. } = func[handed].def else { panic!("a cast") };
+        assert_eq!(func[made].opcode, Opcode::IntToPtr);
+        assert!(
+            func.blocks()
+                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .all(|inst| func[inst].opcode != Opcode::CapOf),
+            "nothing reads the capability, so its producer is gone"
+        );
     }
 
     #[test]

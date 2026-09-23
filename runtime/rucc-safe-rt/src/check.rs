@@ -358,19 +358,32 @@ pub unsafe fn freeing(addr: *const c_void, capability: *const Cap, descriptor: *
 /// instance, and saying so is [`live`]'s job at the access. Reporting it twice would mean one bug
 /// producing two reports from two different judgements.
 ///
+/// The capability is asked first and, as in [`bounds`], only ever permits. A derivation that lands
+/// inside the window it describes is one the planes would permit too, so the answer is the same and
+/// it costs a subtraction and a compare over words the caller already has, where the planes cost a
+/// region lookup and two reads of the lifetime plane. A null capability, the bottom one and a wide
+/// one permit nothing here and go to the planes the way every derivation did before. The wide one
+/// is left out where [`bounds`] believes it because its window is a whole mapping, and a derivation
+/// is exactly the step from one object in a mapping into the next.
+///
 /// # Panics
 ///
 /// As [`bounds`].
 ///
 /// # Safety
 ///
-/// As [`bounds`].
+/// As [`live`].
 pub unsafe fn deriv(
     base: *const c_void,
     derived: *const c_void,
     stride: usize,
+    capability: *const Cap,
     descriptor: *const Descriptor,
 ) {
+    // SAFETY: this function's own contract about `capability`, passed straight on.
+    if unsafe { stays(capability, derived as usize, stride) } {
+        return;
+    }
     let (base, derived) = (base as usize, derived as usize);
     let Some(region) = alloc::covering(base) else { return };
     let instance = owner(&region, base);
@@ -1247,6 +1260,32 @@ unsafe fn permits(capability: *const Cap, addr: usize, size: usize) -> bool {
     held.covers(addr as u64, size as u64)
 }
 
+/// Whether a pointer derived to `derived` is still inside the window [`deriv`] allows, going by the
+/// capability alone.
+///
+/// The window is the one the planes allow: anywhere in the object, one past its end, and below its
+/// start by less than one element, which is where one more step of `stride` lands back inside it.
+/// Wrapping arithmetic, so an address below `lo` is a very large distance above it and fails the
+/// first test rather than passing it.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn stays(capability: *const Cap, derived: usize, stride: usize) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    if held.is_bottom() || held.meta.flags() & Meta::WIDE != 0 {
+        return false;
+    }
+    let derived = derived as u64;
+    derived.wrapping_sub(held.lo) <= held.ext
+        || (derived < held.lo
+            && derived.wrapping_add(stride as u64).wrapping_sub(held.lo) < held.ext)
+}
+
 /// Whether the capability names an instance other than the one that owns the address now.
 ///
 /// False for every capability that names no instance, so a build where the runtime could not work
@@ -1377,16 +1416,18 @@ pub mod exports {
 
     /// # Safety
     ///
-    /// As [`__rucc_check_bounds`], for both pointers. `stride` is a width and is not read through.
+    /// As [`__rucc_check_bounds`], for both pointers. `stride` is a width and is not read through,
+    /// and `capability` is null or a filled slot, as [`__rucc_check_live`] takes one.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_check_deriv(
         base: *const c_void,
         derived: *const c_void,
         stride: usize,
+        capability: *const Cap,
         descriptor: *const Descriptor,
     ) {
-        // SAFETY: as above.
-        unsafe { super::deriv(base, derived, stride, descriptor) };
+        // SAFETY: as above, and a null capability is one of the two this takes.
+        unsafe { super::deriv(base, derived, stride, capability, descriptor) };
     }
 
     /// How many of the `want` bytes from `addr` on the instance owning `addr` covers.
@@ -1713,13 +1754,19 @@ mod tests {
     /// low end of the rule can open. The tests that are about the width pass their own.
     fn deriv(base: *const c_void, derived: *const c_void) {
         // SAFETY: as above.
-        unsafe { super::deriv(base, derived, 1, &raw const ROW) }
+        unsafe { super::deriv(base, derived, 1, core::ptr::null(), &raw const ROW) }
     }
 
     /// The derivation check over a stride the caller picks.
     fn stepped(base: *const c_void, derived: *const c_void, stride: usize) {
         // SAFETY: as above.
-        unsafe { super::deriv(base, derived, stride, &raw const ROW) }
+        unsafe { super::deriv(base, derived, stride, core::ptr::null(), &raw const ROW) }
+    }
+
+    /// The derivation check over a stride the caller picks, through a capability.
+    fn carried(base: *const c_void, derived: *const c_void, stride: usize, capability: &Cap) {
+        // SAFETY: as above, and the capability outlives the call.
+        unsafe { super::deriv(base, derived, stride, capability, &raw const ROW) }
     }
 
     /// The type check, the same way.
@@ -2723,6 +2770,53 @@ mod tests {
         assert!(!refused(|| deriv(base, at(ptr, 64))));
         assert!(refused(|| deriv(base, at(ptr, 65))));
         assert!(refused(|| deriv(base, at(ptr, 4096))));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_derivation_through_its_capability_is_answered_over_the_same_window() {
+        let _turn = turn();
+        // The capability answers the ones inside and the planes still refuse the ones outside, so
+        // the window is the one the two tests either side of this pin down, one past the end at
+        // the top and less than one element below the start at the bottom.
+        let ptr = alloc(64);
+        let cap = whole(ptr);
+        let base = at(ptr, 32);
+        let under = |back: usize| -> *const c_void { ptr.cast::<u8>().wrapping_sub(back).cast() };
+        assert!(!refused(|| carried(base, at(ptr, 0), 1, &cap)));
+        assert!(!refused(|| carried(base, at(ptr, 64), 1, &cap)));
+        assert!(refused(|| carried(base, at(ptr, 65), 1, &cap)));
+        assert!(!refused(|| carried(base, under(4), 4, &cap)));
+        assert!(refused(|| carried(base, under(8), 4, &cap)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_capability_too_narrow_for_a_derivation_leaves_it_to_the_planes() {
+        let _turn = turn();
+        // Only ever a reason to permit. Eight bytes of a sixty four byte instance says nothing
+        // about the other fifty six, and the planes say they are the instance's.
+        let ptr = alloc(64);
+        let wide = whole(ptr);
+        let cap = Cap::new(wide.lo, 8, wide.ver, wide.meta);
+        assert!(!refused(|| carried(at(ptr, 0), at(ptr, 40), 1, &cap)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_wide_capability_does_not_let_a_derivation_into_the_next_object() {
+        let _turn = turn();
+        // A recovery that found the mapping and not the instance covers every object in it, and
+        // stepping from one of those into the next is the derivation this check is for.
+        let ptr = alloc(64);
+        let own = whole(ptr);
+        let flags = Meta::RECOVERED | Meta::WIDE;
+        let meta = Meta::new(Class::Mapped, perm::READ | perm::WRITE, 0).with_flags(flags);
+        let cap = Cap::new(own.lo, 1 << 20, own.ver, meta);
+        assert!(refused(|| carried(at(ptr, 0), at(ptr, 4096), 1, &cap)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
