@@ -20,6 +20,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Four programs in `tests/safety` hold that fix in place: a read after an `if` that freed in one arm, a read at the top of a loop whose body freed, and a callee that frees nothing but stores another type or copies unwritten bytes over what the caller read. Each is refused at `-O0`, and each ran to the end at `-O2` before the fix, so `cargo xtask accounting` reports a divergence if the discharge ever loses track of those paths again.
 
+- A capability carried into a block parameter at a join now gets a stack slot of its own, and each edge into the join copies the four words into it. Before, the parameter was the address of whichever producer's slot came in on the edge, and inside a loop that producer can run again while the parameter still names its slot, so a check after it would read the next object's capability. A parameter that only ever receives one capability still reads that capability's slot directly and copies nothing. A capability parameter that nothing reads is now taken out along with what its edges passed it, so a join whose checks were all discharged no longer keeps a plane walk alive on the way in. Part of tamnd/rucc#1770.
+
 ## 0.11.0
 
 ### Added
