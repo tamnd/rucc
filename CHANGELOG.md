@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A function the scheduler reordered now has locations for its locals under `-g`. The liveness the locations are read from is counted along the order the allocator laid the function out in, and the scheduler runs after it at `-O2` and above, so until now such a function gave no location for anything held in a register or sharing its frame bytes. A stretch in a reordered block is now found by where the instruction at each end went, which is sound because the scheduler keeps every register's reads and writes in order and every memory access in order. Over the SQLite amalgamation at `-O2` the functions with no location list at all go from 1931 of 2548 to 79, and a local that shares its frame bytes is now available at `-O2` where it is wanted, which 0.11.2 could only give from `-O1`. `cargo xtask debugger` now builds its shared arrays at `-O2`. See tamnd/rucc#1680.
 
+### Changed
+
+- A read inside one granule under `-fsafety=detect` is answered from the one type slot and the one init shadow byte for that granule, where it used to walk both planes with loops set up for a read of any width. Only a yes is taken from the two slots. A granule stored through more than one type, or only partly written, goes to the walk as before, so every answer is the one it was. On server2 at `-O2` that takes `a-string-scan` from 4.14G instructions to 3.30G, `a-pointer-chasing-hash-table` from 6.04G to 5.25G, `a-linked-list-traversal` from 2.15G to 1.90G and `a-binary-tree-walk` from 4.32G to 3.90G, and 29, under 1, 9 and 5 percent off their clock times.
+
 ## 0.11.2
 
 ### Added

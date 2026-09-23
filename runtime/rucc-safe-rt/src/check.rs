@@ -527,6 +527,14 @@ pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descri
 /// The type plane is asked first, which is the order the two calls were emitted in, so a read that
 /// disagrees with both reports the same refusal it reported when they were two calls.
 ///
+/// A read inside one granule is asked of the two slots that answer for it and nothing else, which
+/// is [`types::Types::plain`] and [`init::Init::whole`], the same two a strided check asks of each
+/// access in its column. Both are a single load, where the general walk is a loop per plane set up
+/// for any width, and every scalar read a C program makes is inside one granule unless it is
+/// misaligned. Only a yes is taken from them. A no is a granule stored through more than one type
+/// or one only partly written, and the walk below is what can tell whether the bytes this read wants
+/// are the good ones, so it asks again and its answer is the answer.
+///
 /// `rucc_safety::lower` is what puts them together, and only when the pair is one read's: same
 /// address, same width, nothing between them that writes memory. When `crate::discharge` has taken
 /// one of the two out, the other lowers on its own and this is not reached.
@@ -541,6 +549,17 @@ pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descri
 pub unsafe fn allowed(addr: *const c_void, size: usize, ty: TypeId, descriptor: *const Descriptor) {
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
+    const { assert!(types::GRANULE == init::SPAN) };
+    if addr % types::GRANULE + size <= types::GRANULE {
+        // SAFETY: the region covers `addr` and is page aligned at both ends, so it covers the whole
+        // granule `addr` is in, which is every byte either slot answers for.
+        let whole = unsafe {
+            (ty == types::CHARACTER || region.types.plain(addr, ty)) && region.init.whole(addr)
+        };
+        if whole {
+            return;
+        }
+    }
     let size = clipped(&region, addr, size);
     // SAFETY: the range is clipped to the region, whose type plane covers every granule of it and
     // whose init plane covers every byte of it.
@@ -1769,6 +1788,12 @@ mod tests {
         unsafe { super::deriv(base, derived, stride, capability, &raw const ROW) }
     }
 
+    /// The type check and the init check as the one call a read that needs both makes.
+    fn fused(addr: *const c_void, size: usize, ty: TypeId) {
+        // SAFETY: as above.
+        unsafe { allowed(addr, size, ty, &raw const ROW) }
+    }
+
     /// The type check, the same way.
     fn typed(addr: *const c_void, size: usize, ty: TypeId) {
         // SAFETY: as above.
@@ -2150,6 +2175,33 @@ mod tests {
         judge(at(ptr, 0), 32, A);
         assert!(!refused(|| typed(at(ptr, 0), 32, A)));
         assert!(!refused(|| typed(at(ptr, 8), 8, A)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_read_inside_one_granule_gets_the_answer_the_whole_walk_gives() {
+        let _turn = turn();
+        // The single granule answer takes only a yes from the two slots, so a granule that is
+        // mixed or partly written has to come out the same as it did when every read walked.
+        let ptr = alloc(64);
+        judge(at(ptr, 0), 8, A);
+        wrote(at(ptr, 0), 8);
+        assert!(!refused(|| fused(at(ptr, 0), 8, A)));
+        assert!(!refused(|| fused(at(ptr, 4), 4, types::CHARACTER)));
+        assert!(refused(|| fused(at(ptr, 0), 8, B)));
+
+        judge(at(ptr, 8), 4, A);
+        judge(at(ptr, 12), 4, B);
+        wrote(at(ptr, 8), 4);
+        assert!(!refused(|| fused(at(ptr, 8), 4, A)));
+        assert!(refused(|| fused(at(ptr, 8), 4, B)));
+        assert!(refused(|| fused(at(ptr, 12), 4, B)), "the bytes it wants were never written");
+
+        // Two granules, which the walk answers as it always did.
+        wrote(at(ptr, 12), 4);
+        assert!(refused(|| fused(at(ptr, 4), 12, A)));
+        assert!(!refused(|| fused(at(ptr, 4), 12, types::CHARACTER)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
