@@ -46,8 +46,8 @@ use Form::{
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
     ShiftCl, ShiftRi, Spin, Store, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
-    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Test, TestCmov, Trap,
-    UnaryM, UnaryR, UnaryX87,
+    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Test, TestCmov,
+    TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -406,6 +406,14 @@ pub enum Form {
     /// has and is handled the same way, by a copy the allocator inserts when the false arm is still
     /// live afterwards.
     TestCmov,
+    /// A test of a register against a constant, which ands the two and keeps only the flags.
+    ///
+    /// Only a template writes one. A program testing the low bits of a count before it copies the
+    /// last few bytes of a buffer, which is what tcc's `memcpy` in its own test suite does, wants
+    /// the flags that and leaves and not the and itself, so the register is read and nothing is
+    /// written. It is not [`Form::CmpRi`] because a comparison is something the compare pass
+    /// reasons about and this is not a comparison.
+    TestRi,
     /// The move alone, reading a condition state something else left.
     ///
     /// [`Form::TestCmov`] with its front half gone, and it stands to that form the way [`Form::Cmp`]
@@ -1188,6 +1196,7 @@ impl Form {
             BrCond => &BR_COND,
             Call => &CALL,
             Test => &TEST,
+            TestRi => &CMP_RI,
             TestCmov => &TEST_CMOV,
             Cmov => &CMOV,
             Jcc | Jmp | JmpAway => &JUMP,
@@ -1222,7 +1231,16 @@ impl Form {
     pub fn takes_imm(self) -> bool {
         matches!(
             self,
-            LoadImm | AluRi | AluCarryI | AluMi | ShiftRi | CmpSetRi | CmpRi | CmpSetMi | CmpMi
+            LoadImm
+                | AluRi
+                | AluCarryI
+                | AluMi
+                | ShiftRi
+                | CmpSetRi
+                | CmpRi
+                | CmpSetMi
+                | CmpMi
+                | TestRi
         )
     }
 
@@ -1657,6 +1675,23 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sar_rcl_16", ShiftCl),
     ("sar_rcl_32", ShiftCl),
     ("sar_rcl_64", ShiftCl),
+    // Rotates by a constant and by `cl`, which only a template writes.
+    ("rol_ri_8", ShiftRi),
+    ("rol_ri_16", ShiftRi),
+    ("rol_ri_32", ShiftRi),
+    ("rol_ri_64", ShiftRi),
+    ("ror_ri_8", ShiftRi),
+    ("ror_ri_16", ShiftRi),
+    ("ror_ri_32", ShiftRi),
+    ("ror_ri_64", ShiftRi),
+    ("rol_rcl_8", ShiftCl),
+    ("rol_rcl_16", ShiftCl),
+    ("rol_rcl_32", ShiftCl),
+    ("rol_rcl_64", ShiftCl),
+    ("ror_rcl_8", ShiftCl),
+    ("ror_rcl_16", ShiftCl),
+    ("ror_rcl_32", ShiftCl),
+    ("ror_rcl_64", ShiftCl),
     // The comparisons, ten conditions at four widths.
     ("cmp_set_e_8", CmpSet),
     ("cmp_set_e_16", CmpSet),
@@ -1974,6 +2009,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_ri_16", CmpRi),
     ("cmp_ri_32", CmpRi),
     ("cmp_ri_64", CmpRi),
+    // A test against a constant, which only a template writes.
+    ("test_ri_8", TestRi),
+    ("test_ri_16", TestRi),
+    ("test_ri_32", TestRi),
+    ("test_ri_64", TestRi),
     // And the same against memory, which is what the layout leaves of a folded comparison
     // it took the byte off.
     ("cmp_rm_8", CmpRm),
@@ -2395,7 +2435,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 704);
+        assert_eq!(described, 724);
     }
 
     #[test]
@@ -2442,6 +2482,7 @@ mod tests {
                             | BrCond
                             | Call
                             | Test
+                            | TestRi
                             | Cmp
                             | CmpRi
                             | CmpRm

@@ -202,9 +202,11 @@ pub enum Piece {
         /// instruction, and the object is the low half of what that instruction wrote.
         ///
         /// So this says which of the two the width came from, and it is not on its own permission
-        /// to differ from the type: the same modifier on a read is the program handing an
-        /// instruction a part of a register it never filled. The place an operand is put reads
-        /// this and the operand's role together, and only a written one may differ.
+        /// to differ from the type. The place an operand is put reads this together with the
+        /// operand's role and with what the operand arrived holding, and says which of the ways
+        /// to differ are the program asking for part of an object and which are it asking for
+        /// bits nothing put there. The two halves of a word are stated as well, because `%b0` and
+        /// `%h0` are the template saying sixteen bits whatever the type is.
         stated: bool,
     },
     /// A register the instruction uses without its text saying so.
@@ -795,7 +797,7 @@ fn instruction(
                     return None;
                 }
                 *operands.get_mut(usize::from(index))? =
-                    Some(Piece::Operand { index: operand, width: Width::Word, stated: false });
+                    Some(Piece::Operand { index: operand, width: Width::Word, stated: true });
             }
             (Arg::Imm, Given::Imm(value)) => imm = Some(value),
             // An immediate the table wrote is part of the instruction, so a template matches it
@@ -1386,7 +1388,7 @@ mod tests {
             plain("xchgb %b0,%h0", &[Some(Width::Word)]).expect("the swap femtolisp writes");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].opcode, "xchg_high_16");
-        let whole = Piece::Operand { index: 0, width: Width::Word, stated: false };
+        let whole = Piece::Operand { index: 0, width: Width::Word, stated: true };
         assert_eq!(
             lines[0].operands,
             vec![whole, whole],
