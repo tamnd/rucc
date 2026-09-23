@@ -1370,6 +1370,10 @@ pub enum Std {
     /// `-std=c23`. The default, matching current GCC.
     #[default]
     C23,
+    /// `-std=c2y`, the draft after C23, which gcc 16 takes and reports as `202500L`. It is C23
+    /// with whatever the next standard has added so far, and the one addition anything here reads
+    /// yet is the four unsigned absolute value functions under their plain names.
+    C2y,
 }
 
 impl Std {
@@ -1381,6 +1385,7 @@ impl Std {
             Std::C11 => Some("201112L"),
             Std::C17 => Some("201710L"),
             Std::C23 => Some("202311L"),
+            Std::C2y => Some("202500L"),
         }
     }
 
@@ -1392,12 +1397,13 @@ impl Std {
             Std::C11 => "c11",
             Std::C17 => "c17",
             Std::C23 => "c23",
+            Std::C2y => "c2y",
         }
     }
 
     /// Whether this dialect has `_Atomic`, `_Thread_local` and the rest of C11.
     pub const fn has_c11(self) -> bool {
-        matches!(self, Std::C11 | Std::C17 | Std::C23)
+        matches!(self, Std::C11 | Std::C17 | Std::C23 | Std::C2y)
     }
 
     /// Reads a `-std=` argument, and says whether the GNU extensions came with it.
@@ -1416,6 +1422,7 @@ impl Std {
             "c11" | "c1x" | "gnu11" | "gnu1x" | "iso9899:2011" => Std::C11,
             "c17" | "c18" | "gnu17" | "gnu18" | "iso9899:2017" | "iso9899:2018" => Std::C17,
             "c23" | "c2x" | "gnu23" | "gnu2x" => Std::C23,
+            "c2y" | "gnu2y" => Std::C2y,
             _ => return None,
         };
         Some((std, gnu))

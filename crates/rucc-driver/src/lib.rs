@@ -222,7 +222,7 @@ options:
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
-  -std=<dialect>         c89 through c23, and the gnu spellings
+  -std=<dialect>         c89 through c2y, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 16.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z
@@ -4359,6 +4359,10 @@ mod tests {
         let (opts, _) = compile(&["-ansi", "a.c"]);
         assert_eq!(opts.std, Std::C89);
         assert!(!opts.gnu_extensions);
+
+        let (opts, _) = compile(&["-std=gnu2y", "a.c"]);
+        assert_eq!(opts.std, Std::C2y);
+        assert!(opts.gnu_extensions);
 
         let e = parse_args(&args(&["-std=c94jr", "a.c"])).unwrap_err();
         assert!(e.message.contains("unknown dialect"), "{}", e.message);

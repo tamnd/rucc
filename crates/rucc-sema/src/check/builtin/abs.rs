@@ -14,8 +14,10 @@
 //! `__builtin_uabs` and the three beside it answer in the unsigned type of the same width as the
 //! argument. That is the one shape of absolute value with no undefined case: the most negative
 //! value of a signed type has no positive counterpart in that type and has one in the unsigned
-//! type beside it. No C library declares `uabs` or any of the other three, so unlike the signed
-//! four there is no plain name to leave alone and nothing to call if the answer is not built.
+//! type beside it. The draft after C23 adds `uabs`, `ulabs`, `ullabs` and `umaxabs` to
+//! `stdlib.h`, so under `-std=c2y` and `-std=gnu2y` the plain names are the library's in the same
+//! way `abs` is, and gcc 16 expands them there and calls them in every dialect before it. Before
+//! C2y the names are the program's, since nothing reserved them, and a call is a call.
 //!
 //! What gets built is the same four instructions, because on a two's complement machine the
 //! magnitude and the unsigned magnitude are the same bits. The difference is entirely in the type
@@ -54,6 +56,7 @@
 
 use rucc_base::Symbol;
 use rucc_diag::Span;
+use rucc_session::Std;
 use rucc_types::IntKind;
 
 use crate::check::Checker;
@@ -79,10 +82,14 @@ enum Width {
 /// One name of the family, and the type the library gives it.
 #[derive(Debug, Clone, Copy)]
 struct Row {
-    /// The plain name, where the library defines one. Eight names are here and only four of them
-    /// have a plain spelling: nothing declares `uabs` or any of the other three, so those exist
-    /// under the prefix alone and there is no name of the program's to be careful of.
-    name: Option<&'static str>,
+    /// The plain name, which every row has.
+    name: &'static str,
+    /// The first strict dialect whose library defines the plain name. Before it the name is the
+    /// program's under `-std=c89` and the rest of the ISO spellings, and only the prefixed one
+    /// means this. A GNU dialect takes every plain name as the library's whatever its year, which
+    /// is what gcc 16 does: `-std=c89` calls `llabs` and `-std=gnu89` expands it, and `-std=c23`
+    /// calls `uabs` and `-std=gnu23` expands it.
+    since: Std,
     /// The prefixed spelling, which is a row of `features.toml` and means this whatever the
     /// program has done with the plain name.
     builtin: &'static str,
@@ -98,14 +105,56 @@ struct Row {
 /// The prefixed spellings are rows of `features.toml` carrying the type this checks against, and
 /// the test at the bottom of this file is what keeps the two from drifting apart.
 const FAMILY: &[Row] = &[
-    Row { name: Some("abs"), builtin: "__builtin_abs", at: Width::Int, unsigned: false },
-    Row { name: Some("labs"), builtin: "__builtin_labs", at: Width::Long, unsigned: false },
-    Row { name: Some("llabs"), builtin: "__builtin_llabs", at: Width::LongLong, unsigned: false },
-    Row { name: Some("imaxabs"), builtin: "__builtin_imaxabs", at: Width::Max, unsigned: false },
-    Row { name: None, builtin: "__builtin_uabs", at: Width::Int, unsigned: true },
-    Row { name: None, builtin: "__builtin_ulabs", at: Width::Long, unsigned: true },
-    Row { name: None, builtin: "__builtin_ullabs", at: Width::LongLong, unsigned: true },
-    Row { name: None, builtin: "__builtin_umaxabs", at: Width::Max, unsigned: true },
+    Row { name: "abs", since: Std::C89, builtin: "__builtin_abs", at: Width::Int, unsigned: false },
+    Row {
+        name: "labs",
+        since: Std::C89,
+        builtin: "__builtin_labs",
+        at: Width::Long,
+        unsigned: false,
+    },
+    Row {
+        name: "llabs",
+        since: Std::C99,
+        builtin: "__builtin_llabs",
+        at: Width::LongLong,
+        unsigned: false,
+    },
+    Row {
+        name: "imaxabs",
+        since: Std::C99,
+        builtin: "__builtin_imaxabs",
+        at: Width::Max,
+        unsigned: false,
+    },
+    Row {
+        name: "uabs",
+        since: Std::C2y,
+        builtin: "__builtin_uabs",
+        at: Width::Int,
+        unsigned: true,
+    },
+    Row {
+        name: "ulabs",
+        since: Std::C2y,
+        builtin: "__builtin_ulabs",
+        at: Width::Long,
+        unsigned: true,
+    },
+    Row {
+        name: "ullabs",
+        since: Std::C2y,
+        builtin: "__builtin_ullabs",
+        at: Width::LongLong,
+        unsigned: true,
+    },
+    Row {
+        name: "umaxabs",
+        since: Std::C2y,
+        builtin: "__builtin_umaxabs",
+        at: Width::Max,
+        unsigned: true,
+    },
 ];
 
 impl Checker<'_> {
@@ -129,7 +178,10 @@ impl Checker<'_> {
         let spelled = self.text(name);
         let row = *FAMILY
             .iter()
-            .find(|row| row.name == Some(spelled) || row.builtin == spelled)
+            .find(|row| {
+                row.builtin == spelled
+                    || (row.name == spelled && (self.cx.gnu || self.cx.std >= row.since))
+            })
             .filter(|_| self.cx.means_the_library(spelled))?;
         let takes = self.types.int(self.kind(row.at, false));
         let answers = self.types.int(self.kind(row.at, row.unsigned));
@@ -192,18 +244,17 @@ mod tests {
     #[test]
     fn the_prefixed_spelling_is_the_plain_name_with_the_prefix_on_it() {
         for row in FAMILY {
-            let Some(name) = row.name else { continue };
-            assert_eq!(row.builtin.strip_prefix("__builtin_"), Some(name));
+            assert_eq!(row.builtin.strip_prefix("__builtin_"), Some(row.name));
         }
     }
 
-    /// The four with no plain name are the four the C library has never declared, so there is no
-    /// name of the program's for this to be careful of and no function to call if the answer were
-    /// not built. Getting this backwards would take `uabs` away from a program that defines it.
+    /// The unsigned four are the four only the draft after C23 declares, so a strict dialect before
+    /// it leaves the plain names to the program. Getting this backwards would take `uabs` away from
+    /// a C23 program that defines it.
     #[test]
-    fn the_unsigned_four_exist_under_the_prefix_alone() {
+    fn the_unsigned_four_are_the_library_from_c2y_on() {
         for row in FAMILY {
-            assert_eq!(row.name.is_none(), row.unsigned, "{}", row.builtin);
+            assert_eq!(row.since == Std::C2y, row.unsigned, "{}", row.builtin);
             let feature = rucc_gnu::lookup(Kind::Builtin, row.builtin).expect("a row");
             assert_eq!(feature.library.is_empty(), row.unsigned, "{}", row.builtin);
         }

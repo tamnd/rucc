@@ -984,7 +984,7 @@ impl Checker<'_> {
             ParamKind::Void => (Vec::new(), true),
             // `int f()` says nothing about the parameters before C23 and says there are none
             // from C23 onwards, and which of those it means is visible in every call.
-            ParamKind::Empty => (Vec::new(), self.cx.std == Std::C23),
+            ParamKind::Empty => (Vec::new(), self.cx.std >= Std::C23),
             // An old-style definition's identifier list has no types in it at all. They arrive
             // in the declarations between the parenthesis and the body, which is the function
             // definition's business rather than this one's.
