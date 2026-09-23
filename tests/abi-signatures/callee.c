@@ -2464,68 +2464,135 @@ union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1)
 }
 #endif
 
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128_with_one_register_left(long long a0, long long a1, long long a2, long long a3, long long a4, __int128 a5, long long a6)
+{
+	if (a0 != 3035338296602401LL)
+		abi_fail("w_int128_with_one_register_left", "a0");
+	if (a1 != 3333495954837121LL)
+		abi_fail("w_int128_with_one_register_left", "a1");
+	if (a2 != 3631653613071841LL)
+		abi_fail("w_int128_with_one_register_left", "a2");
+	if (a3 != 3929811271306561LL)
+		abi_fail("w_int128_with_one_register_left", "a3");
+	if (a4 != 4227968929541281LL)
+		abi_fail("w_int128_with_one_register_left", "a4");
+	if (a5 != (__int128)(((unsigned __int128)6335201ULL << 64) | 4526126587776001ULL))
+		abi_fail("w_int128_with_one_register_left", "a5");
+	if (a6 != 4824284246010721LL)
+		abi_fail("w_int128_with_one_register_left", "a6");
+	return (__int128)(((unsigned __int128)6351039ULL << 64) | 5122441904245441ULL);
+}
+#endif
+
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128_on_a_sixteen_byte_boundary(long long a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6, __int128 a7, int a8)
+{
+	if (a0 != 5420599562480161LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a0");
+	if (a1 != 5718757220714881LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a1");
+	if (a2 != 6016914878949601LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a2");
+	if (a3 != 6315072537184321LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a3");
+	if (a4 != 6613230195419041LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a4");
+	if (a5 != 6911387853653761LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a5");
+	if (a6 != 7209545511888481LL)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a6");
+	if (a7 != (__int128)(((unsigned __int128)6414391ULL << 64) | 7507703170123201ULL))
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a7");
+	if (a8 != 6422310)
+		abi_fail("w_int128_on_a_sixteen_byte_boundary", "a8");
+	return (__int128)(((unsigned __int128)6430229ULL << 64) | 8104018486592641ULL);
+}
+#endif
+
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128s_past_the_registers(__int128 a0, __int128 a1, __int128 a2, double a3, __int128 a4, __int128 a5, __int128 a6)
+{
+	if (a0 != (__int128)(((unsigned __int128)6438148ULL << 64) | 8402176144827361ULL))
+		abi_fail("w_int128s_past_the_registers", "a0");
+	if (a1 != (__int128)(((unsigned __int128)6446067ULL << 64) | 8700333803062081ULL))
+		abi_fail("w_int128s_past_the_registers", "a1");
+	if (a2 != (__int128)(((unsigned __int128)6453986ULL << 64) | 8998491461296801ULL))
+		abi_fail("w_int128s_past_the_registers", "a2");
+	if (a3 != 817.25)
+		abi_fail("w_int128s_past_the_registers", "a3");
+	if (a4 != (__int128)(((unsigned __int128)6469824ULL << 64) | 9594806777766241ULL))
+		abi_fail("w_int128s_past_the_registers", "a4");
+	if (a5 != (__int128)(((unsigned __int128)6477743ULL << 64) | 9892964436000961ULL))
+		abi_fail("w_int128s_past_the_registers", "a5");
+	if (a6 != (__int128)(((unsigned __int128)6485662ULL << 64) | 10191122094235681ULL))
+		abi_fail("w_int128s_past_the_registers", "a6");
+	return (__int128)(((unsigned __int128)6493581ULL << 64) | 10489279752470401ULL);
+}
+#endif
+
 #if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
 _Float128 qv_quads_past_the_registers(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
-	if (a0 != 6295606)
+	if (a0 != 6501500)
 		abi_fail("qv_quads_past_the_registers", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		_Float128 v0 = ABI_VA_ARG(ap, _Float128);
-		if (v0 != 797.25f128)
+		if (v0 != 823.25f128)
 			abi_fail("qv_quads_past_the_registers", "v0");
 	}
 	{
 		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
-		if (v1 != 798.25f128)
+		if (v1 != 824.25f128)
 			abi_fail("qv_quads_past_the_registers", "v1");
 	}
 	{
 		_Float128 v2 = ABI_VA_ARG(ap, _Float128);
-		if (v2 != 799.25f128)
+		if (v2 != 825.25f128)
 			abi_fail("qv_quads_past_the_registers", "v2");
 	}
 	{
 		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
-		if (v3 != 800.25f128)
+		if (v3 != 826.25f128)
 			abi_fail("qv_quads_past_the_registers", "v3");
 	}
 	{
 		_Float128 v4 = ABI_VA_ARG(ap, _Float128);
-		if (v4 != 801.25f128)
+		if (v4 != 827.25f128)
 			abi_fail("qv_quads_past_the_registers", "v4");
 	}
 	{
 		_Float128 v5 = ABI_VA_ARG(ap, _Float128);
-		if (v5 != 802.25f128)
+		if (v5 != 828.25f128)
 			abi_fail("qv_quads_past_the_registers", "v5");
 	}
 	{
 		_Float128 v6 = ABI_VA_ARG(ap, _Float128);
-		if (v6 != 803.25f128)
+		if (v6 != 829.25f128)
 			abi_fail("qv_quads_past_the_registers", "v6");
 	}
 	{
 		_Float128 v7 = ABI_VA_ARG(ap, _Float128);
-		if (v7 != 804.25f128)
+		if (v7 != 830.25f128)
 			abi_fail("qv_quads_past_the_registers", "v7");
 	}
 	{
 		_Float128 v8 = ABI_VA_ARG(ap, _Float128);
-		if (v8 != 805.25f128)
+		if (v8 != 831.25f128)
 			abi_fail("qv_quads_past_the_registers", "v8");
 	}
 	{
 		_Float128 v9 = ABI_VA_ARG(ap, _Float128);
-		if (v9 != 806.25f128)
+		if (v9 != 832.25f128)
 			abi_fail("qv_quads_past_the_registers", "v9");
 	}
 	ABI_VA_END(ap);
 
-	return 807.25f128;
+	return 833.25f128;
 }
 #endif
 
@@ -2534,38 +2601,38 @@ double qv_quad_between_doubles(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
-	if (a0 != 6390634)
+	if (a0 != 6596528)
 		abi_fail("qv_quad_between_doubles", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		double v0 = ABI_VA_ARG(ap, double);
-		if (v0 != 809.25)
+		if (v0 != 835.25)
 			abi_fail("qv_quad_between_doubles", "v0");
 	}
 	{
 		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
-		if (v1 != 810.25f128)
+		if (v1 != 836.25f128)
 			abi_fail("qv_quad_between_doubles", "v1");
 	}
 	{
 		double v2 = ABI_VA_ARG(ap, double);
-		if (v2 != 811.25)
+		if (v2 != 837.25)
 			abi_fail("qv_quad_between_doubles", "v2");
 	}
 	{
 		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
-		if (v3 != 812.25f128)
+		if (v3 != 838.25f128)
 			abi_fail("qv_quad_between_doubles", "v3");
 	}
 	{
 		double v4 = ABI_VA_ARG(ap, double);
-		if (v4 != 813.25)
+		if (v4 != 839.25)
 			abi_fail("qv_quad_between_doubles", "v4");
 	}
 	ABI_VA_END(ap);
 
-	return 814.25;
+	return 840.25;
 }
 #endif
 
@@ -2574,23 +2641,23 @@ struct quad_one qv_struct_holding_a_quad(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
-	if (a0 != 6446067)
+	if (a0 != 6651961)
 		abi_fail("qv_struct_holding_a_quad", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct quad_one v0 = ABI_VA_ARG(ap, struct quad_one);
-		if (v0.x != 816.25f128)
+		if (v0.x != 842.25f128)
 			abi_fail("qv_struct_holding_a_quad", "v0.x");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
-		if (v1 != 6461905)
+		if (v1 != 6667799)
 			abi_fail("qv_struct_holding_a_quad", "v1");
 	}
 	ABI_VA_END(ap);
 
-	struct quad_one r = { 818.25f128 };
+	struct quad_one r = { 844.25f128 };
 	return r;
 }
 #endif

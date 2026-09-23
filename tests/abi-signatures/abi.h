@@ -357,6 +357,26 @@ struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2);
 union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1);
 #endif
 
+/* Five integers and then a __int128, which gets no pair of registers, so the whole of it goes in
+ * the argument area and the sixth register stays empty. The long long behind it is the one that
+ * takes that register, which is the half of the rule a compiler that split the value into two
+ * words gets wrong. */
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128_with_one_register_left(long long a0, long long a1, long long a2, long long a3, long long a4, __int128 a5, long long a6);
+#endif
+
+/* Seven integers and then a __int128, so the seventh is the first word of the argument area and
+ * the wide value leaves the second one empty to start on a sixteen byte boundary. */
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128_on_a_sixteen_byte_boundary(long long a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6, __int128 a7, int a8);
+#endif
+
+/* Six of them with a double in the middle, so three are in registers, three are in the argument
+ * area and the double takes a vector register without moving any of them. */
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+__int128 w_int128s_past_the_registers(__int128 a0, __int128 a1, __int128 a2, double a3, __int128 a4, __int128 a5, __int128 a6);
+#endif
+
 /* Ten quads past the dots, which is the va_arg walk over the one type whose slot in the register
  * save area is the whole of a vector register rather than the low half of one. Eight of them are
  * in the area and the last two are where the caller left them, so this asks about both ends of

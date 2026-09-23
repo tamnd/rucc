@@ -712,25 +712,46 @@ int main(void)
 			abi_fail("q_union_and_quad", "return.q");
 	}
 #endif
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+	{
+		__int128 r = w_int128_with_one_register_left(3035338296602401LL, 3333495954837121LL, 3631653613071841LL, 3929811271306561LL, 4227968929541281LL, (__int128)(((unsigned __int128)6335201ULL << 64) | 4526126587776001ULL), 4824284246010721LL);
+		if (r != (__int128)(((unsigned __int128)6351039ULL << 64) | 5122441904245441ULL))
+			abi_fail("w_int128_with_one_register_left", "return");
+	}
+#endif
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+	{
+		__int128 r = w_int128_on_a_sixteen_byte_boundary(5420599562480161LL, 5718757220714881LL, 6016914878949601LL, 6315072537184321LL, 6613230195419041LL, 6911387853653761LL, 7209545511888481LL, (__int128)(((unsigned __int128)6414391ULL << 64) | 7507703170123201ULL), 6422310);
+		if (r != (__int128)(((unsigned __int128)6430229ULL << 64) | 8104018486592641ULL))
+			abi_fail("w_int128_on_a_sixteen_byte_boundary", "return");
+	}
+#endif
+#if defined(__SIZEOF_INT128__) && defined(__x86_64__)
+	{
+		__int128 r = w_int128s_past_the_registers((__int128)(((unsigned __int128)6438148ULL << 64) | 8402176144827361ULL), (__int128)(((unsigned __int128)6446067ULL << 64) | 8700333803062081ULL), (__int128)(((unsigned __int128)6453986ULL << 64) | 8998491461296801ULL), 817.25, (__int128)(((unsigned __int128)6469824ULL << 64) | 9594806777766241ULL), (__int128)(((unsigned __int128)6477743ULL << 64) | 9892964436000961ULL), (__int128)(((unsigned __int128)6485662ULL << 64) | 10191122094235681ULL));
+		if (r != (__int128)(((unsigned __int128)6493581ULL << 64) | 10489279752470401ULL))
+			abi_fail("w_int128s_past_the_registers", "return");
+	}
+#endif
 #if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
 	{
-		_Float128 r = qv_quads_past_the_registers(6295606, 797.25f128, 798.25f128, 799.25f128, 800.25f128, 801.25f128, 802.25f128, 803.25f128, 804.25f128, 805.25f128, 806.25f128);
-		if (r != 807.25f128)
+		_Float128 r = qv_quads_past_the_registers(6501500, 823.25f128, 824.25f128, 825.25f128, 826.25f128, 827.25f128, 828.25f128, 829.25f128, 830.25f128, 831.25f128, 832.25f128);
+		if (r != 833.25f128)
 			abi_fail("qv_quads_past_the_registers", "return");
 	}
 #endif
 #if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
 	{
-		double r = qv_quad_between_doubles(6390634, 809.25, 810.25f128, 811.25, 812.25f128, 813.25);
-		if (r != 814.25)
+		double r = qv_quad_between_doubles(6596528, 835.25, 836.25f128, 837.25, 838.25f128, 839.25);
+		if (r != 840.25)
 			abi_fail("qv_quad_between_doubles", "return");
 	}
 #endif
 #if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
 	{
-		struct quad_one v0 = { 816.25f128 };
-		struct quad_one r = qv_struct_holding_a_quad(6446067, v0, 6461905);
-		if (r.x != 818.25f128)
+		struct quad_one v0 = { 842.25f128 };
+		struct quad_one r = qv_struct_holding_a_quad(6651961, v0, 6667799);
+		if (r.x != 844.25f128)
 			abi_fail("qv_struct_holding_a_quad", "return.x");
 	}
 #endif
