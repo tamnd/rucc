@@ -9,17 +9,23 @@
 //!
 //! [`rucc_sysroot::msvc`] is the reading half: it takes the two documents and says which files a
 //! compiler needs out of the nineteen thousand packages in them. This is the half that moves bytes.
-//! It prints the licence, refuses to go on without explicit acceptance, and then downloads the
-//! selection into the cache with every file held against the hash the manifest gives for it.
+//! It prints the licence, refuses to go on without explicit acceptance, downloads the selection into
+//! the cache with every file held against the hash the manifest gives for it, and then lays the
+//! downloads out as the tree `--sysroot` reads. [`tree`] is the mapping from a file in a package to
+//! its place in that tree, and [`rucc_unpack`] is the four readers a download is four formats deep
+//! of.
 //!
-//! # What this does not do yet
+//! # Why the tree is per target
 //!
-//! Unpack. The CRT files are vsix archives, which are zips, and the SDK files are MSIs whose
-//! contents are in cabs the MSIs name, so turning the download into the `crt/include` and
-//! `sdk/include` tree that `--sysroot` already understands needs a zip reader and an MSI and cab
-//! reader. That is its own change. Until it lands this command gets the bytes onto the machine and
-//! says where they are, and the sysroot record that section 13.5 asks for is written by the change
-//! that produces a sysroot to write it about.
+//! Because the record of it is. `spec/cross-compile/13-distribution.md` section 13.5 asks for a
+//! manifest saying where every file came from and what may be done with it, [`Manifest`] is that
+//! record, and it carries one target. A tree that served three architectures would carry a record
+//! that named one of them and said nothing about the other two.
+//!
+//! What that costs is the headers, which are the same for every architecture and are written again
+//! under each target that is fetched. That is 78 MB of the 330 MB a target comes to, measured on the
+//! September 2026 kit, and it is only paid by somebody who fetched more than one architecture on one
+//! machine. The libraries, which are the larger half, were never shared.
 //!
 //! # The two downloads with no hash behind them
 //!
@@ -38,10 +44,16 @@
 //! description of what it publishes rather than the things the licence is about, and what the
 //! acceptance guards is the download of the files themselves, which is what happens after it.
 
+pub mod tree;
+
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rucc_sysroot::msvc::{Channel, Chip, Selection};
+use rucc_sysroot::msvc::{Channel, Chip, Selection, Wanted};
+use rucc_sysroot::{Input, Licence, Manifest, Provenance, Sysroot, sha256};
 use rucc_tuple::TargetTuple;
+use rucc_unpack::cab::File as CabFile;
+use rucc_unpack::{Cab, Cfb, Msi, Zip, under};
 
 use crate::fetch;
 use crate::{CliError, err};
@@ -58,7 +70,7 @@ pub const CHANNEL: &str = "https://aka.ms/vs/17/release/channel";
 /// Under the cache like everything else, and under the build rather than beside it, because two
 /// builds of the Visual Studio installer name different files and a person who fetched one and then
 /// the other should have both rather than a directory that is half of each.
-fn under(cache: &Path, build: &str) -> PathBuf {
+fn downloads(cache: &Path, build: &str) -> PathBuf {
     cache.join("downloads").join("msvc").join(build)
 }
 
@@ -131,7 +143,7 @@ fn run(target: TargetTuple, tuple: &str, accepted: bool, cache: &Path) -> Result
         .map_err(|why| err(format!("{CHANNEL} is not a channel manifest: {why}")))?;
     say(&format!("Visual Studio {}, build {}", channel.release, channel.build));
 
-    let dir = under(cache, &channel.build);
+    let dir = downloads(cache, &channel.build);
     let manifest = dir.join(stored_as(&channel.manifest.name));
     // Named by the build, so a second run for another architecture reads the one already here
     // rather than moving eighteen megabytes again. A copy that does not parse is a run that was
@@ -178,9 +190,264 @@ fn run(target: TargetTuple, tuple: &str, accepted: bool, cache: &Path) -> Result
         mb(chosen.size()),
         dir.display()
     ));
-    say("nothing has been unpacked, because the vsix files are zips and the SDK files are MSIs \
-         whose contents are in cabs, and reading those is the next piece of work");
+
+    let tree = unpack(target, chip, &chosen, &dir, cache, &say)?;
+    say(&format!("compile for {tuple} with --sysroot={}", tree.display()));
     Ok(0)
+}
+
+/// Lay the downloaded packages out as the tree `--sysroot` reads, and record what went into it.
+///
+/// The record is written last and is what says the tree is finished, so a run that was interrupted
+/// leaves a directory with no manifest in it and the next run lays it out again from the top. That
+/// is cheaper than it sounds, because the downloads are held and nothing is fetched twice, and it is
+/// the only test available: the files in the tree have no hashes published for them, only the
+/// packages they came out of do, so there is nothing to hold a half written tree against.
+fn unpack(
+    target: TargetTuple,
+    chip: Chip,
+    chosen: &Selection,
+    from: &Path,
+    cache: &Path,
+    say: &dyn Fn(&str),
+) -> Result<PathBuf, CliError> {
+    let version = format!("{}-{}", chosen.crt, chosen.sdk);
+    let root = cache.join("msvc").join(version).join(target.to_canonical_string());
+    let record = Sysroot::at(root.clone(), target).manifest_path();
+    if std::fs::read_to_string(&record).is_ok_and(|text| Manifest::parse(&text).is_ok()) {
+        say(&format!("the tree at {} was laid out already", root.display()));
+        return Ok(root);
+    }
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|why| err(format!("{}: {why}", root.display())))?;
+    }
+
+    let mut manifest = Manifest::new(target);
+    for file in &chosen.files {
+        let at = from.join(&file.payload.sha256[..12]).join(stored_as(&file.payload.name));
+        let bytes = slurp(&at)?;
+        if stored_as(&file.payload.name).to_ascii_lowercase().ends_with(".msi") {
+            from_msi(&bytes, chip, &root, file, chosen, from, &mut manifest)?;
+        } else {
+            from_vsix(&bytes, chip, &root, file, &mut manifest)?;
+        }
+    }
+
+    let written = manifest.inputs().len();
+    let alike = aliases(&root)?;
+    std::fs::create_dir_all(&root).map_err(|why| err(format!("{}: {why}", root.display())))?;
+    std::fs::write(&record, manifest.render())
+        .map_err(|why| err(format!("{}: {why}", record.display())))?;
+    say(&format!("{written} files and {alike} lowercase names are at {}", root.display()));
+    Ok(root)
+}
+
+/// Lay out the members of one Visual C++ package.
+fn from_vsix(
+    bytes: &[u8],
+    chip: Chip,
+    root: &Path,
+    file: &Wanted,
+    manifest: &mut Manifest,
+) -> Result<(), CliError> {
+    let name = stored_as(&file.payload.name);
+    let zip = Zip::read(bytes).map_err(|why| err(format!("{name}: {why}")))?;
+    for member in zip.members() {
+        if member.is_dir() {
+            continue;
+        }
+        let Some(at) = tree::crt(&member.name, chip) else {
+            continue;
+        };
+        let body = zip.contents(member).map_err(|why| err(format!("{name}: {why}")))?;
+        put(root, &at, &body, file, &file.payload.url, manifest)?;
+    }
+    Ok(())
+}
+
+/// Lay out the files one Windows SDK installer describes, fetching the cabinets they are in.
+///
+/// An installer holds no bytes of its own, so this is two steps rather than one: read the tables to
+/// find out which cabinet every file it describes is in and what that cabinet calls it, then get the
+/// cabinets that hold something this target wants. Most of them hold nothing it wants. The store
+/// apps headers installer names three cabinets and the universal CRT one names eleven, and which of
+/// those are worth 484 MB of downloading is a question only the tables can answer, which is why
+/// [`Selection::cabs`] carries all of them and this picks.
+fn from_msi(
+    bytes: &[u8],
+    chip: Chip,
+    root: &Path,
+    file: &Wanted,
+    chosen: &Selection,
+    from: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CliError> {
+    let name = stored_as(&file.payload.name);
+    let compound = Cfb::read(bytes).map_err(|why| err(format!("{name}: {why}")))?;
+    let installer = Msi::read(&compound).map_err(|why| err(format!("{name}: {why}")))?;
+    let describes = installer.payload().map_err(|why| err(format!("{name}: {why}")))?;
+
+    let mut wanted: BTreeMap<&str, Vec<(&str, String)>> = BTreeMap::new();
+    for payload in &describes {
+        let Some(at) = tree::sdk(&payload.directory, &payload.name, chip) else {
+            continue;
+        };
+        // A cabinet named with a `#` in front of it is a stream inside the installer rather than a
+        // file beside it. No installer in the selection uses one, which was measured rather than
+        // assumed, and a kit that started to would be losing headers quietly if this skipped it.
+        if payload.cabinet.starts_with('#') || payload.cabinet.is_empty() {
+            return Err(err(format!(
+                "{name} keeps {} in {}, which is inside the installer rather than in a cabinet \
+                 beside it, and this does not read those yet",
+                payload.name,
+                if payload.cabinet.is_empty() { "the media" } else { &payload.cabinet }
+            )));
+        }
+        wanted.entry(&payload.cabinet).or_default().push((&payload.key, at));
+    }
+
+    for (cabinet, files) in wanted {
+        let Some(published) = chosen.cab(cabinet) else {
+            return Err(err(format!(
+                "{name} says its files are in {cabinet}, which is not a file this Windows SDK \
+                 publishes, so there is nowhere to get them from"
+            )));
+        };
+        let at =
+            from.join(&published.payload.sha256[..12]).join(stored_as(&published.payload.name));
+        fetch::fetch(&published.payload.url, &published.payload.sha256, &at)?;
+        let bytes = slurp(&at)?;
+        let cab = Cab::read(&bytes).map_err(|why| err(format!("{}: {why}", at.display())))?;
+        spill(&cab, &files, root, file, &published.payload.url, manifest)
+            .map_err(|why| err(format!("{}: {why}", at.display())))?;
+    }
+    Ok(())
+}
+
+/// Write the files a cabinet holds, given what each one is called there and where it goes.
+///
+/// A folder in a cabinet is one compressed stream with the files laid end to end inside it, so it is
+/// decompressed once and sliced rather than once per file. The SDK puts thousands of headers in a
+/// folder, and asking for them one at a time would decompress the same megabytes thousands of times.
+fn spill(
+    cab: &Cab<'_>,
+    files: &[(&str, String)],
+    root: &Path,
+    file: &Wanted,
+    url: &str,
+    manifest: &mut Manifest,
+) -> Result<(), CliError> {
+    let places: BTreeMap<&str, &str> = files.iter().map(|(key, at)| (*key, at.as_str())).collect();
+    let mut folders: BTreeMap<usize, Vec<&CabFile>> = BTreeMap::new();
+    for member in cab.files() {
+        if places.contains_key(member.name.as_str()) {
+            folders.entry(member.folder).or_default().push(member);
+        }
+    }
+    for members in folders.into_values() {
+        let folder = cab.folder(members[0]).map_err(|why| err(why.to_string()))?;
+        for member in members {
+            let at = usize::try_from(member.at).unwrap_or(usize::MAX);
+            let size = usize::try_from(member.size).unwrap_or(usize::MAX);
+            let body =
+                at.checked_add(size).and_then(|end| folder.get(at..end)).ok_or_else(|| {
+                    err(format!("{} is not where this cabinet's folder says it is", member.name))
+                })?;
+            put(root, places[member.name.as_str()], body, file, url, manifest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write one file into the tree and record where it came from.
+///
+/// [`rucc_unpack::under`] is what decides whether the name may be written at all. The last component
+/// of every one of these is a string out of somebody else's archive, so it goes through the same
+/// check an unpacker owes its caller rather than being trusted because the directory in front of it
+/// was ours.
+fn put(
+    root: &Path,
+    at: &str,
+    body: &[u8],
+    file: &Wanted,
+    url: &str,
+    manifest: &mut Manifest,
+) -> Result<(), CliError> {
+    let to = under(root, at).ok_or_else(|| {
+        err(format!("{at} is a name out of a Microsoft package that will not be written"))
+    })?;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|why| err(format!("{}: {why}", parent.display())))?;
+    }
+    std::fs::write(&to, body).map_err(|why| err(format!("{}: {why}", to.display())))?;
+    manifest.push(Input {
+        path: at.to_owned(),
+        source: format!("{} {}", file.package, file.version),
+        url: url.to_owned(),
+        sha256: sha256::hex(body),
+        licence: Licence::MicrosoftSdk,
+        provenance: Provenance::Fetched,
+    });
+    Ok(())
+}
+
+/// Put a lowercase name beside every file and directory in the tree that has a capital in it.
+///
+/// See [`tree::lowercase`] for what this is for. They are not recorded in the manifest, because a
+/// manifest says where files came from and these came from here.
+///
+/// An entry that is already there is left alone rather than reported. That happens on a host whose
+/// filesystem answers to either spelling, where creating the link finds the file itself in the way,
+/// and a compiler that refused to finish on such a host would be refusing over a tree that is
+/// already correct.
+#[cfg(unix)]
+fn aliases(root: &Path) -> Result<usize, CliError> {
+    let mut todo = vec![root.to_path_buf()];
+    let mut made = 0;
+    while let Some(dir) = todo.pop() {
+        let mut here = Vec::new();
+        let listing =
+            std::fs::read_dir(&dir).map_err(|why| err(format!("{}: {why}", dir.display())))?;
+        for entry in listing {
+            let entry = entry.map_err(|why| err(format!("{}: {why}", dir.display())))?;
+            // Not followed, so the links made below are not descended into on the way back up.
+            let kind = entry.file_type().map_err(|why| err(format!("{}: {why}", dir.display())))?;
+            if kind.is_dir() {
+                todo.push(entry.path());
+            }
+            here.push(entry.file_name());
+        }
+        for name in here {
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(lower) = tree::lowercase(name) else {
+                continue;
+            };
+            let link = dir.join(&lower);
+            match std::os::unix::fs::symlink(name, &link) {
+                Ok(()) => made += 1,
+                Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(why) => return Err(err(format!("{}: {why}", link.display()))),
+            }
+        }
+    }
+    Ok(made)
+}
+
+/// The same on a host where the question does not arise.
+///
+/// Windows filesystems are not case sensitive, so `windows.h` already finds `Windows.h` and a second
+/// name for it would be a second file rather than a second spelling.
+#[cfg(not(unix))]
+fn aliases(_root: &Path) -> Result<usize, CliError> {
+    Ok(0)
+}
+
+/// Read a file that was downloaded, saying which one when it cannot be read.
+fn slurp(at: &Path) -> Result<Vec<u8>, CliError> {
+    std::fs::read(at).map_err(|why| err(format!("{}: {why}", at.display())))
 }
 
 /// What a run that has not been given the acceptance prints.
@@ -230,8 +497,101 @@ fn read(at: &Path) -> Result<String, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{files, mb, stored_as, under};
-    use std::path::Path;
+    use super::{aliases, downloads, files, mb, put, stored_as};
+    use rucc_sysroot::{Manifest, Provenance};
+    use std::path::{Path, PathBuf};
+
+    /// A directory of this test's own, since these write files.
+    fn scratch(name: &str) -> PathBuf {
+        let at = std::env::temp_dir().join(format!("rucc-msvc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(&at).expect("a directory to work in");
+        at
+    }
+
+    /// One file out of a package, named the way the selection names one.
+    fn wanted(package: &str) -> rucc_sysroot::msvc::Wanted {
+        rucc_sysroot::msvc::Wanted {
+            package: package.to_owned(),
+            version: "10.0.26100.15".to_owned(),
+            payload: rucc_sysroot::msvc::Payload {
+                name: format!(r"Installers\{package}.msi"),
+                url: "https://example.invalid/thing".to_owned(),
+                sha256: "ab".repeat(32),
+                size: 4,
+            },
+        }
+    }
+
+    #[test]
+    fn a_file_is_written_where_the_tree_says_and_recorded_as_microsofts() {
+        let root = scratch("put");
+        let mut manifest = Manifest::new("x86_64-windows-msvc".parse().expect("a tuple"));
+        let from = wanted("Win11SDK_10.0.26100");
+        put(
+            &root,
+            "sdk/include/um/windows.h",
+            b"#pragma once\n",
+            &from,
+            "https://ms/cab",
+            &mut manifest,
+        )
+        .expect("a file written");
+        assert_eq!(
+            std::fs::read(root.join("sdk/include/um/windows.h")).expect("what was written"),
+            b"#pragma once\n"
+        );
+        let input = &manifest.inputs()[0];
+        assert_eq!(input.path, "sdk/include/um/windows.h");
+        assert_eq!(input.source, "Win11SDK_10.0.26100 10.0.26100.15");
+        // The URL is the cabinet the bytes came out of rather than the installer that named it,
+        // because that is where they were.
+        assert_eq!(input.url, "https://ms/cab");
+        assert_eq!(input.sha256, rucc_sysroot::sha256::hex(b"#pragma once\n"));
+        // Not redistributable, which is the whole reason this command exists.
+        assert!(!input.licence.redistributable());
+        assert_eq!(input.provenance, Provenance::Fetched);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_name_out_of_a_package_that_would_leave_the_tree_is_refused() {
+        let root = scratch("escape");
+        let mut manifest = Manifest::new("x86_64-windows-msvc".parse().expect("a tuple"));
+        let from = wanted("Win11SDK_10.0.26100");
+        // Nothing in the mapping produces one of these. It is refused here anyway, because the last
+        // component of every path this writes is a string out of somebody else's archive.
+        let escape = put(&root, "../../etc/passwd", b"no", &from, "https://ms/cab", &mut manifest);
+        assert!(escape.is_err(), "a name that climbs out of the tree is not written");
+        assert!(manifest.inputs().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_name_with_a_capital_in_it_gets_a_lowercase_one_beside_it() {
+        let root = scratch("aliases");
+        std::fs::create_dir_all(root.join("sdk/include/um")).expect("a directory");
+        std::fs::create_dir_all(root.join("crt/include/CodeAnalysis")).expect("a directory");
+        std::fs::write(root.join("sdk/include/um/Windows.h"), b"h").expect("a header");
+        std::fs::write(root.join("sdk/include/um/winbase.h"), b"h").expect("a header");
+        std::fs::write(root.join("crt/include/CodeAnalysis/warnings.h"), b"h").expect("a header");
+
+        let made = aliases(&root).expect("the links");
+        // Two on a host whose filesystem tells the spellings apart, and none on a Mac, where the
+        // file already answers to the lowercase name and the link finds itself in the way. Both are
+        // right, and what is worth asserting either way is what a compile goes on to find.
+        assert!(made == 2 || made == 0, "{made} links for two names with a capital in them");
+        assert_eq!(std::fs::read(root.join("sdk/include/um/windows.h")).expect("the link"), b"h");
+        assert_eq!(
+            std::fs::read(root.join("crt/include/codeanalysis/warnings.h")).expect("the link"),
+            b"h"
+        );
+        // Run again over its own output, which is what a second fetch of another architecture into
+        // the same cache would do, and nothing new is made and nothing fails.
+        assert_eq!(aliases(&root).expect("the links again"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_payload_keeps_its_name_and_loses_the_directory_the_manifest_put_it_in() {
@@ -255,7 +615,7 @@ mod tests {
         // Two builds of the installer name different files, so a person who fetched one and then
         // the other has both rather than a directory that is half of each.
         assert_eq!(
-            under(Path::new("/cache"), "17.14.37710.0"),
+            downloads(Path::new("/cache"), "17.14.37710.0"),
             Path::new("/cache/downloads/msvc/17.14.37710.0")
         );
     }
