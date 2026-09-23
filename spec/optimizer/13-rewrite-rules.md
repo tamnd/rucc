@@ -161,6 +161,15 @@ against a mask whose top bit is clear rather than a call. It never folds to true
 narrowing only ever takes buckets away, so `fabs(x) >= 0.0` stays as it is, which is correct: a NaN
 has its sign bit cleared like anything else and compares false against everything.
 
+A third question uses the same buckets, narrowed by what the operands allow. A NaN on either side of
+a floating point comparison leaves only the unordered bucket, two constants leave the one they are
+in, a positive infinity on the right leaves every bucket but above and a negative one every bucket
+but below, and a value against itself is equal or unordered. So `nan < x` is false and `nan != x` is
+true whatever `x` is, `x > inf` is false, and `x != x` is `uno x, x`. This one can fold to true,
+since the unordered predicates accept the bucket a NaN leaves. gcc 16 folds all of these without
+`-ffast-math`, and `ieee/fp-cmp-6.c`, `fp-cmp-7.c` and `fp-cmp-9.c` assert it by calling a function
+they never define.
+
 *Tier 6, select and control, roughly 20.* `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)`
 to a zero-extended condition, min and max recognition, absolute value recognition.
 
