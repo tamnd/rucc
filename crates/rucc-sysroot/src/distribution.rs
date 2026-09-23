@@ -144,6 +144,11 @@ pub fn render(version: &str) -> String {
         }
         out.push('\n');
     }
+    // The kernel header tree, after the targets because it is not one of them. Every Linux row that
+    // is pinned needs it, and a person auditing what a fetch of one brings onto the machine would
+    // otherwise find a second download nothing in this file mentions.
+    let kernel = &crate::artifact::KERNEL_HEADERS;
+    let _ = writeln!(out, "tree\t{}\tpinned\t{}\t{}", kernel.tuple, kernel.url, kernel.sha256);
     out
 }
 
@@ -249,6 +254,19 @@ mod tests {
         assert!(text.contains("\tunpublished\n"), "{text}");
     }
 
+    /// The kernel tree is a line of its own, shaped like a pinned target's so that one `awk` reads
+    /// both, and it is the last line, after every target.
+    #[test]
+    fn the_kernel_tree_every_linux_target_shares_is_named_once_after_the_targets() {
+        let lines = lines();
+        let last = lines.last().expect("a file with lines in it");
+        let fields: Vec<&str> = last.split('\t').collect();
+        assert_eq!(fields[..3], ["tree", "kernel-headers", "pinned"]);
+        assert_eq!(fields[3], crate::artifact::KERNEL_HEADERS.url);
+        assert_eq!(fields[4], crate::artifact::KERNEL_HEADERS.sha256);
+        assert_eq!(lines.iter().filter(|line| line.starts_with("tree\t")).count(), 1);
+    }
+
     #[test]
     fn every_line_has_a_kind_and_no_field_is_empty() {
         for line in lines() {
@@ -257,7 +275,10 @@ mod tests {
                 continue;
             }
             assert!(
-                matches!(fields[0], "release" | "producer" | "payload" | "targets" | "target"),
+                matches!(
+                    fields[0],
+                    "release" | "producer" | "payload" | "targets" | "target" | "tree"
+                ),
                 "{line}"
             );
             for field in fields {

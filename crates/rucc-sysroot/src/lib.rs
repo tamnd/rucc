@@ -133,11 +133,13 @@ pub mod sha256;
 pub mod wall;
 
 pub use argv::{Invocation, Item, Unsupported};
-pub use artifact::{PINNED, Pinned, pinned_for, pinned_targets};
+pub use artifact::{KERNEL_HEADERS, PINNED, Pinned, pinned_for, pinned_targets};
 pub use distribution::Arrival;
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};
-pub use manifest::{Input, Licence, Manifest, ManifestError, Provenance};
+pub use manifest::{
+    Input, KernelFile, KernelManifest, Licence, Manifest, ManifestError, Provenance,
+};
 pub use msvc::{Channel, Chip, MsvcError, Payload, Selection, Wanted};
 pub use search::{Entry, Options, Origin, include_paths};
 pub use wall::Wall;

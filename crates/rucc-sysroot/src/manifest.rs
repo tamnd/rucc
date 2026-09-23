@@ -256,6 +256,13 @@ pub enum ManifestError {
         /// How many tab separated fields it had.
         fields: usize,
     },
+    /// A line of the kernel tree's record did not have the four fields a file has there.
+    BadKernelFile {
+        /// Which line, counting from one.
+        line: usize,
+        /// How many tab separated fields it had.
+        fields: usize,
+    },
     /// A hash that is not sixty four lowercase hex characters.
     BadHash {
         /// Which line, counting from one.
@@ -280,7 +287,9 @@ pub enum ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestError::NotAManifest => write!(f, "this does not start like a sysroot manifest"),
+            ManifestError::NotAManifest => {
+                write!(f, "this does not start like a sysroot manifest or a kernel tree's record")
+            }
             ManifestError::UnknownVersion(v) => {
                 write!(f, "manifest format version {v}, which this build does not read")
             }
@@ -290,6 +299,9 @@ impl fmt::Display for ManifestError {
             }
             ManifestError::BadInput { line, fields } => {
                 write!(f, "line {line} has {fields} fields where an input has six")
+            }
+            ManifestError::BadKernelFile { line, fields } => {
+                write!(f, "line {line} has {fields} fields where a kernel header has four")
             }
             ManifestError::BadHash { line, found } => {
                 write!(f, "line {line} has `{found}` where a sha256 belongs")
@@ -543,4 +555,146 @@ impl Manifest {
 /// manifest that verifies nothing while looking like it does.
 fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The first line of the kernel header tree's own record.
+const KERNEL_HEADER: &str = "rucc kernel headers manifest 1";
+
+/// One file in the kernel header tree.
+///
+/// Four fields where a sysroot's input has six, because every file in the tree came out of one
+/// source and got there one way. The URL is the kernel release's and the provenance is bundled for
+/// all of them, so a column of each would be the same word a thousand times.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct KernelFile {
+    /// Where it sits, relative to the tree's root, which puts the architecture or `generic` first.
+    pub path: String,
+    /// The Linux release it came out of, as `linux-6.19`.
+    pub source: String,
+    /// The hash of the file, lowercase hex.
+    pub sha256: String,
+    /// What it may be done with, which for every file here is [`Licence::LinuxUapi`].
+    pub licence: Licence,
+}
+
+/// The record the kernel header tree carries, which `bin/kernel-headers` in `tamnd/rucc-cross`
+/// writes.
+///
+/// A separate type rather than a [`Manifest`] with no target, because the tree is not any target's.
+/// One copy serves every Linux row in the table, which is [`crate::Kernel`]'s whole argument, and a
+/// record that had to name a target would name the wrong one for every target but one. What it
+/// names instead is the Linux release, which is what a sysroot's own `kernel` line is about, so the
+/// two can be read side by side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelManifest {
+    linux: Version,
+    files: Vec<KernelFile>,
+}
+
+impl KernelManifest {
+    /// An empty record for the tree out of this Linux release.
+    #[must_use]
+    pub const fn new(linux: Version) -> Self {
+        KernelManifest { linux, files: Vec::new() }
+    }
+
+    /// The Linux release the tree came out of.
+    #[must_use]
+    pub const fn linux(&self) -> Version {
+        self.linux
+    }
+
+    /// Every file, in the order they were added.
+    #[must_use]
+    pub fn files(&self) -> &[KernelFile] {
+        &self.files
+    }
+
+    /// Record one file.
+    pub fn push(&mut self, file: KernelFile) {
+        self.files.push(file);
+    }
+
+    /// The record as text, sorted by path, which is the same text the producer writes.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut sorted = self.files.clone();
+        sorted.sort();
+        let mut text = String::new();
+        text.push_str(KERNEL_HEADER);
+        text.push_str("\nlinux\t");
+        text.push_str(&self.linux.to_string());
+        text.push('\n');
+        for file in &sorted {
+            text.push_str(&file.path);
+            text.push('\t');
+            text.push_str(&file.source);
+            text.push('\t');
+            text.push_str(&file.sha256);
+            text.push('\t');
+            text.push_str(file.licence.as_str());
+            text.push('\n');
+        }
+        text
+    }
+
+    /// The sha256 of [`KernelManifest::render`], which is what `sha256sum` says about the file, for
+    /// the reason [`Manifest::digest`] gives.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        crate::sha256::hex(self.render().as_bytes())
+    }
+
+    /// Read a record back.
+    ///
+    /// # Errors
+    ///
+    /// Which line was wrong and how, with the same errors a sysroot manifest has. The header being
+    /// some other file's is [`ManifestError::NotAManifest`], and a file line without its four fields
+    /// is [`ManifestError::BadKernelFile`].
+    pub fn parse(text: &str) -> Result<Self, ManifestError> {
+        let mut lines = text.lines().enumerate();
+
+        let (_, first) = lines.next().ok_or(ManifestError::NotAManifest)?;
+        if first != KERNEL_HEADER {
+            let Some(version) = first.strip_prefix("rucc kernel headers manifest ") else {
+                return Err(ManifestError::NotAManifest);
+            };
+            return Err(ManifestError::UnknownVersion(version.to_string()));
+        }
+
+        let (_, second) = lines.next().ok_or(ManifestError::NotAManifest)?;
+        let spelling = second
+            .strip_prefix("linux\t")
+            .ok_or_else(|| ManifestError::BadKernel(second.into()))?;
+        let linux =
+            Version::parse(spelling).ok_or_else(|| ManifestError::BadKernel(spelling.into()))?;
+        let mut manifest = KernelManifest::new(linux);
+
+        for (index, line) in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let number = index + 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [path, source, sha256, licence] = fields.as_slice() else {
+                return Err(ManifestError::BadKernelFile { line: number, fields: fields.len() });
+            };
+            if !is_sha256(sha256) {
+                return Err(ManifestError::BadHash { line: number, found: (*sha256).to_string() });
+            }
+            for (value, field) in [(path, "path"), (source, "source")] {
+                if value.is_empty() {
+                    return Err(ManifestError::EmptyField { line: number, field });
+                }
+            }
+            manifest.push(KernelFile {
+                path: (*path).to_string(),
+                source: (*source).to_string(),
+                sha256: (*sha256).to_string(),
+                licence: licence.parse()?,
+            });
+        }
+        Ok(manifest)
+    }
 }

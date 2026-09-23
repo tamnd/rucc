@@ -4,14 +4,14 @@ producer	https://github.com/tamnd/rucc-cross
 payload	rucc	apache-2.0
 targets	42
 target	x86_64-linux-gnu	unpublished
-target	x86_64-linux-musl	unpublished
+target	x86_64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-x86_64-linux-musl.tar.gz	93b42df66c0a7547c3e96cd5512267790df1ca0227a0000ba4f1808eb214c376
 target	aarch64-linux-gnu	unpublished
-target	aarch64-linux-musl	unpublished
+target	aarch64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-aarch64-linux-musl.tar.gz	098c24c0c27d264dceaee76141f0933845dcc8a7c3a4b473954987f731fecde5
 target	riscv64-linux-gnu	unpublished
-target	riscv64-linux-musl	unpublished
+target	riscv64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-riscv64-linux-musl.tar.gz	00fc00f996d0a9a3de1cabd95840d423de1562ed5345dd5c47f1bf89b30f0b99
 target	i686-linux-gnu	unpublished
 target	armv7-linux-gnueabihf	unpublished
-target	armv7-linux-musleabihf	unpublished
+target	armv7-linux-musleabihf	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-armv7-linux-musleabihf.tar.gz	645ceef60e0302b260ad804569243c3470f7545f1b135a143f9b7ec8408b6f78
 target	loongarch64-linux-gnu	unpublished
 target	powerpc64le-linux-gnu	unpublished
 target	s390x-linux-gnu	unpublished
@@ -45,3 +45,4 @@ target	armv7m-none-eabi	included
 target	wasm32-wasip1	unpublished
 target	wasm32-wasip3	unpublished
 target	wasm32-none	included
+tree	kernel-headers	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-kernel-headers.tar.gz	e96934f553df19d6bdbb6804f1b52d079adc4bea10a819d51eda5bc4ec584f2d

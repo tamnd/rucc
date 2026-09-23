@@ -33,7 +33,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rucc_sysroot::{Manifest, Sysroot, sha256};
+use rucc_sysroot::{Kernel, KernelManifest, Manifest, Sysroot, sha256};
 use rucc_tuple::TargetTuple;
 
 use crate::{CliError, err};
@@ -55,7 +55,8 @@ pub enum Before {
 /// What an install left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    /// Where it is, which is `sysroots/<tuple>` under the cache.
+    /// Where it is, which is `sysroots/<tuple>` under the cache, or `kernel-headers` for the tree
+    /// every Linux target shares.
     pub root: PathBuf,
     /// The digest of its manifest, which is what `rucc -print-sysroot-digest` prints for it.
     pub digest: String,
@@ -109,17 +110,59 @@ pub fn install(
     cache: &Path,
 ) -> Result<Installed, CliError> {
     verify(archive, expected)?;
+    staged(cache, &target.to_canonical_string(), |staging| {
+        install_staged(archive, target, cache, staging)
+    })
+}
 
-    let staging = staging_dir(cache, target);
+/// Check the kernel header tree's artifact and install it where every Linux target reads it.
+///
+/// The same four steps as [`install`], against the tree's own record rather than a sysroot's. What
+/// is not checked is that the tree is the release a sysroot's `kernel` line names, for the reason
+/// [`rucc_sysroot::Kernel`] gives: the two are produced by two commands and can be paired either way,
+/// and the records are what make a stale pairing visible.
+///
+/// # Errors
+///
+/// The same as [`install`]'s, with a record that is not a kernel tree's in place of a sysroot for
+/// the wrong target.
+pub fn install_kernel(archive: &Path, expected: &str, cache: &Path) -> Result<Installed, CliError> {
+    verify(archive, expected)?;
+    staged(cache, "kernel-headers", |staging| install_kernel_staged(archive, cache, staging))
+}
+
+/// Run an install in a staging directory of its own, and take the directory away if it fails.
+///
+/// Every exit has to take the staging directory with it, including the ones that are somebody
+/// else's fault, or a machine that fetches a broken artifact twice a day fills its cache with half
+/// unpacked trees.
+fn staged(
+    cache: &Path,
+    name: &str,
+    work: impl FnOnce(&Path) -> Result<Installed, CliError>,
+) -> Result<Installed, CliError> {
+    let staging = staging_dir(cache, name);
     fs::create_dir_all(&staging).map_err(|why| err(format!("{}: {why}", staging.display())))?;
-    // Every exit from here on has to take the staging directory with it, including the ones that
-    // are somebody else's fault, or a machine that fetches a broken artifact twice a day fills its
-    // cache with half unpacked trees.
-    let outcome = install_staged(archive, target, cache, &staging);
+    let outcome = work(&staging);
     if outcome.is_err() {
         let _ = fs::remove_dir_all(&staging);
     }
     outcome
+}
+
+/// The record at the top of an unpacked archive, as text.
+fn record(archive: &Path, staging: &Path) -> Result<String, CliError> {
+    let record = staging.join("manifest");
+    fs::read_to_string(&record).map_err(|why| {
+        if why.kind() == io::ErrorKind::NotFound {
+            err(format!(
+                "{} has no manifest in it, so there is nothing to check its files against",
+                archive.display()
+            ))
+        } else {
+            err(format!("{}: {why}", record.display()))
+        }
+    })
 }
 
 /// The install, with the staging directory already made and cleaned up by the caller.
@@ -130,18 +173,7 @@ fn install_staged(
     staging: &Path,
 ) -> Result<Installed, CliError> {
     unpack(archive, staging)?;
-
-    let record = staging.join("manifest");
-    let text = fs::read_to_string(&record).map_err(|why| {
-        if why.kind() == io::ErrorKind::NotFound {
-            err(format!(
-                "{} has no manifest in it, so there is nothing to check its files against",
-                archive.display()
-            ))
-        } else {
-            err(format!("{}: {why}", record.display()))
-        }
-    })?;
+    let text = record(archive, staging)?;
     let manifest =
         Manifest::parse(&text).map_err(|why| err(format!("{}: {why}", archive.display())))?;
 
@@ -154,12 +186,39 @@ fn install_staged(
         )));
     }
 
-    check(staging, &manifest).map_err(|why| err(format!("{}: {why}", archive.display())))?;
+    let recorded: Vec<(&str, &str)> = manifest
+        .inputs()
+        .iter()
+        .map(|input| (input.path.as_str(), input.sha256.as_str()))
+        .collect();
+    check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
 
     let digest = manifest.digest();
     let root = Sysroot::in_cache(cache, target).root().to_path_buf();
-    let before = swap(staging, &root, &digest)?;
-    Ok(Installed { root, digest, files: manifest.inputs().len(), before })
+    let before = swap(staging, &root, &digest, existing(&root))?;
+    Ok(Installed { root, digest, files: recorded.len(), before })
+}
+
+/// The kernel tree's install, with the staging directory already made and cleaned up by the
+/// caller.
+fn install_kernel_staged(
+    archive: &Path,
+    cache: &Path,
+    staging: &Path,
+) -> Result<Installed, CliError> {
+    unpack(archive, staging)?;
+    let text = record(archive, staging)?;
+    let manifest =
+        KernelManifest::parse(&text).map_err(|why| err(format!("{}: {why}", archive.display())))?;
+
+    let recorded: Vec<(&str, &str)> =
+        manifest.files().iter().map(|file| (file.path.as_str(), file.sha256.as_str())).collect();
+    check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
+
+    let digest = manifest.digest();
+    let root = Kernel::in_cache(cache);
+    let before = swap(staging, &root, &digest, existing_kernel(&root))?;
+    Ok(Installed { root, digest, files: recorded.len(), before })
 }
 
 /// Where this install does its work.
@@ -168,10 +227,9 @@ fn install_staged(
 /// filesystem, and a name nothing else will pick, because two builds fetching the same target at
 /// the same time is the ordinary case rather than the unlucky one. The process id is not enough on
 /// its own: one process can install the same target twice.
-fn staging_dir(cache: &Path, target: TargetTuple) -> PathBuf {
+fn staging_dir(cache: &Path, name: &str) -> PathBuf {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let unique =
-        format!("{}-{}-{}", target.to_canonical_string(), std::process::id(), now.as_nanos());
+    let unique = format!("{name}-{}-{}", std::process::id(), now.as_nanos());
     cache.join("staging").join(unique)
 }
 
@@ -196,19 +254,22 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
     Err(err(format!("`tar` could not unpack {}{detail}", archive.display())))
 }
 
-/// Check a tree against a manifest and the manifest against the tree.
+/// Check a tree against a record and the record against the tree.
+///
+/// The record is the path and the sha256 of every file, which is the part a sysroot's manifest and
+/// the kernel tree's have in common.
 ///
 /// The errors are collected rather than returned one at a time. An artifact that fails this is
 /// either the wrong artifact or a broken producer, and which of the two it is shows in how many
 /// files disagree, so a report that stopped at the first one would hide the thing that tells them
 /// apart.
-fn check(tree: &Path, manifest: &Manifest) -> Result<(), String> {
+fn check(tree: &Path, files: &[(&str, &str)]) -> Result<(), String> {
     let mut problems: Vec<String> = Vec::new();
     let mut recorded: Vec<&str> = Vec::new();
 
-    for input in manifest.inputs() {
-        recorded.push(&input.path);
-        let at = match relative(tree, &input.path) {
+    for &(path, sha256) in files {
+        recorded.push(path);
+        let at = match relative(tree, path) {
             Ok(at) => at,
             Err(why) => {
                 problems.push(why);
@@ -218,17 +279,15 @@ fn check(tree: &Path, manifest: &Manifest) -> Result<(), String> {
         match fs::read(&at) {
             Ok(bytes) => {
                 let found = sha256::hex(&bytes);
-                if found != input.sha256 {
-                    problems.push(format!(
-                        "{} has sha256 {found} where the record says {}",
-                        input.path, input.sha256
-                    ));
+                if found != sha256 {
+                    problems
+                        .push(format!("{path} has sha256 {found} where the record says {sha256}"));
                 }
             }
             Err(why) if why.kind() == io::ErrorKind::NotFound => {
-                problems.push(format!("{} is in the record and not in the archive", input.path));
+                problems.push(format!("{path} is in the record and not in the archive"));
             }
-            Err(why) => problems.push(format!("{}: {why}", input.path)),
+            Err(why) => problems.push(format!("{path}: {why}")),
         }
     }
 
@@ -304,8 +363,13 @@ fn walk(dir: &Path, prefix: String, out: &mut Vec<String>) -> io::Result<()> {
 /// An existing tree with the same digest is left alone. That is not an optimization: a second fetch
 /// of the same artifact is the ordinary case, and replacing a directory that is already correct
 /// would move files under a build for no reason at all.
-fn swap(staging: &Path, root: &Path, digest: &str) -> Result<Before, CliError> {
-    let before = match existing(root) {
+fn swap(
+    staging: &Path,
+    root: &Path,
+    digest: &str,
+    there: Option<String>,
+) -> Result<Before, CliError> {
+    let before = match there {
         Some(found) if found == digest => {
             let _ = fs::remove_dir_all(staging);
             return Ok(Before::TheSame);
@@ -352,11 +416,17 @@ fn existing(root: &Path) -> Option<String> {
     Manifest::parse(&text).ok().map(|manifest| manifest.digest())
 }
 
+/// The same question about the kernel tree, whose record is in its own format.
+fn existing_kernel(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("manifest")).ok()?;
+    KernelManifest::parse(&text).ok().map(|manifest| manifest.digest())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Before, Installed, check, install, relative, verify, walk};
-    use rucc_sysroot::{Input, Licence, Manifest, Provenance, sha256};
-    use rucc_tuple::TargetTuple;
+    use super::{Before, Installed, check, install, install_kernel, relative, verify, walk};
+    use rucc_sysroot::{Input, KernelFile, KernelManifest, Licence, Manifest, Provenance, sha256};
+    use rucc_tuple::{TargetTuple, Version};
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -413,6 +483,11 @@ mod tests {
     /// Built with the same `tar` the install unpacks with, which is the point: a test that wrote its
     /// own archive format would be testing a reader nobody uses.
     fn artifact(tree: &Tree, files: &[(&str, &str)], manifest: &Manifest) -> (PathBuf, String) {
+        artifact_with(tree, files, &manifest.render())
+    }
+
+    /// The same, with the record already rendered, which is how the kernel tree's is passed.
+    fn artifact_with(tree: &Tree, files: &[(&str, &str)], record: &str) -> (PathBuf, String) {
         let staged = tree.0.join("staged");
         std::fs::create_dir_all(&staged).expect("a staging directory should be creatable");
         for (path, text) in files {
@@ -422,8 +497,7 @@ mod tests {
             }
             std::fs::write(&at, text).expect("a file should be writable");
         }
-        std::fs::write(staged.join("manifest"), manifest.render())
-            .expect("the manifest should be writable");
+        std::fs::write(staged.join("manifest"), record).expect("the manifest should be writable");
 
         let archive = tree.0.join("artifact.tar.gz");
         let status = Command::new("tar")
@@ -504,16 +578,31 @@ mod tests {
         std::fs::create_dir_all(at.parent().expect("a parent")).expect("a downloads directory");
         std::fs::copy(&built, &at).expect("the artifact should be placeable");
 
-        assert_eq!(crate::fetch_sysroot(&pinned, target(), &cache), 0);
+        // And the kernel tree, which a Linux target is fetched with, placed the same way.
+        let kernel_manifest = kernel_manifest_for(KERNEL_FILES);
+        let (built, hash) = artifact_with(&tree, KERNEL_FILES, &kernel_manifest.render());
+        let kernel = rucc_sysroot::Pinned {
+            tuple: "kernel-headers",
+            url: "https://example.invalid/rucc-kernel-headers.tar.gz",
+            sha256: String::leak(hash),
+        };
+        let at = kernel.archive_in(&cache);
+        std::fs::create_dir_all(at.parent().expect("a parent")).expect("a downloads directory");
+        std::fs::copy(&built, &at).expect("the artifact should be placeable");
+
+        assert_eq!(crate::fetch_sysroot(&pinned, Some(&kernel), target(), &cache), 0);
         let root = cache.join("sysroots").join("x86_64-linux-musl");
         assert!(root.join("include/stdio.h").is_file());
         assert_eq!(
             std::fs::read_to_string(root.join("manifest")).expect("a manifest"),
             manifest.render()
         );
-        // And again, which is the ordinary second run: the archive is still there, it still matches,
-        // and the tree it would install is the tree that is already installed.
-        assert_eq!(crate::fetch_sysroot(&pinned, target(), &cache), 0);
+        assert!(cache.join("kernel-headers/x86/asm/unistd.h").is_file());
+        // And again, which is the ordinary second run: the archives are still there, they still
+        // match, and the trees they would install are the trees that are already installed.
+        assert_eq!(crate::fetch_sysroot(&pinned, Some(&kernel), target(), &cache), 0);
+        // A target with no kernel tree is one artifact, and the fetch does not go looking for one.
+        assert_eq!(crate::fetch_sysroot(&pinned, None, target(), &cache), 0);
     }
 
     #[test]
@@ -673,6 +762,79 @@ mod tests {
         assert_eq!(kept, vec!["x86_64-linux-musl".to_owned()]);
     }
 
+    /// The kernel tree's record for these files, which is four fields a line and no target.
+    fn kernel_manifest_for(files: &[(&str, &str)]) -> KernelManifest {
+        let mut manifest = KernelManifest::new(Version::new(6, 19));
+        for (path, text) in files {
+            manifest.push(KernelFile {
+                path: (*path).to_owned(),
+                source: "linux-6.19".to_owned(),
+                sha256: sha256::hex(text.as_bytes()),
+                licence: Licence::LinuxUapi,
+            });
+        }
+        manifest
+    }
+
+    const KERNEL_FILES: &[(&str, &str)] = &[
+        ("generic/linux/types.h", "#define _LINUX_TYPES_H\n"),
+        ("x86/asm/unistd.h", "#define __NR_read 0\n"),
+    ];
+
+    #[test]
+    fn the_kernel_tree_is_installed_beside_the_sysroots_and_not_under_them() {
+        let tree = Tree::new("kernel");
+        let manifest = kernel_manifest_for(KERNEL_FILES);
+        let (archive, hash) = artifact_with(&tree, KERNEL_FILES, &manifest.render());
+        let cache = tree.0.join("cache");
+
+        let done = install_kernel(&archive, &hash, &cache).expect("this one should install");
+        assert_eq!(done.root, cache.join("kernel-headers"));
+        assert_eq!(done.files, 2);
+        assert_eq!(done.digest, manifest.digest());
+        assert_eq!(done.before, Before::Nothing);
+        // Where `rucc_sysroot::Kernel` looks for the two directories a Linux compile searches.
+        let x86 = rucc_sysroot::Kernel::for_target(&cache, target()).expect("a Linux target");
+        assert!(x86.arch_include().join("asm/unistd.h").is_file());
+        assert!(x86.generic_include().join("linux/types.h").is_file());
+
+        let again = install_kernel(&archive, &hash, &cache).expect("the second install");
+        assert_eq!(again.before, Before::TheSame);
+    }
+
+    #[test]
+    fn a_sysroot_is_not_a_kernel_tree_and_a_kernel_tree_is_not_a_sysroot() {
+        // The two archives look alike from outside, a manifest and some directories, and each
+        // install reads only its own record, so handing one to the other is refused by the header
+        // before any file is looked at.
+        let tree = Tree::new("crossed");
+        let sysroot = manifest_for(FILES);
+        let (archive, hash) = artifact(&tree, FILES, &sysroot);
+        let cache = tree.0.join("cache");
+        let why = install_kernel(&archive, &hash, &cache).expect_err("a sysroot");
+        assert!(why.message.contains("kernel tree's record"), "{}", why.message);
+        assert!(!cache.join("kernel-headers").exists());
+
+        let other = Tree::new("crossed-kernel");
+        let kernel = kernel_manifest_for(KERNEL_FILES);
+        let (archive, hash) = artifact_with(&other, KERNEL_FILES, &kernel.render());
+        let cache = other.0.join("cache");
+        install(&archive, &hash, target(), &cache).expect_err("a kernel tree");
+        assert!(!cache.join("sysroots").exists());
+    }
+
+    #[test]
+    fn a_kernel_tree_with_a_file_its_record_does_not_name_is_refused() {
+        let tree = Tree::new("kernel-extra");
+        let manifest = kernel_manifest_for(KERNEL_FILES);
+        let mut with_extra: Vec<(&str, &str)> = KERNEL_FILES.to_vec();
+        with_extra.push(("arm64/asm/surprise.h", "nobody wrote this down\n"));
+        let (archive, hash) = artifact_with(&tree, &with_extra, &manifest.render());
+        let cache = tree.0.join("cache");
+        let why = install_kernel(&archive, &hash, &cache).expect_err("an unrecorded file");
+        assert!(why.message.contains("arm64/asm/surprise.h"), "{}", why.message);
+    }
+
     #[test]
     fn a_record_that_names_a_path_outside_the_tree_is_refused() {
         // Not a likely producer bug, and the check is here because a manifest is data that has not
@@ -723,11 +885,13 @@ mod tests {
         }
         tree.write("manifest", "rucc sysroot manifest 3\n");
         let manifest = manifest_for(FILES);
-        assert_eq!(check(&tree.0, &manifest), Ok(()));
+        let recorded: Vec<(&str, &str)> =
+            manifest.inputs().iter().map(|i| (i.path.as_str(), i.sha256.as_str())).collect();
+        assert_eq!(check(&tree.0, &recorded), Ok(()));
         // An empty directory is not a file and is not a disagreement, which is what a tree that
         // went through `tar` on one host and not another looks like.
         std::fs::create_dir_all(tree.0.join("lib/empty")).expect("a directory");
-        assert_eq!(check(&tree.0, &manifest), Ok(()));
+        assert_eq!(check(&tree.0, &recorded), Ok(()));
     }
 
     #[test]

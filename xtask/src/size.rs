@@ -19,9 +19,9 @@
 //!
 //! Most rows are not produced in this repository yet, and they say so rather than passing. A payload
 //! of zero bytes is under every budget ever written, so a check that treated absence as success would
-//! go green for the whole of the work it exists to watch. The rows that are produced elsewhere name
-//! where, because `tamnd/rucc-cross` measures the two header trees already and those numbers are what
-//! the table now carries.
+//! go green for the whole of the work it exists to watch. The per target trees are out of the base,
+//! because section 13.2 fetches them, and their rows name the producer in `tamnd/rucc-cross` whose
+//! measurements the table carries.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,11 +36,10 @@ enum How {
     Binary,
     /// A directory of files in this repository, with what to say about where they end up.
     Tree { under: &'static str, note: &'static str },
-    /// Produced somewhere, and not here. The string says where and is printed.
-    Elsewhere(&'static str),
     /// Not produced anywhere yet. The string says what would produce it.
     Absent(&'static str),
-    /// In the table and not in the base, so measured by nobody here. The linker and the two SDKs.
+    /// In the table and not in the base, so measured by nobody here. The linker, the two SDKs and
+    /// every per target tree section 13.2 fetches.
     OutOfBase(&'static str),
     /// The base total, which is the sum of the rows above it rather than a thing on disk.
     Total,
@@ -66,15 +65,28 @@ const ROWS: &[(&str, How)] = &[
             "the abilist blob of spec/cross-compile/09-libc-stubs.md is what would write it",
         ),
     ),
-    ("glibc header tree", How::Elsewhere("bin/glibc-headers in tamnd/rucc-cross")),
-    ("musl headers", How::Elsewhere("bin/sysroot in tamnd/rucc-cross")),
-    ("Linux uapi headers", How::Elsewhere("bin/kernel-headers in tamnd/rucc-cross")),
-    ("start files", How::Elsewhere("bin/glibc-startfiles in tamnd/rucc-cross")),
     (
         "librucc_builtins.a",
         How::Absent("cargo xtask builtins writes one target's archive and this row is every one"),
     ),
     ("base distribution", How::Total),
+    (
+        "glibc header tree",
+        How::OutOfBase(
+            "fetched with each glibc target, and bin/glibc-merged in tamnd/rucc-cross makes it",
+        ),
+    ),
+    (
+        "musl sysroot",
+        How::OutOfBase("fetched per target, and bin/sysroot in tamnd/rucc-cross makes it"),
+    ),
+    (
+        "Linux uapi headers",
+        How::OutOfBase(
+            "fetched with the first Linux target, and bin/kernel-headers in tamnd/rucc-cross makes it",
+        ),
+    ),
+    ("start files", How::OutOfBase("inside each target's sysroot, which section 13.2 fetches")),
     (
         "mingw-w64 sysroot",
         How::OutOfBase("section 13.2 fetches it, so it is out of the base and not produced here"),
@@ -244,11 +256,6 @@ fn measure(component: &str, budget_text: &str, how: &How, wanted: &Wanted) -> Re
                 tree(&dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
             (Some(size), false, format!("{files} files in {under}, {note}"))
         }
-        How::Elsewhere(where_) => (
-            None,
-            true,
-            format!("produced by {where_}, so the number in the table is the measurement"),
-        ),
         How::Absent(what) => (None, true, format!("not produced yet, and {what}")),
         How::OutOfBase(why) => (None, false, (*why).to_owned()),
         How::Total => (None, false, TOTAL_NOTE.to_owned()),
