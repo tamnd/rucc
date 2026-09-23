@@ -522,6 +522,7 @@ impl<'a> Printer<'a> {
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
+            ExprKind::ObjectSize { kind, .. } => format!("object-size {kind}"),
             ExprKind::Alloca { .. } => "alloca".to_owned(),
             ExprKind::Jump { ask, .. } => match ask {
                 JumpAsk::Save => "setjmp".to_owned(),
@@ -556,6 +557,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
             | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

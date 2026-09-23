@@ -133,6 +133,14 @@ pub const NAME: &str = "libcall";
 /// down a chain of `ptr_add`, where one level is one index written in the source.
 const DEPTH: u32 = 4;
 
+/// How long a chain of block parameters the walk for a string follows.
+///
+/// Longer than [`DEPTH`], because an `if` and `else if` chain that picks a string in a loop is one
+/// block parameter per arm joining the next, and `builtins/stpcpy-chk.c` has four arms inside the
+/// loop on top of the loop's own parameter. A parameter already on the walk is not walked again,
+/// so this bounds a chain rather than a loop.
+const CHAIN: u32 = 12;
+
 /// How many times the calls in one function are looked at, which is the longest chain of folds
 /// where each one leaves a call behind that the next one folds.
 const ROUNDS: u32 = 3;
@@ -1047,7 +1055,7 @@ impl Site<'_> {
             // one holds the stream, so the call it leaves behind is one the program could have
             // written for itself.
             3 if format == b"%s" && self.func[args[2]].ty == Type::PTR => {
-                match self.strings(args[2], DEPTH) {
+                match self.strings(args[2]) {
                     Some(candidates) => self.string(&candidates, args[2], stream, quiet),
                     None if quiet => None,
                     None => {
@@ -1068,7 +1076,7 @@ impl Site<'_> {
         if self.func[text].ty != Type::PTR || self.func[stream].ty != Type::PTR {
             return None;
         }
-        self.string(&self.strings(text, DEPTH)?, text, stream, quiet)
+        self.string(&self.strings(text)?, text, stream, quiet)
     }
 
     /// What a format holding no `%` writes, given the stream to write it to or nothing.
@@ -1396,23 +1404,31 @@ impl Site<'_> {
     /// Whether a count is known to be no more than the size of the object it is a count of.
     fn fits(&self, count: Value, size: Value) -> bool {
         self.unknown(size)
-            || self
-                .largest(count, DEPTH)
-                .zip(self.number(size))
-                .is_some_and(|(count, size)| count <= size)
+            || self.largest(count).zip(self.number(size)).is_some_and(|(count, size)| count <= size)
     }
 
     /// The largest number this value may work out to, read as an unsigned one.
     ///
     /// The same walk [`Self::strings`] makes, through block parameters and selects, so
-    /// `l1 ? sizeof (buf) : 4` is a count of at most the size of `buf` whichever arm was taken.
-    fn largest(&self, value: Value, depth: u32) -> Option<u128> {
+    /// `l1 ? sizeof (buf) : 4` is a count of at most the size of `buf` whichever arm was taken. A
+    /// parameter the walk reaches again is a count a loop kept, as `l` is in
+    /// `builtins/mempcpy-chk.c`, and adds nothing, for the reason it adds no string.
+    fn largest(&self, value: Value) -> Option<u128> {
+        self.largest_on(value, CHAIN, &mut Vec::new())
+    }
+
+    /// The same, with the block parameters whose largest is being worked out.
+    fn largest_on(&self, value: Value, depth: u32, on: &mut Vec<Value>) -> Option<u128> {
         if depth == 0 {
             return None;
         }
         match self.func[value].def {
             Def::Param { block, index } => {
+                if on.contains(&value) {
+                    return Some(0);
+                }
                 let preds = self.cfg.predecessors(block);
+                on.push(value);
                 let mut most = None;
                 for &pred in preds {
                     let term = self.func.terminator(pred)?;
@@ -1421,15 +1437,17 @@ impl Site<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize)?;
-                        most = most.max(Some(self.largest(arg, depth - 1)?));
+                        most = most.max(Some(self.largest_on(arg, depth - 1, on)?));
                     }
                 }
+                on.pop();
                 most
             }
             Def::Result { inst, .. } if self.func[inst].opcode == Opcode::Select => {
                 let args = &self.func[self.func[inst].args];
                 let (then, other) = (*args.get(1)?, *args.get(2)?);
-                Some(self.largest(then, depth - 1)?.max(self.largest(other, depth - 1)?))
+                let then = self.largest_on(then, depth - 1, on)?;
+                Some(then.max(self.largest_on(other, depth - 1, on)?))
             }
             _ => self.number(value),
         }
@@ -1442,7 +1460,7 @@ impl Site<'_> {
 
     /// The length of the longest string this value may point at.
     fn longest(&self, value: Value) -> Option<u128> {
-        self.strings(value, DEPTH)?.iter().map(|text| text.len() as u128).max()
+        self.strings(value)?.iter().map(|text| text.len() as u128).max()
     }
 
     /// A call to that name, or nothing where this module does not allow one.
@@ -1453,7 +1471,7 @@ impl Site<'_> {
 
     /// The one string this value points at, or `None` where there is more than one of them.
     fn one(&self, value: Value) -> Option<Vec<u8>> {
-        let mut candidates = self.strings(value, DEPTH)?;
+        let mut candidates = self.strings(value)?;
         (candidates.len() == 1).then(|| candidates.pop()).flatten()
     }
 
@@ -1462,18 +1480,31 @@ impl Site<'_> {
     ///
     /// A block parameter is every argument every branch to that block passes, which is how the
     /// conditional expression in `builtins/fputs.c` gets a length without anything having turned it
-    /// into a `select` first. `depth` is what stops the walk on a loop, where a parameter's
-    /// argument is the parameter.
-    fn strings(&self, value: Value, depth: u32) -> Option<Vec<Vec<u8>>> {
+    /// into a `select` first.
+    fn strings(&self, value: Value) -> Option<Vec<Vec<u8>>> {
+        self.strings_on(value, CHAIN, &mut Vec::new())
+    }
+
+    /// The same, with the block parameters whose strings are being worked out.
+    ///
+    /// A loop that picks a string on some trips and keeps the one it had on the others is a
+    /// parameter that is one of its own arguments, as `l` is in `builtins/stpcpy-chk.c`. Reached
+    /// again, it can only be a string one of its other arguments already gave it, so it adds
+    /// nothing to the list. `depth` still bounds how long a chain is followed.
+    fn strings_on(&self, value: Value, depth: u32, on: &mut Vec<Value>) -> Option<Vec<Vec<u8>>> {
         if depth == 0 {
             return None;
         }
         match self.func[value].def {
             Def::Param { block, index } => {
+                if on.contains(&value) {
+                    return Some(Vec::new());
+                }
                 let preds = self.cfg.predecessors(block);
                 if preds.is_empty() {
                     return None;
                 }
+                on.push(value);
                 let mut all = Vec::new();
                 for &pred in preds {
                     let term = self.func.terminator(pred)?;
@@ -1482,16 +1513,17 @@ impl Site<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize)?;
-                        all.extend(self.strings(arg, depth - 1)?);
+                        all.extend(self.strings_on(arg, depth - 1, on)?);
                     }
                 }
+                on.pop();
                 (!all.is_empty()).then_some(all)
             }
             Def::Result { inst, .. } if self.func[inst].opcode == Opcode::Select => {
                 let args = &self.func[self.func[inst].args];
                 let (then, other) = (*args.get(1)?, *args.get(2)?);
-                let mut all = self.strings(then, depth - 1)?;
-                all.extend(self.strings(other, depth - 1)?);
+                let mut all = self.strings_on(then, depth - 1, on)?;
+                all.extend(self.strings_on(other, depth - 1, on)?);
                 Some(all)
             }
             _ => Some(vec![self.literal(value)?]),

@@ -624,6 +624,10 @@ impl<'a> Printer<'a> {
             Extra::Depth(depth) => {
                 let _ = write!(self.out, " depth {depth}");
             }
+            Extra::Question(kind) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", kind {kind}");
+            }
             Extra::Targets(targets) => {
                 // A conditional branch names its condition first and then both arms. A jump
                 // has no operands at all and is its target.

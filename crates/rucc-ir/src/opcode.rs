@@ -587,6 +587,17 @@ pub enum Opcode {
     /// no frame to have kept: the machine holds the address in a place of its own, so this is one
     /// instruction on every target that has the builtin at all.
     ThreadPointer,
+    /// `__builtin_object_size` where the front end could not see the object, which is how many
+    /// bytes there are from the address to the end of whatever it points into.
+    ///
+    /// One operand, the address, and the question as a number from zero to three beside it: the
+    /// low bit asks about the closest member rather than the whole object and the high bit asks
+    /// for the smallest answer rather than the largest. It never reaches the back end:
+    /// `rucc_opt::objsize` answers every one before any other pass runs, from the allocations and
+    /// the arithmetic the address was built out of, and says it does not know where it cannot
+    /// see, which is the largest number there is for the first two questions and zero for the
+    /// other two.
+    ObjectSize,
     /// What is in a machine register, for `register long x asm ("rbx");`.
     ///
     /// The GNU extension that puts an object in a named register rather than in the frame. The
@@ -769,6 +780,7 @@ impl Opcode {
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
+            Self::ObjectSize => "object_size",
             Self::RegisterValue => "register_value",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
@@ -909,6 +921,9 @@ impl Opcode {
                 // which one it is part way through a function, so two of these in one function
                 // are the same value and either may be moved to where the other is.
                 | Self::ThreadPointer
+                // A question about an address that reads nothing: the answer is a fact about where
+                // the address came from, which is the same fact wherever the question is asked.
+                | Self::ObjectSize
                 | Self::MemEntry
                 // Three of the capability instructions are arithmetic on a pointer's
                 // provenance and touch nothing. The other four do: `cap_load`, `cap_store` and
@@ -1252,6 +1267,7 @@ impl Opcode {
             Self::AtomicRmw => ExtraKind::Rmw,
             Self::Fence => ExtraKind::Order,
             Self::Prefetch => ExtraKind::Prefetch,
+            Self::ObjectSize => ExtraKind::Question,
             // How far up the chain of frames to walk, which is a number written in the instruction
             // and never a value. The builtins these came from take a constant and nothing else, for
             // the reason `prefetch` takes one: the instructions this becomes are a walk of that
@@ -1292,6 +1308,8 @@ pub enum ExtraKind {
     Prefetch,
     /// How many frames up to walk.
     Depth,
+    /// Which of the four object size questions.
+    Question,
     /// Branch targets.
     Targets,
     /// A call.
@@ -1327,6 +1345,7 @@ impl ExtraKind {
             Self::Order => "an ordering",
             Self::Prefetch => "a prefetch hint",
             Self::Depth => "a depth",
+            Self::Question => "an object size question",
             Self::Targets => "branch targets",
             Self::Call => "a call",
             Self::Switch => "a switch",
@@ -1471,6 +1490,7 @@ static ALL: &[Opcode] = &[
     Opcode::FrameAddress,
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
+    Opcode::ObjectSize,
     Opcode::RegisterValue,
     Opcode::VaStart,
     Opcode::VaArg,

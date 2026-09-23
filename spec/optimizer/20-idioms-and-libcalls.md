@@ -175,11 +175,24 @@ worked out from the body as it was, so a plan applied after another is renamed t
 other one replaced: in `mempcpy (mempcpy (p, a, 4), b, 4)` the second copy's destination is the
 first one's answer, which the first fold took away.
 
-What this does not do yet is the object size gcc works out after lowering. A destination picked by
-a branch or a loop, `r = l1 == 1 ? &a.buf1[5] : &a.buf2[4]`, is a size of all ones by the time
-the front end folds `__builtin_object_size`, so the call is made plain where gcc keeps the check
-with the larger of the two sizes. The `test3` functions of the `builtins/*-chk.c` torture programs
-count exactly those checks.
+The object size gcc works out after lowering is `rucc_opt::objsize`, which runs before anything
+else in every pipeline. Where the front end cannot see the object behind an address read out of a
+local, it leaves the question in the IR as an `object_size` instruction rather than answering all
+ones, so a destination picked by a branch or a loop, `r = l1 == 1 ? &a.buf1[5] : &a.buf2[4]`, is a
+block parameter or a select whose every incoming pointer is in front of the walk. The walk follows
+those, and constant non-negative steps, back to an `alloca` or a global whose size can be vouched
+for, and takes the larger of the arms for kinds zero and one and the smaller for kind two. A pointer
+a loop moves forward is known for the largest kinds only, since each trip can only leave less, and
+one it moves backward or by an unknown amount is not known at all. Kind one is answered about the
+whole object, because the IR no longer knows the member, which is the larger answer and so never
+checks a copy gcc would let through. Kind three is always zero, the answer that checks nothing. At
+`-O0` every question is answered as not known, which is what gcc says there too. An address read
+out of a parameter or a global is still answered by the front end, because the IR has no more of
+where it came from than the front end did, and answering it there is what lets a checking call over
+one be the plain call at `-O0`. The string and count walks this pass does over a call's arguments
+look through the same block parameters, so `stpcpy (&buf3[16], l)` with `l` chosen in a loop from
+three literals still has its length. The `test3` functions of the `builtins/*-chk.c` torture
+programs count exactly those checks, and all of them pass at every level.
 
 **A rename does not hide the function.** `extern char *strstr (const char *, const char *) __asm
 ("my_strstr");` declares the standard `strstr` and says the symbol is `my_strstr`, and a pass with

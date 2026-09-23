@@ -4994,6 +4994,19 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).prefetch(address, PrefetchHint { write, locality });
                 None
             }
+            // The question the checker could not answer, asked of the IR. The address is lowered
+            // for its value, which the checker made sure changes nothing, and the answer is a
+            // `size_t` like the constant it would otherwise have been.
+            ExprKind::ObjectSize { address, kind } => {
+                let address = self.value(address);
+                let ty = self.value_type(self.tast()[expr].ty, span);
+                let data = InstData {
+                    args: self.func.push_values(&[address]),
+                    extra: Extra::Question(kind),
+                    ..InstData::new(Opcode::ObjectSize)
+                };
+                Some(self.build(span).value(data, ty))
+            }
         }
     }
 
@@ -7954,7 +7967,9 @@ impl Scan<'_> {
                     self.taken.push(label);
                 }
             }
-            ExprKind::Member { base, .. } | ExprKind::Prefetch { address: base, .. } => {
+            ExprKind::Member { base, .. }
+            | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::ObjectSize { address: base, .. } => {
                 self.expr(base);
             }
             // The other node that is answered here rather than where it is met, and for a reason
