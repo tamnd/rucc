@@ -334,7 +334,7 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
 #[must_use]
 pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Option<Vec<Step>> {
     let mut steps = Vec::new();
-    let mut carried = false;
+    let mut carried = None;
     let mut locals = Locals::default();
     for text in template.split(['\n', ';']) {
         let mut text = uncommented(text).trim();
@@ -344,7 +344,7 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
         // refusal on the flag says wherever it appears. What follows a label on its line is read as
         // a line of its own.
         while let Some((name, rest)) = labelled(text) {
-            if carried {
+            if carried.is_some() {
                 return None;
             }
             steps.push(Step::Label(locals.define(name)));
@@ -354,7 +354,7 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
             continue;
         }
         if let Some(step) = jumped(text, &locals) {
-            if carried {
+            if carried.is_some() {
                 return None;
             }
             steps.push(step);
@@ -364,11 +364,11 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
         // its parts arrives here: `rep; nop` is two of these and one instruction. A second prefix
         // in a row is not something this reads, since the only combination it knows is the one
         // below and that one takes a single prefix.
-        if is_repeat(text) {
-            if carried {
+        if let Some(prefix) = repeat(text) {
+            if carried.is_some() {
                 return None;
             }
-            carried = true;
+            carried = Some(prefix);
             continue;
         }
         // A directive before an instruction, because a directive is not a mnemonic and would be
@@ -377,25 +377,25 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
         // gets. A repeat prefix in front of one is half an instruction and is refused like any
         // other.
         if let Some(line) = alignment(text) {
-            if carried {
+            if carried.is_some() {
                 return None;
             }
             steps.push(Step::Line(line));
             continue;
         }
         if let Some(line) = literal(text) {
-            if carried {
+            if carried.is_some() {
                 return None;
             }
             steps.push(Step::Line(line));
             continue;
         }
         steps.push(Step::Line(instruction(text, carried, widths, memory)?));
-        carried = false;
+        carried = None;
     }
     // A prefix with nothing behind it is half an instruction, and half a template is refused for
     // the reason the whole of one is.
-    if carried {
+    if carried.is_some() {
         return None;
     }
     settled(&steps).then_some(steps)
@@ -638,13 +638,24 @@ fn literal(text: &str) -> Option<Line> {
 /// carry anyway. Nothing real asks for more: what programs ask for is a cache line or two.
 const MOST: u32 = 4096;
 
-/// Whether a word is the repeat prefix, in any of the spellings that mean the same thing.
-///
-/// `repne` and `repnz` are not here. They are the other repeat prefix, they mean something
-/// different, and the one instruction this compiler reads a prefix in front of is not one they
-/// are ever written with.
-fn is_repeat(text: &str) -> bool {
-    matches!(text.trim(), "rep" | "repe" | "repz")
+/// The two repeat prefixes, which are two bytes and five spellings between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// `rep`, `repe` and `repz`, which are one byte. In front of a scan or a comparison it goes on
+    /// while the elements are equal, and in front of anything else it is the count alone.
+    Equal,
+    /// `repne` and `repnz`, which go on while the elements are unequal and mean nothing in front of
+    /// anything but a scan or a comparison.
+    Unequal,
+}
+
+/// Which repeat prefix a word is, in any of the spellings that mean the same thing.
+fn repeat(text: &str) -> Option<Repeat> {
+    match text.trim() {
+        "rep" | "repe" | "repz" => Some(Repeat::Equal),
+        "repne" | "repnz" => Some(Repeat::Unequal),
+        _ => None,
+    }
 }
 
 /// The instruction a repeat prefix and that mnemonic are together, or nothing for a pair this does
@@ -666,8 +677,25 @@ fn is_repeat(text: &str) -> bool {
 /// The suffix comes through, since it is the width and the prefix says nothing about the width. The
 /// sixteen bit one is refused, because there is no encoding for it in this assembler and the reason
 /// is in `crate::x86_64::encode`.
-fn repeated(mnemonic: &str, rest: &str) -> Option<String> {
-    if mnemonic == "nop" && rest.trim().is_empty() {
+///
+/// And the string instructions, which are what the prefix was made for. A string instruction with
+/// a prefix is an opcode of its own here, spelled with the prefix, because the prefix changes which
+/// registers it reads: a repeated one counts `rcx` down and a single one leaves it alone. `rep` in
+/// front of a scan or a comparison is spelled `repe`, which is the same byte. `repne` is read in
+/// front of those two and nothing else, and a repeated load, which is a loop that keeps only the
+/// last thing it read, is not read at all.
+fn repeated(prefix: Repeat, mnemonic: &str, rest: &str) -> Option<String> {
+    let alone = rest.trim().is_empty();
+    let string = alone && mnemonic.len() == 5 && mnemonic.ends_with(['b', 'w', 'l', 'q']);
+    let which = if string { &mnemonic[..4] } else { "" };
+    match (prefix, which) {
+        (Repeat::Equal, "movs" | "stos") => return Some(format!("rep {mnemonic}")),
+        (Repeat::Equal, "scas" | "cmps") => return Some(format!("repe {mnemonic}")),
+        (Repeat::Unequal, "scas" | "cmps") => return Some(format!("repne {mnemonic}")),
+        (Repeat::Unequal, _) => return None,
+        _ => {}
+    }
+    if mnemonic == "nop" && alone {
         return Some("pause".to_owned());
     }
     for (search, count) in [("bsf", "tzcnt"), ("bsr", "lzcnt")] {
@@ -694,28 +722,30 @@ fn uncommented(text: &str) -> &str {
 /// is correct into one that is nearly always correct.
 fn instruction(
     text: &str,
-    prefixed: bool,
+    prefixed: Option<Repeat>,
     widths: &[Option<Width>],
     memory: &[bool],
 ) -> Option<Line> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     // The same prefix written on the same line as what it applies to, which is the other way a
     // template writes it and is the same instruction.
-    if is_repeat(mnemonic) {
-        if prefixed {
+    if let Some(prefix) = repeat(mnemonic) {
+        if prefixed.is_some() {
             return None;
         }
-        return instruction(rest.trim(), true, widths, memory);
+        return instruction(rest.trim(), Some(prefix), widths, memory);
     }
-    let mnemonic: Cow<'_, str> =
-        if prefixed { Cow::Owned(repeated(mnemonic, rest)?) } else { Cow::Borrowed(mnemonic) };
-    let mnemonic = mnemonic.as_ref();
     // A label ends in a colon and a directive starts with a dot, and neither is an instruction.
     // Both are caught here rather than being looked for, because a mnemonic is letters and digits
     // and nothing else, so anything carrying punctuation is already not one.
     if mnemonic.is_empty() || !mnemonic.chars().all(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
+    let mnemonic: Cow<'_, str> = match prefixed {
+        Some(prefix) => Cow::Owned(repeated(prefix, mnemonic, rest)?),
+        None => Cow::Borrowed(mnemonic),
+    };
+    let mnemonic = mnemonic.as_ref();
 
     let given: Vec<Given> =
         arguments(rest).iter().map(|text| given(text, memory)).collect::<Option<_>>()?;
@@ -1139,6 +1169,37 @@ mod tests {
         assert!(lines.iter().all(|line| line.opcode == "pause"));
     }
 
+    /// The string instructions, alone and with a repeat prefix in every way a template writes one.
+    /// Every register one of them reaches is fixed and none is written, so each operand is one the
+    /// description fills in, and a repeated one reaches `rcx` where a single one does not.
+    #[test]
+    fn a_string_instruction_is_the_registers_it_names_for_itself() {
+        let cases = [
+            ("movsb", "movs_8", 4),
+            ("movsw\n", "movs_16", 4),
+            ("lodsb", "lods_8", 3),
+            ("stosl", "stos_32", 3),
+            ("scasq", "scas_64", 3),
+            ("cmpsb", "cmps_8", 4),
+            ("rep movsl", "rep_movs_32", 6),
+            ("rep ; movsl", "rep_movs_32", 6),
+            ("rep\n\tstosb", "rep_stos_8", 5),
+            ("repne scasb", "repne_scas_8", 5),
+            ("repne\n\tscasb", "repne_scas_8", 5),
+            ("repnz scasb", "repne_scas_8", 5),
+            ("rep scasb", "repe_scas_8", 5),
+            ("repz cmpsw", "repe_cmps_16", 6),
+        ];
+        for (template, opcode, operands) in cases {
+            let lines = plain(template, &[]).unwrap_or_else(|| panic!("{template} is read"));
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, opcode, "{template}");
+            assert_eq!(lines[0].operands.len(), operands, "{template}");
+            let implicit = |piece: &Piece| matches!(piece, Piece::Implicit { .. });
+            assert!(lines[0].operands.iter().all(implicit), "{template}");
+        }
+    }
+
     /// `rep nop` is `pause`, which is the one prefix and instruction pair this reads. libuv writes
     /// it with a semicolon between the two, so the prefix arrives on a line of its own, and the
     /// comment beside it in that source says `a.k.a. PAUSE`.
@@ -1395,7 +1456,8 @@ mod tests {
     #[test]
     fn a_prefix_this_does_not_read_is_refused_rather_than_dropped() {
         assert_eq!(plain("lock; incl %0", &[]), None, "a lock prefix");
-        assert_eq!(plain("rep; movsb", &[]), None, "a repeat this has no instruction for");
+        assert_eq!(plain("rep; lodsb", &[]), None, "a repeat this has no instruction for");
+        assert_eq!(plain("repne movsb", &[]), None, "the other repeat in front of a move");
         assert_eq!(
             plain("rep; pause", &[]),
             None,

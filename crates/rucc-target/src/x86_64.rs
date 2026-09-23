@@ -681,6 +681,11 @@ fn writes_flags(name: &str) -> bool {
             | Form::Swap
             | Form::SwapHalves
             | Form::Prefetch
+            | Form::StrMove
+            | Form::StrMoveRep
+            | Form::StrStore
+            | Form::StrStoreRep
+            | Form::StrLoad
             | Form::RetVal
             | Form::RetVal2
             | Form::ArgVal

@@ -1034,6 +1034,50 @@ static TEXT: &[(&str, &[Written])] = &[
     // the name is the whole of it.
     ("pause", &[spell("pause", &[])]),
     ("cpuid", &[spell("cpuid", &[])]),
+    ("movs_8", &[spell("movsb", &[])]),
+    ("movs_16", &[spell("movsw", &[])]),
+    ("movs_32", &[spell("movsl", &[])]),
+    ("movs_64", &[spell("movsq", &[])]),
+    ("rep_movs_8", &[spell("rep movsb", &[])]),
+    ("rep_movs_16", &[spell("rep movsw", &[])]),
+    ("rep_movs_32", &[spell("rep movsl", &[])]),
+    ("rep_movs_64", &[spell("rep movsq", &[])]),
+    ("stos_8", &[spell("stosb", &[])]),
+    ("stos_16", &[spell("stosw", &[])]),
+    ("stos_32", &[spell("stosl", &[])]),
+    ("stos_64", &[spell("stosq", &[])]),
+    ("rep_stos_8", &[spell("rep stosb", &[])]),
+    ("rep_stos_16", &[spell("rep stosw", &[])]),
+    ("rep_stos_32", &[spell("rep stosl", &[])]),
+    ("rep_stos_64", &[spell("rep stosq", &[])]),
+    ("lods_8", &[spell("lodsb", &[])]),
+    ("lods_16", &[spell("lodsw", &[])]),
+    ("lods_32", &[spell("lodsl", &[])]),
+    ("lods_64", &[spell("lodsq", &[])]),
+    ("scas_8", &[spell("scasb", &[])]),
+    ("scas_16", &[spell("scasw", &[])]),
+    ("scas_32", &[spell("scasl", &[])]),
+    ("scas_64", &[spell("scasq", &[])]),
+    ("repe_scas_8", &[spell("repe scasb", &[])]),
+    ("repe_scas_16", &[spell("repe scasw", &[])]),
+    ("repe_scas_32", &[spell("repe scasl", &[])]),
+    ("repe_scas_64", &[spell("repe scasq", &[])]),
+    ("repne_scas_8", &[spell("repne scasb", &[])]),
+    ("repne_scas_16", &[spell("repne scasw", &[])]),
+    ("repne_scas_32", &[spell("repne scasl", &[])]),
+    ("repne_scas_64", &[spell("repne scasq", &[])]),
+    ("cmps_8", &[spell("cmpsb", &[])]),
+    ("cmps_16", &[spell("cmpsw", &[])]),
+    ("cmps_32", &[spell("cmpsl", &[])]),
+    ("cmps_64", &[spell("cmpsq", &[])]),
+    ("repe_cmps_8", &[spell("repe cmpsb", &[])]),
+    ("repe_cmps_16", &[spell("repe cmpsw", &[])]),
+    ("repe_cmps_32", &[spell("repe cmpsl", &[])]),
+    ("repe_cmps_64", &[spell("repe cmpsq", &[])]),
+    ("repne_cmps_8", &[spell("repne cmpsb", &[])]),
+    ("repne_cmps_16", &[spell("repne cmpsw", &[])]),
+    ("repne_cmps_32", &[spell("repne cmpsl", &[])]),
+    ("repne_cmps_64", &[spell("repne cmpsq", &[])]),
     // Where the next instruction starts, which is written as no instructions at all for the reason
     // the `ret_val` family below is: it is a fact the writers act on rather than something the
     // processor does. What each of them writes for it is a directive in the listing and a run of
@@ -1710,6 +1754,15 @@ mod tests {
                         | Form::CmpXchg
                         | Form::JmpReg
                         | Form::CpuId
+                        | Form::StrMove
+                        | Form::StrMoveRep
+                        | Form::StrStore
+                        | Form::StrStoreRep
+                        | Form::StrLoad
+                        | Form::StrScan
+                        | Form::StrScanRep
+                        | Form::StrCompare
+                        | Form::StrCompareRep
                 )
             {
                 continue;
