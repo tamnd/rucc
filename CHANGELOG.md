@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__builtin_constant_p` of a value that is not a constant as written but may become one is now answered by the optimizer, as gcc does, rather than as zero in the front end. The front end leaves an `is_constant` instruction where the argument is an arithmetic value that working out changes nothing and cannot fault, and the new required `constant-p` pass answers one where the operand has become a constant and zero elsewhere, late enough that the folding in front of it has run and early enough that the dead arm is cleaned up. `-O0` answers zero, and a constant context still answers zero. `execute/builtin-constant.c` passes at all six levels. Part of tamnd/rucc#392.
+
 - `floor`, `ceil`, `trunc`, `round`, `rint` and `nearbyint` of a `float` widened to `double` become the `float` spelling of the call with its answer widened back, as gcc does, while `sin` and the other functions whose answer changes with the precision stay as they are. `execute/20030125-1.c` passes at all six levels. Part of tamnd/rucc#392.
 
 ### Changed

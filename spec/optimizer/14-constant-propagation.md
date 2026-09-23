@@ -106,6 +106,20 @@ The consequence for the pipeline: constant propagation must run after early inli
 document 03.4's `-O1` list already has, and there must be a test compiling a realistic
 `__builtin_constant_p` idiom at every level.
 
+**What is built.** The front end answers what it can see. A constant as written is one at every
+level, and an argument whose working out would change something or could fault is zero at every
+level, since gcc does not evaluate it either. Inside a function, an integer or real floating value
+read out of objects, with no call, increment, `volatile` read, pointer followed or division in it,
+becomes an `is_constant` instruction instead, and `crates/rucc-opt/src/constant_p.rs` answers it.
+At `-O0` every one is answered zero before any pass runs. Above that the `constant-p` pass sits
+after the second `load-forward` (after `redundant-load` at `-O2` and `-O3`) and in front of a
+`fold`, `simplify` and `simplify-cfg`, so the arm the answer did not choose is taken out, and it
+answers one where the operand has become an `iconst` or an `fconst` and zero elsewhere. The pass
+is required, and whatever a pass list without it leaves is answered the same way once the list is
+done. Where a constant is needed, such as `__builtin_choose_expr` or a static initializer, the
+answer is zero, which is gcc's. There is no inliner and no `sccp` yet, so a parameter of a function
+that would be inlined, or a `static` that nothing writes, is still zero where gcc says one.
+
 ## 14.4 What rucc builds
 
 One pass, `sccp`, in the `-O1` and up pipelines, doing four things.

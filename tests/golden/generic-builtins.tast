@@ -276,7 +276,9 @@ decl #36 known : int(int) function external defined
     block
       return
         binary + : int
-          const 0 : int
+          constant-p : int
+            convert lvalue : int
+              decl #35 a : int lvalue
           const 1 : int
 decl #37 older : long(void) function external defined
   body
