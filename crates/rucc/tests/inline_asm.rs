@@ -397,7 +397,7 @@ void g(unsigned long *sh, unsigned long *sl, unsigned long ah, unsigned long al,
 }
 
 #[test]
-fn an_output_read_before_it_is_written_holds_a_zero_rather_than_nothing() {
+fn an_output_read_before_it_is_written_holds_the_input_it_shares_with() {
     // The same addition as above on an output written `=`, which says the assembly writes the
     // operand and never reads it, while the instruction reads it before it writes it. What is in it
     // there is undefined and the program said so by writing `=` rather than `+`, so this was refused
@@ -405,13 +405,12 @@ fn an_output_read_before_it_is_written_holds_a_zero_rather_than_nothing() {
     // this compiler's to call. GCC 16.2.0 accepts the same statement without a word and adds
     // whatever the register it picked was holding, and a program that means it is real: libgmp's
     // `add_mssaaaa` writes `sbb %0, %0` to get the borrow bit, where what the register held cannot
-    // change the answer. So it is accepted and the operand is given the zero an output nothing wrote
-    // gets, because undefined is not the same as absent and the allocator is owed a definition in
-    // front of every use.
+    // change the answer. What it picks here is the register of the one input, since nothing stops
+    // the two sharing it, so the sum is twice the argument and that is what is read.
     let source = "long f(long x) { asm (\"addq %1, %0\" : \"=r\" (x) : \"r\" (x)); return x; }\n";
     let body = body(&asm("write-only", source), "f");
     assert!(body.contains("addq"), "the template never reached the listing:\n{body}");
-    assert!(zeroed(&body), "the operand it reads was never given a value:\n{body}");
+    assert!(!zeroed(&body), "the operand it reads is not the input it shares with:\n{body}");
 }
 
 #[test]
@@ -626,10 +625,10 @@ fn an_add_with_carry_against_a_constant_is_the_instruction_it_names() {
 fn an_output_a_template_also_reads_is_read_as_a_zero() {
     // `sbb %0, %0` in libgmp's `add_mssaaaa`, which subtracts a register from itself and is asking
     // for the borrow bit rather than for the number, so what the register held does not matter. It
-    // is an output and nothing is tied to it, so the statement never said what is in it, and what
-    // the allocator is owed is still a definition in front of the use.
+    // is an output written `&`, so it shares a register with no input and the statement never said
+    // what is in it, and what the allocator is owed is still a definition in front of the use.
     let source = "long f(long x, long y) { long m; \
-                  asm (\"add %2, %1\\n\\tsbb %q0, %q0\" : \"=r\" (m), \"+r\" (x) : \"r\" (y)); \
+                  asm (\"add %2, %1\\n\\tsbb %q0, %q0\" : \"=&r\" (m), \"+r\" (x) : \"r\" (y)); \
                   return m; }\n";
     let body = body(&asm("output-read", source), "f");
     assert!(body.contains("sbbq"), "the subtract with borrow never reached the listing:\n{body}");
@@ -721,4 +720,16 @@ fn a_high_byte_of_one_word_and_a_low_byte_of_another_is_refused() {
     let (ok, _, said) = run("byte-swap-across", source);
     assert!(!ok, "a byte of one register exchanged with a byte of another was accepted");
     assert!(said.contains("which nothing here assembles"), "{said}");
+}
+
+#[test]
+fn a_call_from_a_template_is_a_call_and_reads_the_input_sharing_its_output() {
+    // tcc's test of a name only a template uses. It passes its output `%0` to `getenv`, which is
+    // the string only because gcc gives the output and the one input the same register.
+    let source = "char *f(void) { static char str[] = \"PATH\"; char *s; \
+                  asm volatile (\"push %%rdi; push %%rdi; mov %0, %%rdi;call getenv@plt;pop %%rdi; pop %%rdi\" \
+                  : \"=a\" (s) : \"r\" (str)); return s; }\n";
+    let body = body(&asm("call-out", source), "f");
+    assert!(body.contains("call\tgetenv"), "the call never reached the listing:\n{body}");
+    assert!(!zeroed(&body), "the output was read as nothing rather than as the input:\n{body}");
 }

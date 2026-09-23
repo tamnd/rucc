@@ -3240,6 +3240,14 @@ impl<'a> Lowering<'a> {
         let mut held = vec![false; list.len()];
         let mut after = false;
         for step in &steps {
+            // A call out of the template writes every register the convention lets the callee
+            // leave anything in, and an output pinned to one of those is written by it.
+            if let x86_64::Step::Call { .. } = step {
+                for index in self.lost(&list).into_iter().filter_map(|(_, _, index)| index) {
+                    *writes.get_mut(index).ok_or_else(refused)? += 1;
+                }
+                continue;
+            }
             let x86_64::Step::Line(line) = step else { continue };
             match line.at.and_then(|at| at.base) {
                 Some(x86_64::Piece::Operand { index, .. }) => {
@@ -3348,11 +3356,22 @@ impl<'a> Lowering<'a> {
         // than for the number, so whatever the register held, the answer is the same. Undefined is
         // not the same as absent though, since the allocator is owed a definition in front of every
         // use, so it gets the zero an output nothing wrote gets and for the same reason.
+        //
+        // Unless an input could have been in the same register, in which case gcc's allocator puts
+        // it there whenever it can and a program may have been written against that. tcc's test of
+        // a call from a template reads its output `"=a" (s)` to pass `"r" (str)` to `getenv`, which
+        // is only the string because gcc gave the two of them `rax`. So an output nothing has
+        // written yet reads the one input that could share its place, when there is exactly one.
+        // One written `&` is written before the inputs are read and shares nothing.
         for index in 0..list.len() {
             if !reads[index] || places[index].read.is_some() || places[index].write.is_none() {
                 continue;
             }
-            places[index].read = Some(self.seeded(inst, list[index])?);
+            let reg = match self.shared(&list, index) {
+                Some(value) => self.reg_of(value)?,
+                None => self.seeded(inst, list[index])?,
+            };
+            places[index].read = Some(reg);
         }
 
         // Worked out once for the whole template, since the list is one list and every instruction
@@ -3531,6 +3550,9 @@ impl<'a> Lowering<'a> {
                     *self.out.succs_mut(from) = Vec::new();
                     self.at = Some(self.out.create_block());
                 }
+                x86_64::Step::Call { symbol } => {
+                    self.call_out(inst, symbol, places, list, clobbered, &carried, &mut wrote)?;
+                }
                 x86_64::Step::Line(line) => {
                     let form = x86_64::form(line.opcode).ok_or_else(refused)?;
                     let mut written = Vec::new();
@@ -3584,6 +3606,114 @@ impl<'a> Lowering<'a> {
             }
         }
         Ok(())
+    }
+
+    /// A template's call to a function somewhere else, as the call the convention makes.
+    ///
+    /// The opcode is the one a call written in C becomes, so everything that asks whether a
+    /// function calls anything gets the answer it would for one: the stack pointer is left aligned
+    /// at the statement and nothing is kept in the red zone. What is not the same is the operands.
+    /// Nothing is passed by the convention, since the template put the arguments where it wanted
+    /// them, and what comes back is whatever an output is pinned to, since that is the only thing
+    /// the template says about it. Every other register the callee may leave anything in is
+    /// written here, which is what a program that calls from a template never says and always
+    /// means.
+    #[allow(clippy::too_many_arguments)]
+    fn call_out(
+        &mut self,
+        inst: Inst,
+        symbol: &str,
+        places: &mut [Place],
+        list: &[AsmOperand<'_>],
+        clobbered: &[PhysReg],
+        carried: &[(usize, RegClass)],
+        wrote: &mut Vec<usize>,
+    ) -> Result<(), Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let mut operands = Vec::new();
+        let mut written = Vec::new();
+        let lost = self.lost(list);
+        for &(reg, class, index) in &lost {
+            let Some(index) = index else {
+                operands.push(mir::Operand::write(mir::Reg::physical(reg), class));
+                continue;
+            };
+            // Written once in this form of the machine IR, so a second write is a new register,
+            // the same as for an instruction in [`Self::woven`].
+            if wrote.contains(&index) {
+                let &(_, class) =
+                    carried.iter().find(|&&(at, _)| at == index).ok_or_else(refused)?;
+                places.get_mut(index).ok_or_else(refused)?.write = Some(self.out.new_vreg(class));
+            } else {
+                wrote.push(index);
+            }
+            let place = places.get(index).ok_or_else(refused)?.write.ok_or_else(refused)?;
+            operands.push(mir::Operand::write(place, class).with(Constraint::Fixed(reg)));
+            written.push(index);
+        }
+        for &reg in clobbered {
+            if lost.iter().all(|&(gone, class, _)| gone != reg || class != self.gpr) {
+                operands.push(mir::Operand::write(mir::Reg::physical(reg), self.gpr));
+            }
+        }
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let opcode = mir::Opcode::new(self.names.intern(abi::CALL));
+        let symbol = self.names.intern(symbol);
+        let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
+        for operand in operands {
+            build = build.operand(operand);
+        }
+        build.finish();
+        let calls = &mut self.stack.calls;
+        *calls = Some(calls.unwrap_or(0));
+        for index in written {
+            let place = places.get_mut(index).ok_or_else(refused)?;
+            place.read = place.write;
+        }
+        Ok(())
+    }
+
+    /// Every register a call may leave anything in, with its file and the output pinned to it if
+    /// one is.
+    ///
+    /// Only a general purpose register is ever pinned to an output, since those are the only ones a
+    /// constraint letter or a register variable names here. The vector registers are numbered from
+    /// nought as well, so asking about one of them would find the output pinned to the register of
+    /// the same number in the other file.
+    fn lost(&self, list: &[AsmOperand<'_>]) -> Vec<(PhysReg, RegClass, Option<usize>)> {
+        let conv = self.conv;
+        let ints = conv.int_order.iter().filter(|&&reg| !conv.preserves_int(reg));
+        let sses = conv.sse_order.iter().filter(|&&reg| !conv.preserves_sse(reg));
+        ints.map(|&reg| (reg, conv.int_class, bound(list, reg, Role::Def)))
+            .chain(sses.map(|&reg| (reg, conv.sse_class, None)))
+            .collect()
+    }
+
+    /// The input an output read before anything wrote it shares its register with, which is the
+    /// one input that could be in that register, or nothing when there is none or more than one.
+    ///
+    /// Could be means nothing ties it elsewhere: it is in a register rather than in memory, no
+    /// constraint pins it anywhere the output is not, and it is not tied to another output. An
+    /// output written `&` shares nothing, since the assembly writes it before it reads the inputs.
+    fn shared(&self, list: &[AsmOperand<'_>], index: usize) -> Option<Value> {
+        let output = list.get(index)?;
+        if output.early || output.tied.is_some() {
+            return None;
+        }
+        let class = self.class_of(self.source[output.result?].ty);
+        let mut fits = list.iter().filter(|operand| {
+            operand.result.is_none()
+                && !operand.memory
+                && operand.tied.is_none()
+                && operand.value.is_some_and(|value| self.class_of(self.source[value].ty) == class)
+                && pinned(operand).is_none_or(|reg| pinned(output) == Some(reg))
+        });
+        let value = fits.next()?.value;
+        if fits.next().is_some() {
+            return None;
+        }
+        value
     }
 
     /// The block one of the template's labels made, and the parameters it takes.

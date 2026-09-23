@@ -87,6 +87,12 @@ pub struct AsmOperand<'a> {
     /// The name as the program wrote it, sigil and all, because which register a name means is the
     /// target's business the same way which register a letter means is. See [`Self::fixed`].
     pub named: Option<&'a str>,
+    /// Whether the output is written before every input has been read, which is what `&` says.
+    ///
+    /// It does not change where the operand lives. What it changes is whether an input may share
+    /// that place, since an input in a register the assembly writes early is gone before the
+    /// assembly reads it.
+    pub early: bool,
 }
 
 /// The operands of one assembly statement, in the order the template counts them.
@@ -129,6 +135,7 @@ impl<'a> AsmOperands<'a> {
                 tied: entry.tied,
                 fixed: entry.fixed,
                 named: entry.named,
+                early: entry.early,
             });
         }
 
@@ -189,6 +196,7 @@ struct Entry<'a> {
     tied: Option<usize>,
     fixed: Option<char>,
     named: Option<&'a str>,
+    early: bool,
 }
 
 impl<'a> Entry<'a> {
@@ -206,6 +214,7 @@ impl<'a> Entry<'a> {
         let mut fixed = None;
         let mut named = None;
         let mut several = false;
+        let mut early = false;
 
         let mut rest = text.char_indices().peekable();
         while let Some((at, letter)) = rest.next() {
@@ -216,9 +225,10 @@ impl<'a> Entry<'a> {
                     updates = true;
                 }
                 // Earlyclobber and commutative, which say when the operand is written and whether
-                // it may swap with the one after it. Neither changes where it lives, and where it
-                // lives is the whole of what this reads.
-                '&' | '%' => {}
+                // it may swap with the one after it. Neither changes where it lives. The first is
+                // kept anyway, since it says whether an input may live in the same place.
+                '&' => early = true,
+                '%' => {}
                 // The memory forms. `o` and `V` are the offsettable and the non offsettable halves
                 // of `m`, and all three are an address as far as anything here is concerned.
                 'm' | 'o' | 'V' => memory = true,
@@ -288,7 +298,7 @@ impl<'a> Entry<'a> {
             return None;
         }
         let fixed = if several { None } else { fixed };
-        Some(Entry { role, memory: memory && !register, updates, tied, fixed, named })
+        Some(Entry { role, memory: memory && !register, updates, tied, fixed, named, early })
     }
 }
 

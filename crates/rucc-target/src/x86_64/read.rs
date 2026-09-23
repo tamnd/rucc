@@ -300,6 +300,18 @@ pub enum Step {
         /// The name it goes to, which is a symbol somewhere else in the program.
         symbol: String,
     },
+    /// A `call` to a name nothing in the template carries, which is a call to a function
+    /// somewhere else in the program.
+    ///
+    /// The name reaches the object file the way the one on [`Self::Away`] does. What makes it more
+    /// than an instruction is everything the program did not write: the function it calls may
+    /// leave anything in the registers the convention does not ask it to put back, so every one of
+    /// those is gone across it whatever the clobber list says. tcc's tests call `getenv` this way
+    /// to check that a name only a template uses still reaches the linker.
+    Call {
+        /// The name it calls, which is a symbol somewhere else in the program.
+        symbol: String,
+    },
     /// One instruction.
     Line(Line),
 }
@@ -429,6 +441,7 @@ fn settled(steps: &[Step]) -> bool {
     steps.iter().enumerate().all(|(at, step)| match step {
         Step::Jump { to, .. } => names.contains(&to.as_str()),
         Step::Away { symbol } => at + 1 == steps.len() && !names.contains(&symbol.as_str()),
+        Step::Call { symbol } => !names.contains(&symbol.as_str()),
         _ => true,
     })
 }
@@ -453,6 +466,12 @@ fn jumped(text: &str, locals: &Locals) -> Option<Step> {
     if let Some(local) = locals.find(to) {
         let opcode = condition(mnemonic)?;
         return Some(Step::Jump { opcode, to: local? });
+    }
+    if matches!(mnemonic, "call" | "callq") {
+        // The table of stubs is where a call in a position independent object goes anyway, so
+        // asking for it by name is asking for what the call already is.
+        let to = to.strip_suffix("@plt").or_else(|| to.strip_suffix("@PLT")).unwrap_or(to);
+        return (is_label(to) && !to.contains('%')).then(|| Step::Call { symbol: to.to_owned() });
     }
     if !is_label(to) {
         return None;
@@ -1129,7 +1148,7 @@ mod tests {
             .into_iter()
             .map(|step| match step {
                 Step::Line(line) => Some(line),
-                Step::Label(_) | Step::Jump { .. } | Step::Away { .. } => None,
+                Step::Label(_) | Step::Jump { .. } | Step::Away { .. } | Step::Call { .. } => None,
             })
             .collect()
     }
@@ -1641,6 +1660,25 @@ mod tests {
         assert_eq!(steps.len(), 2);
         let away = Step::Away { symbol: "nlr_push_tail".to_owned() };
         assert_eq!(steps[1], away, "the name the linker settles rather than one this compares");
+    }
+
+    /// tcc's call to `getenv` from a template, which saves the register it passes the argument in
+    /// around the call. The name is the same whether or not the template asks for the table of
+    /// stubs, and a call to a label in the template or through an operand is not one of these.
+    #[test]
+    fn a_call_to_a_name_the_template_does_not_carry_is_a_call_out_of_it() {
+        let widths = [Some(Width::Quad), Some(Width::Quad)];
+        let steps = read(
+            "push %%rdi; push %%rdi; mov %1, %%rdi;call getenv@plt;pop %%rdi; pop %%rdi",
+            &widths,
+        )
+        .expect("the call tcc makes");
+        assert_eq!(steps.len(), 6);
+        assert_eq!(steps[3], Step::Call { symbol: "getenv".to_owned() });
+        let plain = read("call getenv", &[]).expect("a call with no table of stubs named");
+        assert_eq!(plain, vec![Step::Call { symbol: "getenv".to_owned() }]);
+        assert_eq!(read("here:\ncall here", &[]), None, "a call to a label in the template");
+        assert_eq!(read("call %0", &widths), None, "a call through an operand");
     }
 
     /// The three shapes that look like the one above and are not, all of which leave steps behind
