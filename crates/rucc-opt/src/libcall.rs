@@ -703,7 +703,7 @@ impl Site<'_> {
             "strchr" | "index" => self.strchr(data, &args, Side::First),
             "strrchr" | "rindex" => self.strchr(data, &args, Side::Last),
             "memchr" => self.memchr(data, &args),
-            "strlen" => self.strlen(data, &args),
+            "strlen" => self.strlen(inst, data, &args),
             "strnlen" => self.strnlen(data, &args),
             "strcmp" => self.strcmp(data, &args),
             "strncmp" => self.strncmp(data, &args),
@@ -832,7 +832,7 @@ impl Site<'_> {
     }
 
     /// How long a string this module holds is.
-    fn strlen(&self, data: &InstData, args: &[Value]) -> Option<Plan> {
+    fn strlen(&self, inst: Inst, data: &InstData, args: &[Value]) -> Option<Plan> {
         if args.len() != 1 || self.func[args[0]].ty != Type::PTR {
             return None;
         }
@@ -843,6 +843,9 @@ impl Site<'_> {
             let len = texts.first()?.len();
             texts.iter().all(|text| text.len() == len).then_some(())?;
             return Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)));
+        }
+        if let Some(text) = self.stored(inst, args[0]) {
+            return Some(Plan::Answer(Answer::Number(i128::try_from(text.len()).ok()?)));
         }
         // `strlen("hello world" + (x & 7))` is eleven less the step, because a step of no more than
         // the length lands on a byte of the string or on its terminator and there is no other
@@ -857,6 +860,59 @@ impl Site<'_> {
             return None;
         }
         Some(Plan::Answer(Answer::Less { len, step }))
+    }
+
+    /// The string at this address in a local array, as the stores in front of the call wrote it.
+    ///
+    /// `builtins/strlen.c` writes "nts" and its terminator into a `char str[8]` a byte at a time
+    /// and asks how long it is, and gcc 16 answers that from the stores. The walk goes back from
+    /// the call through its own block and keeps the last byte stored at each place, and it stops at
+    /// the first thing that could have written the array some other way: a call, a store of more
+    /// than a byte, or a store through a pointer that is not this array or another local one. What
+    /// it has then is enough only where it reaches a stored terminator without a gap.
+    fn stored(&self, call: Inst, value: Value) -> Option<Vec<u8>> {
+        let (base, offset) = self.address(value)?;
+        let local = |value: Value| match self.func[value].def {
+            Def::Result { inst, .. } => self.func[inst].opcode == Opcode::Alloca,
+            _ => false,
+        };
+        if !local(base) {
+            return None;
+        }
+        let block = self.func.block_of(call)?;
+        let mut bytes: HashMap<i128, u8> = HashMap::new();
+        for inst in self.func.insts_backwards(block).skip_while(|&inst| inst != call).skip(1) {
+            let data = &self.func[inst];
+            if !data.opcode.writes_memory() {
+                continue;
+            }
+            if data.opcode != Opcode::Store {
+                break;
+            }
+            let &[byte, to] = &self.func[data.args] else { break };
+            let Some((root, at)) = self.address(to) else { break };
+            if root != base {
+                // Two locals are two objects, so a store into another one leaves this one alone.
+                if local(root) {
+                    continue;
+                }
+                break;
+            }
+            if self.func[byte].ty != Type::int(8) {
+                break;
+            }
+            let Some((imm, _)) = crate::fold::evaluated(self.func, byte, DEPTH) else { break };
+            let Ok(byte) = u8::try_from(imm.unsigned()) else { break };
+            bytes.entry(at).or_insert(byte);
+        }
+        let mut text = Vec::new();
+        for at in (offset..).take(bytes.len()) {
+            match *bytes.get(&at)? {
+                0 => return Some(text),
+                byte => text.push(byte),
+            }
+        }
+        None
     }
 
     /// The largest this value can be, read as an unsigned number, where the arithmetic that made it
@@ -2705,6 +2761,45 @@ block0:
         assert!(!out.contains("call @strlen("), "{out}");
         assert!(out.contains("iconst.i64 11"), "{out}");
         assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// `strlen` of a local array the block has just written a string into is that string's length,
+    /// from the front or from part way along, and a call in between leaves it a call.
+    #[test]
+    fn strlen_of_what_stores_just_wrote_is_its_length() {
+        let text = r#"
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64, i64), linkage(external);
+func @touch(), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = alloca, size 8, align 1
+    %1 = alloca, size 8, align 1
+    %2 = iconst.i8 110
+    store %2 -> %0, align 1
+    %3 = iconst.i64 1
+    %4 = ptr_add %0, %3
+    %5 = iconst.i8 116
+    store %5 -> %4, align 1
+    %6 = iconst.i64 2
+    %7 = ptr_add %0, %6
+    %8 = iconst.i8 0
+    store %8 -> %7, align 1
+    store %8 -> %1, align 1
+    CALL
+    %9 = call @strlen(%0) : (ptr) -> i64
+    %10 = call @strlen(%4) : (ptr) -> i64
+    call @use(%9, %10) : (i64, i64)
+    return
+}
+"#;
+        let out = folded(&text.replace("CALL", ""));
+        assert!(!out.contains("call @strlen("), "{out}");
+        assert!(out.contains("iconst.i64 2"), "{out}");
+
+        let out = folded(&text.replace("CALL", "call @touch() : ()"));
+        assert_eq!(out.matches("call @strlen(").count(), 2, "{out}");
     }
 
     /// `strlen` of a pointer that may be either of two strings is their length where they share

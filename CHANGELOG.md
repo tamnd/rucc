@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `strlen` of a local array the same block has just written a string into, one constant byte at a time, is the length of that string, from the front or from part way along. The walk back from the call stops at a call, a wider store or a store through a pointer that is not a local, so nothing that could have changed the array is looked past. `execute/builtins/strlen.c` passes at every level. Part of tamnd/rucc#1677.
+
 - `strlen` of a held string stepped into by an amount no larger than its length is the length less the step, so `strlen ("hello world" + (x++ & 7))` is `11 - (x & 7)` with `x` still stepped, and `strlen` of a pointer that may be any of several held strings is their length where they all share it. The step's largest value comes from the mask, remainder or widening that made it. `execute/builtins/strlen-2.c` and `execute/builtins/strlen-3.c` pass at every level. Part of tamnd/rucc#1677.
 
 - `__printf_chk`, `__fprintf_chk`, `__vprintf_chk`, `__vfprintf_chk`, `vprintf` and `vfprintf` go through the printf folds when their result is not used, the `v` spellings only where the format holds no `%`, so `__vprintf_chk (1, "hello\n", ap)` is `puts ("hello")` as it is in gcc 16. A body the program wrote for a standard name no longer stops calls to that name being folded, which is gcc 16's rule too; only `-fno-builtin` does. `execute/vprintf-chk-1.c` and `execute/vfprintf-chk-1.c` pass at every level. Part of tamnd/rucc#1677.
