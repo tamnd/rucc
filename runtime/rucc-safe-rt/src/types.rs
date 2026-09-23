@@ -304,6 +304,24 @@ impl<'a> Types<'a> {
         unsafe { self.each(lo, lo + len, wanted) }
     }
 
+    /// Whether the granule `at` is in holds one type that an access through `wanted` may read,
+    /// answered from its slot alone.
+    ///
+    /// A no is not a refusal. A granule stored through more than one type says so in its slot and
+    /// only [`Types::allows`] can answer for it, so a caller with an access inside one granule asks
+    /// this first and asks [`Types::allows`] when it says no, and the answer is the same.
+    ///
+    /// # Safety
+    ///
+    /// `at` is inside the mapping this plane was built for.
+    #[must_use]
+    #[inline]
+    pub unsafe fn plain(&self, at: usize, wanted: TypeId) -> bool {
+        // SAFETY: as in `read`.
+        let slot = unsafe { self.slot(at).read() };
+        slot & HETEROGENEOUS == 0 && compatible(wanted, slot)
+    }
+
     /// [`Types::allows`] for a long range, which is what a check taken out of a loop asks about.
     ///
     /// Read a run of eight granules at a time rather than one. A run whose slots all say the one

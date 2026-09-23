@@ -404,9 +404,11 @@ fn pairs(func: &Func, insts: &[Inst]) -> HashMap<Inst, Inst> {
 ///
 /// Same address, same width, same block, and nothing between the two that writes memory or ends
 /// the block. Another check of either kind in between ends the search rather than being walked
-/// past, because a second one is a second read and the pair is one read's.
+/// past, because a second one is a second read and the pair is one read's. The operands past the
+/// capability have to be the same values, which for the pair `rucc_opt::hoist` writes in front of a
+/// loop is the same span and the same step, so that is a pair too.
 fn partner(func: &Func, check: Inst) -> Option<Inst> {
-    let [_capability, pointer] = func[func[check].args] else { return None };
+    let asked = func[func[check].args].get(1..)?;
     let Extra::Mem(mem) = func[check].extra else { return None };
     let size = func[mem].size;
     let block = func.block_of(check)?;
@@ -421,9 +423,9 @@ fn partner(func: &Func, check: Inst) -> Option<Inst> {
         }
         match func[inst].opcode {
             Opcode::CheckInit => {
-                let [_capability, other] = func[func[inst].args] else { return None };
+                let theirs = func[func[inst].args].get(1..)?;
                 let Extra::Mem(at) = func[inst].extra else { return None };
-                return (other == pointer && func[at].size == size).then_some(inst);
+                return (theirs == asked && func[at].size == size).then_some(inst);
             }
             Opcode::CheckType => return None,
             opcode if opcode.writes_memory() || opcode.is_terminator() => return None,
@@ -466,6 +468,8 @@ const RANGE: u64 = 64;
 /// time and a constant where it is known here. It is a name of its own rather than a test of the
 /// length inside the plain routine, because that test cost every access's check a few
 /// instructions, and here it is decided once and for nothing.
+///
+/// A fourth operand is a step, and then the check is [`strided`]'s.
 fn typed(
     func: &mut Func,
     names: &mut Interner,
@@ -481,10 +485,24 @@ fn typed(
     else {
         return;
     };
+    let step = args.get(3).copied();
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
     let Some(node) = func[mem].tbaa else { return };
     let Some(&number) = numbers.get(&node) else { return };
+    if let (Some(span), Some(step)) = (computed, step) {
+        let small = Type::int(32);
+        let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
+        let routine = match partner {
+            Some(init) => {
+                func.remove_inst(init);
+                "__rucc_check_typed_init_strided"
+            }
+            None => "__rucc_check_type_strided",
+        };
+        strided(func, names, word, table, inst, (routine, Some(ty)), [pointer, span, step]);
+        return;
+    }
 
     let row = Descriptor {
         judgement: ACCESS,
@@ -523,7 +541,8 @@ fn typed(
 /// not permit, and that is already the sentence the reporter prints.
 ///
 /// A third operand is how many bytes to ask about, as on [`typed`] and [`bounds`], and the call is
-/// to `__rucc_check_init_range` for a range the way [`typed`] says.
+/// to `__rucc_check_init_range` for a range the way [`typed`] says. A fourth is a step, and then the
+/// check is [`strided`]'s.
 fn began(
     func: &mut Func,
     names: &mut Interner,
@@ -537,6 +556,11 @@ fn began(
     else {
         return;
     };
+    if let (Some(span), Some(&step)) = (computed, args.get(3)) {
+        let routine = ("__rucc_check_init_strided", None);
+        strided(func, names, word, table, inst, routine, [pointer, span, step]);
+        return;
+    }
     let Extra::Mem(mem) = func[inst].extra else { return };
     let size = func[mem].size;
 
@@ -555,6 +579,50 @@ fn began(
     let routine = if ranged { "__rucc_check_init_range" } else { "__rucc_check_init" };
     let params = &[Type::PTR, word, Type::PTR];
     call(func, names, inst, routine, params, &[], &[pointer, bytes, desc]);
+}
+
+/// A plane check with a step becomes the `_strided` form of its routine, which is handed the span
+/// and the step and the width of one access where the other forms are handed one width, and the
+/// type number after them for the two that ask the type plane.
+///
+/// The row keeps the width of one access rather than going to zero the way a range's does. What a
+/// report names is the width of an access the program wrote, and here every access asked about is
+/// one of those. The routine asks about each of them where the dense forms ask about every byte in
+/// the span, which is the point of it: `b[k * N + j]` round `k` reads eight bytes out of every
+/// sixteen hundred, and asking about the sixteen hundred was measured at thirty three times the
+/// whole program (tamnd/rucc#1711).
+fn strided(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+    (routine, ty): (&'static str, Option<Value>),
+    [pointer, span, step]: [Value; 3],
+) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+    let row = Descriptor {
+        judgement: ACCESS,
+        class: 0,
+        // Saturating, for the reason [`bounds`] gives about a report of a width that does not fit.
+        size: u16::try_from(size).unwrap_or(u16::MAX),
+    };
+    let desc = record(func, names, table, inst, row);
+    let span = fitted(func, inst, span, word);
+    let step = fitted(func, inst, step, word);
+    let width = konst(func, inst, Imm::int(i128::from(size), word), word);
+    match ty {
+        Some(ty) => {
+            let params = &[Type::PTR, word, word, word, Type::int(32), Type::PTR];
+            let args = &[pointer, span, step, width, ty, desc];
+            call(func, names, inst, routine, params, &[], args);
+        }
+        None => {
+            let params = &[Type::PTR, word, word, word, Type::PTR];
+            call(func, names, inst, routine, params, &[], &[pointer, span, step, width, desc]);
+        }
+    }
 }
 
 /// `check_race` becomes `__rucc_check_race(pointer, size, descriptor)`.
@@ -1902,9 +1970,9 @@ mod tests {
 
     #[test]
     fn a_plane_check_over_a_length_the_program_worked_out_calls_the_range_form() {
-        // What `rucc_opt::hoist` writes in front of a loop, for the two planes. Each goes to the
-        // `_range` entry point, which sweeps the plane a word at a time, and the two are not made
-        // one call, because `partner` pairs the checks of one access and these are not that.
+        // What `rucc_opt::hoist` writes in front of a loop, for the two planes. The pair goes to the
+        // `_range` entry point, which sweeps the plane a word at a time, and it is one call, since
+        // the two ask about the same span from the same address and that is one read's pair.
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("sweep.c"), &target());
         let root = names.intern("char");
@@ -1939,14 +2007,70 @@ mod tests {
 
         let mut table = Vec::new();
         calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
-        assert_eq!(table.len(), 2, "one row for each of the two checks");
+        assert_eq!(table.len(), 1, "one row serves the pair");
 
         module.add_func(func);
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
-        assert!(printed.contains("call @__rucc_check_type_range(%0, %1, "), "{printed}");
-        assert!(printed.contains("call @__rucc_check_init_range(%0, %1, "), "{printed}");
-        assert!(!printed.contains("typed_init"), "{printed}");
+        assert!(printed.contains("call @__rucc_check_typed_init_range(%0, %1, "), "{printed}");
+        assert!(!printed.contains("check_init_range"), "{printed}");
+    }
+
+    #[test]
+    fn a_plane_check_with_a_step_calls_the_strided_form_with_the_width_of_one_access() {
+        // What `rucc_opt::hoist` writes in front of a walk that leaves gaps. The span and the step
+        // go through as they are and the width of one access after them, and the row keeps that
+        // width, because every access the routine asks about is one the program wrote. A type
+        // check and an init check with the same span and step are one read's and make one call,
+        // and an init check alone makes the init plane's own.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("strided.c"), &target());
+        let root = names.intern("char");
+        let root =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+        let int = names.intern("int");
+        let int =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
+        let plane = Plane::build(&mut module);
+        let numbers = plane::numbers(&module, &names);
+
+        let mut func = Func::new(
+            names.intern("strided"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64), Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let span = func.append_param(entry, Type::int(64));
+        let step = func.append_param(entry, Type::int(64));
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(plane.entry(Some(int))),
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        marker(&mut b, Opcode::CheckType, Some(info), &[of, p, span, step]);
+        marker(&mut b, Opcode::CheckInit, Some(info), &[of, p, span, step]);
+        marker(&mut b, Opcode::CheckInit, Some(info), &[of, p, span, step]);
+        b.ret(&[]);
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        assert_eq!(table.len(), 2, "one row for the pair and one for the init check alone");
+        assert!(table.iter().all(|row| row.size == 4), "{table:?}");
+
+        module.add_func(func);
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        let typed = "call @__rucc_check_typed_init_strided(%0, %1, %2, ";
+        assert!(printed.contains(typed), "{printed}");
+        let alone = "call @__rucc_check_init_strided(%0, %1, %2, ";
+        assert!(printed.contains(alone), "{printed}");
+        assert!(printed.contains(": (ptr, i64, i64, i64, i32, ptr)"), "{printed}");
+        assert!(printed.contains(": (ptr, i64, i64, i64, ptr)"), "{printed}");
     }
 
     #[test]

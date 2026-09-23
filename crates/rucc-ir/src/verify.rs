@@ -1711,12 +1711,23 @@ impl<'a> Verifier<'a> {
                 // Three is the hoisted check of section 7.4, whose length the program computes, and
                 // the extra operand is that length in bytes. All three of these are a claim about a
                 // range that holds of every subrange of it, which is what makes one of them able to
-                // stand for a loop's worth.
-                if self.takes_either(opcode, arity, 2, 3) {
+                // stand for a loop's worth. Four is a plane check over a walk that leaves gaps, and
+                // the last operand is the step. A bounds check is never written that way, since for
+                // it the whole span costs what the accesses in it cost.
+                let fits = if opcode == Opcode::CheckBounds {
+                    self.takes_either(opcode, arity, 2, 3)
+                } else if (2..=4).contains(&arity) {
+                    true
+                } else {
+                    let name = opcode.name();
+                    self.error(format!("{name} takes 2, 3 or 4 operands and this one has {arity}"));
+                    false
+                };
+                if fits {
                     self.capability(opcode, arg(0), 0);
                     self.pointer(opcode, arg(1), 1);
-                    if arity == 3 {
-                        self.integer(opcode, arg(2), 2);
+                    for at in 2..arity {
+                        self.integer(opcode, arg(at), at);
                     }
                 }
             }
@@ -3437,6 +3448,44 @@ block1(%3: cap):
 ",
         );
         reports(&text, "check_bounds takes 2 or 3 operands and this one has 4");
+    }
+
+    #[test]
+    fn a_plane_check_may_carry_a_step_and_nothing_past_it() {
+        let stepped = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    %3 = iconst.i64 16
+    check_init %1, %0, %2, %3, size 4, align 4
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(errors(&stepped), Vec::<String>::new());
+        let past = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    check_init %1, %0, %2, %2, %2, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&past, "check_init takes 2, 3 or 4 operands and this one has 5");
+        let pointer = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    check_init %1, %0, %2, %0, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&pointer, "operand 4 of check_init is an integer and this one is ptr");
     }
 
     #[test]
