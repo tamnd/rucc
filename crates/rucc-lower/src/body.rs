@@ -2504,71 +2504,8 @@ impl<'u> Body<'_, 'u> {
     /// nothing decides is a side that still has to run, and it goes in the list, in the order the
     /// program wrote it.
     fn decided_condition(&self, cond: ExprId) -> Option<(Vec<ExprId>, bool)> {
-        if let Some(answer) = self.folded_condition(cond) {
-            return Some((Vec::new(), answer));
-        }
-        let tast = self.tast();
-        match tast[cond].kind {
-            ExprKind::Convert { kind: Conversion::Bool, operand } => {
-                self.decided_condition(operand)
-            }
-            ExprKind::Unary { op: UnaryOp::Not, operand } => {
-                let (effects, answer) = self.decided_condition(operand)?;
-                Some((effects, !answer))
-            }
-            ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
-                let ends = op == BinaryOp::LogOr;
-                if let Some((mut effects, answer)) = self.decided_condition(lhs) {
-                    if answer == ends {
-                        return Some((effects, ends));
-                    }
-                    let (rest, answer) = self.decided_condition(rhs)?;
-                    effects.extend(rest);
-                    return Some((effects, answer));
-                }
-                let (rest, answer) = self.decided_condition(rhs)?;
-                if answer != ends {
-                    return None;
-                }
-                let mut effects = vec![lhs];
-                effects.extend(rest);
-                Some((effects, ends))
-            }
-            _ => None,
-        }
-    }
-
-    /// Which way the condition of an `if` goes when it is a constant, and nothing when it is not.
-    ///
-    /// A program that asks a question about the compiler rather than about its own data writes the
-    /// answer as a constant and puts the call that only the other answer supports inside the arm
-    /// that is never taken. `if (sizeof (void *) == 4) use_the_32_bit_helper();` in a build for a
-    /// 64 bit target is that, and so is every `if (0)` a configure script leaves behind. Emitting
-    /// the branch leaves the call referenced, the linker goes looking for a function nobody
-    /// defined, and the program does not link. gcc folds the branch away in the front end, so it
-    /// links at every level including `-O0`, and this is where rucc does the same. The optimizer
-    /// already removed these at `-O1` and above, which is why the failure was only ever seen in a
-    /// build that did not ask for optimization.
-    ///
-    /// Only a number answers, and a fold that went looking for an address does not, even when
-    /// what came back is a number. The folder assumes no object is at zero, which is what turns
-    /// `if (&a)` into a true it never was asked to prove, and the assumption is wrong for exactly
-    /// the symbol a program writes this about: a weak one is at zero when nothing defined it, and
-    /// `if (&pthread_create)` is the idiom. That question belongs to the linker and to run time,
-    /// so it keeps its branch. A condition the folder had something to say about does not answer
-    /// either, since the ordinary path is the one that reports, and taking the answer here would
-    /// drop what it reported on the floor.
-    fn folded_condition(&self, cond: ExprId) -> Option<bool> {
-        let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
-        let folded = eval.constant(cond);
-        if eval.addressed() || !eval.finish().is_empty() {
-            return None;
-        }
-        match folded {
-            Ok(Const::Int(value)) => Some(value != 0),
-            Ok(Const::Float(value)) => Some(!value.is_zero()),
-            _ => None,
-        }
+        crate::reach::Decide::new(self.tast(), self.types(), self.target(), self.unit.names)
+            .condition(cond)
     }
 
     /// `if (cond) ...` where the condition folded, which builds the arm that runs and no branch.
@@ -6629,8 +6566,22 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `a && b` and `a || b`, whose right side is evaluated only when it decides the answer.
+    ///
+    /// A left side whose answer is known is not branched on, for the same reason an `if` on one
+    /// is not: `f() && 0 && g()` is `(f() && 0) && g()`, the left of the outer `&&` is false
+    /// whatever `f` returns, and gcc drops the call to `g` at `-O0` so a program that never
+    /// defined `g` links. tcc's own test does exactly that in `optimize_out_test`.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
+        if let Some((effects, answer)) = self.decided_condition(lhs) {
+            for effect in effects {
+                self.discard(effect);
+            }
+            if answer != and {
+                return self.build(span).iconst(Type::I1, i128::from(answer));
+            }
+            return self.condition(rhs);
+        }
         let left = self.condition(lhs);
         let var = self.temp();
         let block = self.block();

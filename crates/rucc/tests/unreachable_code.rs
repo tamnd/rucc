@@ -31,17 +31,22 @@ void foo(int x) {
 ";
 
 /// The fixture, in a directory of its own so two of these at once do not write one file.
-fn fixture(what: &str) -> PathBuf {
+fn fixture(what: &str, source: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rucc-medce-{}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("medce.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     path
 }
 
 /// What the compiler emits for the fixture at this level, in the form asked for.
 fn emit(level: &str, what: &str) -> String {
-    let path = fixture(&format!("{}{}", level.trim_start_matches('-'), what));
+    emit_of(level, what, "medce", SOURCE)
+}
+
+/// The same for a source of the test's own.
+fn emit_of(level: &str, what: &str, name: &str, source: &str) -> String {
+    let path = fixture(&format!("{name}{}{}", level.trim_start_matches('-'), what), source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
         .args([&format!("--emit={what}"), "-o", "-", level])
@@ -75,5 +80,50 @@ fn the_name_it_never_calls_is_not_in_the_assembly_either() {
         let asm = emit(level, "asm");
         assert!(!asm.contains("link_error"), "the dead call reached the assembler at {level}");
         assert!(asm.contains("bar"), "the live call did not reach the assembler at {level}");
+    }
+}
+
+/// `f() && 0 && g()` is `(f() && 0) && g()`, and the left of the outer `&&` is false whatever `f`
+/// returns. gcc never calls `g` and never names it, at `-O0` as well. tcc's `optimize_out_test`
+/// is written that way about a function nothing defines.
+#[test]
+fn a_chain_its_left_side_already_ended_does_not_name_its_right_side() {
+    let source = "extern int defined(void); extern int never(void);\n\
+                  int f(void) { int i = defined() && 0 && never();\n\
+                  return i + (defined() || 1 || never()); }\n";
+    for level in LEVELS {
+        let asm = emit_of(level, "asm", "chain", source);
+        assert!(!asm.contains("never"), "the call nobody makes reached {level}:\n{asm}");
+        assert!(asm.contains("defined"), "the call somebody makes went at {level}:\n{asm}");
+    }
+}
+
+/// A `static inline` called only from an arm that is never lowered is not emitted, or its body
+/// names a function nothing defines. `refer_to_undefined` in tcc's test is that.
+#[test]
+fn a_function_called_only_from_an_arm_never_taken_is_not_emitted() {
+    let source = "extern int defined(void); extern void never(void);\n\
+                  static inline void refer(void) { never(); }\n\
+                  void f(void) { if (defined() && 0) refer(); }\n";
+    for level in LEVELS {
+        let asm = emit_of(level, "asm", "refer", source);
+        assert!(!asm.contains("refer"), "the function nobody calls was emitted at {level}:\n{asm}");
+        assert!(!asm.contains("never"), "its call reached {level}:\n{asm}");
+    }
+}
+
+/// Unless a label is in the arm, since a `goto` from outside reaches it and the call after it is
+/// a call the program makes.
+#[test]
+fn a_function_called_after_a_label_in_an_arm_never_taken_is_emitted() {
+    let source = "extern void done(void);\n\
+                  static void kept(void) { done(); }\n\
+                  void f(int x) { if (x) goto in; if (0) { in: kept(); } }\n";
+    for level in &LEVELS[..1] {
+        let asm = emit_of(level, "asm", "label", source);
+        assert!(
+            asm.contains("kept:"),
+            "the function the goto reaches is missing at {level}:\n{asm}"
+        );
     }
 }

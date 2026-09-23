@@ -103,6 +103,26 @@ int call_it(int x) { return somebody_elses_hook ? somebody_elses_hook(x) : 0; }
     assert!(!text.contains("\t.globl\tsomebody_elses_hook"), "{text}");
 }
 
+/// A variable nobody defines is read through the global offset table, even in an executable.
+///
+/// The linker copies an ordinary variable into the executable, so its distance from the code is
+/// a number the link has. A weak one nothing defines has no definition to copy, its address is
+/// zero, and lld refuses the `R_X86_64_PC32` to it. gcc reads the address out of a slot, and so
+/// does this now. tcc's test does it with `weak_v1` and three more like it.
+#[test]
+fn a_variable_nobody_defines_is_read_through_the_table() {
+    let text = asm(
+        "variable",
+        "\
+extern int __attribute__((weak)) maybe;
+int read_it(void) { return &maybe ? maybe : 123; }
+",
+    );
+
+    assert!(text.contains("maybe@GOTPCREL(%rip)"), "{text}");
+    assert!(!text.contains("maybe(%rip)"), "{text}");
+}
+
 /// An ordinary undefined name is left alone, which is what makes the link fail when it should.
 #[test]
 fn a_name_nobody_marked_is_still_a_name_the_link_has_to_find() {

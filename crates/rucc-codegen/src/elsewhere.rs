@@ -35,7 +35,7 @@
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
-use rucc_ir::{Module, Pic};
+use rucc_ir::{Linkage, Module, Pic};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -104,9 +104,17 @@ impl Elsewhere {
             let func = &module[id];
             func.is_declaration() || pic.replaceable(func.linkage, func.visibility)
         });
+        // A weak variable nothing here defines is the one variable the copying above does not
+        // cover, since there may be no definition anywhere to copy and then its address is null. The
+        // distance from here to null is not a number the linker has, so lld refuses the
+        // `R_X86_64_PC32` and gcc reads the address out of a slot, which the linker fills with zero.
         let globals = module
             .globals()
-            .filter(|&id| pic.replaceable(module[id].linkage, module[id].visibility))
+            .filter(|&id| {
+                let global = &module[id];
+                (global.is_declaration() && global.linkage == Linkage::Weak)
+                    || pic.replaceable(global.linkage, global.visibility)
+            })
             .map(|id| module[id].name);
         // An alias is a symbol of its own with a linkage and a visibility of its own, so it answers
         // this for itself the same way it answered the visibility question in #752. What it points
@@ -254,6 +262,18 @@ mod tests {
         for name in ["kept", "away", "quiet", "shy", "second"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
+    }
+
+    /// A weak variable nothing defines may be at zero, which no distance from the code reaches.
+    #[test]
+    fn a_weak_variable_this_file_only_declares_is_reached_through_the_table() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut maybe = Global::new(names.intern("maybe"), 4, 4);
+        maybe.linkage = Linkage::Weak;
+        module.add_global(maybe);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        assert!(elsewhere.holds(names.intern("maybe")));
     }
 
     /// A library pays for every name it exports, defined here or not, because the definition the
