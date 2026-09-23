@@ -1077,7 +1077,7 @@ impl Pass for Discharge {
                             stats.missed(COMPUTED_EXTENT_PLANE);
                             continue;
                         }
-                        let Some(asked) = about(func, inst) else {
+                        let Some(asked) = planed(func, inst) else {
                             stats.missed(UNKNOWN_SHAPE_INIT);
                             continue;
                         };
@@ -1676,7 +1676,24 @@ pub(crate) fn about(func: &Func, check: Inst) -> Option<Fact> {
 fn holding(func: &Func, check: Inst) -> Option<(Meta, Fact)> {
     let Extra::Mem(info) = func[check].extra else { return None };
     let node = func[info].tbaa?;
-    Some((node, about(func, check)?))
+    Some((node, planed(func, check)?))
+}
+
+/// What a `check_init` or a `check_type` is about: the bytes it reads and nothing either side.
+///
+/// Not [`about`], for two reasons. The first is that a capability taken at the base widens a bounds
+/// fact to reach back to the base, which is right for bounds because an instance is a run of bytes,
+/// and wrong here because the bytes between the base and the access are in the instance and may
+/// never have been written. Read through [`about`], a check that `p->b` was written went down as a
+/// fact about `p->a` as well, and the check on `p->a` after it went away however uninitialized it
+/// was. The second is that the capability says nothing these two planes need. They are kept per
+/// address, nothing that forgets one of their facts goes by instance, since a lifetime starting, an
+/// init copy and anything opaque give up every fact there is, and lowering drops the capability.
+fn planed(func: &Func, check: Inst) -> Option<Fact> {
+    let &pointer = func[func[check].args].get(1)?;
+    let Extra::Mem(info) = func[check].extra else { return None };
+    let (base, offset) = normal(func, pointer);
+    Some(Fact { base, offset, size: i128::from(func[info].size) })
 }
 
 /// What a `check_live` is about, when it is one this pass can read.
@@ -2743,7 +2760,13 @@ mod tests {
     /// same reason the bounds check does, since how many bytes the access takes is the whole of
     /// what the check is about.
     fn began(build: &mut Builder<'_>, pointer: Value, size: u64) {
-        let args = build.func().push_values(&[pointer]);
+        began_naming(build, pointer, pointer, size);
+    }
+
+    /// [`began`] with the capability taken at `named` rather than at the pointer, which is the shape
+    /// `rucc_safety::origin` emits for an address walked off a pointer it already has one for.
+    fn began_naming(build: &mut Builder<'_>, named: Value, pointer: Value, size: u64) {
+        let args = build.func().push_values(&[named]);
         let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
         let info = MemInfo {
             size,
@@ -2773,7 +2796,12 @@ mod tests {
     /// that is all this pass ever does with one: it compares two of them and it never looks the
     /// node up, so a number nothing in the module table answers is the same question to it.
     fn asked(build: &mut Builder<'_>, pointer: Value, size: u64, node: Meta) {
-        let args = build.func().push_values(&[pointer]);
+        asked_naming(build, pointer, pointer, size, node);
+    }
+
+    /// [`asked`] with the capability taken at `named`, for the reason [`began_naming`] gives.
+    fn asked_naming(build: &mut Builder<'_>, named: Value, pointer: Value, size: u64, node: Meta) {
+        let args = build.func().push_values(&[named]);
         let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
         let info = MemInfo {
             size,
@@ -2997,6 +3025,37 @@ mod tests {
     }
 
     #[test]
+    fn an_init_check_on_a_field_says_nothing_about_the_field_in_front_of_it() {
+        // `p->b` then `p->a`, with the capability taken at `p` for both. The instance runs from `p`
+        // to past `p->b`, and a bounds fact is right to reach back that far, but only the eight
+        // bytes of `p->b` were read and passed on, and `p->a` may never have been written.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let second = past(&mut build, pointer, 8);
+        began_naming(&mut build, pointer, second, 8);
+        began_naming(&mut build, pointer, pointer, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::NOTHING_WROTE_IT), 2);
+    }
+
+    #[test]
+    fn an_init_check_answers_one_naming_another_capability_over_the_same_bytes() {
+        // The plane is kept by address and the capability is dropped when the check is lowered,
+        // so which pointer it was taken at does not change what a passing check says.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let field = past(&mut build, pointer, 8);
+        began_naming(&mut build, pointer, field, 8);
+        began(&mut build, field, 8);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(inits(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_INIT), 1);
+    }
+
+    #[test]
     fn an_init_check_a_call_stands_between_stays_and_is_counted() {
         // The bounds facts cross a call and these do not, which the `called` comment argues for.
         // The row is here so that what the conservatism costs is a number rather than a paragraph.
@@ -3145,6 +3204,21 @@ mod tests {
         let stats = run(&mut func);
         assert_eq!(types(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_TYPE), 1);
+    }
+
+    #[test]
+    fn a_type_check_on_a_field_says_nothing_about_the_field_in_front_of_it() {
+        // The init arm's `p->b` then `p->a`, at one type. The bytes of `p->a` agreeing with it is
+        // not something a read of `p->b` found out.
+        let (_, mut func, block, pointer) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let second = past(&mut build, pointer, 8);
+        asked_naming(&mut build, pointer, second, 8, Meta::new(3));
+        asked_naming(&mut build, pointer, pointer, 8, Meta::new(3));
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(types(&func), 2);
+        assert_eq!(stats.count(Kind::Missed, super::NOTHING_TYPED_IT), 2);
     }
 
     #[test]
