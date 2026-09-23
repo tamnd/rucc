@@ -154,7 +154,7 @@ const WORD: u64 = 8;
 /// a slot is only an `alloca` and a name for it, so nothing is lost by deciding all of them first.
 ///
 /// Taking the block parameters out goes between the substitution and the second walk, because a
-/// capability carried along an edge is a value the first walk gives no slot to, and [`parameters`]
+/// capability carried along an edge is a value the first walk gives no slot to, and `parameters`
 /// needs every edge already carrying an address to decide which slot each parameter reads.
 pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     prune(func);
