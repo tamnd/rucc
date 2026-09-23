@@ -159,7 +159,9 @@
 //! assignment through a pointer of a different type writes the type plane. That makes `a[i] =
 //! a[i - 1]` over an array with only `a[0]` written a loop every iteration of which passes its init
 //! check, where one check in front of the loop would refuse the whole array. So a loop that writes
-//! either plane keeps that plane's checks.
+//! either plane keeps that plane's checks, unless every write is to an object the check is not
+//! about. A copy loop is that case, since it writes the planes over where it copies to and reads
+//! them over where it copies from, and two blocks two calls to `malloc` handed back share no byte.
 //!
 //! The other new condition is not about what is true, it is about what it costs. A bounds check is
 //! two comparisons whatever range it is handed, so one of them in front of a loop is one of them
@@ -185,8 +187,12 @@
 //! plane is off and one of the other two is on, and that is worth knowing rather than worth
 //! refusing over.
 
-use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, MemInfo, Opcode, Type, Value};
+use rucc_base::Symbol;
+use rucc_ir::{
+    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, MemInfo, Opcode, Type, Value,
+};
 
+use crate::alias::{Origin, origin};
 use crate::cfg::Cfg;
 use crate::discharge::{Question, named_by, yes};
 use crate::dom::Dominators;
@@ -434,7 +440,7 @@ fn sweep(
     let written = writes(func, loops, id);
 
     for check in checks {
-        if let Some(why) = written.refusing(func[check].opcode) {
+        if let Some(why) = written.refusing(func, check) {
             stats.missed(why);
             continue;
         }
@@ -445,23 +451,89 @@ fn sweep(
     }
 }
 
-/// Which of the two planes a loop writes, which is the condition a plane check has and a bounds
-/// check does not.
-#[derive(Clone, Copy, Debug)]
+/// Where a loop writes each of the two planes, which is the condition a plane check has and a
+/// bounds check does not.
+#[derive(Clone, Debug)]
 struct Written {
-    /// The loop has a `meta_init`, a `meta_init_copy` or a `meta_begin` in it.
-    init: bool,
-    /// The loop has a `meta_type`, a `meta_type_copy` or a `meta_begin` in it.
-    ty: bool,
+    /// The address of every `meta_init`, `meta_init_copy` and `meta_begin` in the loop.
+    init: Vec<Value>,
+    /// The address of every `meta_type`, `meta_type_copy` and `meta_begin` in the loop.
+    ty: Vec<Value>,
 }
 
 impl Written {
-    /// Why a check of this kind stays where it is, when it does.
-    fn refusing(self, opcode: Opcode) -> Option<&'static str> {
-        match opcode {
-            Opcode::CheckInit if self.init => Some(WRITES_THE_INIT_PLANE),
-            Opcode::CheckType if self.ty => Some(WRITES_THE_TYPE_PLANE),
-            _ => None,
+    /// Why this check stays where it is, when it does.
+    ///
+    /// A write to the plane the check reads keeps it in the loop unless the write is to some other
+    /// object than the one the check is about. `to[i] = from[i]` is the shape, and it is the copy
+    /// loop in `a-byte-at-a-time-copy`: every iteration writes both planes over `to` and asks both
+    /// about `from`, and when the two came out of two different calls to `malloc` no iteration can
+    /// be reading plane bytes an earlier one wrote, so one check in front asks what every check
+    /// inside was going to ask.
+    fn refusing(&self, func: &Func, check: Inst) -> Option<&'static str> {
+        let (writes, why) = match func[check].opcode {
+            Opcode::CheckInit => (&self.init, WRITES_THE_INIT_PLANE),
+            Opcode::CheckType => (&self.ty, WRITES_THE_TYPE_PLANE),
+            _ => return None,
+        };
+        let &pointer = func[func[check].args].get(1)?;
+        let read = Object::of(func, pointer);
+        let apart = |&at: &Value| read.zip(Object::of(func, at)).is_some_and(|(a, b)| a.apart(b));
+        (!writes.iter().all(apart)).then_some(why)
+    }
+}
+
+/// An object whose storage no other object shares, named by what made it.
+///
+/// Only the ones where two of them being different is a thing this function can see. Two frame
+/// slots made by two `alloca`s are two objects, and so are two blocks handed back by two calls to
+/// `malloc`, and neither is a global. Two globals are left out, because two symbols can be two
+/// names for one object and the module is not here to ask. So is anything [`crate::alias::origin`]
+/// cannot follow back to one of these, which is a parameter, a load and every other call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Object {
+    /// A frame slot, by the `alloca` that made it.
+    Local(Inst),
+    /// A named object, by its symbol.
+    Global(Symbol),
+    /// Storage an allocation call made, by the call.
+    Fresh(Inst),
+}
+
+impl Object {
+    /// The object this address is in, when it is one of the three.
+    ///
+    /// A call counts when [`Flags::HEAP`] is on it and nothing it was handed is a pointer. The flag
+    /// says the result is a new instance or null, and `realloc` has the flag too, but what it hands
+    /// back may be the storage it was handed. Asking for no pointer argument keeps `malloc`,
+    /// `calloc`, `valloc` and `aligned_alloc` and leaves `realloc` and `reallocf` out without a
+    /// list of names here that could drift from the one `crate::heap` has.
+    fn of(func: &Func, pointer: Value) -> Option<Self> {
+        match origin(func, pointer).0 {
+            Origin::Local(inst) => Some(Self::Local(inst)),
+            Origin::Global(name) => Some(Self::Global(name)),
+            Origin::Unknown(value) => {
+                let Def::Result { inst, index: 0 } = func[value].def else { return None };
+                let data = &func[inst];
+                let fresh = data.opcode == Opcode::Call
+                    && data.flags.contains(Flags::HEAP)
+                    && func[data.args].iter().all(|&arg| func[arg].ty != Type::PTR);
+                fresh.then_some(Self::Fresh(inst))
+            }
+        }
+    }
+
+    /// Whether no byte of one is a byte of the other.
+    ///
+    /// The same instruction is not two objects even though it may run twice and make two, since
+    /// which of those an address is in is a question about the path and not about the instruction.
+    fn apart(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Global(_), Self::Global(_)) => false,
+            (Self::Local(one), Self::Local(two)) | (Self::Fresh(one), Self::Fresh(two)) => {
+                one != two
+            }
+            _ => true,
         }
     }
 }
@@ -483,15 +555,18 @@ impl Written {
 /// assembly block, every `meta_end` and every `meta_transfer`, so the only things left that write a
 /// plane are these five opcodes.
 fn writes(func: &Func, loops: &Loops, id: LoopId) -> Written {
-    let mut written = Written { init: false, ty: false };
+    let mut written = Written { init: Vec::new(), ty: Vec::new() };
     for &block in loops.blocks(id) {
         for inst in func.insts(block) {
+            // The address is the first operand of all five, and for the two copies it is the
+            // destination, which is the range whose plane is written.
+            let Some(&at) = func[func[inst].args].first() else { continue };
             match func[inst].opcode {
-                Opcode::MetaInit | Opcode::MetaInitCopy => written.init = true,
-                Opcode::MetaType | Opcode::MetaTypeCopy => written.ty = true,
+                Opcode::MetaInit | Opcode::MetaInitCopy => written.init.push(at),
+                Opcode::MetaType | Opcode::MetaTypeCopy => written.ty.push(at),
                 Opcode::MetaBegin => {
-                    written.init = true;
-                    written.ty = true;
+                    written.init.push(at);
+                    written.ty.push(at);
                 }
                 _ => {}
             }
@@ -2040,6 +2115,130 @@ mod tests {
             let (_, mut func) = planed(kind, Some(Opcode::MetaBegin));
             let stats = hoisted(&mut func);
             assert!(!stats.changed(), "{kind:?}");
+        }
+    }
+
+    /// Where the copy loop [`copying`] builds writes to.
+    #[derive(Clone, Copy, Debug)]
+    enum Into {
+        /// A second call to `malloc`, which is a different object from the first.
+        Allocated,
+        /// A parameter, which could be anything including the block being read.
+        Parameter,
+        /// What `realloc` gave back for the block being read, which may be that block.
+        Reallocated,
+    }
+
+    /// `to[i] = from[i]` round a counted loop, as the planes see it.
+    ///
+    /// `from` is what a call to `malloc` handed back and has a `kind` check on it each time round,
+    /// and `to` is wherever `into` says and has `writing` done to it. The flag on the calls is put
+    /// there by hand, for the reason `crate::discharge`'s tests give: which calls deserve it is a
+    /// question about a module and `crate::heap` answers it.
+    fn copying(kind: Opcode, writing: Opcode, into: Into) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let given = func.append_param(entry, Type::PTR);
+        let counter = func.append_param(head, Type::int(64));
+
+        let word = Type::int(64);
+        let mut build = Builder::new(&mut func, entry);
+        let sized = Signature::new().with_params(&[word]).with_returns(&[Type::PTR]);
+        let sized = build.func().add_signature(sized);
+        let resized = Signature::new().with_params(&[Type::PTR, word]).with_returns(&[Type::PTR]);
+        let resized = build.func().add_signature(resized);
+        let bytes = build.iconst(word, 64);
+        let mut allocate = |build: &mut Builder<'_>, name: &str, sig, args: &[Value]| {
+            let call = build.call(names.intern(name), sig, args);
+            let at = build.func();
+            at[call].flags |= Flags::HEAP;
+            at[call].results().next().expect("a call that gives back a pointer")
+        };
+        let from = allocate(&mut build, "malloc", sized, &[bytes]);
+        let to = match into {
+            Into::Allocated => allocate(&mut build, "malloc", sized, &[bytes]),
+            Into::Parameter => given,
+            Into::Reallocated => allocate(&mut build, "realloc", resized, &[from, bytes]),
+        };
+        let zero = build.iconst(word, 0);
+        build.jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let by = build.iconst(word, WIDTH);
+        let scaled = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let args = build.func().push_values(&[from, scaled]);
+        let read = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let args = build.func().push_values(&[to, scaled]);
+        let wrote = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let args = build.func().push_values(&[read]);
+        let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[capability, read]);
+        let extra = Extra::Mem(build.func().add_mem(info));
+        build.inst(InstData { args, extra, ..InstData::new(kind) }, &[]);
+        let length = build.iconst(word, 4);
+        let args = match writing {
+            Opcode::MetaTypeCopy | Opcode::MetaInitCopy => {
+                build.func().push_values(&[wrote, read, length])
+            }
+            _ => build.func().push_values(&[wrote, length]),
+        };
+        build.inst(InstData { args, ..InstData::new(writing) }, &[]);
+        let one = build.iconst(word, 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(word, 16);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func)
+    }
+
+    #[test]
+    fn a_copy_between_two_allocations_takes_the_plane_checks_on_its_source_out() {
+        // The loop writes both planes, and it writes them over the other block. No iteration can
+        // be reading a plane byte an earlier one wrote, so the check in front asks what the checks
+        // inside were going to.
+        let cases = [
+            (Opcode::CheckInit, Opcode::MetaInit, HOISTED_INIT),
+            (Opcode::CheckInit, Opcode::MetaInitCopy, HOISTED_INIT),
+            (Opcode::CheckType, Opcode::MetaTypeCopy, HOISTED_TYPE),
+            (Opcode::CheckInit, Opcode::MetaBegin, HOISTED_INIT),
+        ];
+        for (kind, writing, done) in cases {
+            let (_, mut func) = copying(kind, writing, Into::Allocated);
+            let stats = hoisted(&mut func);
+            assert_eq!(stats.count(Kind::Optimized, done), 1, "{kind:?} under {writing:?}");
+            let left = kinds(&func, kind);
+            assert_eq!(left.len(), 1);
+            assert_eq!(extent(&func, left[0].1), 64);
+        }
+    }
+
+    #[test]
+    fn a_copy_into_somewhere_that_may_be_its_source_keeps_its_plane_checks() {
+        // A parameter could be the block being read, and so could what `realloc` gave back for it,
+        // which is the one allocation call whose result is not always a new object.
+        for into in [Into::Parameter, Into::Reallocated] {
+            for (kind, writing, why) in [
+                (Opcode::CheckInit, Opcode::MetaInit, super::WRITES_THE_INIT_PLANE),
+                (Opcode::CheckType, Opcode::MetaTypeCopy, super::WRITES_THE_TYPE_PLANE),
+            ] {
+                let (_, mut func) = copying(kind, writing, into);
+                let stats = hoisted(&mut func);
+                assert!(!stats.changed(), "{kind:?} into {into:?}");
+                assert_eq!(stats.count(Kind::Missed, why), 1);
+            }
         }
     }
 
