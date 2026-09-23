@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A function the scheduler reordered now has locations for its locals under `-g`. The liveness the locations are read from is counted along the order the allocator laid the function out in, and the scheduler runs after it at `-O2` and above, so until now such a function gave no location for anything held in a register or sharing its frame bytes. A stretch in a reordered block is now found by where the instruction at each end went, which is sound because the scheduler keeps every register's reads and writes in order and every memory access in order. Over the SQLite amalgamation at `-O2` the functions with no location list at all go from 1931 of 2548 to 79, and a local that shares its frame bytes is now available at `-O2` where it is wanted, which 0.11.2 could only give from `-O1`. `cargo xtask debugger` now builds its shared arrays at `-O2`. See tamnd/rucc#1680.
+
 ## 0.11.2
 
 ### Added

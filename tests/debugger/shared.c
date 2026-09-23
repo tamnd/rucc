@@ -1,4 +1,4 @@
-/* A function whose two arrays share their bytes, built by the compiler under test at `-O1`.
+/* A function whose two arrays share their bytes, built by the compiler under test at `-O2`.
  *
  * `spent` is finished with before `later` is first written, so from `-O1` up the frame puts the two
  * in the same bytes. At the breakpoint `spent` is dead and its bytes hold `later`, which is the

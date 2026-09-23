@@ -25,10 +25,11 @@
 //! a real one, and this compiler has to refuse, which says a dead variable comes out marked rather
 //! than stale.
 //!
-//! The same is asked of a second shape, built at `-O1` because that is where it arises: two arrays
-//! the frame put in the same bytes, one of them dead at the breakpoint. The live one has to read
-//! back as gcc's does, and the dead one has to be unavailable rather than read out of bytes that
-//! now hold the other.
+//! The same is asked of a second shape, built at `-O2`: two arrays the frame put in the same bytes,
+//! one of them dead at the breakpoint. The live one has to read back as gcc's does, and the dead one
+//! has to be unavailable rather than read out of bytes that now hold the other. Sharing starts at
+//! `-O1`, and `-O2` is asked because the scheduler runs there too, so where each array is wanted is
+//! read back through a block whose instructions have been moved.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -78,7 +79,7 @@ const ASKED: [(&str, &str); 6] = [
     ),
     (
         "later",
-        "an array built at `-O1` that shares its bytes with one the function was finished with, \
+        "an array built at `-O2` that shares its bytes with one the function was finished with, \
          so it is in the frame over part of the function only and the breakpoint is in that part",
     ),
 ];
@@ -103,7 +104,7 @@ const DEAD: [(&str, &str); 2] = [
     ),
     (
         "spent",
-        "an array built at `-O1` that nothing reads after the line that adds two of its elements, \
+        "an array built at `-O2` that nothing reads after the line that adds two of its elements, \
          so at the breakpoint its bytes hold the array declared after it, and a debugger should \
          say it is unavailable rather than print the other one under its name. An answer here \
          that agreed with gcc would also be the two no longer sharing, which leaves the question \
@@ -238,9 +239,9 @@ fn build() -> Result<PathBuf> {
 
     let rucc = crate::cost::compiler()?;
     let fixtures = root().join("tests").join("debugger");
-    // Each at the level its question is about: `-O0` for the locals, and `-O1` for the arrays that
-    // share, since nothing shares below it.
-    for (name, level) in [("locals", "-O0"), ("shared", "-O1")] {
+    // Each at the level its question is about: `-O0` for the locals, and `-O2` for the arrays that
+    // share, since nothing shares below `-O1` and the scheduler only runs from `-O2`.
+    for (name, level) in [("locals", "-O0"), ("shared", "-O2")] {
         let out = Command::new(&rucc)
             .args(["-c", &format!("--target={TRIPLE}"), level, "-g", crate::VERIFY])
             .arg("-o")

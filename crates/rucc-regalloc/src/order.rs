@@ -92,6 +92,16 @@ impl Order {
         self.end[block.index()]
     }
 
+    /// Where a block's parameters arrive and where its outgoing arguments are read, or `None` for a
+    /// block the function did not have when it was laid out.
+    #[must_use]
+    pub fn bounds(&self, block: Block) -> Option<(Point, Point)> {
+        // A block that was laid out ends after it starts, since its parameters and its outgoing
+        // arguments are two points, and one that was not has both left at zero.
+        let (start, end) = (*self.start.get(block.index())?, *self.end.get(block.index())?);
+        (end > start).then_some((start, end))
+    }
+
     /// Where an instruction reads its operands, and where it writes the ones it writes early.
     #[must_use]
     pub fn early(&self, inst: Inst) -> Point {
