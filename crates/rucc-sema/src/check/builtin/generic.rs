@@ -46,7 +46,7 @@ use crate::decl::{
     Decl, DeclFlags, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
     StorageDuration,
 };
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::{Base, Const};
 
 /// What one argument of a type generic builtin is.
@@ -320,7 +320,84 @@ impl Checker<'_> {
                 Const::Int(_) | Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. },
             ) => true,
             Ok(Const::Address(address)) => matches!(address.base, Base::Str(_)),
-            Err(_) => false,
+            Err(_) => self.shaped(arg).is_some(),
+        }
+    }
+
+    /// The number an integer expression comes to by its shape when a part of it is not a constant.
+    ///
+    /// gcc's front end folds `i && 0` and `i * 0` to nought when `i` does nothing but read, and
+    /// then `(i && 0) ? i : 34` to 34, so `__builtin_constant_p` says one for all three. tcc's test
+    /// prints them. A part with an effect is kept, and the answer is not a constant then.
+    fn shaped(&mut self, expr: ExprId) -> Option<i128> {
+        match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Bool, operand } => {
+                self.settled(operand).map(|value| i128::from(value != 0))
+            }
+            ExprKind::Cast(operand) | ExprKind::Convert { operand, .. }
+                if is_integer(&self.types, self.tast[expr].ty) =>
+            {
+                self.settled(operand)
+            }
+            ExprKind::Binary {
+                op: op @ (ast::BinaryOp::LogAnd | ast::BinaryOp::LogOr),
+                lhs,
+                rhs,
+            } => {
+                let ends = i128::from(op == ast::BinaryOp::LogOr);
+                let answer = self.settled(rhs).map(|value| i128::from(value != 0))?;
+                (answer == ends && self.only_reads(lhs)).then_some(ends)
+            }
+            ExprKind::Binary { op: ast::BinaryOp::Mul, lhs, rhs }
+                if is_integer(&self.types, self.tast[expr].ty) =>
+            {
+                let zero = |side| side == Some(0);
+                let (left, right) = (self.settled(lhs), self.settled(rhs));
+                ((zero(left) && self.only_reads(rhs)) || (zero(right) && self.only_reads(lhs)))
+                    .then_some(0)
+            }
+            ExprKind::Cond { cond, then, otherwise } => {
+                let taken = if self.settled(cond)? != 0 { then } else { otherwise };
+                self.settled(taken)
+            }
+            _ => None,
+        }
+    }
+
+    /// The number an integer expression comes to, folded or by its shape.
+    fn settled(&mut self, expr: ExprId) -> Option<i128> {
+        let mut eval = self.eval();
+        let value = eval.constant(expr);
+        let _ = eval.finish();
+        match value {
+            Ok(Const::Int(value)) => Some(value),
+            _ => self.shaped(expr),
+        }
+    }
+
+    /// Whether evaluating an expression does nothing but read, so that dropping it changes nothing.
+    fn only_reads(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) => true,
+            ExprKind::Member { base: operand, .. }
+            | ExprKind::Cast(operand)
+            | ExprKind::Convert { operand, .. } => self.only_reads(operand),
+            ExprKind::Unary { op, operand } => {
+                !matches!(
+                    op,
+                    ast::UnaryOp::PreInc
+                        | ast::UnaryOp::PreDec
+                        | ast::UnaryOp::PostInc
+                        | ast::UnaryOp::PostDec
+                ) && self.only_reads(operand)
+            }
+            ExprKind::Subscript { base: lhs, index: rhs }
+            | ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Comma { lhs, rhs } => self.only_reads(lhs) && self.only_reads(rhs),
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.only_reads(cond) && self.only_reads(then) && self.only_reads(otherwise)
+            }
+            _ => false,
         }
     }
 
