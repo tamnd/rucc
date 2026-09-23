@@ -62,7 +62,7 @@
 //! is also the better one. It says which object the pointer was written for, where recovery says
 //! which object is at the address now, and those differ exactly when the pointer is dangling.
 //!
-//! The edges are filled in by [`Origins::join`] once the walk is over rather than when the
+//! The edges are filled in by `Origins::join` once the walk is over rather than when the
 //! parameter is made, because the capability an edge passes is often a `cap_load` behind a load the
 //! walk has not reached yet, and asking for it early would put a `cap_of` there instead.
 
