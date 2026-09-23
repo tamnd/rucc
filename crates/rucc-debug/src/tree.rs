@@ -177,10 +177,11 @@ fn fill(
 /// this compiler writes one for every function including the leaves. It costs a reader having to
 /// read that table, which is a thing every debugger does before it prints a frame at all.
 ///
-/// A build that asked for no unwind table gets no frame base, because there would then be nothing to
-/// resolve the operation against and an expression a reader cannot evaluate is worse than an
-/// attribute that is not there. gcc's answer for that case is to write the same table into
-/// `.debug_frame` instead, which this compiler does not write yet.
+/// A build that asked for no unwind table has the same table written into `.debug_frame` instead,
+/// which is gcc's answer too, and the frame base is read through that. Only a build with neither
+/// gets no frame base, because there would then be nothing to resolve the operation against and an
+/// expression a reader cannot evaluate is worse than an attribute that is not there. That is a
+/// target with no calling convention written down, or a format with no `.debug_frame`.
 ///
 /// A file-scope variable needs none of it: its address is its own symbol and the linker knows where
 /// that went.
@@ -794,10 +795,10 @@ mod tests {
         assert!(holds(&info, ".debug_info", &expr), "the frame base is not the call frame address");
     }
 
-    /// A build with no unwind table gets no frame base, because there is nothing to resolve it
-    /// against.
+    /// A build with no table of frame rules in either section gets no frame base, because there is
+    /// nothing to resolve it against.
     #[test]
-    fn a_build_that_writes_no_unwind_table_gets_no_frame_base() {
+    fn a_build_that_writes_no_frame_table_gets_no_frame_base() {
         let mut unit = one();
         unit.frames = false;
         let info = write(&unit).expect("sections");

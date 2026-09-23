@@ -41,7 +41,7 @@ use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
-use rucc_object::{Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
+use rucc_object::{Chunk, Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
 
 use crate::Error;
 use crate::format::{binding, visibility};
@@ -87,6 +87,10 @@ pub struct Assembled {
     /// One list per function of [`Text::funcs`], in the same order, and empty throughout in a
     /// build that asked for no debug information.
     pub lines: Vec<Vec<Row>>,
+    /// The frame rules as `.debug_frame`, in a build that asked for debug information and for no
+    /// unwind table, where it is the only table a debugger has to find a frame base through. None
+    /// in every other build, and on a format that has no such section.
+    pub frames: Option<Chunk>,
 }
 
 /// Every function, as the bytes of a text section.
@@ -197,12 +201,17 @@ pub fn assemble(
     }
     // In whichever of the two shapes the target reads, which is what decides whether a prologue
     // this cannot describe is a refusal or is nothing at all. See [`unwind::table`].
-    if unwind {
-        if let Some(conv) = target.call_regs {
+    // Or, when there is to be no unwind table and there is to be debug information, the same rows
+    // where only a debugger looks. See [`unwind::debug_frame`].
+    let mut frames = None;
+    if let Some(conv) = target.call_regs {
+        if unwind {
             text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format)?;
+        } else if lines {
+            frames = unwind::debug_frame(&text.funcs, &rows, conv, target.object_format);
         }
     }
-    Ok(Assembled { text, lines: all })
+    Ok(Assembled { text, lines: all, frames })
 }
 
 /// A jump inside a function, waiting for the block it goes to to have a place.
