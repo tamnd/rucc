@@ -54,6 +54,20 @@
 //! register with nothing to be relative to. The one reader rule below still takes those when the
 //! reader is reading a flat address.
 //!
+//! # The sum of two registers
+//!
+//! `p[i]` on a `char` is an address with an index and no scale, and the selector writes that as
+//! the addition it is rather than as a `lea`, since the rules that make a `lea` are the ones with a
+//! multiply in them. So a byte array read came out as a copy, an add and a load through the result,
+//! which is the pair above with the address written as arithmetic. An add of two registers at the
+//! width of an address is read here as the address a base, an index and a scale of one make, and it
+//! goes into its readers under exactly the rules a `lea` does. The flags the add writes are nothing
+//! to lose, since this runs straight after selection and the selector never reads the flags of an
+//! addition, it compares.
+//!
+//! The stack pointer cannot be an index on this machine, so a sum with it in the second place has
+//! the two swapped, and a sum of two registers neither of which can be an index is left alone.
+//!
 //! A displacement that does not fit. The two are added as `i64` and the answer has to be an `i32`,
 //! which is what the field holds. It is not a case that comes up in a program anybody wrote, and
 //! the check is there because the alternative to checking is wrapping.
@@ -238,6 +252,7 @@ pub fn addresses(
     pending: &mut Pending<'_>,
 ) -> usize {
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
     let mut reads = Reads::of(func);
     let mut folded = 0;
     for block in func.blocks().collect::<Vec<_>>() {
@@ -285,17 +300,23 @@ pub fn addresses(
                 }
             }
             for written in written(func, inst) {
-                open.retain(|reg, held| *reg != written && !touches(func, held.from, written));
+                open.retain(|reg, held| *reg != written && !touches(func, held, written));
             }
             if func[inst].opcode == lea {
                 let room = if pending.holds(inst) { FRAME_READERS } else { usize::MAX };
+                let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
                 match folding_def(func, &reads, inst) {
                     Some((reg, wanted))
-                        if wanted <= room && (wanted == 1 || fits_every_reader(func, inst)) =>
+                        if wanted <= room && (wanted == 1 || fits_every_reader(address)) =>
                     {
-                        open.insert(reg, Open { from: inst, wanted, folds: Vec::new() });
+                        open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
                     }
                     _ => {}
+                }
+            } else if func[inst].opcode == sum {
+                let Some(address) = summed(func, inst) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
                 }
             }
         }
@@ -307,6 +328,10 @@ pub fn addresses(
 struct Open {
     /// The address instruction, which goes once every one of its readers has taken it.
     from: mir::Inst,
+    /// The address it works out, with its registers numbered as that instruction's operands.
+    ///
+    /// A `lea`'s own memory operand, or for a sum the base and the index it adds.
+    address: mir::Amode,
     /// How many reads of the register it wrote there are in the whole function.
     wanted: usize,
     /// The folds agreed to so far, which are applied together or not at all.
@@ -344,6 +369,25 @@ fn offer(func: &mir::Func, open: &mut HashMap<mir::Reg, Open>, inst: mir::Inst) 
     open.remove(&base)
 }
 
+/// The address a sum of two registers is, as a base and an index at a scale of one.
+///
+/// The operands are the register written and then the two added, so the address names the second
+/// and the third. `None` when neither of the two can be an index, which on this machine is the
+/// stack pointer, the only register [`candidate`] could be handed that the encoding has no room
+/// for as one.
+fn summed(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
+    let operands = &func[func[inst].operands];
+    let [_, left, right] = operands else { return None };
+    let (base, index) = if right.reg.is_virtual() {
+        (1, 2)
+    } else if left.reg.is_virtual() {
+        (2, 1)
+    } else {
+        return None;
+    };
+    Some(mir::Amode { base: Some(base), index: Some(index), ..mir::Amode::NOTHING })
+}
+
 /// Whether an address is one every reader can carry in the room it already has, which is what
 /// makes handing it to more than one of them free.
 ///
@@ -361,8 +405,8 @@ fn offer(func: &mir::Func, open: &mut HashMap<mir::Reg, Open>, inst: mir::Inst) 
 ///
 /// One reader is a different question and keeps the old answer, since there the address word is
 /// written once either way and what goes is the whole `lea`.
-fn fits_every_reader(func: &mir::Func, inst: mir::Inst) -> bool {
-    func[inst].mem.is_some_and(|mem| func[mem].symbol.is_none())
+fn fits_every_reader(address: mir::Amode) -> bool {
+    address.symbol.is_none()
 }
 
 /// How many of an instruction's operands read that register.
@@ -406,10 +450,9 @@ fn written(func: &mir::Func, inst: mir::Inst) -> Vec<mir::Reg> {
 
 /// Whether an address computation reads that register, which is what makes writing it the end of
 /// the chance to fold it.
-fn touches(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> bool {
-    let Some(mem) = func[inst].mem else { return false };
-    let amode = func[mem];
-    let operands = &func[func[inst].operands];
+fn touches(func: &mir::Func, held: &Open, reg: mir::Reg) -> bool {
+    let amode = held.address;
+    let operands = &func[func[held.from].operands];
     [amode.base, amode.index]
         .into_iter()
         .flatten()
@@ -459,8 +502,8 @@ struct Folding {
 /// are worked out from the length rather than carried over.
 fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
     let base = base_reg(func, inst)?;
-    let from = open.get(&base)?.from;
-    let address = func[func[from].mem?];
+    let held = open.get(&base)?;
+    let (from, address) = (held.from, held.address);
     let reading = func[func[inst].mem?];
     let taken = &func[func[from].operands];
     let reader = &func[func[inst].operands];
@@ -507,7 +550,7 @@ fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) 
 
 #[cfg(test)]
 mod tests {
-    use rucc_target::x86_64::{FRAME, GPR, MACHINE, RDI};
+    use rucc_target::x86_64::{FRAME, GPR, MACHINE, RDI, RSP};
 
     use super::*;
 
@@ -1375,5 +1418,84 @@ mod tests {
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A byte array read as selection leaves it, the sum of two registers and a load three bytes
+    /// past it, and the register the sum wrote.
+    fn a_sum_and_a_load(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        added: [mir::Reg; 2],
+    ) -> mir::Reg {
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let sum = op(names, FRAME.sum);
+        let load = op(names, "mov_rm_8");
+        func.build(block, sum).def(address, GPR).uses(added[0], GPR).uses(added[1], GPR).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(3))
+            .finish();
+        address
+    }
+
+    /// `p[i + 3]` on a `char`, where there is no scale for a rule to make a `lea` out of.
+    #[test]
+    fn a_sum_of_two_registers_is_a_base_and_an_index_to_the_one_reading_through_it() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        a_sum_and_a_load(&mut func, &mut names, block, [array, index]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the sum is still there: {left:?}");
+        assert_eq!(left[0].0, format!("{}mov_rm_8", FRAME.prefix));
+        assert_eq!((left[0].1.scale, left[0].1.disp), (1, 3));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index]);
+    }
+
+    /// The stack pointer has no encoding as an index, so a sum with it second reads it as the base.
+    #[test]
+    fn a_sum_with_the_stack_pointer_second_has_it_as_the_base() {
+        let (mut names, mut func, block) = empty();
+        let index = func.new_vreg(GPR);
+        let sp = mir::Reg::physical(RSP);
+        a_sum_and_a_load(&mut func, &mut names, block, [index, sp]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![sp, index]);
+    }
+
+    /// Two registers neither of which can be an index is a sum this leaves as a sum.
+    #[test]
+    fn a_sum_with_no_register_that_can_be_an_index_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let (sp, di) = (mir::Reg::physical(RSP), mir::Reg::physical(RDI));
+        a_sum_and_a_load(&mut func, &mut names, block, [di, sp]);
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A sum anything reads as a number rather than as an address is arithmetic the program wants,
+    /// and it stays, along with every reader that did want the address.
+    #[test]
+    fn a_sum_read_as_a_number_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = a_sum_and_a_load(&mut func, &mut names, block, [array, index]);
+        let copy = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(copy, GPR).uses(address, GPR).uses(index, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
     }
 }
