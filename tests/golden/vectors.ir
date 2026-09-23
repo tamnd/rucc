@@ -334,7 +334,7 @@ block0(%0: i64):
     store %4 -> %6, align 4, tbaa !1
     %7 = load.i32 %1, align 4, tbaa !1
     %8 = load.i32 %3, align 4, tbaa !1
-    %9 = shl.nsw %7, %8
+    %9 = shl %7, %8
     store %9 -> %2, align 4, tbaa !1
     %10 = iconst.i64 4
     %11 = ptr_add %1, %10
@@ -342,7 +342,7 @@ block0(%0: i64):
     %13 = iconst.i64 4
     %14 = ptr_add %3, %13
     %15 = load.i32 %14, align 4, tbaa !1
-    %16 = shl.nsw %12, %15
+    %16 = shl %12, %15
     %17 = iconst.i64 4
     %18 = ptr_add %2, %17
     store %16 -> %18, align 4, tbaa !1
