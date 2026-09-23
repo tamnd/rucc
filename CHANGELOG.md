@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The sum of two registers folds into the memory operand that reads it on x86-64. `p[i]` on a `char` array is a base and an index with no scale, which the rules leave as an `add_rr_64` rather than making a `lea` of, so a byte array read came out as a copy, an add and a load through the result. `crates/rucc-codegen/src/fold.rs` now reads that add as the address `base + index` and folds it into its readers under the rules a `lea` goes by, so the read is `movb (%rbx,%r13), %dil`. Over the 2663 corpus sources that is 183494 instructions to 183096 at `-O2`, 176127 to 175335 at `-O1` and 174821 to 174041 at `-Os`, with nothing larger at any level, and the SQLite amalgamation at `-O2` goes from 243511 to 241618. Section 37.4 of `spec/optimizer/37-machine-level-optimization.md` has the details. Closes tamnd/rucc#1719.
 
+### Fixed
+
+- A loop over a global array keeps the one pointer it walks rather than the counter and the pointer together. `crates/rucc-opt/src/ivopts.rs` priced every candidate for a group whose base is the address of a global as no price at all, because the arithmetic on invariants will not scale an address, so the search found no set that served every use and fell back to the variables it started with. The price now takes the global off both bases first: the walk made for the group cancels it and pays a plain base, and a counter leaves it as the base register and pays a `lea` on every turn for it, since nothing moves the address of a global out of a loop. The `switch-runs` example in the issue now keeps one pointer and tests it at the exit. Over the corpus six loops change their variables, the `-O2` text grows by 47 instructions over 14 sources from one more saved register in a few nested loops, and the instructions executed fall by 293 with the same output. Section 28.3 of `spec/optimizer/28-induction-variables.md` has the details. Closes tamnd/rucc#762.
+
 ## 0.10.78
 
 ### Added
