@@ -115,8 +115,9 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    AbiList, CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, IntPred,
-    Linkage, MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
+    AbiList, AttrSet, Block, CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst,
+    InstData, IntPred, Linkage, MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature,
+    SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -189,7 +190,7 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 48] = [
+const SOURCES: [&str; 49] = [
     "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
@@ -215,6 +216,7 @@ const SOURCES: [&str; 48] = [
     "fputs_unlocked",
     "index",
     "memchr",
+    "memcmp",
     "memmove",
     "mempcpy",
     "printf",
@@ -705,6 +707,7 @@ impl Site<'_> {
             "strchr" | "index" => self.strchr(data, &args, Side::First),
             "strrchr" | "rindex" => self.strchr(data, &args, Side::Last),
             "memchr" => self.memchr(data, &args),
+            "memcmp" => self.memcmp(inst, data, &args),
             "strlen" => self.strlen(inst, data, &args),
             "strnlen" => self.strnlen(data, &args),
             "strcmp" => self.strcmp(data, &args),
@@ -885,6 +888,20 @@ impl Site<'_> {
     /// terminator from the place asked about without a gap.
     fn stored(&self, call: Inst, value: Value) -> Option<Vec<u8>> {
         let (base, offset) = self.address(value)?;
+        let bytes = self.before(call, base)?;
+        let mut text = Vec::new();
+        for at in (offset..).take(bytes.len()) {
+            match *bytes.get(&at)? {
+                0 => return Some(text),
+                byte => text.push(byte),
+            }
+        }
+        None
+    }
+
+    /// The bytes of the local array at `base` the walk in front of this call found written, by
+    /// their place in the array.
+    fn before(&self, call: Inst, base: Value) -> Option<HashMap<i128, u8>> {
         let size = self.extent(base)?;
         let mut bytes: HashMap<i128, u8> = HashMap::new();
         let mut block = self.func.block_of(call)?;
@@ -904,17 +921,53 @@ impl Site<'_> {
                     break 'walk;
                 }
             }
-            let &[pred] = self.cfg.predecessors(block) else { break };
+            let Some(pred) = self.only_way_in(block) else { break };
             block = pred;
         }
-        let mut text = Vec::new();
-        for at in (offset..).take(bytes.len()) {
-            match *bytes.get(&at)? {
-                0 => return Some(text),
-                byte => text.push(byte),
-            }
+        Some(bytes)
+    }
+
+    /// The one block control can have come from into this one, leaving out any that calls a
+    /// function that does not come back.
+    ///
+    /// `if (memcmp (...) != 0) abort ();` is a join in front of whatever comes next until the
+    /// branches are cleaned up, which is after this pass, and control reaching the join cannot
+    /// have come through the arm that called `abort`, so the walk goes on up the other arm.
+    fn only_way_in(&self, block: Block) -> Option<Block> {
+        let mut live = self
+            .cfg
+            .predecessors(block)
+            .iter()
+            .copied()
+            .filter(|&pred| !self.func.insts(pred).any(|inst| self.never_back(inst)));
+        let first = live.next()?;
+        live.next().is_none().then_some(first)
+    }
+
+    /// Whether this is a call control does not come back from, by the callee's own attribute or
+    /// because it is a declaration of `abort` or `exit`, which gcc knows the same way.
+    fn never_back(&self, inst: Inst) -> bool {
+        if self.func[inst].opcode != Opcode::Call {
+            return false;
         }
-        None
+        let Extra::Call(at) = self.func[inst].extra else { return false };
+        let Some(callee) = self.func[at].callee else { return false };
+        let Some(SymbolRef::Func(id)) = self.module.lookup(callee) else { return false };
+        let target = &self.module[id];
+        target.attrs.set.contains(AttrSet::NORETURN)
+            || (target.entry().is_none()
+                && matches!(self.called(inst), Some("abort" | "exit" | "_Exit" | "quick_exit")))
+    }
+
+    /// The `count` bytes from this address, out of a constant object or out of what was written
+    /// into a local array in front of the call, with no gap and no terminator stopping them.
+    fn held(&self, call: Inst, value: Value, count: usize) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.raw(value) {
+            return Some(bytes.get(..count)?.to_vec());
+        }
+        let (base, offset) = self.address(value)?;
+        let bytes = self.before(call, base)?;
+        (offset..).take(count).map(|at| bytes.get(&at).copied()).collect()
     }
 
     /// Puts what this instruction wrote into the local array at `base` into `bytes`, under the
@@ -961,6 +1014,10 @@ impl Site<'_> {
                         let mut text = self.one(*args.get(1)?)?;
                         text.push(0);
                         text
+                    }
+                    // Calls that only read, which an earlier comparison on the same array is.
+                    "memcmp" | "memchr" | "strcmp" | "strncmp" | "strlen" | "strchr" => {
+                        return Some(());
                     }
                     _ => return None,
                 };
@@ -1041,6 +1098,37 @@ impl Site<'_> {
             None => return None,
         };
         Some(Plan::Answer(Answer::Number(i128::try_from(len).ok()?)))
+    }
+
+    /// How two objects compare over a count of bytes the call was given.
+    ///
+    /// Unlike the string comparisons there is no terminator, so every byte up to the count has to
+    /// be known, and it may be known from a constant object or from what was written into a local
+    /// array in front of the call. `builtins/memcmp.c` asks both, and gcc 16 folds both. The answer
+    /// is the sign of the first byte that differs read as an `unsigned char`, which is all the
+    /// standard promises. Where only one side is known a count of one is still an answer, since
+    /// that one byte is the whole comparison.
+    fn memcmp(&self, call: Inst, data: &InstData, args: &[Value]) -> Option<Plan> {
+        (args.len() == 3).then_some(())?; // not a threshold: `memcmp` takes three arguments.
+        if self.func[args[0]].ty != Type::PTR || self.func[args[1]].ty != Type::PTR {
+            return None;
+        }
+        let ty = self.answers(data)?;
+        let count = self.count(args[2])?;
+        // Told to read no bytes it reads neither object, so the answer holds whatever they hold.
+        if count == 0 {
+            return Some(Plan::Answer(Answer::Number(0)));
+        }
+        match (self.held(call, args[0], count), self.held(call, args[1], count)) {
+            (Some(left), Some(right)) => {
+                let differs = left.iter().zip(&right).find(|(this, that)| this != that);
+                let sign = differs.map_or(0, |(this, that)| if this < that { -1 } else { 1 });
+                Some(Plan::Answer(Answer::Number(sign)))
+            }
+            (Some(known), None) => self.byte(ty, &known, args[1], true, count),
+            (None, Some(known)) => self.byte(ty, &known, args[0], false, count),
+            (None, None) => None,
+        }
     }
 
     /// How two strings this module holds compare.
@@ -3142,6 +3230,91 @@ block0:
 
         let out = folded(&text.replace("CALL", "call @touch() : ()"));
         assert_eq!(out.matches("call @strlen(").count(), 2, "{out}");
+    }
+
+    /// `memcmp` of two constant objects is the sign of the first byte that differs, of a count of
+    /// nothing is zero, and of a local array reads what was copied into it in front of the call,
+    /// past an earlier comparison, which is `builtins/memcmp.c`.
+    #[test]
+    fn memcmp_of_bytes_known_in_front_of_it_is_their_order() {
+        let text = r#"
+global @.Lstr.0 : bytes 5 = { bytes "abcd\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 5 = { bytes "efgh\00" }, align 1, linkage(internal), constant
+global @.Lstr.2 : bytes 5 = { bytes "3141\00" }, align 1, linkage(internal), constant
+
+func @memcmp(ptr, ptr, i64) -> i32, linkage(external);
+func @strcpy(ptr, ptr) -> ptr, linkage(external);
+func @use(i32, i32, i32, i32, i32), linkage(external);
+func @touch(ptr), linkage(external);
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @.Lstr.0
+    %2 = global_addr @.Lstr.1
+    %3 = iconst.i64 4
+    %4 = call @memcmp(%1, %2, %3) : (ptr, ptr, i64) -> i32
+    %5 = iconst.i64 0
+    %6 = call @memcmp(%0, %2, %5) : (ptr, ptr, i64) -> i32
+    %7 = alloca, size 8, align 1
+    %8 = global_addr @.Lstr.2
+    %9 = call @strcpy(%7, %8) : (ptr, ptr) -> ptr
+    %10 = iconst.i64 2
+    %11 = ptr_add %7, %10
+    %12 = iconst.i64 1
+    %13 = call @memcmp(%7, %11, %12) : (ptr, ptr, i64) -> i32
+    TOUCH
+    %14 = call @memcmp(%11, %7, %12) : (ptr, ptr, i64) -> i32
+    %15 = call @memcmp(%0, %1, %3) : (ptr, ptr, i64) -> i32
+    call @use(%4, %6, %13, %14, %15) : (i32, i32, i32, i32, i32)
+    return
+}
+"#;
+        let out = folded(&text.replace("TOUCH", ""));
+        assert_eq!(out.matches("call @memcmp(").count(), 1, "the unknown one stays, {out}");
+        assert!(out.contains("iconst.i32 -1"), "{out}");
+        assert!(out.contains("iconst.i32 1"), "{out}");
+
+        let out = folded(&text.replace("TOUCH", "call @touch(%7) : (ptr)"));
+        assert_eq!(out.matches("call @memcmp(").count(), 2, "{out}");
+    }
+
+    /// The walk back from a comparison goes past an `if (...) abort ();` in front of it, since the
+    /// arm that calls `abort` is not one control came from, and stops at a join of two arms that
+    /// both come back.
+    #[test]
+    fn an_arm_that_calls_abort_is_not_a_way_in() {
+        let text = r#"
+global @.Lstr.0 : bytes 5 = { bytes "3141\00" }, align 1, linkage(internal), constant
+
+func @memcmp(ptr, ptr, i64) -> i32, linkage(external);
+func @strcpy(ptr, ptr) -> ptr, linkage(external);
+func @abort(), linkage(external);
+func @other(), linkage(external);
+func @use(i32), linkage(external);
+
+func @g(i1), linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 8, align 1
+    %2 = global_addr @.Lstr.0
+    %3 = call @strcpy(%1, %2) : (ptr, ptr) -> ptr
+    br_if %0, block1, block2
+block1:
+    call @STOP() : ()
+    jump block2
+block2:
+    %4 = iconst.i64 2
+    %5 = ptr_add %1, %4
+    %6 = iconst.i64 1
+    %7 = call @memcmp(%1, %5, %6) : (ptr, ptr, i64) -> i32
+    call @use(%7) : (i32)
+    return
+}
+"#;
+        let out = folded(&text.replace("STOP", "abort"));
+        assert!(!out.contains("call @memcmp("), "{out}");
+
+        let out = folded(&text.replace("STOP", "other"));
+        assert!(out.contains("call @memcmp("), "{out}");
     }
 
     /// `strlen` of a pointer that may be either of two strings is their length where they share
