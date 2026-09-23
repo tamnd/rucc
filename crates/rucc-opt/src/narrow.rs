@@ -57,13 +57,23 @@
 //! That is the whole profitability argument, and it is deliberately a structural one rather than
 //! a cost model. A pass whose payoff has to be estimated is a pass whose payoff can be wrong.
 //!
+//! A division of zero extensions. A divide or a remainder reads every bit of what it divides, so it
+//! is not one of the operations above, but two zero extensions from the narrow width are numbers
+//! that fit in it, and so do their quotient and their remainder. The wide operation then gives the
+//! narrow answer with nothing above it to throw away, and the truncation of it is the unsigned
+//! division at the narrow width. That holds for the signed opcodes as well, because a zero
+//! extension is never negative and the two readings agree on it. This is `unsigned char a, b; a /
+//! b`, which C divides at `int` because the promotions say so.
+//!
 //! # What it does not narrow
 //!
-//! Not a divide or a remainder. `char a = -128, b = -1; char c = a / b;` is well defined in C: the
-//! division happens at `int`, gives 128, and the conversion back to `char` is what makes it minus
-//! 128 again. The same division at one byte is the overflow case that raises on this machine, so
-//! narrowing it turns a program that works into a program that dies. It needs a range that says
-//! the operands miss that one pair, and ranges are the analysis this pass does not have.
+//! Not a divide or a remainder of sign extensions. `char a = -128, b = -1; char c = a / b;` is well
+//! defined in C: the division happens at `int`, gives 128, and the conversion back to `char` is
+//! what makes it minus 128 again. The same division at one byte is the overflow case that raises
+//! on this machine, so narrowing it turns a program that works into a program that dies. It needs a
+//! range that says the operands miss that one pair, and ranges are the analysis this pass does not
+//! have. A division by a constant is not narrowed either, because the back end turns one into a
+//! multiply at the width it is written at, and that is worth more than the narrow divide.
 //!
 //! Not a shift by a value. `char c; c <<= n;` shifts at `int`, so a count of twenty is a defined
 //! shift whose low eight bits are zero, and the same count at one byte is poison. A shift by a
@@ -213,11 +223,16 @@ fn redo(func: &Func, value: Value, ty: Type, uses: &[u32], depth: u32) -> Option
     }
     let Def::Result { inst, .. } = func[value].def else { return None };
     let data = &func[inst];
+    let args = &func[data.args];
+    let (&left, &right) = (args.first()?, args.get(1)?);
+    if let Some(opcode) = unsigned_division(data.opcode) {
+        let lhs = Plan::Already(zero_extended(func, left, ty)?);
+        let rhs = Plan::Already(zero_extended(func, right, ty)?);
+        return Some(Redo { opcode, extra: Extra::None, ty, lhs, rhs: Some(rhs) });
+    }
     if !low_bits_only(data.opcode) {
         return None;
     }
-    let args = &func[data.args];
-    let (&left, &right) = (args.first()?, args.get(1)?);
     let lhs = plan(func, left, ty, uses, depth)?;
     // A shift is the one operation whose right operand is not a number of the same kind as its
     // left one, and it is the one that is unsafe to narrow when that operand is not a constant.
@@ -254,6 +269,34 @@ const fn low_bits_only(opcode: Opcode) -> bool {
             | Opcode::Xor
             | Opcode::Shl
     )
+}
+
+/// The unsigned division a division or a remainder is at the narrow width, when its operands are
+/// zero extensions from it.
+///
+/// Signed or not, because the operands are what makes it unsigned. A zero extension is never
+/// negative, so the signed and the unsigned division of two of them are the same division, and
+/// the narrow one has to be the unsigned one because the narrow operands are not zero extended
+/// any more and the signed reading of them is a different number.
+const fn unsigned_division(opcode: Opcode) -> Option<Opcode> {
+    match opcode {
+        Opcode::UDiv | Opcode::SDiv => Some(Opcode::UDiv),
+        Opcode::URem | Opcode::SRem => Some(Opcode::URem),
+        _ => None,
+    }
+}
+
+/// What this value was before it was zero extended from exactly that width.
+///
+/// The width has to be the narrow one and not something narrower. A byte zero extended to `int`
+/// and divided, then truncated to two bytes, would be a divide at two bytes of operands that are
+/// not two bytes wide, and the extension that would put them there is the instruction this pass
+/// does not write.
+fn zero_extended(func: &Func, value: Value, ty: Type) -> Option<Value> {
+    match widening(func, value)? {
+        (Opcode::ZExt, from, narrow) if from == ty => Some(narrow),
+        _ => None,
+    }
 }
 
 /// Whether this is a comparison of two things extended from the same narrower width.
@@ -720,6 +763,123 @@ mod tests {
         // The most negative byte over minus one is a hundred and twenty eight at four bytes and
         // is the overflow that raises at one, so this is the rewrite that would turn a working
         // program into one that dies.
+        assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
+    }
+
+    /// The division `unsigned char a, b; unsigned char c = a / b;` compiles to, at each of the
+    /// four opcodes a division can be. The promotions make it a signed divide of two zero
+    /// extensions, and the operands being zero extensions is what lets the signed one narrow.
+    #[test]
+    fn a_division_of_two_zero_extensions_is_the_unsigned_division_at_the_narrow_width() {
+        let cases = [
+            (Opcode::SDiv, Opcode::UDiv),
+            (Opcode::UDiv, Opcode::UDiv),
+            (Opcode::SRem, Opcode::URem),
+            (Opcode::URem, Opcode::URem),
+        ];
+        for (width, (wide, want)) in [8, 16].into_iter().flat_map(|w| cases.map(|c| (w, c))) {
+            let (mut func, block) = blank();
+            let a = func.append_param(block, Type::int(width));
+            let b = func.append_param(block, Type::int(width));
+            let mut build = Builder::new(&mut func, block);
+            let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+            let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+            let divided = build.binary(wide, wide_a, wide_b, Flags::NONE);
+            let narrow = build.unary(Opcode::Trunc, divided, Type::int(width));
+            build.ret(&[narrow]);
+            assert!(
+                Narrow
+                    .run(
+                        &mut func,
+                        &mut crate::machine::fixtures::analyses(),
+                        &mut Fuel::unlimited()
+                    )
+                    .changed()
+            );
+            let operands = vec![Type::int(width), Type::int(width)];
+            assert_eq!(shape(&func, narrow), (want, operands));
+            assert_eq!(left(&func, block), 5);
+        }
+    }
+
+    #[test]
+    fn a_division_inside_narrow_arithmetic_narrows_with_it() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+        let quotient = build.binary(Opcode::SDiv, wide_a, wide_b, Flags::NONE);
+        let one = build.iconst(Type::int(32), 1);
+        let sum = build.binary(Opcode::Add, quotient, one, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, narrow), (Opcode::Add, vec![Type::int(8), Type::int(8)]));
+        let inner = under(&func, narrow);
+        assert_eq!(shape(&func, inner), (Opcode::UDiv, vec![Type::int(8), Type::int(8)]));
+    }
+
+    #[test]
+    fn a_division_of_a_zero_extension_by_a_sign_extension_stays_wide() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
+        let quotient = build.binary(Opcode::SDiv, wide_a, wide_b, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, quotient, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        // Two hundred over minus one is minus two hundred at four bytes, and a byte divide of the
+        // same bits is two hundred over two hundred and fifty five, which is nothing like it.
+        assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
+    }
+
+    #[test]
+    fn a_division_of_zero_extensions_from_a_narrower_width_stays_wide() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::ZExt, b, Type::int(32));
+        let quotient = build.binary(Opcode::UDiv, wide_a, wide_b, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, quotient, Type::int(16));
+        build.ret(&[narrow]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
+    }
+
+    #[test]
+    fn a_division_by_a_constant_stays_wide() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide = build.unary(Opcode::ZExt, a, Type::int(32));
+        let ten = build.iconst(Type::int(32), 10);
+        let quotient = build.binary(Opcode::SDiv, wide, ten, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, quotient, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
         assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
     }
 
