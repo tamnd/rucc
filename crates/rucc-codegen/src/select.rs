@@ -254,23 +254,24 @@ mod tests {
         assert_eq!(selects(&terms, bit), Some("x64.bit_of_32"));
     }
 
-    /// The unsigned divisions at one byte and at two, which the `narrow` pass writes for a
-    /// division of two zero extensions. The signed ones at those widths have no rule, and a term
-    /// for one finds nothing rather than a wide division it would be wrong to substitute.
+    /// The divisions at one byte and at two, which the `narrow` pass writes for a division of two
+    /// zero extensions and, signed, for a division of two sign extensions the ranges clear.
     #[test]
-    fn a_narrow_unsigned_division_is_the_narrow_divide() {
+    fn a_narrow_division_is_the_narrow_divide() {
         let mut terms = Terms::default();
-        for (width, quo, rem) in
-            [(8, "x64.div_quo_8", "x64.div_rem_8"), (16, "x64.div_quo_16", "x64.div_rem_16")]
-        {
+        for width in [8, 16] {
             let x = terms.value(width, "v0");
             let y = terms.value(width, "v1");
-            let divide = terms.app(&format!("udiv.i{width}"), &[x, y]);
-            assert_eq!(selects(&terms, divide), Some(quo));
-            let remainder = terms.app(&format!("urem.i{width}"), &[x, y]);
-            assert_eq!(selects(&terms, remainder), Some(rem));
-            let signed = terms.app(&format!("sdiv.i{width}"), &[x, y]);
-            assert_eq!(selects(&terms, signed), None);
+            for (op, head) in [
+                ("udiv", "div_quo"),
+                ("urem", "div_rem"),
+                ("sdiv", "idiv_quo"),
+                ("srem", "idiv_rem"),
+            ] {
+                let term = terms.app(&format!("{op}.i{width}"), &[x, y]);
+                let want = format!("x64.{head}_{width}");
+                assert_eq!(selects(&terms, term), Some(want.as_str()));
+            }
         }
     }
 

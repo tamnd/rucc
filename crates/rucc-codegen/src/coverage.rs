@@ -166,27 +166,14 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 /// two sign extended chars and there is no C program that asks the back end to add two bytes.
 /// Rules were written at those names anyway, ahead of the pass that would reach them, and they sat
 /// proved and never selected: `tamnd/rucc#261` measured that and `tamnd/rucc#368` took them out.
-/// Most of them are back, because the width narrowing pass in `tamnd/rucc#375` is that caller and
-/// it writes a byte add out of the truncation the assignment back to a `char` already was.
+/// They are back, because the width narrowing pass in `tamnd/rucc#375` is that caller and it
+/// writes a byte add out of the truncation the assignment back to a `char` already was. The last
+/// to come back were the divides, which narrow when the operands are zero extensions and, for
+/// sign extensions, when the ranges rule out the most negative value over minus one.
 ///
-/// What is left is what the pass will not narrow. A divide of two zero extensions is narrowed and
-/// its unsigned names have rules, but a divide of sign extensions is not, because the most negative
-/// byte over minus one is a defined hundred and twenty eight at four bytes and is the overflow that
-/// raises at one, so it wants a range analysis saying that pair cannot happen.
-///
-/// Not every narrow name was ever here, because promotion is not the only way a narrow operation
-/// is born. Reading a bitfield is a shift and a mask by constants at the width of the storage
-/// unit, writing one is a mask, a shift and an `or` of two values, and a truth test on a narrow
-/// scalar is an `icmp_ne` at that scalar's width. Those fire, so those always had rules.
-pub static NAMES: &[(&str, &str, &str)] = &[
-    ("sdiv.i8", "a narrow signed divide, which wants a range analysis first", NARROW),
-    ("sdiv.i16", "the same", NARROW),
-    ("srem.i8", "the same", NARROW),
-    ("srem.i16", "the same", NARROW),
-];
-
-/// The issue every entry of [`NAMES`] waits on, since they all wait on the same one.
-const NARROW: &str = "tamnd/rucc#375";
+/// So the list is empty, and it stays here for the next name somebody decides to leave out, since
+/// the report and the capability table both read it.
+pub static NAMES: &[(&str, &str, &str)] = &[];
 
 /// What a target's rules cover, and what they do not.
 #[derive(Debug)]
