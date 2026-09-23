@@ -331,9 +331,10 @@ mod tests {
     ///
     /// A rotate is a term the IR could have, and does not yet: C spells one as two shifts and an or,
     /// and nothing puts those back together. A test against a constant is an and whose answer is
-    /// thrown away, and the layout writes a comparison for that rather than this. So what reaches
-    /// one of these is a program that wrote the name, which is what tcc's byte swap and its copy of
-    /// `memcpy` do.
+    /// thrown away, and the layout writes a comparison for that rather than this. A store of a
+    /// constant goes through a register when the compiler writes it. So what reaches one of these
+    /// is a program that wrote the name, which is what tcc's byte swap, its copy of `memcpy` and
+    /// its test of `"m"` operands do.
     const TEMPLATED: &[&str] = &[
         "rol_ri_8",
         "rol_ri_16",
@@ -355,6 +356,10 @@ mod tests {
         "test_ri_16",
         "test_ri_32",
         "test_ri_64",
+        "mov_mi_8",
+        "mov_mi_16",
+        "mov_mi_32",
+        "mov_mi_64",
     ];
 
     /// The instructions a template asks for that are right because of the line above them.

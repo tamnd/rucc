@@ -668,6 +668,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Lea
             | Form::Load
             | Form::Store
+            | Form::StoreImm
             | Form::LoadImm
             | Form::Push
             | Form::Pop

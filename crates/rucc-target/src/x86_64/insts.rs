@@ -45,7 +45,7 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
+    ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
     StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Test, TestCmov,
     TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
@@ -337,6 +337,12 @@ pub enum Form {
     /// A store: an addressing mode the value goes to, and the register it comes out of. It
     /// writes no register at all, which makes it the first form here with no definition in it.
     Store,
+    /// A store of a constant: an addressing mode and the number that goes there.
+    ///
+    /// No register at all, for the reason [`Form::AluMi`] has none. Only a template writes one, since
+    /// a store of a constant the compiler writes goes through a register it already has, and tcc's
+    /// `movl $51,%2` on an `"=m"` operand is a program writing one by name.
+    StoreImm,
     /// The value a function gives back, in the register it is given back in.
     ///
     /// It is not the `ret` instruction and it encodes to nothing. What the selector can do about
@@ -1189,7 +1195,7 @@ impl Form {
             Lea => &ADDRESS,
             Load => &LOAD,
             AluMr | Store => &STORE,
-            AluMi | UnaryM => &ALU_MI,
+            AluMi | UnaryM | StoreImm => &ALU_MI,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
@@ -1241,6 +1247,7 @@ impl Form {
                 | CmpSetMi
                 | CmpMi
                 | TestRi
+                | StoreImm
         )
     }
 
@@ -1259,6 +1266,7 @@ impl Form {
                 | CmpSetMi
                 | CmpMi
                 | Store
+                | StoreImm
                 | LoadVec
                 | StoreVec
                 | PushX87
@@ -1303,6 +1311,7 @@ impl Form {
                 | CmpSetMi
                 | CmpMi
                 | Store
+                | StoreImm
                 | LoadVec
                 | StoreVec
                 | PushX87
@@ -1919,6 +1928,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mov_mr_16", Store),
     ("mov_mr_32", Store),
     ("mov_mr_64", Store),
+    // A constant stored where an address says, which only a template writes.
+    ("mov_mi_8", StoreImm),
+    ("mov_mi_16", StoreImm),
+    ("mov_mi_32", StoreImm),
+    ("mov_mi_64", StoreImm),
     // Reading and writing a truth value, which the machine does with the byte forms above for the
     // reason it widens one with the byte widenings. Separate names for the same reason as well.
     ("mov_rm_bit", Load),
@@ -2435,7 +2449,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 724);
+        assert_eq!(described, 728);
     }
 
     #[test]
@@ -2502,6 +2516,7 @@ mod tests {
                             | UnaryX87
                             | AluMi
                             | UnaryM
+                            | StoreImm
                             | Landing
                             | Nop
                             | Spin
@@ -2679,6 +2694,7 @@ mod tests {
                             | Barrier
                             | AluMi
                             | UnaryM
+                            | StoreImm
                             | CmpMi
                             | Landing
                             | Nop
