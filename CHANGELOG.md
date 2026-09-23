@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.0
+
 ### Added
 
 - `rucc --fetch` now installs the four musl targets, `x86_64-linux-musl`, `aarch64-linux-musl`, `riscv64-linux-musl` and `armv7-linux-musleabihf`. Each is musl 1.2.5 with its static libraries and start files, packed by `tamnd/rucc-cross` and published in its release `sysroots-2026-09-23`, about 2 MiB each. The Linux uapi headers are a fifth archive shared by every Linux target, so a fetch of the first Linux target also installs them at `kernel-headers` in the cache, and later ones find them there. Both archives are checked against a hash compiled into the release, and the kernel tree is checked against its own record the same way a sysroot is.
