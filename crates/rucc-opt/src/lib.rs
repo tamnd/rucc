@@ -153,6 +153,7 @@ pub mod profile;
 pub mod prune;
 pub mod purity;
 pub mod range;
+pub mod readonly;
 pub mod reload;
 pub mod rules;
 pub mod scev;
@@ -209,6 +210,7 @@ pub use profile::{Frequency, Hotness, Probability, Quality};
 // top of an optimizer says nothing about which facts. [`purity::Purity`] is the answer everything
 // asks for and is worth having here.
 pub use purity::Purity;
+pub use readonly::{ReadOnly, Table};
 // `range::query::Options` and `range::query::Counts` stay behind their module for the two reasons
 // already given above, which is that both names are taken at the top of this crate and neither of
 // the things holding them is the thing a caller would mean.
