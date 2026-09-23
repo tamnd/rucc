@@ -339,12 +339,22 @@ pub fn witness(addr: *const c_void) -> Origin {
 /// caller's side and this is the callee's, and a callee compiled against this does the right thing
 /// either way without knowing which kind of caller it has.
 ///
-/// A caller that genuinely means to pass a null or a dead pointer passes the bottom capability
-/// too, and this recovers over it. That is not a hole. Recovery over a dead pointer inside a
-/// watched heap answers [`Origin::Nobody`], which is the bottom capability again.
+/// A caller that genuinely means to pass a dead pointer passes the bottom capability too, and this
+/// recovers over it. That is not a hole. Recovery over a dead pointer inside a watched heap answers
+/// [`Origin::Nobody`], which is the bottom capability again.
+///
+/// A null one is bottom and stays bottom, without a recovery, which is the rule
+/// [`crate::cap::load`] already has for a null word read out of memory and for the same reason:
+/// recovery over an address nothing watches answers with bounds over everything, and a capability
+/// that permits dereferencing null is the one answer no reading of this can want. It is also most of
+/// the recoveries a recursive walk does, since every leaf is a call with a null in it, and each of
+/// them was a scan of every region and an atomic add on a counter shared by every thread.
 #[must_use]
 pub fn argument(carried: Cap, addr: *const c_void) -> Cap {
-    if carried.is_bottom() { recover(addr) } else { carried }
+    if !carried.is_bottom() || addr.is_null() {
+        return carried;
+    }
+    recover(addr)
 }
 
 /// The instance `addr` landed in, as a base and an extent, when the planes know of one.
@@ -848,6 +858,16 @@ mod tests {
         let cap = super::argument(carried, 4096 as *const c_void);
         assert_eq!(cap, carried);
         assert_eq!(counts().total(), before, "nothing was recovered");
+    }
+
+    #[test]
+    fn a_null_argument_is_bottom_without_a_recovery() {
+        let _turn = crate::turnstile::turn();
+
+        let before = counts();
+        let cap = super::argument(Cap::BOTTOM, core::ptr::null());
+        assert!(cap.is_bottom());
+        assert_eq!(counts(), before, "nothing was recovered");
     }
 
     #[test]

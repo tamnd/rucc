@@ -345,6 +345,7 @@ pub mod exports {
 mod tests {
     use super::*;
     use crate::layout::{Class, Meta, perm};
+    use core::ffi::c_void;
 
     /// A capability naming an instance nothing else in the test uses.
     fn cap(lo: u64, ver: u64) -> Cap {
@@ -472,21 +473,23 @@ mod tests {
 
         // A position the caller did not describe, which is the recovery rather than an error, and
         // then a position no frame could hold. Whatever the planes say about the address is the
-        // answer to both, and the address here is one they have never heard of.
-        let found = crate::recover::recover(core::ptr::null());
+        // answer to both, and the address here is one they have never heard of. Not null, which
+        // is bottom without asking them.
+        let nowhere = 16 as *const c_void;
+        let found = crate::recover::recover(nowhere);
         // SAFETY: as above.
-        unsafe { exports::__rucc_frame_arg(&raw mut out, &raw mut frame, 1, core::ptr::null()) };
+        unsafe { exports::__rucc_frame_arg(&raw mut out, &raw mut frame, 1, nowhere) };
         assert_eq!(out, found);
         // SAFETY: as above, and `u64::MAX` is a position rather than something read through.
         unsafe {
-            exports::__rucc_frame_arg(&raw mut out, &raw mut frame, u64::MAX, core::ptr::null());
+            exports::__rucc_frame_arg(&raw mut out, &raw mut frame, u64::MAX, nowhere);
         }
         assert_eq!(out, found);
 
         // And no frame at all, which is an entry from uninstrumented code and is the same answer.
         // SAFETY: null says there is no frame, which the contract allows.
         unsafe {
-            exports::__rucc_frame_arg(&raw mut out, core::ptr::null_mut(), 0, core::ptr::null());
+            exports::__rucc_frame_arg(&raw mut out, core::ptr::null_mut(), 0, nowhere);
         }
         assert_eq!(out, found);
     }
@@ -508,16 +511,22 @@ mod tests {
 
         // A callee that wrote nothing leaves the bottom capability the caller put there, which is
         // the signal to work the answer out of the planes, and so is having no frame at all.
-        let found = crate::recover::recover(core::ptr::null());
+        let nowhere = 16 as *const c_void;
+        let found = crate::recover::recover(nowhere);
         frame.ret = Cap::BOTTOM;
         // SAFETY: as above, and a null frame is nothing to write to and nothing to read from.
         unsafe {
             exports::__rucc_frame_yield(core::ptr::null_mut(), &raw const returned);
-            exports::__rucc_frame_returned(&raw mut out, &raw mut frame, core::ptr::null());
+            exports::__rucc_frame_returned(&raw mut out, &raw mut frame, nowhere);
             assert_eq!(out, found);
-            exports::__rucc_frame_returned(&raw mut out, core::ptr::null_mut(), core::ptr::null());
+            exports::__rucc_frame_returned(&raw mut out, core::ptr::null_mut(), nowhere);
         }
         assert_eq!(out, found);
+
+        // A null pointer coming back is bottom whatever the frame says, without a recovery.
+        // SAFETY: as above.
+        unsafe { exports::__rucc_frame_returned(&raw mut out, &raw mut frame, core::ptr::null()) };
+        assert!(out.is_bottom());
     }
 
     #[test]
