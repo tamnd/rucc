@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.80
+
 ### Added
 
 - `memcmp` of a constant count folds where both sides are known, from a constant object or from what was written into a local array in front of the call, to the sign of the first byte that differs, and a count of zero folds to zero. The walk back that finds what was written passes calls that only read and, at a join, leaves out an arm that calls `abort` or `exit` or anything declared `noreturn`, so `if (...) abort ();` in front of a call no longer stops it. `execute/builtins/memcmp.c` builds and passes at all six levels. Part of tamnd/rucc#392.
