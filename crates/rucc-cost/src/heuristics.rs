@@ -502,8 +502,10 @@ pub const SCHEDULER_READY_LIST_BOUND: usize = 100;
 ///
 /// Not measured. The right answer depends on what a mispredicted indirect branch costs against
 /// what a run of well predicted compares costs, and both are machine numbers, so section 40.10
-/// asks for a measurement and document 42 owes it. The value here keeps the lowering working and
-/// should not be quoted at anybody.
+/// asks for a measurement and document 42 owes it. `rucc_codegen`'s switch lowering reads it as the
+/// fewest clusters a table may replace. gcc 16 builds a table from five cases on x86-64, so eight
+/// is the more careful of the two until something here measures the difference, and it should
+/// not be quoted at anybody.
 pub const JUMP_TABLE_MIN_TARGETS: u32 = 8;
 
 /// How much worse than the reference the allocator may do before it counts as a regression, as a

@@ -463,7 +463,10 @@ fn copied_form(
     if amode.base.is_none() || amode.index.is_some() || amode.disp != 0 {
         return None;
     }
-    if amode.symbol.is_some() || amode.block.is_some() || amode.segment.is_some() {
+    if amode.symbol.is_some() || amode.block.is_some() || amode.table.is_some() {
+        return None;
+    }
+    if amode.segment.is_some() {
         return None;
     }
     opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)

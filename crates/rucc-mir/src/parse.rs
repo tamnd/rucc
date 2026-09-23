@@ -34,8 +34,8 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
-use crate::func::Func;
-use crate::inst::{BlockCall, Flags, Mem, Opcode, Operand, Param, Reach, Reg};
+use crate::func::{Func, Table};
+use crate::inst::{Block, BlockCall, Flags, Mem, Opcode, Operand, Param, Reach, Reg};
 
 /// Why a text could not be read.
 ///
@@ -100,8 +100,16 @@ struct PendingMem {
     disp: i32,
     symbol: Option<Symbol>,
     block: Option<u32>,
+    table: Option<u32>,
     reach: Reach,
     segment: Option<Segment>,
+}
+
+/// A jump table, read but not yet built: the block whose jump reads it, and its cells.
+struct PendingTable {
+    block: u32,
+    cells: Vec<u32>,
+    line: u32,
 }
 
 /// One arm of a terminator, read but not yet resolved.
@@ -160,6 +168,7 @@ impl<'a> Parser<'a, '_> {
         self.end_of_line()?;
 
         let mut blocks: Vec<PendingBlock> = Vec::new();
+        let mut tables: Vec<PendingTable> = Vec::new();
         loop {
             self.skip_blank_lines();
             if self.eat("}") {
@@ -169,9 +178,47 @@ impl<'a> Parser<'a, '_> {
             if self.at_end() {
                 return self.fail("the function is not closed");
             }
-            blocks.push(self.block()?);
+            if self.at_table() {
+                tables.push(self.table(tables.len())?);
+            } else if tables.is_empty() {
+                blocks.push(self.block()?);
+            } else {
+                return self.fail("a block begins after the tables");
+            }
         }
-        self.build(name, blocks)
+        let mut func = self.build(name, blocks)?;
+        let order: Vec<Block> = func.blocks().collect();
+        for table in tables {
+            self.line = table.line;
+            let Some(jump) = order.get(table.block as usize).and_then(|&b| func.terminator(b))
+            else {
+                return self.fail(format!("block{} has no jump to read a table", table.block));
+            };
+            func.tables.push(Table { jump, cells: table.cells });
+        }
+        Ok(func)
+    }
+
+    /// One `tableN blockM: cell cell ...` line, which has to be the next table in order.
+    fn table(&mut self, next: usize) -> Result<PendingTable, ParseError> {
+        let line = self.line;
+        self.expect("table")?;
+        let number = self.u32()?;
+        if number as usize != next {
+            return self.fail(format!("this is table {next} and the text calls it table{number}"));
+        }
+        let block = self.label()?;
+        self.expect(":")?;
+        let mut cells = Vec::new();
+        loop {
+            self.spaces();
+            if self.at_end() || self.at("\n") {
+                break;
+            }
+            cells.push(self.u32()?);
+        }
+        self.end_of_line()?;
+        Ok(PendingTable { block, cells, line })
     }
 
     fn block(&mut self) -> Result<PendingBlock, ParseError> {
@@ -193,7 +240,8 @@ impl<'a> Parser<'a, '_> {
         let mut insts = Vec::new();
         loop {
             self.spaces();
-            if self.at_end() || self.at("\n") || self.at("}") || self.at_label() {
+            if self.at_end() || self.at("\n") || self.at("}") || self.at_label() || self.at_table()
+            {
                 break;
             }
             insts.push(self.inst()?);
@@ -387,6 +435,12 @@ impl<'a> Parser<'a, '_> {
                     return self.fail("an address names one block");
                 }
                 mem.block = Some(self.label()?);
+            } else if self.at("table") {
+                if mem.table.is_some() {
+                    return self.fail("an address names one table");
+                }
+                self.expect("table")?;
+                mem.table = Some(self.u32()?);
             } else if self.at("%") || self.at("$") {
                 let operand = PendingOperand {
                     reg: self.written(false)?,
@@ -539,6 +593,7 @@ impl<'a> Parser<'a, '_> {
                             disp: mem.disp,
                             symbol: mem.symbol,
                             block: named,
+                            table: mem.table,
                             reach: mem.reach,
                             segment: mem.segment,
                         })
@@ -655,6 +710,13 @@ impl<'a> Parser<'a, '_> {
 
     fn at_end(&self) -> bool {
         self.pos >= self.text.len()
+    }
+
+    /// Whether a table line begins here, which is what says the blocks are over.
+    fn at_table(&self) -> bool {
+        let rest = self.text[self.pos..].trim_start_matches([' ', '\t']);
+        let Some(rest) = rest.strip_prefix("table") else { return false };
+        rest.starts_with(|c: char| c.is_ascii_digit())
     }
 
     /// Whether a block label begins here, which is what says an instruction does not.
@@ -915,6 +977,37 @@ block1:
 }
 ",
         );
+    }
+
+    #[test]
+    fn a_jump_table_round_trips() {
+        // What a dense switch is selected as. The address names the table rather than a block, and
+        // the table itself comes after the blocks, naming the block whose jump reads it and then
+        // the jump's successors by place, one per cell.
+        round_trip(
+            "\
+mfunc @dense {
+block0:
+    %0:gpr = x64.lea_64 [table0]
+    x64.jmp_reg %0, block1, block2
+
+block1:
+    x64.ret
+
+block2:
+    x64.ret
+
+  table0 block0: 0 1 0
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_block_after_a_table_is_refused() {
+        let text =
+            "mfunc @f {\nblock0:\n    x64.ret\n\n  table0 block0: 0\nblock1:\n    x64.ret\n}\n";
+        assert!(error(text).contains("a block begins after the tables"), "{}", error(text));
     }
 
     #[test]

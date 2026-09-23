@@ -512,7 +512,10 @@ fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) 
     // multiplied by, so the operand and the scale are carried together.
     let scaled = match (address.index, reading.index) {
         (Some(_), Some(_)) => return None,
-        (None, Some(_)) if address.symbol.is_some() => return None,
+        // Nor an address that is a place in this function, which is reached from the instruction
+        // pointer the way a symbol is and has no room for a register either.
+        (None, Some(_)) if address.table.is_some() => return None,
+        (None, Some(_)) if address.symbol.is_some() || address.block.is_some() => return None,
         (Some(at), None) => Some((*taken.get(usize::from(at))?, address.scale)),
         (None, Some(at)) => Some((*reader.get(usize::from(at))?, reading.scale)),
         (None, None) => None,

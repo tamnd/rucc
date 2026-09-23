@@ -1989,6 +1989,10 @@ pub static INSTS: &[(&str, Form)] = &[
     // reason it widens one with the byte widenings. Separate names for the same reason as well.
     ("mov_rm_bit", Load),
     ("mov_mr_bit", Store),
+    // Reading one cell of a jump table, which is a distance of four bytes that is added to a
+    // whole address and so is widened with its sign on the way in. Only the lowering of a dense
+    // `switch` writes it.
+    ("movsxd_rm_32_64", Load),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),

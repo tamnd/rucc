@@ -893,6 +893,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // machine writes.
     ("mov_rm_bit", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
     ("mov_mr_bit", &[spell("movb", &[Reg(0, Byte), Mem])]),
+    // One cell of a jump table, which is a signed distance from the table to an arm.
+    ("movsxd_rm_32_64", &[spell("movslq", &[Mem, Reg(0, Quad)])]),
     // The three that are not instructions. A return value, an argument and the condition a block
     // leaves on are each one register and one claim about it, and the claim is for the allocator.
     ("ret_val_8", &[]),

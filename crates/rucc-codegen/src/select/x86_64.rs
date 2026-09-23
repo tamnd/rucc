@@ -270,6 +270,12 @@ mod tests {
     /// address of, and a rule says what an instruction reads rather than where a block goes.
     const LABELS: &[&str] = &["jmp_reg"];
 
+    /// The load a jump table is read with, which `crate::lower` writes by name next to the jump
+    /// above. The address it reads is a table of this function rather than a value in the IR,
+    /// and no IR instruction loads from a place that is not a value, so there is nothing a rule
+    /// could match it from.
+    const CELL: &[&str] = &["movsxd_rm_32_64"];
+
     /// The instruction the memory model writes rather than a rule.
     ///
     /// A barrier computes nothing, so there is no equality for the solver to discharge and no
@@ -971,7 +977,7 @@ mod tests {
             if TEMPLATED.contains(&opcode) {
                 continue;
             }
-            if LABELS.contains(&opcode) || STOP.contains(&opcode) {
+            if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

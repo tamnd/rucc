@@ -1099,6 +1099,13 @@ impl<'a> Lowering<'a> {
                     self.indirect_branch(inst)?;
                     continue;
                 }
+                // A `switch` that `crate::switch` found dense enough for a table, which is a load
+                // out of the table and the same jump. Built here for the reasons the jump above
+                // is, and because what the load reads is a place in this function.
+                Opcode::Switch => {
+                    self.jump_table(inst)?;
+                    continue;
+                }
                 // The pair that saves a place in this function and comes back to it. Built here
                 // for the reason the address of a label is, and for two more. The reason is the
                 // same: the first of them writes down where control comes back to, which is a
@@ -2409,6 +2416,74 @@ impl<'a> Lowering<'a> {
         let name = x86_64::BRANCH.indirect;
         let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
         self.out.build(block, opcode).at(span).operand(mir::Operand::read(reg, self.gpr)).finish();
+        Ok(())
+    }
+
+    /// A `switch` on an index from zero up, as a jump through a table of this function.
+    ///
+    /// Every `switch` that reaches here is one `crate::switch` left behind on purpose: it has
+    /// already checked the value is inside the table and taken the lowest case off it, so the
+    /// operand is a 64 bit index, the cases are the values from zero up with gaps where the
+    /// program had no case, and the default is only where those gaps go. What is written is the
+    /// shape gcc writes for the same statement in position independent code:
+    ///
+    /// ```text
+    /// leaq    table(%rip), %base
+    /// movslq  (%base,%index,4), %offset
+    /// addq    %base, %offset
+    /// jmp     *%offset
+    /// ```
+    ///
+    /// The table holds distances from itself to each arm rather than addresses, which is what
+    /// lets it be filled in by the assembler with nothing left for a linker to do. Each cell is
+    /// stored as the place of an arm among this block's successors, which [`Self::edges`] copies
+    /// across in the IR's own order, the default first and then one per case. See
+    /// [`mir::Table`] for why a place and not a block.
+    fn jump_table(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Switch(info) = data.extra else { return Err(self.unsupported(inst)) };
+        let &index = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
+        let ty = self.source[index].ty;
+        if ty != Type::int(u64::BITS) {
+            return Err(self.unsupported(inst));
+        }
+        let cases = self.source[self.source[info].cases].to_vec();
+        let mut cells: Vec<u32> = Vec::new();
+        for (arm, case) in cases.iter().enumerate() {
+            let at = usize::try_from(case.signed(ty)).map_err(|_| self.unsupported(inst))?;
+            if at >= cells.len() {
+                cells.resize(at + 1, 0);
+            }
+            cells[at] = u32::try_from(arm + 1).map_err(|_| self.unsupported(inst))?;
+        }
+        let reg = self.reg_of(index)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let table = u32::try_from(self.out.tables.len()).expect("fewer tables than that");
+
+        let base = self.out.new_vreg(gpr);
+        let lea = self.named(x86_64::FRAME.lea);
+        self.out.build(block, lea).at(span).def(base, gpr).mem(mir::Mem::table(table)).finish();
+        let offset = self.out.new_vreg(gpr);
+        let cell =
+            mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4);
+        let load = self.named("movsxd_rm_32_64");
+        self.out.build(block, load).at(span).def(offset, gpr).mem(cell).finish();
+        // Two address, for the reason `thread_pointer` gives.
+        let to = self.out.new_vreg(gpr);
+        let add = self.named("add_rr_64");
+        self.out
+            .build(block, add)
+            .at(span)
+            .operand(mir::Operand::write(to, gpr).with(Constraint::Reuse(1)))
+            .operand(mir::Operand::read(offset, gpr))
+            .operand(mir::Operand::read(base, gpr))
+            .finish();
+        let jump = self.named(x86_64::BRANCH.indirect);
+        let jump =
+            self.out.build(block, jump).at(span).operand(mir::Operand::read(to, gpr)).finish();
+        self.out.tables.push(mir::Table { jump, cells });
         Ok(())
     }
 
@@ -4355,7 +4430,8 @@ impl<'a> Lowering<'a> {
     /// anything in this crate does and is why it is remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
-        let leaves = matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr);
+        let leaves =
+            matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch);
         let branch = if leaves { self.out.terminator(out) } else { None };
 
         let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
@@ -4962,6 +5038,7 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             disp: 0,
             symbol: None,
             block: None,
+            table: None,
             reach: mir::Reach::Itself,
             segment: None,
         }),
