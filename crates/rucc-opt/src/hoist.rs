@@ -92,6 +92,32 @@
 //! enough step to make here, and it is written down rather than left out because the rule does not
 //! cover it and a reader who assumed it did would be reading the wrong file.
 //!
+//! # Where the walk starts
+//!
+//! The check in front has to be written at the address the first iteration reads, and for a long
+//! time that address had to be a pointer plus a number. That is the walk over a whole array, and it
+//! is not the walk over a row of one. `a[i * N + k]` round `k` starts at `a` plus eight times `i *
+//! N`, and `i * N` is a value the loop does not change but it is not a value this pass knows, so the
+//! whole loop came out `check kept, its address does not walk the loop by a constant` and a matrix
+//! multiply kept every check it had. The same is true of the column walk, which starts at `grid`
+//! plus eight times `col`.
+//!
+//! So how far past the anchor the walk starts comes out of `anchored` as the expression rather than
+//! as a number, and `starting` writes it in the preheader: widen the value the way the invariant
+//! said it was read, multiply, add, and `ptr_add` the anchor by the result. Every part of that is
+//! left out where the numbers make it nothing, so the array walk still writes no arithmetic and the
+//! row walk writes three instructions in a block that runs once.
+//!
+//! Nothing about the argument changes. The rule is about a distance from wherever the walk starts,
+//! the hoisted check takes its capability from the address it is written at, and the address it is
+//! written at is the address the loop itself works out the first time round. What does change is the
+//! capability condition, which now refuses a start the preheader has to work out unless the check's
+//! capability was taken at its own pointer. A start further along is a start that may be in some
+//! other object, and that is the same sentence `NOT_ITS_CAPABILITY` was already saying about a
+//! constant offset. The other two planes do not read the capability at all, which is why they are
+//! where this earns anything: the loops it opens up are the ones whose bounds checks loop splitting
+//! has already taken care of.
+//!
 //! # What it does not do yet
 //!
 //! Not every counter as wide as the arithmetic. `fits` bounds a narrow count from the width of the
@@ -132,6 +158,17 @@
 //! a[i - 1]` over an array with only `a[0]` written a loop every iteration of which passes its init
 //! check, where one check in front of the loop would refuse the whole array. So a loop that writes
 //! either plane keeps that plane's checks.
+//!
+//! The other new condition is not about what is true, it is about what it costs. A bounds check is
+//! two comparisons whatever range it is handed, so one of them in front of a loop is one of them
+//! and the span never enters into it. The two plane checks answer by reading the plane over the
+//! range, so what they cost goes up with the range rather than with what the loop reads, and a walk
+//! that leaves gaps hands them bytes nobody touched. `b[k * N + j]` round `k` reads two hundred
+//! eight byte elements with three hundred and eighteen kilobytes between the first and the last,
+//! and one check over the lot of it was measured at thirty three times the whole program. So a
+//! plane check comes out of a loop only where the step is no wider than the access, which is to say
+//! only where the range in front is the bytes the loop reads rather than the ground it covers.
+//! A bounds check keeps the old condition, because for it the two are the same price.
 //!
 //! What the hoisted check does not do is report further out than the object it starts in. The
 //! runtime finds the region the first address is in and clips the range to it, so a walk that runs
@@ -195,6 +232,10 @@ const COUNT_TOO_WIDE: &str =
 /// What is reported for a check whose address does not walk the loop.
 const NOT_A_SWEEP: &str = "check kept, its address does not walk the loop by a constant";
 
+/// What is reported for a check whose walk starts somewhere the preheader cannot work out.
+const START_NOT_A_WORD: &str =
+    "check kept, where its walk starts is not worked out in sixty four bit arithmetic";
+
 /// What is reported for a check whose address the analysis has nothing to say about.
 const NOT_FOLLOWED: &str =
     "check kept, what its address does round the loop is not something the analysis follows";
@@ -211,6 +252,10 @@ const NOT_EVERY_TIME: &str = "check kept, an iteration can finish without reachi
 
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str = "check kept, its step is not a whole number of its alignment";
+
+/// What is reported for a plane check over a walk that leaves gaps.
+const LEAVES_GAPS: &str =
+    "plane check kept, the range in front would be wider than the bytes the loop reads";
 
 /// What is reported when the rule declines the range the loop sweeps.
 const TOO_WIDE: &str = "check kept, the range the loop sweeps is too wide for the rule";
@@ -304,8 +349,9 @@ struct Plan {
     /// What the first iteration's address is computed from. An address rather than a value when it
     /// is a global, since nothing outside the loop computes one of those. See [`Anchor`].
     base: Anchor,
-    /// How far past that value the first iteration reads.
-    offset: i128,
+    /// How far past that value the first iteration reads, which is a number where the loop walks an
+    /// array from its start and arithmetic the preheader does where it walks a row of one.
+    start: Plain,
     /// How many bytes from there the whole loop covers.
     span: Extent,
     /// The payload of the check being removed, which the new one keeps everything of but the size.
@@ -536,7 +582,7 @@ fn planned(
     let info = func[held];
 
     let reach = i128::from(info.size);
-    let (base, offset, span) = match scev.evolution(id, pointer) {
+    let (base, start, span) = match scev.evolution(id, pointer) {
         // An address that does not move at all. Every iteration checks the same bytes, so the one
         // in front covers all of them and there is no arithmetic to write: the extent is one
         // access. `crate::licm` is the pass that would otherwise own this, and it leaves a check
@@ -548,13 +594,14 @@ fn planned(
         // about it, since the address the check in front asks about is the address the one inside
         // was asking about.
         Evolution::Invariant(at) => {
-            let Some((base, offset)) = anchored(at) else {
+            let Some((base, start)) = anchored(at) else {
                 return Err(NOT_A_SWEEP);
             };
+            plain_enough(func, start)?;
             if !swept(reach, 0, reach) {
                 return Err(TOO_WIDE);
             }
-            (base, offset, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
+            (base, start, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
         }
         Evolution::Affine(chrec) => {
             let Some(step) = chrec.step.as_number() else {
@@ -566,11 +613,24 @@ fn planned(
             // Scale one because the base is an address. Anything else is a multiple of a pointer,
             // which is not a thing the loop computed, so it is a shape this reads rather than a
             // case to handle.
-            let Some((base, offset)) = anchored(chrec.base) else {
+            let Some((base, start)) = anchored(chrec.base) else {
                 return Err(NOT_A_SWEEP);
             };
+            plain_enough(func, start)?;
             if step % i128::from(info.align) != 0 {
                 return Err(MISALIGNED);
+            }
+            // What the range in front costs is what separates the bounds check from the other two.
+            // A bounds check is two comparisons whatever the range, so one of them in front of a
+            // walk that reads one element out of every two hundred is still one of them. The two
+            // plane checks answer by reading the plane over the range, so their cost goes up with
+            // the range rather than with what the loop reads, and covering bytes nobody touches is
+            // work nobody needed. `b[k * N + j]` round `k` is the shape that says so: two hundred
+            // reads of eight bytes each, three hundred and eighteen kilobytes between the first and
+            // the last, and one check over all of it is thirty three times the whole program. So a
+            // plane check comes out only where the walk covers what it spans.
+            if matches!(func[check].opcode, Opcode::CheckInit | Opcode::CheckType) && step > reach {
+                return Err(LEAVES_GAPS);
             }
             // The check runs once before the loop goes round for the first time and once more each
             // time it does, so the furthest address it sees is the one it is at after the last of
@@ -593,7 +653,7 @@ fn planned(
                     Extent::Computed { count, step, reach, reading }
                 }
             };
-            (base, offset, span)
+            (base, start, span)
         }
         // Not the same as a step that is not a number, and the two used to be reported as if they
         // were. This one is an address the analysis has nothing at all to say about, which on real
@@ -618,14 +678,22 @@ fn planned(
     // capability operand is read into a name beginning with an underscore. So which instance it
     // names cannot change what those two answer, and a walk that starts along from the pointer the
     // capability was taken at is a walk they may still be hoisted out of.
+    //
+    // A walk that starts at arithmetic rather than at the pointer itself is refused here too, and by
+    // the same test rather than by one of its own. `start` being a number the answer rests on is
+    // exactly what makes the walk start on the pointer the capability names, so a start the
+    // preheader has to work out is a start further on, and further on is where another object may
+    // be.
     let opcode = func[check].opcode;
     if opcode == Opcode::CheckBounds {
         let Some(named) = named else { return Err(NOT_A_SWEEP) };
-        if named != pointer && (base != Anchor::Value(named) || offset != 0) {
+        let none_past = (start.value.is_none() || start.scale == 0) && start.offset == 0;
+        let at_it = base == Anchor::Value(named) && none_past;
+        if named != pointer && !at_it {
             return Err(NOT_ITS_CAPABILITY);
         }
     }
-    Ok(Plan { preheader, base, offset, span, info, opcode, check })
+    Ok(Plan { preheader, base, start, span, info, opcode, check })
 }
 
 /// The pointer an invariant is an address off, and how far past it, when it is one.
@@ -634,14 +702,35 @@ fn planned(
 /// a thing the loop computed, so it is a shape this reads rather than a case to handle. The second
 /// arm is the same shape with a global in place of the value, which is described rather than named
 /// and so arrives in the other half of the invariant.
-fn anchored(inv: Invariant) -> Option<(Anchor, i128)> {
+///
+/// How far past the anchor comes back as the expression rather than as a number. It used to come
+/// back as a number, and the second arm refused anything else, which is what kept every walk along a
+/// row of a two dimensional array where it was. `a[i * N + k]` round `k` is the anchor `a` plus
+/// eight times a value the loop does not change, and that is not a number here but it is a number by
+/// the time the preheader has run, which is where the check in front is going. See `starting` for
+/// what is built and [`plain_enough`] for which shapes of it can be.
+fn anchored(inv: Invariant) -> Option<(Anchor, Plain)> {
     if let Some(at @ Plain { value: Some(base), scale: 1, .. }) = inv.plain() {
-        return Some((Anchor::Value(base), at.offset));
+        let past = Plain { value: None, read: None, scale: 0, offset: at.offset };
+        return Some((Anchor::Value(base), past));
     }
-    match inv.on()? {
-        (base, rest) if rest.value.is_none() || rest.scale == 0 => Some((base, rest.offset)),
-        _ => None,
-    }
+    inv.on()
+}
+
+/// Whether how far past the anchor the walk starts is arithmetic a preheader can be handed.
+///
+/// A number always is. An expression is when it lands in sixty four bits, which is the width the
+/// address arithmetic is done at, either because the value is already that wide or because the
+/// invariant carries the widening that gets it there. Anything else is refused rather than
+/// truncated, since a start address worked out narrow and used wide is a check about the wrong
+/// bytes.
+fn plain_enough(func: &Func, start: Plain) -> Result<(), &'static str> {
+    let Some(value) = start.value.filter(|_| start.scale != 0) else { return Ok(()) };
+    let ty = match start.read {
+        Some(read) => read.to,
+        None => func[value].ty,
+    };
+    if ty.is_int() && ty.bits() == 64 { Ok(()) } else { Err(START_NOT_A_WORD) }
 }
 
 /// Establishes that the extent arithmetic stays inside sixty four bits whatever the count turns out
@@ -785,6 +874,59 @@ fn swept_sym(reach: i128) -> bool {
     }
 }
 
+/// The address the first iteration reads, built in the preheader.
+///
+/// `base + (scale * value + offset)`, with the value widened first where the invariant said it was
+/// read wider than its own type. Every part of it is left out where the numbers make it nothing, so
+/// a walk from the start of an array still writes no arithmetic at all and the one along a row
+/// writes the three instructions the row needed.
+///
+/// No flags on the arithmetic. This is the address the loop itself works out on its first time
+/// round, so whatever it does is what the program already does, but saying `nsw` about it would be
+/// a claim about the program's own arithmetic that nothing here established. [`covered`] earns its
+/// `nsw` from [`fits`], and there is no [`fits`] for a value the pass cannot see.
+fn starting(build: &mut Builder<'_>, made: &mut Vec<Value>, base: Value, start: Plain) -> Value {
+    let word = Type::int(64);
+    let past = match start.value.filter(|_| start.scale != 0) {
+        None => {
+            if start.offset == 0 {
+                return base;
+            }
+            let by = build.iconst(word, start.offset);
+            made.push(by);
+            by
+        }
+        Some(value) => {
+            let mut at = value;
+            if let Some(read) = start.read {
+                let widen = match read.reading {
+                    Reading::Signed => Opcode::SExt,
+                    Reading::Unsigned => Opcode::ZExt,
+                };
+                at = build.unary(widen, value, word);
+                made.push(at);
+            }
+            if start.scale != 1 {
+                let scale = build.iconst(word, start.scale);
+                made.push(scale);
+                at = build.binary(Opcode::Mul, at, scale, Flags::NONE);
+                made.push(at);
+            }
+            if start.offset != 0 {
+                let offset = build.iconst(word, start.offset);
+                made.push(offset);
+                at = build.binary(Opcode::Add, at, offset, Flags::NONE);
+                made.push(at);
+            }
+            at
+        }
+    };
+    let args = build.func().push_values(&[base, past]);
+    let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+    made.push(sum);
+    sum
+}
+
 /// Puts the one check in front of the loop and takes the one inside it out.
 fn apply(func: &mut Func, plan: &Plan) {
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
@@ -806,16 +948,7 @@ fn apply(func: &mut Func, plan: &Plan) {
             at
         }
     };
-    let first = if plan.offset == 0 {
-        base
-    } else {
-        let by = build.iconst(Type::int(64), plan.offset);
-        made.push(by);
-        let args = build.func().push_values(&[base, by]);
-        let sum = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-        made.push(sum);
-        sum
-    };
+    let first = starting(&mut build, &mut made, base, plan.start);
     let args = build.func().push_values(&[first]);
     let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
     made.push(capability);
@@ -1831,6 +1964,134 @@ mod tests {
             let stats = hoisted(&mut func);
             assert!(!stats.changed(), "{kind:?}");
         }
+    }
+
+    /// A walk along one row of a two dimensional array, which is `a[row * 16 + k]` round `k`.
+    ///
+    /// The row offset is worked out in the loop out of a value nothing in the loop changes, so what
+    /// the walk starts at is an anchor plus an expression rather than an anchor plus a number. That
+    /// is the shape a matrix multiply and a strided column sum both have, and the shape the pass
+    /// used to refuse outright. When `narrow` the row comes in as an `int` and is read wide, which
+    /// is what C writes, and then the start carries a widening as well.
+    fn rowed(narrow: bool) -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let row_ty = if narrow { Type::int(32) } else { Type::int(64) };
+        let signature = Signature::new().with_params(&[Type::PTR, row_ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let row = func.append_param(entry, row_ty);
+        let counter = func.append_param(head, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let wide = if narrow { build.unary(Opcode::SExt, row, Type::int(64)) } else { row };
+        let stride = build.iconst(Type::int(64), 64);
+        let down = build.binary(Opcode::Mul, wide, stride, Flags::NSW);
+        let by = build.iconst(Type::int(64), WIDTH);
+        let along = build.binary(Opcode::Mul, counter, by, Flags::NSW);
+        let sum = build.binary(Opcode::Add, down, along, Flags::NSW);
+        let args = build.func().push_values(&[array, sum]);
+        let pointer = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        check(&mut build, pointer, 4, 4);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), 16);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func, vec![entry, head, done])
+    }
+
+    #[test]
+    fn a_walk_along_a_row_starts_where_the_preheader_works_it_out() {
+        // The row offset is not a number here and is a number by the time the preheader has run, so
+        // the check in front goes at `a + row * 64` and covers the row from there. This is the loop
+        // the pass used to report as not walking by a constant, which it does: what was not a
+        // constant was where the walking started.
+        let (mut names, mut func, _) = rowed(false);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        let left = checks(&func);
+        assert_eq!(left.len(), 1, "one check, and it is the one that was put in front");
+        assert_eq!(extent(&func, left[0].1), 64, "fifteen steps of four, plus the last read");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_row_offset_the_program_reads_wide_is_read_wide_in_front_of_the_loop_too() {
+        // The same loop with the row coming in as an `int`, which is what the C actually says. The
+        // start carries the sign extension the source asked for rather than a truncation nobody
+        // asked for, and `sound` is what says the preheader names a value that is in scope there.
+        let (mut names, mut func, _) = rowed(true);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        let left = checks(&func);
+        assert_eq!(left.len(), 1);
+        assert_eq!(extent(&func, left[0].1), 64);
+        let (block, _) = left[0];
+        let widened = func.insts(block).any(|inst| func[inst].opcode == Opcode::SExt);
+        assert!(widened, "the preheader works the row offset out at the width the address wants");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_walk_along_a_row_keeps_a_bounds_check_whose_capability_is_about_the_whole_array() {
+        // A start the preheader has to work out is a start further along, and further along may be
+        // inside some other object, so the capability test refuses it for the same reason it
+        // refuses a constant offset. The other two planes do not read the capability, which is why
+        // this is where a real matrix multiply is helped and a bounds check is not.
+        let (_, mut func, blocks) = rowed(false);
+        let array = func[blocks[0]].params[0];
+        taken_at(&mut func, blocks[1], array);
+        let stats = hoisted(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, super::NOT_ITS_CAPABILITY), 1);
+    }
+
+    #[test]
+    fn a_plane_check_over_a_walk_that_leaves_gaps_stays_where_it_is() {
+        // Four bytes read out of every sixteen. The bounds check comes out, because two comparisons
+        // are two comparisons whatever range they are handed. The two plane checks do not, because
+        // what they cost goes up with the range, and one check over a hundred and sixteen bytes is
+        // more work than eight checks over four when only thirty two of those bytes are ever read.
+        let (mut names, mut func, _) = walking(8, 16, 4, 4);
+        assert_eq!(hoisted(&mut func).count(Kind::Optimized, HOISTED), 1);
+        sound(&func, &mut names);
+        for kind in [Opcode::CheckInit, Opcode::CheckType] {
+            let (_, mut func, blocks) = walking(8, 16, 4, 4);
+            let check = func
+                .insts(blocks[1])
+                .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+                .expect("the loop checks the address it works out");
+            func[check].opcode = kind;
+            let stats = hoisted(&mut func);
+            assert!(!stats.changed(), "{kind:?}");
+            assert_eq!(stats.count(Kind::Missed, super::LEAVES_GAPS), 1, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_worked_out_narrower_than_the_address_arithmetic_is_refused() {
+        // Not reachable through the IR a sixty four bit target produces, since what a `ptr_add`
+        // takes is a word and every start comes out of one. It is a guard rather than a case, and
+        // this is the guard asked directly, because a start worked out at one width and added at
+        // another is a check about bytes nobody walked.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let short = func.append_param(entry, Type::int(32));
+        Builder::new(&mut func, entry).ret(&[]);
+        let narrow = super::Plain { value: Some(short), read: None, scale: 1, offset: 0 };
+        assert_eq!(super::plain_enough(&func, narrow), Err(super::START_NOT_A_WORD));
+        // The same value with nothing multiplying it is a number, and a number is always fine.
+        let none = super::Plain { value: Some(short), read: None, scale: 0, offset: 8 };
+        assert_eq!(super::plain_enough(&func, none), Ok(()));
     }
 
     /// The instruction that produced a value.

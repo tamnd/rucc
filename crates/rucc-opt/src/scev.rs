@@ -997,6 +997,15 @@ impl<'a> Scev<'a> {
     /// narrow arithmetic may already have wrapped and `sext(2 * x + 3)` is not `2 * sext(x) + 3`.
     /// What that leaves out is a base like `start + 1`, and what it lets in is `start`, which is
     /// the shape a walk from an index the caller handed in is in. See #810.
+    ///
+    /// A value the loop does not change is widened by the same rule. It used to be widened only
+    /// when it was a number, and everything else came back unknown, which is a sequence that does
+    /// not move being harder to widen than one that does. What it cost is the row of a two
+    /// dimensional array: `a[row * N + k]` round `k` has `(long)row * N` in it, that is invariant
+    /// and is not a number, so the address of the whole subscript came back unknown and every pass
+    /// reading it had nothing to work with. There is no wrapping question to answer here, because
+    /// there is no sequence and so nothing to wrap, and the shapes that get through are the same
+    /// ones [`Invariant::widened`] lets through for a chrec's base.
     fn extend(&mut self, id: LoopId, opcode: Opcode, from: Value, to: Type) -> Evolution {
         let narrow = self.func[from].ty;
         let signed = opcode == Opcode::SExt;
@@ -1004,15 +1013,25 @@ impl<'a> Scev<'a> {
         let settled = |chrec: Chrec| {
             chrec.does_not_wrap(signed) || (!signed && held.is_some_and(|held| trails(chrec, held)))
         };
+        let reading = if signed { Reading::Signed } else { Reading::Unsigned };
         match self.at(id, from) {
             Evolution::Invariant(inv) => match inv.as_number() {
                 // A number read at the narrow width means the same thing at the wide one under
                 // sign extension, and under zero extension once it is not negative.
                 Some(number) if signed || number >= 0 => Evolution::Invariant(inv),
-                _ => Evolution::Unknown,
+                Some(_) => Evolution::Unknown,
+                // Not a number, and still the same value read wider. This is the widening a chrec
+                // gets, asked about something that does not move: `(long)row * 64` inside a loop
+                // over `k` is an expression the loop does not change, and it used to come back
+                // unknown, which made the whole of `a[row * N + k]` unknown. [`Invariant::widened`]
+                // is the one that decides, and it refuses anything with arithmetic in it for the
+                // reason written on it, so what gets through is one of a value and nothing else.
+                None => match inv.widened(reading, to) {
+                    Some(wide) => Evolution::Invariant(wide),
+                    None => Evolution::Unknown,
+                },
             },
             Evolution::Affine(chrec) if chrec.ty == narrow && settled(chrec) => {
-                let reading = if signed { Reading::Signed } else { Reading::Unsigned };
                 let (Some(base), Some(step)) =
                     (chrec.base.widened(reading, to), chrec.step.widened(reading, to))
                 else {
@@ -1648,6 +1667,43 @@ mod tests {
         assert_eq!(chrec.base, Invariant::of(start));
         assert_eq!(chrec.step, Invariant::number(4));
         assert_eq!(chrec.ty, Type::PTR);
+    }
+
+    #[test]
+    fn a_value_the_loop_does_not_change_widens_the_way_a_sequence_does() {
+        // `(long)row` inside a loop over something else. There is no sequence here and so nothing
+        // that could wrap, and the answer was unknown all the same, which made a sequence that does
+        // not move harder to widen than one that does. What it cost is `a[row * N + k]` round `k`,
+        // whose address came back unknown on account of the widening in the middle of it.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let body = func.create_block();
+        let exit = func.create_block();
+        let row = func.append_param(entry, Type::int(32));
+        let counter = func.append_param(header, Type::int(64));
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        build.jump(header, &[zero]);
+
+        let mut build = Builder::new(&mut func, header);
+        let limit = build.iconst(Type::int(64), 100);
+        let test = build.icmp(IntPred::Slt, counter, limit);
+        build.br_if(test, body, &[], exit, &[]);
+
+        let mut build = Builder::new(&mut func, body);
+        let wide = build.unary(Opcode::SExt, row, Type::int(64));
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NSW);
+        build.jump(header, &[next]);
+        Builder::new(&mut func, exit).ret(&[]);
+
+        let word = Type::int(64);
+        let widened =
+            Invariant::of(row).widened(Reading::Signed, word).expect("one of a value widens");
+        assert_eq!(evolution(&func, wide), Evolution::Invariant(widened));
     }
 
     /// A value to hang an invariant on, which these never look inside.
