@@ -3285,24 +3285,50 @@ decl #0 x : int object external static defined
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
     }
 
-    /// The same `switch` with one arm off the line, which stays a `switch`.
+    /// The same `switch` with one arm off the line, which is a table and not arithmetic.
     ///
-    /// The answers being a line is what licenses the range check and the addition, since they
-    /// answer for every label in the range at once. One label whose arm disagrees is a label they
-    /// would answer wrongly, so this is here to say that the pass is reading the arms and not
-    /// counting the labels. Sixteen dense labels are a jump table once the back end lowers them,
-    /// so what is left is either a jump through a table or more than one comparison, and the arm
-    /// off the line is still there.
+    /// The answers being a line is what licenses the addition, since it answers for every label in
+    /// the range at once. One label whose arm disagrees is a label it would answer wrongly, so this
+    /// is here to say that the pass is reading the arms and not counting the labels. What it does
+    /// instead is look the answer up: one comparison, no jump through a jump table, and the arm off
+    /// the line is a cell of a constant array in `.rodata`, which is gcc's `CSWTCH` and its shape.
     #[test]
-    fn a_dense_switch_whose_arms_are_not_a_line_keeps_its_comparisons() {
+    fn a_dense_switch_whose_arms_are_not_a_line_is_a_load_from_a_table() {
         let arms: String = (0..16)
             .map(|k| format!("case {k}: return {};", if k == 9 { 100 } else { k + 1 }))
             .collect::<Vec<_>>()
             .join(" ");
         let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
-        let dispatched = text.contains("\tjmp\t*") || text.matches("\tcmp").count() > 1;
-        assert!(dispatched, "{text}");
-        assert!(text.contains("$100"), "{text}");
+        assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
+        assert!(!text.contains("\tjmp\t*"), "{text}");
+        assert!(text.contains("leaq\tCSWTCH.0(%rip)"), "{text}");
+        let table = &text[text.find("CSWTCH.0:").expect("the table is in the output")..];
+        let section = text[..text.find("CSWTCH.0:").unwrap_or(0)].rfind("\t.section\t.rodata");
+        assert!(section.is_some(), "{text}");
+        assert_eq!(table.matches("\t.long\t").count(), 16, "{text}");
+        assert!(table.contains("\t.long\t100\n"), "{text}");
+    }
+
+    /// The same table at `-Os`, where a cell is a byte because every answer fits in one.
+    ///
+    /// gcc 16 narrows the cells at `-Os` and not at `-O2`, and so does rucc: sixteen answers under a
+    /// hundred and twenty eight are sixteen bytes rather than sixty four, and the byte is widened
+    /// back with its sign.
+    #[test]
+    fn a_table_at_os_has_cells_as_narrow_as_its_answers() {
+        let arms: String = (0..16)
+            .map(|k| format!("case {k}: return {};", if k == 9 { 100 } else { k + 1 }))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::Os;
+        let result = run(&opts, &format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        let table = &text[text.find("CSWTCH.0:").expect("the table is in the output")..];
+        assert_eq!(table.matches("\t.byte\t").count(), 16, "{text}");
+        assert!(text.contains("\tmovsbl\t"), "{text}");
     }
 
     /// A conversion whose operand the optimizer turned into a constant, which is the whole of what
