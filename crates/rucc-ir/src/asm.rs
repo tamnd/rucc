@@ -238,8 +238,10 @@ impl<'a> Entry<'a> {
                 // here for the same reason `rm` does. `A` is `rdx` and `rax` at once, so it is
                 // counted here rather than above: it names a pair and the question above is which
                 // one register an operand is in.
+                // `p` is an address, which is a value like any other until something reads what
+                // it points at, and it is kept in a register the same way.
                 'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
-                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' => register = true,
+                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => register = true,
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
                 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' => {
@@ -368,6 +370,16 @@ mod tests {
         let operand = read.iter().next().copied().expect("one operand");
         assert!(!operand.memory);
         assert_eq!(operand.result, Some(results[0]));
+    }
+
+    #[test]
+    fn an_address_is_a_value_in_a_register_like_any_other() {
+        // tcc's `tests/tcctest.c` hands a template the address of a local this way.
+        let args = values(1);
+        let read = AsmOperands::read("p", &[], &args).expect("one address");
+        let operand = read.iter().next().copied().expect("one operand");
+        assert!(!operand.memory);
+        assert_eq!(operand.value, Some(args[0]));
     }
 
     #[test]

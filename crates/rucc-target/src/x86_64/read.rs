@@ -74,6 +74,11 @@
 //! program handing an instruction the top half of a register that nothing ever defined, and that is
 //! refused where it is placed.
 //!
+//! `%P0` is read as well and is no width at all. What it asks gcc for is the operand without the
+//! punctuation around it, which only changes anything for a constant: a register comes out the same
+//! with it or without. The operands that reach a template here are in registers, so it is `%0`.
+//! tcc's `tests/tcctest.c` writes one on the address of a local handed in with the constraint `p`.
+//!
 //! Four of them and not the rest. gcc has a dozen more letters in that position and they do other
 //! things: print a constant without its sigil, print the suffix on its own, print an address. Those
 //! are a template asking for text rather than for an instruction, and text is not what this reads.
@@ -894,6 +899,11 @@ fn modified(after: &str) -> Option<Given> {
     if letter == "h" {
         return Some(Given::High(digits.parse().ok()?));
     }
+    // The operand without its punctuation, which is the operand itself for one in a register. See
+    // the module documentation.
+    if letter == "P" {
+        return Some(Given::Operand(digits.parse().ok()?, None));
+    }
     let width = match letter {
         "b" => Width::Byte,
         "w" => Width::Word,
@@ -1570,5 +1580,13 @@ mod tests {
         assert_eq!(read_in("xchgb %b0,%h0", &quad, &[true]), None, "the high byte of one");
         assert_eq!(read_in("movq (%0), %1", &quad, &[true, false]), None, "an address from one");
         assert_eq!(read_in("movq %c0(%1), %1", &quad, &[true, false]), None, "a distance in one");
+    }
+
+    /// `%P1` is `%1` for an operand in a register, which is where every one that reaches here is.
+    #[test]
+    fn an_operand_without_its_punctuation_is_the_operand() {
+        let quad = [Some(Width::Quad); 2];
+        assert_eq!(read("mov %P1,%0", &quad), read("mov %1,%0", &quad));
+        assert!(read("mov %P1,%0", &quad).is_some());
     }
 }

@@ -137,6 +137,18 @@ fn an_operand_in_memory_the_template_names_as_a_register_is_refused() {
 }
 
 #[test]
+fn an_address_handed_in_with_p_is_the_register_it_is_in() {
+    // tcc's `tests/tcctest.c`, word for word apart from the type. `%P1` is the operand without the
+    // punctuation gcc would put round a constant, and a register has none, so it is `%1`.
+    let source = "long f(void) { long ret; int var; \
+                  asm volatile (\"mov %P1,%0\" : \"=r\" (ret) : \"p\" (&var)); \
+                  return ret == (long) &var; }\n";
+    let text = asm("address", source);
+    let body = body(&text, "f");
+    assert!(body.contains("leaq\t"), "the address was never taken:\n{body}");
+}
+
+#[test]
 fn a_template_with_an_instruction_in_it_is_that_instruction() {
     let text = asm("real", "int f(int x) { asm volatile (\"pause\"); return x; }\n");
     let body = body(&text, "f");
