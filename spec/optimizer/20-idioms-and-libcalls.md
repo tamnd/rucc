@@ -108,6 +108,16 @@ read whose end the compiler cannot see, and the call stays. The count itself is 
 written as an `int` in the source and widened on the way into a `size_t` parameter, so the pass
 looks under the widening for it, and refuses a source constant that was negative.
 
+**The pass runs before anything has folded.** It is one walk over the module ahead of the function
+pipeline, so a count or an index the source worked out from constants is still the arithmetic when
+it looks: `s1 + (x & 3)` with `x` known is a `ptr_add` of a `sext` of an `and` of two constants, and
+`++n` is an `add`. Every count, character and index the pass reads goes through
+`fold::evaluated`, which looks a few instructions deep through integer arithmetic over constants
+and answers with the same arithmetic the constant folder uses, so the number it reads is the number
+that pass would have written later. It changes nothing in the function. The depth is the same
+bound the address walk has, which is enough for anything written in a single expression and keeps
+the walk from following a long chain.
+
 **One of the comparisons answers without either string.** `strcmp` and `strncmp` read the first
 byte of both of their strings before they can answer anything, so where one string is known and the
 other is not there is still an answer in the two cases that first byte settles on its own: a
