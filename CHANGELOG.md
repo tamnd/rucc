@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.79
+
 ### Added
 
 - `strcat` of a string of known length onto a local array whose string the code in front of the call just wrote is a `memcpy` of the string and its terminator to the end of that string. The walk that finds the length now reads `memset`, `memcpy` and `strcpy` as writes and goes on into a block with one predecessor, and the libcall pass runs up to eight rounds so a nest of six `strcat` calls folds all the way. `execute/builtins/strcat.c` passes at every level. Part of tamnd/rucc#1677.
