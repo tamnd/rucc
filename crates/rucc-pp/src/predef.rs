@@ -358,7 +358,7 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     // same in every dialect and this one is not, which is the whole reason a header can test
     // for it: gcc's own `stdatomic.h` writes `atomic_char8_t` under `#ifdef __CHAR8_TYPE__`
     // and gets it in C23 and not in C17.
-    d.set_if(opts.std == Std::C23, "__CHAR8_TYPE__", "unsigned char");
+    d.set_if(opts.std >= Std::C23, "__CHAR8_TYPE__", "unsigned char");
     // C11 made these conditional features, and a header that sees `__STDC_VERSION__` at
     // 201112 with no `__STDC_NO_ATOMICS__` next to it will use `_Atomic`. Each one here is a
     // claim not to have something, so each one is only correct while it stays true: atomics

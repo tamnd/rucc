@@ -113,7 +113,7 @@ A Windows target gets five more, and they are the reason its headers can be read
 
 ## 4.6 Dialect and semantic flags
 
-`-std=` accepts `c89` `c90` `c99` `c11` `c17` `c23` and their `gnu` variants. **The default is `gnu23`**, matching current GCC. `-ansi` is `-std=c89`. `-pedantic` and `-pedantic-errors` diagnose extensions used in a strict mode.
+`-std=` accepts `c89` `c90` `c99` `c11` `c17` `c23` `c2y` and their `gnu` variants. **The default is `gnu23`**, matching current GCC. `c2y` is the draft that follows C23, and gcc 16 gives it `__STDC_VERSION__` as `202500L`, which is what it is here too; its keywords are C23's until a later draft adds one this compiler reads. `-ansi` is `-std=c89`. `-pedantic` and `-pedantic-errors` diagnose extensions used in a strict mode.
 
 `-fgnu89-inline` puts the whole unit under GNU's reading of `inline` rather than C's, and `-fno-gnu89-inline` puts it back. C99 swapped which of `inline` and `extern inline` leaves a definition behind, so a program written before that swap and compiled under a later dialect needs this flag to mean what it meant. The C89 dialects are under GNU's reading whatever the flag says, so `-std=c89 -fno-gnu89-inline` changes nothing here. gcc refuses that combination outright with `'-fno-gnu89-inline' is only supported in GNU99 or C99 mode`, and accepting it and ignoring it is the more permissive of the two answers on a command line that could only have meant one thing anyway. The flag also decides which of `__GNUC_GNU_INLINE__` and `__GNUC_STDC_INLINE__` is defined, since that is how a header asks which reading it is under, and `spec/13-gnu-compat.md` section 13.3 has the rest of what the two readings differ on.
 

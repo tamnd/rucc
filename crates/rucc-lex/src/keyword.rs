@@ -500,7 +500,8 @@ const fn mask(std: Std, gnu: bool) -> u8 {
         Std::C99 => C99,
         Std::C11 => C11,
         Std::C17 => C17,
-        Std::C23 => C23,
+        // The draft after C23 has no keyword of its own that this reads yet, so it is C23's list.
+        Std::C23 | Std::C2y => C23,
     };
     if gnu { dialect | GNU } else { dialect }
 }
