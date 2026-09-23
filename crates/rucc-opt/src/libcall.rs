@@ -187,11 +187,13 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 39] = [
+const SOURCES: [&str; 45] = [
+    "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
     "__mempcpy_chk",
     "__memset_chk",
+    "__printf_chk",
     "__snprintf_chk",
     "__sprintf_chk",
     "__stpcpy_chk",
@@ -200,6 +202,8 @@ const SOURCES: [&str; 39] = [
     "__strcpy_chk",
     "__strncat_chk",
     "__strncpy_chk",
+    "__vfprintf_chk",
+    "__vprintf_chk",
     "__vsnprintf_chk",
     "__vsprintf_chk",
     "fprintf",
@@ -227,6 +231,8 @@ const SOURCES: [&str; 39] = [
     "strrchr",
     "strspn",
     "strstr",
+    "vfprintf",
+    "vprintf",
 ];
 
 /// What the compiler worked out a call writes, which is what it is replaced by.
@@ -503,12 +509,18 @@ pub fn fold(
     // function it is, so this is what the two names are put back together through.
     let standard: HashMap<Symbol, Symbol> =
         module.funcs().filter_map(|id| Some((module[id].name, module[id].spelled?))).collect();
-    // A module that defines one of these names itself is where that function comes from, and what a
-    // function called `fputs` does in there is whatever it was written to do.
-    let defined: HashSet<Symbol> = module
+    // A body the program wrote for one of these names does not stop a call to that name being
+    // folded, which is gcc 16's rule as well: only `-fno-builtin` says a standard name is not the
+    // standard function. What it does stop is folding inside that body, since a `puts` of the
+    // program's own with a `printf` of a newline in it would otherwise be a call to itself.
+    let library: HashSet<Symbol> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .map(|id| module[id].name)
+        .filter(|&name| {
+            let name = names.resolve(standard.get(&name).copied().unwrap_or(name));
+            SOURCES.contains(&name) || REPLACEMENTS.contains(&name)
+        })
         .collect();
     // One table for the module rather than one per function, so that two calls folded to the same
     // string share one object instead of each getting one of its own.
@@ -519,7 +531,10 @@ pub fn fold(
         // walk over its instructions that allocates nothing. The two tables below are a vector and
         // a predecessor list per block, which is a cost worth not paying over a module whose
         // functions print nothing.
-        if module[id].is_declaration() || !mentions(&module[id], names, &standard) {
+        if module[id].is_declaration()
+            || library.contains(&module[id].name)
+            || !mentions(&module[id], names, &standard)
+        {
             continue;
         }
         let mut stats = Stats::new();
@@ -538,7 +553,6 @@ pub fn fold(
                     cfg: &Cfg::new(func),
                     shapes: &shapes,
                     counts: &uses::count(func),
-                    defined: &defined,
                     standard: &standard,
                     names,
                     no_builtin,
@@ -596,8 +610,6 @@ struct Site<'a> {
     shapes: &'a Shapes,
     /// How many times each value is read, which is what says a result is ignored.
     counts: &'a [u32],
-    /// The names this module defines bodies for.
-    defined: &'a HashSet<Symbol>,
     /// What each renamed symbol was called in the source.
     standard: &'a HashMap<Symbol, Symbol>,
     /// The spellings, for reading a callee's name.
@@ -644,9 +656,6 @@ impl Site<'_> {
         let ignored = data.results().all(|result| self.counts[result.index()] == 0);
         let Extra::Call(at) = data.extra else { return None };
         let callee = self.func[at].callee?;
-        if self.defined.contains(&callee) {
-            return None;
-        }
         let name = self.names.resolve(self.standard.get(&callee).copied().unwrap_or(callee));
         if self.no_builtin.iter().any(|it| it == name) {
             return None;
@@ -661,6 +670,24 @@ impl Site<'_> {
             "fprintf_unlocked" if ignored => self.fprintf(&args, true),
             "fputs" if ignored => self.fputs(&args, false),
             "fputs_unlocked" if ignored => self.fputs(&args, true),
+            // The formatted checking calls are the plain ones with a flag, and the flag says only
+            // whether a `%n` in a format the program can write to is refused, so what they write is
+            // what the plain call writes. A `v` spelling hands its arguments over in a list this
+            // cannot read, so it folds only where the format takes none of them.
+            "__printf_chk" if ignored => self.printf(args.get(1..)?, false),
+            "vprintf" | "__vprintf_chk" if ignored => {
+                let format = if name == "vprintf" { 0 } else { 1 };
+                self.printf(&[*args.get(format)?], false)
+            }
+            "__fprintf_chk" if ignored => {
+                let mut rest = vec![*args.first()?];
+                rest.extend_from_slice(args.get(2..)?);
+                self.fprintf(&rest, false)
+            }
+            "vfprintf" | "__vfprintf_chk" if ignored => {
+                let format = if name == "vfprintf" { 1 } else { 2 };
+                self.fprintf(&[*args.first()?, *args.get(format)?], false)
+            }
             "strstr" => self.strstr(data, &args),
             // `index` and `rindex` are the older spellings of the same two searches, and a
             // program that wrote one of them is asking for the same answer.
@@ -2213,28 +2240,44 @@ block0:
         assert!(out.contains("call @printf("), "{out}");
     }
 
-    /// A module holding the body of its own `printf` means that body.
+    /// A body the program wrote for a standard name does not stop a call to that name being folded,
+    /// which is what gcc 16 does and what `execute/vprintf-chk-1.c` checks by defining the checking
+    /// function above the calls it expects to be folded away. The body itself is left alone, so a
+    /// `puts` of the program's own that prints with `printf` does not become a call to itself.
     #[test]
-    fn a_name_this_module_defines_is_that_definition() {
+    fn a_body_for_a_standard_name_is_not_folded_inside_and_does_not_stop_the_fold() {
         let out = folded(
             r#"
 global @.Lstr.0 : bytes 3 = { bytes "a\0a\00" }, align 1, linkage(internal), constant
 
-func @printf(ptr, ...) -> i32, linkage(external) {
+func @printf(ptr, ...) -> i32, linkage(external);
+
+func @puts(ptr) -> i32, linkage(external) {
 block0(%0: ptr):
-    %1 = iconst.i32 0
-    return %1
+    %1 = global_addr @.Lstr.0
+    %2 = call @printf(%1) : (ptr, ...) -> i32
+    %3 = iconst.i32 0
+    return %3
 }
 
-func @g(), linkage(external) {
-block0:
-    %0 = global_addr @.Lstr.0
-    %1 = call @printf(%0) : (ptr, ...) -> i32
+func @__vprintf_chk(i32, ptr, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr, %2: ptr):
+    %3 = iconst.i32 0
+    return %3
+}
+
+func @g(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 1
+    %2 = global_addr @.Lstr.0
+    %3 = call @__vprintf_chk(%1, %2, %0) : (i32, ptr, ptr) -> i32
     return
 }
 "#,
         );
-        assert!(out.contains("call @printf("), "{out}");
+        assert!(!out.contains("call @__vprintf_chk("), "{out}");
+        assert_eq!(out.matches("call @puts(").count(), 1, "{out}");
+        assert!(out.contains("call @printf("), "the body of `puts` keeps its own call, {out}");
     }
 
     /// A program that declared `puts` as something else keeps the call it had.

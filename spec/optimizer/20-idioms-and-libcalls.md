@@ -343,10 +343,12 @@ be used. Document 12.3's arm C should be measured on exactly this.
 ## 20.7 How this is wrong
 
 **A user's function with a standard name is assumed to have standard semantics.** The `-fno-builtin`
-handling. A translation unit that defines `strlen` and calls it must call its own. GCC's rule is
-that a declaration in the file with the standard prototype still gets the builtin treatment unless
-`-fno-builtin`, and a *definition* in the file does not. Matching this exactly requires care and
-requires a test.
+handling. gcc 16's rule, measured rather than read, is that a definition in the file changes
+nothing: a unit that defines `strlen`, `printf` and `__vprintf_chk` and calls all three gets
+`strlen ("abc")` as three and both prints as `puts`, and only `-fno-builtin` says otherwise. The
+library call fold follows that, and `execute/vprintf-chk-1.c` is the torture program that checks
+it. What it does not do is fold inside such a body, since a `puts` of the program's own that
+prints with `printf` of a newline would otherwise become a call to itself.
 
 **An inlined `memcpy` reads or writes out of range.** 20.2's trap.
 
