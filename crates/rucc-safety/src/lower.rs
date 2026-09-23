@@ -433,6 +433,12 @@ fn partner(func: &Func, check: Inst) -> Option<Inst> {
     None
 }
 
+/// How wide a check has to be before it is lowered to the `_range` form of its routine.
+///
+/// Sixty four bytes is one word of the runtime's init shadow and one run of its type plane, which is
+/// the step the range forms read in, so a narrower check would have nothing for them to do.
+const RANGE: u64 = 64;
+
 /// `check_type` becomes `__rucc_check_type(pointer, size, type, descriptor)`.
 ///
 /// The one check with a type number on it, and the number is the same one [`judgement`] passes for
@@ -452,6 +458,14 @@ fn partner(func: &Func, check: Inst) -> Option<Inst> {
 /// `rucc_opt::hoist` writes when one check stands for a loop's worth. The size in the row goes to
 /// zero there for the reason given in [`bounds`]: what a report would name is the width of an access
 /// the program wrote, and a check covering a whole walk is not one of those.
+///
+/// A check over a computed width, or over a constant one of at least [`RANGE`] bytes, calls the
+/// `_range` form of the routine it would have called, which takes the same arguments and asks the
+/// plane a run of sixty four bytes at a time. That is what a check `rucc_opt::hoist` put in front of
+/// a loop is, whichever way it wrote the width: computed where the trip count is only known at run
+/// time and a constant where it is known here. It is a name of its own rather than a test of the
+/// length inside the plain routine, because that test cost every access's check a few
+/// instructions, and here it is decided once and for nothing.
 fn typed(
     func: &mut Func,
     names: &mut Interner,
@@ -486,11 +500,13 @@ fn typed(
     let small = Type::int(32);
     let ty = konst(func, inst, Imm::int(i128::from(number), small), small);
     let params = &[Type::PTR, word, small, Type::PTR];
+    let ranged = computed.is_some() || size >= RANGE;
     let routine = match partner {
         Some(init) => {
             func.remove_inst(init);
-            "__rucc_check_typed_init"
+            if ranged { "__rucc_check_typed_init_range" } else { "__rucc_check_typed_init" }
         }
+        None if ranged => "__rucc_check_type_range",
         None => "__rucc_check_type",
     };
     call(func, names, inst, routine, params, &[], &[pointer, bytes, ty, desc]);
@@ -506,7 +522,8 @@ fn typed(
 /// 04 section 4.4's first judgement names, so a read the plane refused is an access the planes did
 /// not permit, and that is already the sentence the reporter prints.
 ///
-/// A third operand is how many bytes to ask about, as on [`typed`] and [`bounds`].
+/// A third operand is how many bytes to ask about, as on [`typed`] and [`bounds`], and the call is
+/// to `__rucc_check_init_range` for a range the way [`typed`] says.
 fn began(
     func: &mut Func,
     names: &mut Interner,
@@ -534,8 +551,10 @@ fn began(
         Some(value) => fitted(func, inst, value, word),
         None => konst(func, inst, Imm::int(i128::from(size), word), word),
     };
+    let ranged = computed.is_some() || size >= RANGE;
+    let routine = if ranged { "__rucc_check_init_range" } else { "__rucc_check_init" };
     let params = &[Type::PTR, word, Type::PTR];
-    call(func, names, inst, "__rucc_check_init", params, &[], &[pointer, bytes, desc]);
+    call(func, names, inst, routine, params, &[], &[pointer, bytes, desc]);
 }
 
 /// `check_race` becomes `__rucc_check_race(pointer, size, descriptor)`.
@@ -1879,6 +1898,107 @@ mod tests {
              return\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn a_plane_check_over_a_length_the_program_worked_out_calls_the_range_form() {
+        // What `rucc_opt::hoist` writes in front of a loop, for the two planes. Each goes to the
+        // `_range` entry point, which sweeps the plane a word at a time, and the two are not made
+        // one call, because `partner` pairs the checks of one access and these are not that.
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("sweep.c"), &target());
+        let root = names.intern("char");
+        let root =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+        let int = names.intern("int");
+        let int =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
+        let plane = Plane::build(&mut module);
+        let numbers = plane::numbers(&module, &names);
+
+        let mut func = Func::new(
+            names.intern("sweep"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(plane.entry(Some(int))),
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let of = b.unary(Opcode::CapOf, p, Type::CAP);
+        marker(&mut b, Opcode::CheckType, Some(info), &[of, p, n]);
+        marker(&mut b, Opcode::CheckInit, Some(info), &[of, p, n]);
+        b.ret(&[]);
+
+        let mut table = Vec::new();
+        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        assert_eq!(table.len(), 2, "one row for each of the two checks");
+
+        module.add_func(func);
+        let id = module.funcs().next().expect("the module has one function");
+        let printed = print_func(&module, &module[id], &names);
+        assert!(printed.contains("call @__rucc_check_type_range(%0, %1, "), "{printed}");
+        assert!(printed.contains("call @__rucc_check_init_range(%0, %1, "), "{printed}");
+        assert!(!printed.contains("typed_init"), "{printed}");
+    }
+
+    #[test]
+    fn a_plane_check_over_a_wide_constant_calls_the_range_form_and_a_narrow_one_does_not() {
+        // The other way `rucc_opt::hoist` writes a walk, with the trip count known here, so the
+        // width is a constant in the payload rather than an operand. The pair is one access's as
+        // far as `partner` is concerned, so it is made one call, and that call is the range form
+        // once the width reaches a word of init shadow.
+        for (size, routine) in
+            [(RANGE, "__rucc_check_typed_init_range"), (RANGE - 1, "__rucc_check_typed_init")]
+        {
+            let mut names = Interner::new();
+            let mut module = Module::new(names.intern("wide.c"), &target());
+            let root = names.intern("char");
+            let root =
+                module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+            let int = names.intern("int");
+            let int = module.add_meta(MetaNode::Tbaa(TbaaNode {
+                name: int,
+                parent: Some(root),
+                offset: 0,
+            }));
+            let plane = Plane::build(&mut module);
+            let numbers = plane::numbers(&module, &names);
+
+            let mut func =
+                Func::new(names.intern("wide"), Signature::new().with_params(&[Type::PTR]));
+            let entry = func.create_block();
+            let p = func.append_param(entry, Type::PTR);
+            let info = MemInfo {
+                size,
+                align: 4,
+                order: MemOrder::NotAtomic,
+                tbaa: Some(plane.entry(Some(int))),
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            let mut b = Builder::new(&mut func, entry);
+            let of = b.unary(Opcode::CapOf, p, Type::CAP);
+            marker(&mut b, Opcode::CheckType, Some(info), &[of, p]);
+            marker(&mut b, Opcode::CheckInit, Some(info), &[of, p]);
+            b.ret(&[]);
+
+            let mut table = Vec::new();
+            calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+
+            module.add_func(func);
+            let id = module.funcs().next().expect("the module has one function");
+            let printed = print_func(&module, &module[id], &names);
+            assert!(printed.contains(&format!("call @{routine}(%0, ")), "{size}: {printed}");
+            assert!(!printed.contains("__rucc_check_init"), "{size}: {printed}");
+        }
     }
 
     #[test]

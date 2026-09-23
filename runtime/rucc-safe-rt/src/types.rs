@@ -137,6 +137,10 @@ pub const GRANULE: usize = 8;
 /// What one granule's worth of plane is, which is a flag and an identifier.
 type Slot = u32;
 
+/// How many bytes of program a long range is read in, which is eight granules and four words of
+/// slots.
+pub const RUN: usize = GRANULE * 8;
+
 /// How many bytes of shadow one granule needs.
 pub const SLOT: usize = size_of::<Slot>();
 
@@ -285,6 +289,8 @@ impl<'a> Types<'a> {
     /// however many of its bytes the access covers, and an access that covers whole granules is
     /// what nearly every access is.
     ///
+    /// A long range is cheaper through [`Types::sweep`], which gives the same answer.
+    ///
     /// # Safety
     ///
     /// `[lo, lo + len)` is inside the mapping this plane was built for.
@@ -294,8 +300,95 @@ impl<'a> Types<'a> {
         if wanted == CHARACTER {
             return true;
         }
+        // SAFETY: the caller's contract, passed straight on.
+        unsafe { self.each(lo, lo + len, wanted) }
+    }
+
+    /// [`Types::allows`] for a long range, which is what a check taken out of a loop asks about.
+    ///
+    /// Read a run of eight granules at a time rather than one. A run whose slots all say the one
+    /// type its first slot says, and that type is one the access may read, is four word compares
+    /// for sixty four bytes of program, and while the runs that follow keep saying it the walk
+    /// stays in that loop. A run that is anything else, two types that are each fine or one that
+    /// is not, goes back to a granule at a time for those sixty four bytes, so a range that mixes
+    /// types pays one failed look per run on top of what [`Types::allows`] would have. A function
+    /// of its own for the reason `crate::init::Init::sweep` gives.
+    ///
+    /// # Safety
+    ///
+    /// As [`Types::allows`].
+    #[must_use]
+    pub unsafe fn sweep(&self, lo: usize, len: usize, wanted: TypeId) -> bool {
+        if wanted == CHARACTER {
+            return true;
+        }
+        let end = lo + len;
         let mut at = lo;
-        while at < lo + len {
+        while at < end {
+            let stop = if at % GRANULE == 0 && end - at >= RUN {
+                // SAFETY: `at` is inside the range the caller says is mapped.
+                let slot = unsafe { self.slot(at).read() };
+                // SAFETY: `[at, at + RUN)` is inside the range the caller says is mapped.
+                if compatible(wanted, slot) && unsafe { self.agrees(at, slot) } {
+                    at += RUN;
+                    // The run after a run that agreed usually agrees with the same slot, which is
+                    // the whole of a dense array of one type, so the loop stays here while it does.
+                    // SAFETY: as above, for the next run, which the length test keeps in range.
+                    while end - at >= RUN && unsafe { self.agrees(at, slot) } {
+                        at += RUN;
+                    }
+                    continue;
+                }
+                at + RUN
+            } else if at % GRANULE == 0 {
+                end
+            } else {
+                ((at / GRANULE + 1) * GRANULE).min(end)
+            };
+            // SAFETY: `[at, stop)` is inside the range the caller says is mapped.
+            if !unsafe { self.each(at, stop, wanted) } {
+                return false;
+            }
+            at = stop;
+        }
+        true
+    }
+
+    /// Whether every slot of the run of granules from `at` on says exactly `slot`.
+    ///
+    /// Four word loads rather than eight slot loads, with the slot doubled up to fill a word, and one
+    /// test of what the four have in them that differs from it rather than four tests. The
+    /// doubling puts the same value in both halves, so the answer does not depend on which half of
+    /// the word a target puts the lower address in. A slot with the flag set never matches here,
+    /// because the caller has already asked whether it is a type the access may read, and an index
+    /// into the side table is not one.
+    ///
+    /// # Safety
+    ///
+    /// `[at, at + RUN)` is inside the mapping this plane was built for, and `at` starts a granule.
+    unsafe fn agrees(&self, at: usize, slot: Slot) -> bool {
+        let pair = u64::from(slot) * 0x1_0000_0001;
+        let words = self.slot(at).cast::<u64>();
+        // SAFETY: the eight slots starting at the one for `at` are the ones for `[at, at + RUN)`,
+        // which the caller says is mapped. Unaligned, because a slot is four bytes and a word is eight.
+        let differs = unsafe {
+            (words.read_unaligned() ^ pair)
+                | (words.add(1).read_unaligned() ^ pair)
+                | (words.add(2).read_unaligned() ^ pair)
+                | (words.add(3).read_unaligned() ^ pair)
+        };
+        differs == 0
+    }
+
+    /// The granule at a time walk [`Types::allows`] does, over `[lo, end)`.
+    ///
+    /// # Safety
+    ///
+    /// `[lo, end)` is inside the mapping this plane was built for.
+    #[inline]
+    unsafe fn each(&self, lo: usize, end: usize, wanted: TypeId) -> bool {
+        let mut at = lo;
+        while at < end {
             // SAFETY: `at` is inside the range the caller says is mapped.
             let slot = unsafe { self.slot(at).read() };
             let next = (at / GRANULE + 1) * GRANULE;
@@ -306,7 +399,7 @@ impl<'a> Types<'a> {
                 at = next;
                 continue;
             }
-            while at < next.min(lo + len) {
+            while at < next.min(end) {
                 // SAFETY: as in `read`, whose body this is.
                 let stored = unsafe { self.side.entry(slot & LIMIT).add(at % GRANULE).read() };
                 if !compatible(wanted, stored) {
@@ -482,6 +575,11 @@ mod tests {
         fn allows(&self, offset: usize, len: usize, ty: TypeId) -> bool {
             // SAFETY: as above.
             unsafe { self.plane().allows(self.base + offset, len, ty) }
+        }
+
+        fn sweep(&self, offset: usize, len: usize, ty: TypeId) -> bool {
+            // SAFETY: as above.
+            unsafe { self.plane().sweep(self.base + offset, len, ty) }
         }
 
         fn copy(&self, dst: usize, src: usize, len: usize) {
@@ -757,5 +855,32 @@ mod tests {
         // rather than writing into address zero.
         let side = Side::new();
         assert_eq!(side.take(), None);
+    }
+
+    #[test]
+    fn a_sweep_answers_what_a_granule_at_a_time_walk_would() {
+        // The run at a time path a check taken out of a loop goes down, held against the plainest
+        // walk there is. One granule is made to say something else at each of several places in a
+        // range long enough to have ragged ends and whole runs in the middle, and every start and
+        // length around it is asked. The something else is a type the read may not see, a type it
+        // may, and a granule split between two types, which is the one with a side entry.
+        const GRANULES: usize = 48;
+        const LEN: usize = GRANULES * GRANULE;
+        let fake = Fake::new(GRANULES, 16);
+        let odd = [(0, GRANULE, B), (0, GRANULE, UNTYPED), (3, 1, B)];
+        for (n, &(off, width, ty)) in odd.iter().enumerate() {
+            for granule in [0, 1, 7, 8, 13, 31, 47] {
+                fake.set(0, LEN, A);
+                fake.set(granule * GRANULE + off, width, ty);
+                for lo in 0..20 {
+                    for len in [0, 1, 8, 9, 63, 64, 65, 128, 200, 300, LEN - 20] {
+                        let plain = (lo..lo + len).all(|at| compatible(A, fake.read(at)));
+                        let said = fake.sweep(lo, len, A);
+                        assert_eq!(said, plain, "case {n} at granule {granule}, {len} from {lo}");
+                        assert_eq!(fake.allows(lo, len, A), plain, "case {n}, {len} from {lo}");
+                    }
+                }
+            }
+        }
     }
 }
